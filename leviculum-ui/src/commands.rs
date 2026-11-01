@@ -88,6 +88,13 @@ pub enum Command {
     /// Turn sending read receipts off, and on again: off, none is sent and
     /// none is shown.
     ReadReceipts,
+    /// Start a conversation: the palette takes a friend's code or address
+    /// as text.
+    NewConversation,
+    /// Add a contact: a friend's code, then the name for it.
+    AddContact,
+    /// Show our own contact code and its QR, for a friend to add us.
+    MyCode,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -99,9 +106,14 @@ pub struct PaletteEntry {
     pub command: Command,
 }
 
-/// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 32] = [
+/// The table, in the order the palette lists it unfiltered. A first user's
+/// two commands stand right under `send`, where an open palette shows them
+/// (1263), and the code a friend adds us by right after them (1279).
+pub const COMMANDS: [PaletteEntry; 35] = [
     entry("send", Command::Send),
+    entry("new conversation", Command::NewConversation),
+    entry("add contact", Command::AddContact),
+    entry("my code", Command::MyCode),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
     entry("help", Command::Help),

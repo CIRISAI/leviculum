@@ -328,8 +328,15 @@ impl<R: RangeRead> Archive<R> {
     /// Where `t`'s blob lies; `None` when the archive does not hold it.
     pub fn locate(&self, t: TileId) -> Res<Option<Located>> {
         let id = tile_id(t);
-        let mut dir: Arc<Vec<DirEntry>> = Arc::new(self.root.clone());
+        // The root borrowed, never copied: an extract's root holds every
+        // tile's entry (Germany's parts hundreds of thousands), and a copy
+        // per tile made the cut of a country quadratic.
+        let mut leaf: Option<Arc<Vec<DirEntry>>> = None;
         for _ in 0..=MAX_DEPTH {
+            let dir: &[DirEntry] = match &leaf {
+                Some(l) => l,
+                None => &self.root,
+            };
             // The last entry at or before `id`.
             let i = match dir.binary_search_by_key(&id, |e| e.0) {
                 Ok(i) => i,
@@ -338,7 +345,7 @@ impl<R: RangeRead> Archive<R> {
             };
             let (first, off, len, run) = dir[i];
             if run == 0 {
-                dir = self.leaf(off, len)?;
+                leaf = Some(self.leaf(off, len)?);
                 continue;
             }
             if id - first < u64::from(run) {

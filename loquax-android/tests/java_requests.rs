@@ -145,6 +145,62 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "photo",
+            java_map(&[
+                ("t", Java::Str("photo")),
+                ("peer", Java::Str(PEER)),
+                ("data", Java::Bin(&[0xff, 0xd8, 0xff, 0xe0])),
+            ]),
+            Request::Photo {
+                peer: s(PEER),
+                data: schema::Blob(vec![0xff, 0xd8, 0xff, 0xe0]),
+            },
+        ),
+        (
+            "file",
+            java_map(&[
+                ("t", Java::Str("file")),
+                ("peer", Java::Str(PEER)),
+                ("name", Java::Str("Grüße.pdf")),
+                ("data", Java::Bin(&[0x25, 0x50, 0x44, 0x46])),
+                ("size", Java::Long(4_200_000)),
+            ]),
+            Request::File {
+                peer: s(PEER),
+                name: s("Grüße.pdf"),
+                data: schema::Blob(vec![0x25, 0x50, 0x44, 0x46]),
+                size: 4_200_000,
+            },
+        ),
+        (
+            "voice",
+            java_map(&[
+                ("t", Java::Str("voice")),
+                ("peer", Java::Str(PEER)),
+                ("pcm", Java::Bin(&[0x01, 0x00, 0xff, 0xff])),
+                ("rate", Java::Long(16_000)),
+            ]),
+            Request::Voice {
+                peer: s(PEER),
+                pcm: schema::Blob(vec![0x01, 0x00, 0xff, 0xff]),
+                rate: 16_000,
+            },
+        ),
+        (
+            "playVoice",
+            java_map(&[
+                ("t", Java::Str("playvoice")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+                ("on", Java::Bool(true)),
+            ]),
+            Request::PlayVoice {
+                peer: s(PEER),
+                key: KEY,
+                on: true,
+            },
+        ),
+        (
             "sendAgain",
             java_map(&[
                 ("t", Java::Str("sendagain")),
@@ -341,7 +397,144 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
                 at: 1_793_475_600,
             },
         ),
+        (
+            "stage",
+            java_map(&[
+                ("t", Java::Str("stage")),
+                ("peer", Java::Str(PEER)),
+                ("data", Java::Bin(&[0xff, 0xd8, 0xff, 0xe1])),
+            ]),
+            Request::Stage {
+                peer: s(PEER),
+                data: schema::Blob(vec![0xff, 0xd8, 0xff, 0xe1]),
+            },
+        ),
+        (
+            "unstage",
+            java_map(&[("t", Java::Str("unstage")), ("peer", Java::Str(PEER))]),
+            Request::Unstage { peer: s(PEER) },
+        ),
+        (
+            "sheet",
+            java_map(&[
+                ("t", Java::Str("sheet")),
+                ("peer", Java::Str(PEER)),
+                ("kind", Java::Str("position")),
+            ]),
+            Request::Sheet {
+                peer: s(PEER),
+                kind: s("position"),
+            },
+        ),
+        (
+            "sheet (closed)",
+            java_map(&[
+                ("t", Java::Str("sheet")),
+                ("peer", Java::Str(PEER)),
+                ("kind", Java::Str("")),
+            ]),
+            Request::Sheet {
+                peer: s(PEER),
+                kind: String::new(),
+            },
+        ),
+        (
+            "noFix",
+            java_map(&[("t", Java::Str("nofix"))]),
+            Request::NoFix,
+        ),
+        (
+            "shareFix",
+            java_map(&[("t", Java::Str("sharefix")), ("peer", Java::Str(PEER))]),
+            Request::ShareFix { peer: s(PEER) },
+        ),
+        (
+            "startShare",
+            java_map(&[
+                ("t", Java::Str("startshare")),
+                ("peer", Java::Str(PEER)),
+                ("span", Java::Str("15_min")),
+            ]),
+            Request::StartShare {
+                peer: s(PEER),
+                span: s("15_min"),
+            },
+        ),
+        (
+            "stopShare",
+            java_map(&[("t", Java::Str("stopshare")), ("peer", Java::Str(PEER))]),
+            Request::StopShare { peer: s(PEER) },
+        ),
+        // The microphone's gestures and the recorder's levels (1276):
+        // `Core.record` writes every field, all of them longs.
+        record("press", 5_000_123, 0, 0, 0),
+        record("slide", 0, -120, -80, 0),
+        record("release", 5_003_000, 0, 0, 0),
+        record("cancel", 0, 0, 0, 0),
+        record("level", 5_000_173, 0, 0, 32_767),
+        record("tick", 5_000_400, 0, 0, 0),
+        record("played", 0, 0, 0, 0),
+        (
+            "recordingVerb",
+            java_map(&[
+                ("t", Java::Str("recording")),
+                ("peer", Java::Str(PEER)),
+                ("verb", Java::Str("rec_lock")),
+            ]),
+            Request::Recording {
+                peer: s(PEER),
+                verb: s("rec_lock"),
+            },
+        ),
+        (
+            "Locator.tell",
+            java_map(&[
+                ("t", Java::Str("fix")),
+                ("lat_e6", Java::Long(43_773_100)),
+                ("lon_e6", Java::Long(11_256_000)),
+                ("alt_e2", Java::Long(0)),
+                ("accuracy_e2", Java::Long(500)),
+                ("at", Java::Long(1_793_475_600)),
+            ]),
+            Request::Fix {
+                lat_e6: 43_773_100,
+                lon_e6: 11_256_000,
+                alt_e2: 0,
+                accuracy_e2: 500,
+                at: 1_793_475_600,
+            },
+        ),
     ]
+}
+
+/// `Core.record`'s bytes for `input`: every field, each a long.
+fn record(
+    input: &'static str,
+    now: i64,
+    dx: i64,
+    dy: i64,
+    rms: i64,
+) -> (&'static str, Vec<u8>, Request) {
+    (
+        input,
+        java_map(&[
+            ("t", Java::Str("record")),
+            ("peer", Java::Str(PEER)),
+            ("input", Java::Str(input)),
+            ("now", Java::Long(now)),
+            ("dx", Java::Long(dx)),
+            ("dy", Java::Long(dy)),
+            ("rms", Java::Long(rms)),
+        ]),
+        Request::Record {
+            peer: PEER.to_string(),
+            input: input.to_string(),
+            now,
+            dx: dx as i32,
+            dy: dy as i32,
+            rms: rms as u32,
+        },
+    )
 }
 
 fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
@@ -368,10 +561,19 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
         ),
         ("me", t("me"), Query::Me),
         ("profile", t("profile"), Query::Profile),
+        ("linkDevice", t("linkdevice"), Query::LinkDevice),
+        ("linked", t("linked"), Query::Linked),
         (
             "lxma",
-            java_map(&[("t", Java::Str("lxma")), ("text", Java::Str(LXMA))]),
-            Query::Lxma { text: s(LXMA) },
+            java_map(&[
+                ("t", Java::Str("lxma")),
+                ("text", Java::Str(LXMA)),
+                ("lang", Java::Str("de-DE")),
+            ]),
+            Query::Lxma {
+                text: s(LXMA),
+                lang: Some(s("de-DE")),
+            },
         ),
         (
             "info",
@@ -487,6 +689,113 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
                 set: Some(s("dark")),
             },
         ),
+        ("photoSize", t("photosize"), Query::PhotoSize { set: None }),
+        (
+            "photoSize (set)",
+            java_map(&[("t", Java::Str("photosize")), ("set", Java::Str("small"))]),
+            Query::PhotoSize {
+                set: Some(s("small")),
+            },
+        ),
+        (
+            "photoBitmap",
+            java_map(&[
+                ("t", Java::Str("photo")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+                ("edge", Java::Long(720)),
+            ]),
+            Query::Photo {
+                peer: s(PEER),
+                key: KEY,
+                edge: 720,
+            },
+        ),
+        (
+            "saveFile",
+            java_map(&[
+                ("t", Java::Str("savefile")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+                ("index", Java::Long(0)),
+            ]),
+            Query::SaveFile {
+                peer: s(PEER),
+                key: KEY,
+                index: 0,
+            },
+        ),
+        (
+            "voicePcm",
+            java_map(&[
+                ("t", Java::Str("voice")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+            ]),
+            Query::Voice {
+                peer: s(PEER),
+                key: KEY,
+            },
+        ),
+        (
+            "bar",
+            java_map(&[("t", Java::Str("bar")), ("peer", Java::Str(PEER))]),
+            Query::Bar { peer: s(PEER) },
+        ),
+        (
+            "recording",
+            java_map(&[("t", Java::Str("recording")), ("peer", Java::Str(PEER))]),
+            Query::Recording { peer: s(PEER) },
+        ),
+        (
+            "shares",
+            java_map(&[("t", Java::Str("shares"))]),
+            Query::Shares,
+        ),
+        (
+            "stagedBitmap",
+            java_map(&[
+                ("t", Java::Str("staged")),
+                ("peer", Java::Str(PEER)),
+                ("edge", Java::Long(256)),
+            ]),
+            Query::Staged {
+                peer: s(PEER),
+                edge: 256,
+            },
+        ),
+        (
+            "zoom",
+            java_map(&[
+                ("t", Java::Str("zoom")),
+                ("view_w", Java::Real(1080.0)),
+                ("view_h", Java::Real(2340.0)),
+                ("picture_w", Java::Real(1600.0)),
+                ("picture_h", Java::Real(1200.0)),
+                ("scale", Java::Real(1.0)),
+                ("pan_x", Java::Real(0.0)),
+                ("pan_y", Java::Real(0.0)),
+                ("gesture", Java::Str("pinch")),
+                ("factor", Java::Real(1.25)),
+                ("x", Java::Real(540.5)),
+                ("y", Java::Real(1170.0)),
+            ]),
+            Query::Zoom(schema::ZoomAsk {
+                view_w: 1080.0,
+                view_h: 2340.0,
+                picture_w: 1600.0,
+                picture_h: 1200.0,
+                scale: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+                gesture: s("pinch"),
+                factor: 1.25,
+                x: 540.5,
+                y: 1170.0,
+                dx: 0.0,
+                dy: 0.0,
+            }),
+        ),
         ("mapFling", t("mapfling"), Query::MapFling { set: None }),
         (
             "mapFling (set)",
@@ -558,7 +867,12 @@ fn every_request_java_builds_decodes_as_java_means_it() {
 fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
     use loquax::ui::intent::{Intent, Switch, Target};
     use loquax_android::session::{decode, Decoded};
-    let glue = ["link", "unlink", "notNow", "relink"];
+    // The microphone's gestures and levels (1276) are the platform's
+    // input, not intents: `Core.record`'s rows, named by their input.
+    let glue = [
+        "link", "unlink", "notNow", "relink", "press", "slide", "release", "cancel", "level",
+        "tick", "played",
+    ];
     let mut wrong = Vec::new();
     for (name, bytes, _) in commands() {
         let request = schema::decode::<Request>(&bytes).expect("decodes");
@@ -606,11 +920,13 @@ fn every_start_java_builds_decodes() {
                 ("dir", Java::Str(DIR)),
                 ("offset", Java::Long(3_600)),
                 ("lang", Java::Str("de-DE")),
+                ("camera", Java::Bool(true)),
             ]),
             Start {
                 dir: DIR.to_string(),
                 offset: 3_600,
                 lang: s("de-DE"),
+                camera: true,
                 ..Start::default()
             },
         ),
@@ -637,6 +953,7 @@ fn every_start_java_builds_decodes() {
                 ("offset", Java::Long(7_200)),
                 ("lang", Java::Str("en-US")),
                 ("here", Java::Bool(true)),
+                ("camera", Java::Bool(false)),
             ]),
             Start {
                 dir: DIR.to_string(),

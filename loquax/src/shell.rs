@@ -249,6 +249,9 @@ pub(crate) struct Shell {
     watch: Option<(tokio::task::JoinHandle<()>, UnboundedReceiver<WatchEvent>)>,
     watching: bool,
     fallback: Fallback,
+    /// The desktop's microphone (1276): the system's recorder, run on the
+    /// model's recording effects and pumped on every poll.
+    mic: crate::mic::Mic,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -262,6 +265,11 @@ pub(crate) enum Output {
     Mouse(bool),
     /// Draw the map the `n`th way the frontend offered (1093).
     MapDrawing(usize),
+    /// Show this photo's file whole in the system's viewer (1220).
+    Photo(std::path::PathBuf),
+    /// Open this received file with the system's handler for its kind
+    /// (1221).
+    File(std::path::PathBuf),
 }
 
 impl Shell {
@@ -316,6 +324,67 @@ impl Shell {
                 UiEffect::Log(line) => tracing::warn!("{line}"),
                 UiEffect::LoadMap(want) => self.map_ask(want),
                 UiEffect::Import => answers.extend(self.import()),
+                // A photo whole (1220): the terminal has no pixels for it,
+                // so the system's viewer shows it, from a file under the
+                // home as the phone keeps it in its store.
+                UiEffect::ShowPhoto { peer, key } => match self.photo_file(peer, key) {
+                    Ok(path) => self.outputs.push(Output::Photo(path)),
+                    Err(line) => answers.push(UiEvent::Notice(line)),
+                },
+                // A file (1221): saved under the home's files/, as the
+                // phone keeps it under its app files, then the system's
+                // handler opens it.
+                UiEffect::OpenFile { peer, key, index } => {
+                    let saved = self
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .ok_or_else(|| "that message is gone".to_string())
+                        .and_then(|m| {
+                            loquax::file_save::save(&self.context.home, peer, key, index, &m.fields)
+                        });
+                    match saved {
+                        Ok(path) => self.outputs.push(Output::File(path)),
+                        Err(line) => answers.push(UiEvent::Notice(line)),
+                    }
+                }
+                // A voice message (1222): decoded into a WAV file under the
+                // home's voice/, which the system's player plays; the model
+                // hears of no end, so the bubble's button goes back at once.
+                UiEffect::PlayVoice { peer, key } => {
+                    #[cfg(feature = "voice")]
+                    let saved = self
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .ok_or_else(|| "that message is gone".to_string())
+                        .and_then(|m| {
+                            loquax::voice::save_wav(&self.context.home, peer, key, &m.fields)
+                        });
+                    #[cfg(not(feature = "voice"))]
+                    let saved: Result<std::path::PathBuf, String> =
+                        Err("this build plays no voice messages".to_string());
+                    answers.push(UiEvent::VoiceEnded { peer, key });
+                    match saved {
+                        Ok(path) => self.outputs.push(Output::File(path)),
+                        Err(line) => answers.push(UiEvent::Notice(line)),
+                    }
+                }
+                UiEffect::PauseVoice { .. } => {}
+                // The recording bar's effects (1276): the microphone runs
+                // them; a finished recording comes back as its voice
+                // message, a preview as a WAV file for the system's player.
+                UiEffect::Recording { peer, effect } => {
+                    let done = self.mic.effect(peer, effect, &self.context.home);
+                    if let Some(path) = done.play {
+                        self.outputs.push(Output::File(path));
+                    }
+                    answers.extend(done.events);
+                }
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
                 UiEffect::Remember { key, value } => {
@@ -338,6 +407,35 @@ impl Shell {
             self.apply(answer);
         }
         self.start_next();
+    }
+
+    /// The photo of the message `key` of `peer`'s conversation as a file
+    /// under the home's `photos/`, named by the message, written once.
+    fn photo_file(&self, peer: [u8; 16], key: u64) -> Result<std::path::PathBuf, String> {
+        let (format, data) = self
+            .model
+            .conversations
+            .iter()
+            .find(|c| c.peer == peer)
+            .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+            .and_then(|m| {
+                let (format, data) = loquax::ui::photos::photo_parts(&m.fields)?;
+                Some((format, data.to_vec()))
+            })
+            .ok_or_else(|| "that message has no photo".to_string())?;
+        let ext: String = format
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(5)
+            .collect();
+        let dir = self.context.home.join("photos");
+        let path = dir.join(format!("{}-{key}.{ext}", loquax::address::to_hex(&peer)));
+        if !path.exists() {
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, &data))
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        Ok(path)
     }
 
     /// A read receipt among a send's fields: one `tui.log` line, alone or
@@ -574,6 +672,40 @@ impl Shell {
         let steps = self.loader.poll(self.elapsed_ms());
         self.map_steps(steps);
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
+        self.listen();
+    }
+
+    /// The microphone's windows since the last poll, as levels, and the
+    /// recording's clock (1276); a recorder that stopped by itself is
+    /// said once.
+    fn listen(&mut self) {
+        let pumped = self.mic.pump(self.elapsed_ms());
+        for input in pumped.inputs {
+            self.apply(UiEvent::Record {
+                peer: pumped.peer,
+                input,
+            });
+        }
+        if let Some(line) = pumped.stopped {
+            self.apply(UiEvent::Notice(line));
+        }
+    }
+
+    /// A gesture on the window's microphone (1276), on the shell's clock:
+    /// the window has none of its own that the model's recording counts
+    /// by.
+    #[cfg(feature = "gui")]
+    pub(crate) fn record(&mut self, peer: [u8; 16], input: loquax::ui::recording::Input) {
+        use loquax::ui::recording::Input;
+        let now = self.elapsed_ms();
+        let input = match input {
+            Input::Press { .. } => Input::Press { now },
+            Input::Release { .. } => Input::Release { now },
+            Input::Tick { .. } => Input::Tick { now },
+            other => other,
+        };
+        self.apply(UiEvent::Elapsed(now));
+        self.apply(UiEvent::Record { peer, input });
     }
 
     /// The clock's tick, every [`TICK_MS`]: the time of day to the model,
@@ -1008,6 +1140,18 @@ async fn drain(outbox: &mut Watched, context: RunContext) -> Result<usize, Fetch
     .map(|fetched| fetched.new)
 }
 
+/// Our contact code for `my code`, with its QR where the build draws one
+/// (the terminal's; the window shows the code alone). `None` when the key
+/// makes no address, which `my code` then says.
+fn own_code(public_key: &[u8; loquax::lxma::KEY_BYTES]) -> Option<loquax::ui::OwnCode> {
+    let code = loquax::lxma::encode(public_key).ok()?;
+    #[cfg(feature = "qr")]
+    let qr = loquax::home::qr::lines(&code).unwrap_or_default();
+    #[cfg(not(feature = "qr"))]
+    let qr = Vec::new();
+    Some(loquax::ui::OwnCode { code, qr })
+}
+
 /// Everything before the first frame: the log, the identity, the history
 /// and what it restores, the daemon, the contacts and the config, the
 /// mailbox's schedule and the map's regions. The config comes back beside
@@ -1095,6 +1239,12 @@ pub(crate) async fn start(
         mailbox: mailbox_tx,
         files: home.clone(),
     };
+    // The code a friend adds us by: the home node's for a client, as its
+    // address is (1279, `my code`).
+    let own_key = match client {
+        Some(public_key) => public_key,
+        None => identity.public_key_bytes(),
+    };
     let device = identity.clone();
     let role = match client {
         Some(_) => Role::Client { address },
@@ -1124,6 +1274,7 @@ pub(crate) async fn start(
         loquax::names::load_contacts(&home).map_err(|error| crate::usage(error.to_string()))?;
     let mut model = Model::new(&options.to);
     model.home_client = client.is_some();
+    model.own_code = own_code(&own_key);
     model.names = loquax::names::Names::new(contacts);
     let (restored, names, last_key, positions, unverified) = history;
     // The messages an earlier run kept unverified: the engine checks each
@@ -1158,6 +1309,11 @@ pub(crate) async fn start(
     model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     model.reading.on = config.read_receipts.unwrap_or(true);
+    model.photo_size = config.photo_size.unwrap_or_default();
+    // The microphone (1276): the system's recorder, where it has one; the
+    // window offers the microphone only then.
+    let mic = crate::mic::Mic::of_process();
+    model.bar.abilities.microphone = mic.available();
     // The mailbox's schedule: the flag, else the config file, else fifteen
     // minutes. A script runs one only when its command line names the flag,
     // as it ticks only when it says so.
@@ -1267,6 +1423,7 @@ pub(crate) async fn start(
         watch,
         watching: false,
         fallback: Fallback::default(),
+        mic,
     };
     Ok((shell, config))
 }

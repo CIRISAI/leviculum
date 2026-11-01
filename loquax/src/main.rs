@@ -22,6 +22,8 @@
 #[cfg(feature = "gui")]
 mod gui;
 #[cfg(any(feature = "tui", feature = "gui"))]
+mod mic;
+#[cfg(any(feature = "tui", feature = "gui"))]
 mod shell;
 #[cfg(feature = "tui")]
 mod tui;
@@ -415,6 +417,28 @@ struct SendArgs {
     /// then not read.
     #[arg(long, value_name = "LAT,LON", allow_hyphen_values = true)]
     position: Option<String>,
+
+    /// Send this file with it, as Columba and Sideband attach one (1221):
+    /// the LXMF file attachments field, its name and bytes unchanged. A
+    /// file over 990 KB is refused, the most a receiver takes. Without a
+    /// body the message is the file alone and stdin is not read.
+    #[arg(long, value_name = "FILE")]
+    file: Option<PathBuf>,
+
+    /// Send this picture with it, as Columba and Sideband send a photo
+    /// (1220): turned upright, scaled by `--photo-size`, its EXIF (the
+    /// place, the camera) removed. Without a body the message is the
+    /// photo alone and stdin is not read.
+    #[cfg(feature = "photos")]
+    #[arg(long, value_name = "FILE")]
+    photo: Option<PathBuf>,
+
+    /// How far `--photo` is scaled: `small` (800 px), `phone` (1600 px,
+    /// the default) or `original`. Without it the config's `photo_size`
+    /// decides.
+    #[cfg(feature = "photos")]
+    #[arg(long, value_name = "SIZE", requires = "photo")]
+    photo_size: Option<String>,
 
     /// The name recipients see as the sender. Defaults to the account name of
     /// the user running loquax; `LNMSG_DISPLAY_NAME` sets it where there is no
@@ -1050,35 +1074,44 @@ fn first_start_import() {
 /// use, so this is also how a fresh machine learns (and creates) the address
 /// a correspondent should write down.
 fn run_address() -> ExitCode {
+    use std::io::IsTerminal;
     let home = match identity::home_dir() {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
     // A client's address is its home node's.
-    match loquax::home::client::load_client(&home) {
-        Ok(Some(public_key)) => {
-            return match loquax::home::lxmf_address(&public_key) {
-                Ok(address) => {
-                    println!("{}", address::to_hex(&address));
-                    ExitCode::SUCCESS
-                }
-                Err(error) => failure(error, "no-identity"),
-            };
-        }
-        Ok(None) => {}
+    let public_key = match loquax::home::client::load_client(&home) {
+        Ok(Some(public_key)) => public_key,
+        Ok(None) => match identity::load_or_create(&home.join("identity")) {
+            Ok(identity) => identity.public_key_bytes(),
+            Err(error) => return failure(error, "no-identity"),
+        },
         Err(error) => return failure(error, "no-home"),
-    }
-    let identity = match identity::load_or_create(&home.join("identity")) {
-        Ok(identity) => identity,
-        Err(error) => return failure(error, "no-identity"),
     };
-    match loquax::engine::delivery_address(&identity) {
-        Ok(address) => {
-            println!("{}", address::to_hex(&address));
+    match address_lines(&public_key, std::io::stdout().is_terminal()) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => failure(error, "no-identity"),
     }
+}
+
+/// What `loquax address` prints: the address alone for a script, which
+/// reads the one line as before; at a terminal the contact code under it,
+/// the text a friend pastes to add us (1279, walk finding 23).
+fn address_lines(
+    public_key: &[u8; loquax::lxma::KEY_BYTES],
+    terminal: bool,
+) -> Result<Vec<String>, String> {
+    let address = loquax::home::lxmf_address(public_key)?;
+    let mut lines = vec![address::to_hex(&address)];
+    if terminal {
+        lines.push(loquax::lxma::encode(public_key)?);
+    }
+    Ok(lines)
 }
 
 async fn run(args: SendArgs) -> ExitCode {
@@ -1098,7 +1131,35 @@ async fn run(args: SendArgs) -> ExitCode {
         Ok(fields) => fields,
         Err(error) => return usage(error),
     };
-    // A report has no body, and reads none from stdin.
+    #[cfg(feature = "photos")]
+    let photo = match args.photo.as_deref() {
+        None => None,
+        Some(path) => match send_photo(path, args.photo_size.as_deref()) {
+            Ok(fields) => Some(fields),
+            Err(error) => return usage(error),
+        },
+    };
+    #[cfg(not(feature = "photos"))]
+    let photo: Option<Vec<leviculum_lxmf::Field>> = None;
+    let file = match args.file.as_deref() {
+        None => None,
+        Some(path) => match send_file(path) {
+            Ok(fields) => Some(fields),
+            Err(error) => return usage(error),
+        },
+    };
+    let fields = match (fields, photo, file) {
+        (None, None, None) => None,
+        (position, photo, file) => Some(
+            position
+                .into_iter()
+                .chain(photo)
+                .chain(file)
+                .flatten()
+                .collect::<Vec<_>>(),
+        ),
+    };
+    // A report, a photo or a file has no body, and reads none from stdin.
     let body = match (&fields, args.body.as_deref()) {
         (Some(_), None) => Vec::new(),
         (_, body) => match body::resolve(body, &mut std::io::stdin().lock()) {
@@ -1365,6 +1426,51 @@ struct ClientMessage {
     title: Vec<u8>,
     body: Vec<u8>,
     fields: Vec<leviculum_lxmf::Field>,
+}
+
+/// `--file`'s name and bytes as the file attachments field, refused past
+/// [`loquax::ui::files::LARGEST`] with both sizes said.
+fn send_file(path: &std::path::Path) -> Result<Vec<leviculum_lxmf::Field>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("--file {}: {e}", path.display()))?;
+    if let Some(why) = loquax::ui::files::refusal(bytes.len()) {
+        return Err(format!(
+            "--file {}: {}",
+            path.display(),
+            why.resolve(loquax::ui::strings::Lang::En)
+        ));
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(loquax::ui::files::file_fields(&name, bytes))
+}
+
+/// `--photo`'s picture prepared at `size`, else at the config's
+/// `photo_size`, else at `phone` ([`loquax::photo::prepare`]), as the
+/// image field.
+#[cfg(feature = "photos")]
+fn send_photo(
+    path: &std::path::Path,
+    size: Option<&str>,
+) -> Result<Vec<leviculum_lxmf::Field>, String> {
+    use loquax::ui::photos::PhotoSize;
+    let size = match size {
+        Some(word) => PhotoSize::from_word(word)
+            .ok_or_else(|| format!("--photo-size {word}: want small, phone or original"))?,
+        None => identity::home_dir()
+            .ok()
+            .and_then(|home| loquax::config::load(&home).ok())
+            .and_then(|config| config.photo_size)
+            .unwrap_or_default(),
+    };
+    let bytes = std::fs::read(path).map_err(|e| format!("--photo {}: {e}", path.display()))?;
+    let prepared = loquax::photo::prepare(&bytes, size)
+        .map_err(|e| format!("--photo {}: {e}", path.display()))?;
+    Ok(loquax::ui::photos::photo_fields(
+        prepared.format,
+        prepared.data,
+    ))
 }
 
 /// `--position`'s `LAT,LON` in degrees as the fields of a position report
@@ -1685,29 +1791,22 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
                     return usage(format!("--server: {error}"));
                 }
             }
-            let mut token = [0u8; 16];
-            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut token);
-            if let Err(error) = store.issue_token(&token, &name, now) {
-                return failure(error, "no-store");
-            }
             let public_key = match identity::load_or_create(&home.join("identity")) {
                 Ok(identity) => identity.public_key_bytes(),
                 Err(error) => return failure(error, "no-identity"),
             };
-            let code = loquax::home::code::HomeCode { public_key, token };
             // The rendezvous list the phone tries in order (1196): this
             // mailbox's own phone port first when --server names it, then
             // the list the mailbox dials itself, on the phones' ports.
-            let shared: Vec<String> = match loquax::home::rendezvous::mailbox_list(&config) {
-                (_, "config") => config.rendezvous.clone().unwrap_or_default(),
-                (_, "default") => loquax::home::rendezvous::default_list(),
-                _ => Vec::new(),
+            let list = loquax::home::admit::computer_list(&config, server);
+            // The phone's "Link a device" opens its admissions the same way
+            // (1264).
+            let admission = match loquax::home::admit::open(store, public_key, &name, list, now) {
+                Ok(admission) => admission,
+                Err(error) => return failure(error, "no-store"),
             };
-            let list = match server {
-                Some(server) => loquax::home::rendezvous::with_first(server, &shared),
-                None => shared,
-            };
-            let text = code.encode_with_rendezvous(&list);
+            let code = &admission.code;
+            let text = admission.text();
             let qr = loquax::home::qr::lines(&text);
             if code_only {
                 println!("{text}\n");
@@ -1722,7 +1821,7 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
                 Ok(lines) => println!("{}\n", lines.join("\n")),
                 Err(error) => eprintln!("loquax: no QR code: {error}"),
             }
-            match server.is_some() || !list.is_empty() {
+            match server.is_some() || !admission.list.is_empty() {
                 true => println!(
                     "On a phone, in Loquax: \"On a computer at home\", then \"Scan the code\"; \
                      or paste it into the join screen."
@@ -2375,6 +2474,28 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1279, walk finding 23: a script still reads the address alone; at a
+    /// terminal the contact code follows, the one that adds us.
+    #[test]
+    fn address_prints_the_code_under_the_hex_at_a_terminal_only() {
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let hex = address::to_hex(&loquax::home::lxmf_address(&key).expect("an address"));
+        // The same address the engine registers, which it printed before.
+        let identity = leviculum_core::Identity::from_private_key_bytes(&private).expect("a key");
+        let registered = loquax::engine::delivery_address(&identity).expect("an address");
+        assert_eq!(hex, address::to_hex(&registered));
+        assert_eq!(
+            address_lines(&key, false).expect("lines"),
+            std::slice::from_ref(&hex)
+        );
+        let code = loquax::lxma::encode(&key).expect("a code");
+        assert!(code.starts_with(&format!("lxma://{hex}:")), "{code}");
+        assert_eq!(address_lines(&key, true).expect("lines"), [hex, code]);
+    }
 
     /// `--position` (1209): degrees to a report's Telemeter, which reads
     /// back as a position report; anything else is refused before a send.

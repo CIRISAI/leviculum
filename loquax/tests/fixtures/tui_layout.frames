@@ -1,5 +1,5 @@
 --- 80 x 24 ---
-┌  Loquax afafafaf───────┐┌  <4f4f4f4f…>  unknown─── propagation node 9c9c9c9c ┐
+┌  Loquax afafafaf───────┐┌  <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││              yes, from ten. Shall I bring the T114 │
 │                        ││              and the long antenna, or is the stick │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- 120 x 40 ---
-┌  Loquax afafafaf─────────────────┐┌  <4f4f4f4f…>  unknown────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
+┌  Loquax afafafaf─────────────────┐┌  <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
 │▌<4f4f4f4f…>                14:06 ││                                                propagation node 9c9c9c9c adopted │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -65,7 +65,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- cursor ---
-┌  Loquax afafafaf───────┐┌● <4f4f4f4f…>  unknown─── propagation node 9c9c9c9c ┐
+┌  Loquax afafafaf───────┐┌● <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
@@ -90,7 +90,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- detail ---
-┌  Loquax afafafaf───────┐┌● <4f4f4f4f…>  unknown─── propagation node 9c9c9c9c ┐
+┌  Loquax afafafaf───────┐┌● <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
@@ -115,7 +115,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- 60 x 20, narrow ---
-┌  Loquax afafafaf───────┐┌  <4f4f4f4f…>  unknown────── pn ┐
+┌  Loquax afafafaf───────┐┌  <4f4f4f4f…>────── pn 9c9c9c9c ┐
 │▌<4f4f4f4f…>      14:06 ││ 14:03                          │
 │▌you: the tripod fits   ││                                │
 │                        ││          ── Today ──           │

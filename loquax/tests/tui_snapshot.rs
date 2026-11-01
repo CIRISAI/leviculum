@@ -1254,7 +1254,7 @@ async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
         assert!(closed.contains("● Loquax"), "{size}: {closed}");
         assert!(closed.contains(" / search "), "{size}: {closed}");
         assert!(!closed.contains('«'), "{size}: {closed}");
-        assert!(closed.contains("<61ddb79a…>  unknown"), "{size}: {closed}");
+        assert!(closed.contains("<61ddb79a…>──"), "{size}: {closed}");
         all.push_str(&format!("=== {size} ===\n{frames}"));
     }
     if all != EXPECTED_SEARCH {
@@ -1389,7 +1389,7 @@ async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() 
         "stderr: {stderr}\nframes:\n{got}"
     );
     let named = frame(&got, "named");
-    assert!(named.contains("Bob ·61dd  unknown"), "{named}");
+    assert!(named.contains("Bob ·61dd──"), "{named}");
     assert!(named.contains("to Bob ·61dd"), "{named}");
     let collision = frame(&got, "collision");
     assert!(collision.contains("same name as ·"), "{collision}");

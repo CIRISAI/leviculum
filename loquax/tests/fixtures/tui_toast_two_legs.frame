@@ -1,4 +1,4 @@
-┌  Loquax (attaching)────┐┌  <abababab…>  unknown───────── no propagation node ┐
+┌  Loquax (attaching)────┐┌  <abababab…>───────────────────────────── no relay ┐
 │▌<abababab…>            ││                                                    │
 │▌you: hi                ││                                                    │
 │                        ││                                                    │
@@ -13,11 +13,11 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│┌────────────────────────────────────────────────────────────────────────────┐│
-││⚠ not sent: direct: no route to abababababababababababababababab after      ││
-││30.0s: no announce from it has reached this node, so there is no key to     ││
-││encrypt to and no path to send over.; propagated: no propagation node: no p…││
-│└────────────────────────────────────────────────────────────────────────────┘│
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  ┌────────────────────────────────┐│
+│                        ││           nothing│⚠ Not sent. Its details say why.││
+│                        ││                  └────────────────────────────────┘│
 │                        │├● to <abababab…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

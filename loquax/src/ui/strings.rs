@@ -145,6 +145,7 @@ leviculum_ui::catalogue! {
     Forget = "scene_forget", "Delete conversation", "Unterhaltung löschen";
     NewConversation = "scene_new_conversation", "New conversation", "Neue Unterhaltung";
     AddContact = "scene_add_contact", "Add contact", "Kontakt hinzufügen";
+    MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";
     Front = "scene_front", "App in front", "App im Vordergrund";
@@ -155,6 +156,108 @@ leviculum_ui::catalogue! {
     // The privacy page's switch (1233, loquax-read-receipts.md, section 4).
     ReadReceipts = "read_receipts", "Send read receipts", "Lesebestätigungen senden";
     ReadReceiptsText = "read_receipts_text", "Others see when you have read their messages. Off, you do not see it from others either.", "Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.";
+    // Photos (1220): the bubble's words, the paperclip's entry, the
+    // setting under Settings › Chats with its one line.
+    Photo = "scene_photo", "Photo, %1$s", "Foto, %1$s";
+    AttachPhoto = "attach_photo", "Gallery", "Galerie";
+    ViewPhoto = "scene_view_photo", "Show photo", "Foto zeigen";
+    PhotoSize = "photo_size", "Photo size", "Fotogröße";
+    PhotoSizeText = "photo_size_text", "Photos are made smaller before they go. Their place and camera data never go.", "Fotos werden vor dem Senden verkleinert. Ort und Kameradaten gehen nie mit.";
+    PhotoSmall = "photo_small", "Small, for slow connections", "Klein, für langsame Verbindungen";
+    PhotoPhone = "photo_phone", "Phone (recommended)", "Handy (empfohlen)";
+    PhotoOriginal = "photo_original", "Original size", "Originalgröße";
+    PhotoUnreadable = "photo_unreadable", "This photo could not be shown.", "Dieses Foto ließ sich nicht zeigen.";
+    // Files (1221): the bubble's row, the paperclip's entry, the cap's
+    // refusal with both sizes, and what the phone says when it cannot.
+    File = "scene_file", "File %1$s, %2$s", "Datei %1$s, %2$s";
+    AttachFile = "attach_file", "File", "Datei";
+    OpenFile = "scene_open_file", "Open file", "Datei öffnen";
+    FileTooLarge = "file_too_large", "This file is %1$s. A message carries at most %2$s.", "Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.";
+    FileUnreadable = "file_unreadable", "This file could not be read.", "Diese Datei ließ sich nicht lesen.";
+    FileNoApp = "file_no_app", "No app here opens this file.", "Keine App hier öffnet diese Datei.";
+    // Voice messages (1222): the bubble's words, its buttons, the
+    // microphone's hint, the slide that cancels, the refusals, and what
+    // the phone says without the microphone.
+    Voice = "scene_voice", "Voice message, %1$s", "Sprachnachricht, %1$s";
+    VoiceUnplayable = "scene_voice_unplayable", "Voice message, %1$s, which cannot be played here", "Sprachnachricht, %1$s, hier nicht abspielbar";
+    PlayVoice = "scene_play_voice", "Play", "Abspielen";
+    PauseVoice = "scene_pause_voice", "Pause", "Pause";
+    RecordVoice = "record_voice", "Hold to record a voice message", "Halten für eine Sprachnachricht";
+    VoiceHold = "voice_hold", "Hold the microphone to record, release to send.", "Mikrofon halten zum Aufnehmen, loslassen zum Senden.";
+    VoiceCancel = "voice_cancel", "Slide left to cancel", "Zum Abbrechen nach links wischen";
+    VoiceTooLong = "voice_too_long", "A voice message lasts at most %1$s.", "Eine Sprachnachricht dauert höchstens %1$s.";
+    VoiceNoMicrophone = "voice_no_microphone", "Loquax needs the microphone to record a voice message.", "Loquax braucht das Mikrofon für Sprachnachrichten.";
+    // The recording bar (1276): the timer, the waveform, the hints, the
+    // lock chip, the buttons, the silence hint and the cap.
+    RecBar = "rec_bar", "Recording a voice message", "Sprachnachricht wird aufgenommen";
+    RecTimer = "rec_timer", "REC %1$s", "REC %1$s";
+    RecWave = "rec_wave", "Sound level", "Lautstärke";
+    RecHeld = "rec_held", "Release to send", "Loslassen zum Senden";
+    RecReleaseCancel = "rec_release_cancel", "Release to cancel", "Loslassen zum Abbrechen";
+    RecLock = "rec_lock", "Lock the recording", "Aufnahme feststellen";
+    RecLocked = "rec_locked", "Recording locked", "Aufnahme festgestellt";
+    RecPause = "rec_pause", "Pause recording", "Aufnahme pausieren";
+    RecResume = "rec_resume", "Continue recording", "Aufnahme fortsetzen";
+    RecPlay = "rec_play", "Listen", "Anhören";
+    RecStopPlay = "rec_stop_play", "Stop listening", "Anhören beenden";
+    RecSend = "rec_send", "Send voice message", "Sprachnachricht senden";
+    RecDiscard = "rec_discard", "Discard recording", "Aufnahme verwerfen";
+    RecSilent = "rec_silent", "Nothing heard. Is the microphone allowed?", "Nichts zu hören. Ist das Mikrofon erlaubt?";
+    RecAllow = "rec_allow", "Allow the microphone", "Mikrofon erlauben";
+    RecCap = "rec_cap", "That is as long as a voice message can be", "Länger kann eine Sprachnachricht nicht sein";
+    // The compose bar after Signal (1270): the plus and its sheet, the
+    // position button and its sheet, the camera and the staged photo.
+    Attach = "scene_attach", "Attach", "Anhängen";
+    Locate = "scene_locate", "My position", "Meine Position";
+    Camera = "scene_camera", "Take a photo", "Foto aufnehmen";
+    CameraNoApp = "camera_no_app", "No camera app here takes a photo.", "Keine Kamera-App hier nimmt ein Foto auf.";
+    Staged = "scene_staged", "Photo to send, %1$s", "Foto zum Senden, %1$s";
+    Unstage = "scene_unstage", "Remove photo", "Foto entfernen";
+    CaptionHint = "caption_hint", "Add a caption", "Bildunterschrift hinzufügen";
+    ShareNow = "share_now", "Now, once", "Jetzt, einmal";
+    // Sharing a position for a while (1273): the sheet's four rows, the
+    // chat's chip and its Stop, the list's sign, Settings, Privacy.
+    ShareFor15 = "share_15_min", "For 15 minutes", "Für 15 Minuten";
+    ShareFor1h = "share_1_h", "For 1 hour", "Für 1 Stunde";
+    ShareFor8h = "share_8_h", "For 8 hours", "Für 8 Stunden";
+    ShareUntilStopped = "share_until_stopped", "Until I stop", "Bis ich es beende";
+    SharingLeft = "sharing_left", "Sharing your position, %1$s left", "Deine Position wird geteilt, noch %1$s";
+    SharingUntilStop = "sharing_until_stop", "Sharing your position until you stop", "Deine Position wird geteilt, bis du es beendest";
+    ShareStop = "share_stop", "Stop", "Beenden";
+    SharingSign = "sharing_sign", "Sharing your position", "Du teilst deine Position";
+    PositionSharing = "position_sharing", "Position sharing", "Positionsfreigabe";
+    ShareNotice = "share_notice", "Loquax shares your position", "Loquax teilt deine Position";
+    NoShares = "no_shares", "Your position is not shared with anyone.", "Deine Position wird mit niemandem geteilt.";
+    LocationOn = "location_on", "Turn location on", "Standort einschalten";
+    NoFix = "no_fix", "Loquax does not know where you are yet.", "Loquax weiß noch nicht, wo du bist.";
+    FixAge = "fix_age", "Found %1$s", "Ermittelt %1$s";
+    FixNow = "fix_now", "Found just now", "Gerade eben ermittelt";
+    // A code read (1263, `crate::code`): what a scanner, the pencil and
+    // the palette say for one they cannot take.
+    CodeForeign = "code_foreign", "That is not a Loquax code.", "Das ist kein Loquax-Code.";
+    CodeDamaged = "code_damaged", "This code is damaged. Ask for it again.", "Dieser Code ist beschädigt. Lass ihn dir noch einmal geben.";
+    CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a friend.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
+    // The pencil's screen (1263): scan first, paste second, typing under
+    // Advanced.
+    NewScan = "new_scan", "Scan a code", "Code scannen";
+    NewPaste = "new_paste", "Paste a code", "Code einfügen";
+    NewHint = "new_hint", "Your friend's code is on their profile, behind their picture.", "Den Code deines Kontakts findest du in seinem Profil, hinter dem Bild.";
+    NewTyped = "new_typed", "Or type the address your friend gave you.", "Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.";
+    NewNothing = "new_nothing", "There is nothing to paste. Copy your friend's code first.", "Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.";
+    // Joining a mailbox (1263, finding 8): one sentence each, the
+    // daemon's words under Details.
+    JoinNoAnswer = "join_no_answer", "The mailbox did not answer. Is the computer on?", "Das Postfach hat nicht geantwortet. Ist der Computer an?";
+    JoinSlow = "join_slow", "The mailbox did not answer in time. Try again.", "Das Postfach hat nicht rechtzeitig geantwortet. Versuch es noch einmal.";
+    JoinNotMailbox = "join_not_mailbox", "That code is not a mailbox code.", "Das ist kein Postfach-Code.";
+    JoinRefused = "join_refused", "The mailbox did not take this code. Make a new one on the computer.", "Das Postfach hat den Code nicht angenommen. Mach am Computer einen neuen.";
+    JoinNoCode = "join_no_code", "Scan or paste the code your mailbox shows.", "Scanne den Code, den dein Postfach zeigt, oder füge ihn ein.";
+    JoinWhere = "join_where", "Loquax does not know where your mailbox is. Type where it is below.", "Loquax weiß nicht, wo dein Postfach ist. Gib es unten ein.";
+    JoinBadWhere = "join_bad_where", "Loquax cannot read where the mailbox is. It looks like 192.168.1.20:4242.", "Loquax kann nicht lesen, wo das Postfach ist. Das sieht so aus: 192.168.1.20:4242.";
+    JoinFailed = "join_failed", "Joining the mailbox did not work.", "Das Postfach ließ sich nicht verbinden.";
+    JoinOtherMailbox = "join_other_mailbox", "This phone already reads another mailbox.", "Dieses Handy liest schon ein anderes Postfach.";
+    // Linking a device (1264): the phone holds no mailbox to link to.
+    LinkOnComputer = "link_on_computer", "Your mailbox is on a computer. Link the other device there.", "Dein Postfach ist auf einem Computer. Verbinde das andere Gerät dort.";
+    Details = "details", "Details", "Details";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";
     Pan = "scene_pan", "Move the map", "Karte verschieben";

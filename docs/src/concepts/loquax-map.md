@@ -32,9 +32,9 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3472`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2424`) and the positions in a table of
-their own (`SCHEMA_V2`, `loquax/src/store.rs:183`). The sender's timestamp
+`loquax/src/ui.rs:3826`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:2551`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:191`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.
@@ -50,14 +50,14 @@ What the core reads them with, all in `leviculum-lxmf`, `no_std + alloc`:
   (`leviculum-lxmf/src/constants.rs:61`, `leviculum-lxmf/src/constants.rs:62`);
 - the Telemeter codec, `Telemetry` (`leviculum-lxmf/src/telemetry.rs:176`)
   with `Telemetry::decode_field_value`
-  (`leviculum-lxmf/src/telemetry.rs:325`), and its `Location` in the wire's
+  (`leviculum-lxmf/src/telemetry.rs:341`), and its `Location` in the wire's
   scaled integers (`leviculum-lxmf/src/telemetry.rs:56`);
 - the stream decoder for a collector's rows, `decode_stream_field_value`
-  (`leviculum-lxmf/src/telemetry.rs:381`);
+  (`leviculum-lxmf/src/telemetry.rs:493`);
 - the request reader, `telemetry_request_timebase`
-  (`leviculum-lxmf/src/telemetry.rs:688`), whose command id is a
+  (`leviculum-lxmf/src/telemetry.rs:800`), whose command id is a
   documented assumption (`COMMAND_TELEMETRY_REQUEST`,
-  `leviculum-lxmf/src/telemetry.rs:678`).
+  `leviculum-lxmf/src/telemetry.rs:790`).
 
 ## 1. What the user sees
 
@@ -506,13 +506,15 @@ test.
 whose module comment is the normative layout). All integers little-endian,
 offsets from the start of the file:
 
-- a header: `LMR1`, the version (1, or 2 since 1100 with names), the
-  header length (64, or 96 for version 2), the bounds in
+- a header: `LMR1`, the version (1, 2 since 1100 with names, 3 since
+  1191 with buildings), the header length (64, 96 for version 2, 112 for
+  version 3), the bounds in
   degrees x 10^7 (west, south, east, north; west greater than east means
   across the antimeridian), the zoom range (at most 16, so x and y fit a
   `u16`), the layer profile id, where the attribution and the notice lie,
   the tile count, where the index lies and the file's length; version 2
-  adds where the label index and the string table lie;
+  adds where the label index and the string table lie, version 3 where
+  the building index lies and how many sections it lists;
 - the two texts, UTF-8 and both required: the attribution, one line every
   map view shows ("© OpenStreetMap contributors"), and the notice, the
   ODbL text, the derived-database sentence and the source the region was
@@ -537,9 +539,178 @@ offsets from the start of the file:
   1 reader refuses version 2 with `RegionError::Version`; this reader
   reads both, and a frontend that draws no names never opens the label
   index or the table;
+- version 3 (LMR3, 1191): a building section per z15 tile that has
+  buildings, after the label sections, and a building index like the
+  tile index between the label index and the tile index. The layout is
+  `leviculum-map/src/buildings.rs`'s module comment; the paragraph
+  "Buildings" below says why it is so;
 - the index last, 20 bytes per tile ascending by (z, x, y): z, x, y,
   offset, length. Last, so the cut can stream tiles and learn their count
   at the end.
+
+**Buildings** (1191, the format and the cut; 1192, the draw).
+Protomaps' z15 tiles carry every OSM building. They are not in the
+tile blobs, which stay as profile 1 cuts them, byte for byte, but in a
+section of their own per z15 tile: in the blobs, a view that draws no
+buildings would still pay for them (every blob is checked whole when read,
+and the name placement walks every feature of a tile), a z16 or z17 view
+would project and cull the whole z15 tile, and the M9 would read 3.3 times
+the bytes of every z15 view from its card (the 1191 study, measured with
+buildings in the blobs).
+
+A section is a head of 16 cells, a 4 x 4 grid of 1,024 units square, 16
+bytes each: where the cell's records end (`u32`), how many footprints it
+holds (`u32`) and the box every vertex of them lies in (four `i16`). A
+footprint is stored once, in the cell holding the centre of its box; a
+reader takes every cell whose box meets the part of the tile it draws, so
+a z16 tile reads its four cells and a z17 tile its one, plus a neighbour
+where a footprint reaches over the cell edge, and skips a cell from its
+head entry alone. A footprint is its rings, the outer one first, then its
+holes: a ring's vertex count and a flag for another ring of the same
+footprint in one LEB128 varint (one byte up to 63 vertices), its first
+vertex as two `i16`, then each step to the next vertex as two `i8`, or
+the byte `0x80` and two `i16` where the step is longer (24 m at z15). The
+ring closes on its first vertex. Coordinates are the z15 tile's units at
+extent 4,096 and lie within one extent of the tile, as a blob's do; a
+footprint holds at most 4,096 vertices and 1,024 rings, the M9's
+capacities. A cell counts its footprints in a `u32`, so no tile is too
+full for the format (the study's worst z15 tile holds 2,228). Every
+record is checked as it is read: a truncated or corrupt one is an error,
+never a panic.
+
+A version 2 reader refuses a version 3 file with `RegionError::Version(3)`
+before it reads past the version field, as a version 1 reader refuses
+version 2, so the reader has to ship before regions with buildings reach
+it; Loquax cuts its own regions, so in practice only a file copied by hand
+meets an older reader. A cut without buildings (`leviculum-map-tool cut
+--buildings false`, or no z15 in its zooms) writes version 2, which every
+version 2 reader reads.
+
+The cut (`leviculum-mapcut/src/cut.rs`, `footprints`) takes the
+`buildings` layer of each z15 source tile, the same decode as the tile's
+blob, and keeps every building piece the tile holds, a building across a
+tile edge once in each tile as that tile's piece. Each ring is simplified
+at half a pixel, 8 sub-pixels or about 1.5 m, as profile 1 simplifies
+every other class at z15; buildings are four to six vertices each, so
+coarser tolerances save little (study, section 1). A ring that collapses
+under it goes: a hole on its own, an outer ring with its footprint. A
+footprint over the M9's capacities would be simplified again at doubled
+tolerance up to four pixels; none is in the two boxes below.
+`leviculum-map-tool cut` cuts buildings by default (`--buildings`), and
+so does the autoload; the M9 and the terminal never open the section.
+
+Measured 2026-11-01 on the coder host from the Protomaps build of
+2026-10-28 (Basemap 4.15.2, the build the regions in use were cut from):
+the two boxes extracted with `leviculum-map-tool extract` (Frankfurt
+`8.47,50.01,8.80,50.23`, 27,409,373 bytes; Berlin `13.05,52.32,13.80,52.70`,
+89,323,845 bytes), then cut z0 to z15, profile 1, `--locale de`, with and
+without `--buildings`:
+
+| Region | without | with | added | footprints | vertices | dropped as degenerate | sections | heads and index |
+|---|---|---|---|---|---|---|---|---|
+| Frankfurt | 10,290,565 | 14,601,696 | +41.9 % | 322,436 | 1,494,946 | 2,800 | 881 | 243,156 |
+| Berlin | 36,363,478 | 49,373,566 | +35.8 % | 912,127 | 4,451,470 | 11,254 | 3,217 | 887,892 |
+
+The records alone add 39.5 % and 33.3 %, the study's estimate for the
+encoding (+40 % and +33 %); the 256-byte head per section and the 20-byte
+index entry add the rest. The tile blobs of both cuts are the same bytes.
+The footprint counts are the source's pieces (325,236 and 923,381) less
+the degenerate ones, slivers a tile's buffer cut off and outlines under a
+pixel.
+
+**Drawing the buildings** (1192). The map core draws a tile's
+footprints at view zoom 16 and deeper (`BUILDINGS_FROM`), where the
+style asks for them: `Style::buildings`, set in `Style::SCREEN`, the
+finish of the phone and the window; `Style::PC` (the terminal's sixel
+and kitty pictures) and `Style::M9` leave it off, and a view that does not
+draw them never reads a byte of the sections (`Region::read_buildings`).
+In `leviculum-map/src/draw.rs` they go after the areas, so over water,
+and before every line, so roads, paths, rails and the names over the
+frame stay on top; placement never looks at them, so they move no name.
+Each cell of the section that meets the tile's part of the view is read,
+each footprint culled by its box before a vertex is projected
+(`Pass::building` in `leviculum-mapfill/src/render.rs`), filled through
+the scanline filler in the building's area colour, then outlined as a
+1 px aliased line in the table's `building_edge`, a step darker: light
+`rgb(221,213,205)` with `rgb(194,184,175)`, dark `rgb(62,62,70)` (a
+step lighter than the study's, whose fill was a step off the ground
+alone) with `rgb(46,46,52)`, between the fill and the ground as CoMaps
+draws it. A tile whose section holds more than `BUILDING_CAP` (2,048)
+footprints is drawn as blocks: filled, no outline, so touching buildings
+merge into their block. The outline is about half a building's cost, so
+the cap bounds the dearest tiles; it counts the whole section, so a tile
+looks the same in the tile cache's 256 pixel tiles as in a view drawn
+whole. Of Frankfurt's 881 sections one is over it (z15/17175/11110, 2,229
+footprints; the 99th percentile is 1,640), of Berlin's 3,217 none (1,427 at
+most).
+
+Measured 2026-11-01 with `map_fps` (`MAPFPS_ZOOM`, `MAPFPS_QUICK`) on the
+coder host (4 cores, so 4 workers, not the study's 8), the phone frame
+over Frankfurt, three runs each over the region cut with and without
+buildings, ranges in ms:
+
+| Row | workers | z16 without | z16 with | z17 without | z17 with |
+|---|---|---|---|---|---|
+| cold, at rest | 4 | 26.1-43.0 | 30.4-41.3 | 20.1-20.6 | 23.3-26.8 |
+| cold, at rest | 1 | 65.3-66.0 | 82.1-82.6 | 55.8-56.5 | 66.8-69.2 |
+| tile time, summed | 1 | 38.0-38.8 | 55.1-55.8 | 33.7-34.3 | 45.1-46.8 |
+| pan, cache warm | 4 | 3.6-5.6 | 3.0-3.5 | 2.9-3.3 | 2.8-2.9 |
+| at rest, cache warm | 4 | 11.5-20.5 | 11.2-16.5 | 9.4-15.0 | 9.5-10.3 |
+| pinch, a step either side (median) | 4 | 12.5-21.3 | 13.0-17.6 | 9.8-11.0 | 9.5-10.4 |
+
+The z15 cold frame at rest, the bar for z16, is 33.1-35.7 ms on 4 workers
+and 78.9-79.7 on 1 here. The frames at z15 and shallower are the same
+pixels with buildings as without (`leviculum-map/tests/golden.rs`).
+
+Measured again 2026-11-01 (1193) on the same host given back its 10
+vCPUs, so with the study's 8 workers: five runs each, interleaved, over
+the same two regions, the load average 3 to 6 from other work on the
+host; medians, ranges in brackets, in ms:
+
+| Row | workers | z15 without | z16 without | z16 with | z17 without | z17 with |
+|---|---|---|---|---|---|---|
+| cold, at rest | 8 | 26.5 (24.9-27.5) | 21.3 (18.6-62.9) | 24.8 (23.6-57.9) | 22.1 (17.3-44.5) | 20.4 (18.5-77.9) |
+| cold, at rest | 1 | 80.5 (78.9-82.5) | 67.0 (64.8-68.2) | 86.0 (83.7-92.6) | 57.9 (57.0-62.2) | 69.1 (68.5-69.7) |
+| tile time, summed | 1 | 56.7 | 39.2 | 58.0 | 35.0 | 46.4 |
+| pan, cache warm | 8 | 3.1 | 5.3 | 4.2 | 5.3 | 3.9 |
+| at rest, cache warm | 8 | 14.5 | 15.1 | 11.5 | 10.6 | 11.0 |
+| pinch, a step either side (median) | 8 | 8.5 | 10.5 | 9.8 | 9.6 | 8.8 |
+| pinch, tiles held (median) | 8 | 8.6 | 9.7 | 10.2 | 12.1 | 9.6 |
+
+Every acceptance number of the study holds: the cold z16 frame at rest
+with buildings (24.8) is under the cold z15 frame at rest (26.5) on 8
+workers; on 1 worker it is 1.28 times z16 without (the bar 1.4, 93.8
+ms); the warm, pinch and held rows are within 1 ms or faster. The single
+runs of 58 to 78 ms on 8 workers are in both columns, the other work on
+the host, so the medians decide. Nothing was tuned in this pass: no row
+missed.
+
+**Region sizes with buildings** (1193), cut 2026-11-01 from the Protomaps
+build of 2026-10-28 with `--locale de`, with and without `--buildings`.
+The autoload's places are its 12 by 12 km boxes at z10 to z15 (the three
+measured under "The autoload", the same bytes fetched), Hessen and Germany the
+boxes of the table in section 4 at z0 to z15, Germany fetched in three
+latitude bands as there. Sections over the cap are drawn as blocks:
+
+| Region | without | with | added | sections | over the cap | most footprints in a section |
+|---|---|---|---|---|---|---|
+| central Frankfurt (place) | 4,041,375 | 5,699,692 | +41.0 % | 255 | 0 | 1,983 |
+| central Berlin (place) | 8,127,178 | 10,221,288 | +25.8 % | 289 | 0 | 1,369 |
+| the Vogelsberg (place) | 1,290,432 | 1,449,420 | +12.3 % | 176 | 0 | 494 |
+| Hessen | 401,045,416 | 489,009,508 | +21.9 % | 48,710 | 12 | 2,542 |
+| Germany | 4,014,983,480 | 4,886,283,750 | +21.7 % | 554,101 | 248 | 4,024 |
+
+A city adds a quarter to two fifths, the countryside an eighth, a state or
+the country a fifth, since most of their tiles are fields. Germany with
+its buildings still fits a card, Hessen at about 0.49 GB too. The
+autoload cuts with buildings, and the phone's Maps page sizes a region by
+its file (`loquax-android/src/map.rs`, `RegionRow::bytes` from the file's
+metadata), so it shows the size with buildings as it is. Cutting Germany
+found `Archive::locate` copying the PMTiles root for every tile, which an
+extract's root of every tile made quadratic (the cut did not end in ten
+minutes); it searches the root in place now and cuts Germany in 77 s
+(`leviculum-mapcut/tests/pmtiles.rs`,
+`a_root_of_every_tile_is_searched_in_place`).
 
 **Names** (1100). The cut keeps the names of places (city, town, district,
 village, suburb, neighbourhood; not localities, hamlets, isolated
@@ -583,7 +754,8 @@ corrupt file is an error, never a panic; `verify` walks the whole index
 once for a file a frontend did not make.
 
 **Layer profile 1** (`leviculum-map/src/profile.rs`): no buildings at any
-zoom (points, `pois` among them, are not in the flat format at all); from
+zoom in the tile blobs (from version 3 they are a section of their own,
+above; points, `pois` among them, are not in the flat format at all); from
 z13 the extent stays 4,096 and the Douglas-Peucker tolerance is half a
 pixel; z12 and shallower, the region zooms, are quantised to an extent of
 512, simplified at one pixel and lose the landuse, natural and landcover
@@ -970,6 +1142,70 @@ remembered. The techniques and the measurements behind their order are
   `<mosh|tmux|screen|local>:<TERM_PROGRAM, else TERM>`. A remembered way
   wins over the ladder at the next start unless it cannot work there at
   all (a picture behind mosh), which is said once.
+
+### Sharing for a while (1273)
+
+Lew, 2026-11-01: sharing a position must be possible once, for a
+certain time, or until stopped, and ending it must be simple. The
+position sheet behind the compose bar's ⌖ (1270) has five rows: "Now,
+once" sends one report as before; "For 15 minutes", "For 1 hour", "For
+8 hours" and "Until I stop" start a **share** for that chat. The model
+owns it (`loquax/src/ui/share.rs`): its end time, its cadence and the
+last report it sent. The platform only delivers fixes and the clock.
+
+**The cadence**, constants in `share.rs`, after the board's rule in
+[announce cadence](announce-cadence.md) (5 min moving, 1 h still),
+shortened at rest so the receiver keeps the stream live:
+
+| Rule | Constant | Value |
+|---|---|---|
+| the share's first fix goes at once | | |
+| a fix farther than this from the last report goes | `MOVED_M` | 25 m |
+| never two reports closer than | `MIN_GAP_S` | 60 s |
+| after a report for a move, the next at the latest | `MOVING_EVERY_S` | 5 min |
+| at rest, one report every | `STILL_EVERY_S` | 15 min |
+
+The distance is the equirectangular one, exact enough at 25 m. A clock
+without a new fix still sends the rest report from the newest fix (a
+phone at rest may deliver none), and the phone's session wakes at least
+every `MIN_GAP_S` while a share runs.
+
+**On the wire** every report of a running share carries the share mark
+of [telemetry](telemetry.md), "The extension ladder": `"every": 900`,
+the longest the next report waits, as the location's eighth element.
+The stop sends one last report from the newest fix with `"ended":
+true`. A receiver's liveness (1209, `ui::liveness`) keeps a stream live
+for twice the promise whatever cadence it learned, so a sharer who walked
+(reports a minute apart) and then sat down stays live for half an hour
+between rest reports; the end report makes the stream not live at all,
+only as old as it is: the chat's header and the Friends sheet say the
+age words (`last position 2 min ago`) from then on. A receiver that does
+not know the mark sees the same fixes and an older last one.
+
+**Visible while it runs, stoppable in one tap.** The chat shows a chip at
+its top, `scene::ShareChip`: "Sharing your position, 42 min left" (the
+time left rounded up, minutes under an hour, else hours) or "Sharing
+your position until you stop", and its Stop. The list's row carries
+`sharing`, drawn as a small ⌖ in the accent colour on our side. Settings,
+Privacy, "Position sharing" lists every running share by name with its
+words and a Stop (`scene::share_rows`). The terminal cannot share (it has
+no position), but draws the chip row of a share the model holds under
+the mailbox's row, `⌖ Sharing your position, 42 min left · click to
+stop`, and a click on it stops the share (`tests/fixtures/tui_share_chip.frames`).
+
+**Android.** The foreground service `ShareService` (type location)
+keeps the fixes coming while a share runs: GPS and the network provider
+every 30 s, and in the debug build the walk's seeded fix every 15 s. Its
+notification says "Loquax shares your position", with whom and how long,
+and has a Stop that ends every share with its end report. It starts from
+the sheet's row and whenever the list says a share runs (a share of a
+restart among them), and ends itself once the library lists none. A
+share survives a restart (schema 10, [storage](loquax-storage.md)); one
+whose end passed meanwhile ends at the first clock with its end report.
+No share survives an uninstall: the store goes with the app. Android 14
+refuses a location service started from the background; a share
+restored before any screen then runs on the fixes a screen brings until
+one starts the service.
 
 ## 7. Decided
 

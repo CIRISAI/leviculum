@@ -70,6 +70,21 @@ reference/LXMF/LXMF/__init__.py loquax/python_interop
 # that recipe reads these lines through scripts/with-prerequisites.sh.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
+# The voice round trip (1222) starts the same Python peer, and makes and
+# judges its sounds with the reference codecs: opus-tools and codec2 from
+# apt (scripts/install-ci.sh).
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+/usr/bin/opusenc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+/usr/bin/opusdec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+/usr/bin/c2enc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+/usr/bin/c2dec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+# The photo (1220) and file (1221) round trips start the same Python peer;
+# the home node merge brought them beside 1282's guard, which found them.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
 reference/Reticulum/RNS/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
 reference/LXMF/LXMF/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
 reference/Reticulum/RNS/__init__.py loquax/home_node a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
@@ -138,3 +153,7 @@ command:python3 leviculum-std/manifest_tmp_race concurrent_same_gate_invocations
 command:python3 leviculum-std/manifest_tmp_race startup_sweep_unlinks_only_this_gates_stale_tmps
 command:python3 lnpnd/event_log_analysis the_analysis_reads_what_the_writer_writes
 command:python3 loquax-android/device_walk_script the_walks_parsers_pass_their_tests
+
+# The recorder's level windows (1276): Levels.java against the core's rms.
+command:javac loquax-android/fling the_recorders_windows_are_the_librarys
+command:java loquax-android/fling the_recorders_windows_are_the_librarys

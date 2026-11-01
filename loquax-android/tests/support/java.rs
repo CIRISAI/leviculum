@@ -1,7 +1,7 @@
 //! A request as the app's Java builds it, in the bytes `MsgPack.pack`
 //! writes (`android/src/network/leviculum/loquax/MsgPack.java`, `write`):
 //! a long in a fixint when it fits and as `d3` and eight bytes otherwise,
-//! whatever its size; a `byte[]` as `c6`; null as `c0`. The facade's
+//! whatever its size; a double as `cb`; a `byte[]` as `c6`; null as `c0`. The facade's
 //! tests decode these bytes, not serde's own, so a field Java leaves out
 //! or writes in another width shows up as it does on the phone.
 
@@ -11,6 +11,8 @@ pub enum Java<'a> {
     Nil,
     Bool(bool),
     Long(i64),
+    /// A `Double` (or a `Float`), always float 64 (1269).
+    Real(f64),
     Str(&'a str),
     Bin(&'a [u8]),
     Longs(&'a [i64]),
@@ -40,6 +42,10 @@ fn write(out: &mut Vec<u8>, value: &Java) {
         Java::Nil => out.push(0xc0),
         Java::Bool(b) => out.push(if *b { 0xc3 } else { 0xc2 }),
         Java::Long(n) => long(out, *n),
+        Java::Real(x) => {
+            out.push(0xcb);
+            out.extend_from_slice(&x.to_bits().to_be_bytes());
+        }
         Java::Str(s) => string(out, s),
         Java::Bin(bytes) => {
             out.push(0xc6);

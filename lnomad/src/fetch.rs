@@ -15,6 +15,7 @@
 //! [`Link`]: leviculum_std::LinkHandle
 //! [`NodeEvent::ResponseReceived`]: leviculum_std::NodeEvent::ResponseReceived
 
+use crate::app::strings::{with, StrId, Text};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -72,6 +73,23 @@ pub enum FetchError {
     /// The underlying node reported an error dispatching a request or link.
     #[error("node error: {0}")]
     Node(String),
+}
+
+impl FetchError {
+    /// The error in the browser's catalogue: the English text is the
+    /// `Display` one, word for word.
+    pub fn text(&self) -> Text {
+        match self {
+            FetchError::Connect(why) => with(StrId::FetchConnect, why.clone()),
+            FetchError::NoPath => Text::key(StrId::FetchNoPath),
+            FetchError::LinkFailed => Text::key(StrId::FetchLinkFailed),
+            FetchError::Timeout => Text::key(StrId::FetchTimeout),
+            FetchError::NotFound => Text::key(StrId::FetchNotFound),
+            FetchError::Save(why) => with(StrId::FetchSave, why.clone()),
+            FetchError::Decode => Text::key(StrId::FetchDecode),
+            FetchError::Node(why) => with(StrId::FetchNode, why.clone()),
+        }
+    }
 }
 
 /// The link the session currently owns: which destination it reaches, its id,
@@ -620,6 +638,28 @@ fn decode_page(response_data: &[u8]) -> Result<Vec<u8>, FetchError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every fetch error says in English what its `Display` says, and in
+    /// German something else.
+    #[test]
+    fn a_fetch_error_is_in_the_catalogue() {
+        use crate::app::strings::Lang;
+        let all = [
+            FetchError::Connect("refused".into()),
+            FetchError::NoPath,
+            FetchError::LinkFailed,
+            FetchError::Timeout,
+            FetchError::NotFound,
+            FetchError::Save("disk full".into()),
+            FetchError::Decode,
+            FetchError::Node("gone".into()),
+        ];
+        for err in all {
+            assert_eq!(err.text().resolve(Lang::En), err.to_string());
+            assert_ne!(err.text().resolve(Lang::De), err.to_string());
+        }
+    }
+
     use super::*;
 
     #[test]

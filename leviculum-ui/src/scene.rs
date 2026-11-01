@@ -80,6 +80,14 @@ pub enum Role {
     Sheet,
     Card,
     Chip,
+    /// A laid-out document: the browser's page (1255).
+    Page,
+    /// A link in a page.
+    Link,
+    /// A form field in a page.
+    Field,
+    /// A picture in a page.
+    Image,
 }
 
 impl Role {
@@ -98,6 +106,10 @@ impl Role {
             Role::Sheet => "sheet",
             Role::Card => "card",
             Role::Chip => "chip",
+            Role::Page => "page",
+            Role::Link => "link",
+            Role::Field => "field",
+            Role::Image => "image",
         }
     }
 }

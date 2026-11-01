@@ -1,7 +1,7 @@
 //! The device walk's mailbox (1175): the 1173 ugly store in the archive of
 //! a Loquax Mailbox home, a second home whose identity is the Ratspeak
 //! conversation's peer, and a manifest of what the phone's screens must
-//! show for them.
+//! show for them, and a friend's contact code the phone does not know.
 //!
 //! ```sh
 //! cargo run -p loquax-android --example walk_mailbox -- MAILBOX SENDER MANIFEST
@@ -70,6 +70,11 @@ fn run(mailbox: PathBuf, sender: PathBuf, manifest: PathBuf) -> Result<(), Strin
         })
         .collect();
     let body = |j: usize| rows.get(j).map(|row| row.body.clone()).unwrap_or_default();
+    // A friend the phone does not know yet (walk finding 12): their
+    // contact code is what the walk shares into the app.
+    let friend = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let friend_key = friend.public_key_bytes();
+    let friend_address = loquax::home::lxmf_address(&friend_key)?;
     let doc = serde_json::json!({
         "address": loquax::address::to_hex(&address),
         "messages": filled.messages,
@@ -84,6 +89,10 @@ fn run(mailbox: PathBuf, sender: PathBuf, manifest: PathBuf) -> Result<(), Strin
         },
         "sender_peer": ugly_store::peer_hex(them),
         "friends": friends(&own),
+        "friend": {
+            "code": loquax::lxma::encode(&friend_key)?,
+            "address": loquax::address::to_hex(&friend_address),
+        },
     });
     let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     std::fs::write(&manifest, text).map_err(|e| format!("{}: {e}", manifest.display()))?;

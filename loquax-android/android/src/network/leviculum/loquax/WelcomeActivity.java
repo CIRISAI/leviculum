@@ -56,11 +56,16 @@ public class WelcomeActivity extends Activity {
     private static final int STARTING = 3;
     private static final int ADDRESS = 4;
     private static final int RESTORE = 5;
+    /** Another device's mailbox (1264): a phone's "Link a device" code, or a computer's. */
+    private static final int JOINING = 6;
     private static final int ASK_NOTIFICATIONS = 1;
     private static final int ASK_BATTERY = 2;
     private static final int OPEN_BACKUP = 3;
     private static final int SCAN_CODE = 4;
     private static final int SCAN_BACKUP = 5;
+    /** The extra that opens a page directly; {@link #ADDRESS_PAGE} is the one there is. */
+    static final String SHOW = "show";
+    static final String ADDRESS_PAGE = "address";
 
     private ScrollView frame;
     private int page = CHOICE;
@@ -89,6 +94,12 @@ public class WelcomeActivity extends Activity {
         if (savedInstanceState != null) {
             page = savedInstanceState.getInt(PAGE, CHOICE);
             here = savedInstanceState.getBoolean(WHERE_HERE, true);
+        } else if (ADDRESS_PAGE.equals(getIntent().getStringExtra(SHOW))) {
+            // The address page of a session that runs: after the first
+            // join of a mailbox elsewhere (walk finding 13), and the device
+            // walk's way to the first start's QR (1263), in the debug APK,
+            // where this screen is exported.
+            page = ADDRESS;
         }
         // Recreated while starting or after: the session runs or ran in
         // the library; asking it again answers for the running one.
@@ -111,6 +122,8 @@ public class WelcomeActivity extends Activity {
         if (page == RESTORE) {
             failed = null;
             show(CHOICE);
+        } else if (page == JOINING) {
+            show(CHOICE);
         } else if (page == COMPUTER || page == BACKGROUND) {
             show(page == BACKGROUND && !here ? COMPUTER : CHOICE);
         } else {
@@ -128,7 +141,10 @@ public class WelcomeActivity extends Activity {
                 choice(body);
                 break;
             case COMPUTER:
-                computer(body);
+                computer(body, false);
+                break;
+            case JOINING:
+                computer(body, true);
                 break;
             case BACKGROUND:
                 background(body);
@@ -194,6 +210,17 @@ public class WelcomeActivity extends Activity {
                 show(here ? BACKGROUND : COMPUTER);
             }
         });
+        Button join = button(getString(R.string.join_existing));
+        join.setId(R.id.where_join);
+        join.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                here = false;
+                restore = null;
+                show(JOINING);
+            }
+        });
+        body.addView(join, wrap());
         Button have = button(getString(R.string.have_address));
         have.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -271,11 +298,15 @@ public class WelcomeActivity extends Activity {
         return at < 0 ? "" : text.substring(at).trim();
     }
 
-    /** The mailbox on a computer: what to do there, and the code it shows. */
-    private void computer(LinearLayout body) {
-        body.addView(text(getString(R.string.computer_title), 22, R.color.text, true), matchWrap());
-        body.addView(gap(text(getString(R.string.computer_text), 15, R.color.text, false), 8, 16),
-                matchWrap());
+    /**
+     * The mailbox on a computer: what to do there, and the code it shows; `joining`, a mailbox that
+     * already runs on another device (1264), whose "Link a device" shows the same code.
+     */
+    private void computer(LinearLayout body, boolean joining) {
+        body.addView(text(getString(joining ? R.string.join_existing : R.string.computer_title), 22,
+                R.color.text, true), matchWrap());
+        body.addView(gap(text(getString(joining ? R.string.join_existing_text : R.string.computer_text),
+                15, R.color.text, false), 8, 16), matchWrap());
         if (ScanActivity.available(this)) {
             Button scan = button(getString(R.string.scan_code));
             scan.setOnClickListener(new View.OnClickListener() {
@@ -296,6 +327,9 @@ public class WelcomeActivity extends Activity {
             }
         });
         body.addView(paste, wrap());
+        if (joining) {
+            return;
+        }
         Button until = button(getString(R.string.phone_until_then));
         until.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -402,6 +436,7 @@ public class WelcomeActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                Core.sense(getApplicationContext());
                 final Map<String, Object> started = Core.startHere(dir, restore, passphrase);
                 final Map<String, Object> mine = Core.bool(started, "ok") ? Core.me() : null;
                 runOnUiThread(new Runnable() {
@@ -448,11 +483,31 @@ public class WelcomeActivity extends Activity {
         body.addView(again, wrap());
     }
 
-    /** The address to give people, the name for others, the backup. */
+    /** The name for others, the address to give people, the backup. */
     private void address(LinearLayout body) {
-        body.addView(text(getString(R.string.address_title), 22, R.color.text, true), matchWrap());
+        final boolean phone = Core.bool(me, "here");
+        if (phone) {
+            // The page's one field, first (walk finding 9): friends see this
+            // name, not the address's digits. Prefilled from the phone
+            // owner's card where Android lets us read it; empty is allowed.
+            body.addView(text(getString(R.string.name_for_others), 15, R.color.text, false),
+                    matchWrap());
+            name = new EditText(this);
+            name.setId(R.id.welcome_name);
+            name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+            name.setSingleLine(true);
+            name.setHint(R.string.profile_name_hint);
+            String kept = Core.str(me, "name");
+            name.setText(kept.isEmpty() ? Book.ownerName(this) : kept);
+            body.addView(name, matchWrap());
+        }
+        body.addView(gap(text(getString(R.string.address_title), 22, R.color.text, true), 16, 0),
+                matchWrap());
+        // The contact code's QR, the profile's (1263): a friend's scanner
+        // takes it.
         ImageView qr = QrCode.view(this, me, dp(240), Core.str(me, "fingerprint"));
         if (qr != null) {
+            qr.setId(R.id.welcome_qr);
             LinearLayout.LayoutParams at = new LinearLayout.LayoutParams(dp(240), dp(240));
             at.gravity = Gravity.CENTER_HORIZONTAL;
             at.topMargin = dp(16);
@@ -467,12 +522,13 @@ public class WelcomeActivity extends Activity {
                 false), 4, 16), matchWrap());
         LinearLayout row = new LinearLayout(this);
         Button share = button(getString(R.string.share));
+        share.setId(R.id.welcome_share);
         share.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 Intent send = new Intent(Intent.ACTION_SEND)
                         .setType("text/plain")
-                        .putExtra(Intent.EXTRA_TEXT, Core.str(me, "address"));
+                        .putExtra(Intent.EXTRA_TEXT, Core.str(me, "lxma"));
                 startActivity(Intent.createChooser(send, getString(R.string.share)));
             }
         });
@@ -486,15 +542,7 @@ public class WelcomeActivity extends Activity {
         });
         row.addView(write, wrap());
         body.addView(row, matchWrap());
-        final boolean phone = Core.bool(me, "here");
         if (phone) {
-            body.addView(gap(text(getString(R.string.name_for_others), 15, R.color.text, false),
-                    20, 0), matchWrap());
-            name = new EditText(this);
-            name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-            name.setHint(R.string.optional);
-            name.setText(Core.str(me, "name"));
-            body.addView(name, matchWrap());
             Button backup = button(getString(R.string.backup_address));
             backup.setOnClickListener(new View.OnClickListener() {
                 @Override

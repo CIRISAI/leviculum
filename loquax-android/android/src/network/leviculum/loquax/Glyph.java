@@ -13,13 +13,16 @@ import android.graphics.drawable.Drawable;
  * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
  * the list's search, close and pencil 1130, the tab bar's chat and pin
  * 1199, the map's people button 1200, the crosshair and the chat's
- * attachment menu 1201). The delivery marks are the ladder of
+ * attachment menu 1201, the microphone and the voice player 1222). The delivery marks are the ladder of
  * docs/src/concepts/loquax-read-receipts.md, section 3 (1232): CLOCK, TICK,
  * TICKS, TICKS_READ, FAILED, with the numbers of
  * loquax/src/ui/chat.rs's shapes, which a test of the facade reads here.
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH }
+    enum Kind {
+        BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT,
+        PIN, PEOPLE, LOCATE, ATTACH, MIC, PLAY, PAUSE, CAMERA, PLUS, LOCK, UNLOCK, BIN, STOP, UP
+    }
 
     private final Kind kind;
     private final int color;
@@ -198,6 +201,68 @@ final class Glyph extends Drawable {
                 canvas.drawLine(12, 18.5f, 12, 22, stroke);
                 canvas.drawLine(2, 12, 5.5f, 12, stroke);
                 canvas.drawLine(18.5f, 12, 22, 12, stroke);
+                break;
+            case MIC:
+                // A capsule on a stand: the microphone (1222).
+                canvas.drawRoundRect(9, 3, 15, 15, 3, 3, fill);
+                Path cup = new Path();
+                cup.moveTo(6, 11);
+                cup.cubicTo(6, 15, 8.7f, 18, 12, 18);
+                cup.cubicTo(15.3f, 18, 18, 15, 18, 11);
+                canvas.drawPath(cup, stroke);
+                canvas.drawLine(12, 18, 12, 21, stroke);
+                break;
+            case CAMERA:
+                // A body with a hump on top and a lens (1270).
+                Path body = path(3, 8, 7.5f, 8, 9, 5.5f, 15, 5.5f, 16.5f, 8, 21, 8, 21, 19, 3, 19);
+                body.close();
+                canvas.drawPath(body, stroke);
+                canvas.drawCircle(12, 13, 3.5f, stroke);
+                break;
+            case PLUS:
+                // The compose bar's round button with nothing to send (1270).
+                canvas.drawLine(12, 5, 12, 19, stroke);
+                canvas.drawLine(5, 12, 19, 12, stroke);
+                break;
+            case PLAY:
+                Path play = path(8, 5, 19, 12, 8, 19);
+                play.close();
+                canvas.drawPath(play, fill);
+                break;
+            case PAUSE:
+                canvas.drawRect(7, 5, 10.5f, 19, fill);
+                canvas.drawRect(13.5f, 5, 17, 19, fill);
+                break;
+            case LOCK:
+            case UNLOCK:
+                // The recording bar's lock chip (1276): a body and its
+                // shackle, closed, or open with its right leg lifted.
+                canvas.drawRoundRect(5.5f, 11, 18.5f, 20.5f, 2, 2, fill);
+                Path shackle = new Path();
+                shackle.moveTo(8.5f, 11);
+                shackle.lineTo(8.5f, 7.5f);
+                shackle.cubicTo(8.5f, 5.3f, 10, 3.5f, 12, 3.5f);
+                shackle.cubicTo(14, 3.5f, 15.5f, 5.3f, 15.5f, 7.5f);
+                shackle.lineTo(15.5f, kind == Kind.LOCK ? 11 : 8.5f);
+                canvas.save();
+                if (kind == Kind.UNLOCK) canvas.translate(0, -2);
+                canvas.drawPath(shackle, stroke);
+                canvas.restore();
+                break;
+            case BIN:
+                // The bin: a lid with its handle and a tapering can.
+                canvas.drawLine(4.5f, 6.5f, 19.5f, 6.5f, stroke);
+                canvas.drawPath(path(9.5f, 6.5f, 9.5f, 4, 14.5f, 4, 14.5f, 6.5f), stroke);
+                Path can = path(6.5f, 6.5f, 7.5f, 20, 16.5f, 20, 17.5f, 6.5f);
+                canvas.drawPath(can, stroke);
+                canvas.drawLine(10.5f, 10, 10.5f, 16.5f, stroke);
+                canvas.drawLine(13.5f, 10, 13.5f, 16.5f, stroke);
+                break;
+            case STOP:
+                canvas.drawRoundRect(6.5f, 6.5f, 17.5f, 17.5f, 1.5f, 1.5f, fill);
+                break;
+            case UP:
+                canvas.drawPath(path(6, 15, 12, 9, 18, 15), stroke);
                 break;
             default:
                 break;

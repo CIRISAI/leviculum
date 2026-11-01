@@ -1,6 +1,6 @@
 === first ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: typed ---
-┌  Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: left ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────────────────┐
 │ <61ddb79a…>            ││                                                    │
 │ Draft: half a thought  ││                                                    │
 │                        ││                                                    │
@@ -75,7 +75,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: back ---
-┌  Loquax afbda7b3───────┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -101,7 +101,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === second ===
 --- frame 1: restarted ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │

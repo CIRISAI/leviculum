@@ -34,10 +34,12 @@ use iced::{
 };
 
 use loquax::ui::chat::{self, size, Colours, Mark};
+use loquax::ui::compose::Button as BarButton;
 use loquax::ui::intent::{Intent, Switch};
 use loquax::ui::reactions::SIGNAL_QUICK;
+use loquax::ui::recording::Verb;
 use loquax::ui::scene::{
-    self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, Row, Tab, TabId,
+    self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, RecordingBar, Row, Tab, TabId,
 };
 use loquax::ui::strings::{Lang, StrId};
 use loquax::when::{list_time, WallTime};
@@ -150,6 +152,21 @@ pub enum Icon {
     Map,
     /// The settings: a gear.
     Settings,
+    /// The compose bar's buttons beyond the emoji and Send (1270): the
+    /// plus, the position button's crosshair, the camera, the microphone.
+    Plus,
+    Locate,
+    Camera,
+    Mic,
+    /// The recording bar's (1276): the bin, pause, play, stop listening,
+    /// and the lock chip, open with its up chevron or closed.
+    Bin,
+    Pause,
+    Play,
+    Stop,
+    Lock {
+        closed: bool,
+    },
 }
 
 struct Drawing {
@@ -294,6 +311,127 @@ impl canvas::Program<Message> for Drawing {
                     );
                 }
             }
+            Icon::Plus => {
+                frame.stroke(&Path::line(p(0.5, 0.22), p(0.5, 0.78)), line);
+                frame.stroke(&Path::line(p(0.22, 0.5), p(0.78, 0.5)), line);
+            }
+            Icon::Locate => {
+                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.27), line);
+                frame.fill(&Path::circle(p(0.5, 0.5), s * 0.09), self.ink);
+                for (a, b) in [
+                    ((0.5, 0.08), (0.5, 0.23)),
+                    ((0.5, 0.77), (0.5, 0.92)),
+                    ((0.08, 0.5), (0.23, 0.5)),
+                    ((0.77, 0.5), (0.92, 0.5)),
+                ] {
+                    frame.stroke(&Path::line(p(a.0, a.1), p(b.0, b.1)), line);
+                }
+            }
+            Icon::Camera => {
+                let body = Path::new(|b| {
+                    b.move_to(p(0.12, 0.33));
+                    b.line_to(p(0.31, 0.33));
+                    b.line_to(p(0.38, 0.23));
+                    b.line_to(p(0.62, 0.23));
+                    b.line_to(p(0.69, 0.33));
+                    b.line_to(p(0.88, 0.33));
+                    b.line_to(p(0.88, 0.79));
+                    b.line_to(p(0.12, 0.79));
+                    b.close();
+                });
+                frame.stroke(&body, line);
+                frame.stroke(&Path::circle(p(0.5, 0.54), s * 0.15), line);
+            }
+            Icon::Mic => {
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        p(0.38, 0.12),
+                        iced::Size::new(s * 0.24, s * 0.5),
+                        (s * 0.12).into(),
+                    ),
+                    self.ink,
+                );
+                let cup = Path::new(|b| {
+                    b.arc(canvas::path::Arc {
+                        center: p(0.5, 0.46),
+                        radius: s * 0.25,
+                        start_angle: iced::Radians(0.0),
+                        end_angle: iced::Radians(std::f32::consts::PI),
+                    });
+                });
+                frame.stroke(&cup, line);
+                frame.stroke(&Path::line(p(0.5, 0.71), p(0.5, 0.88)), line);
+            }
+            Icon::Bin => {
+                let can = Path::new(|b| {
+                    b.move_to(p(0.28, 0.3));
+                    b.line_to(p(0.34, 0.85));
+                    b.line_to(p(0.66, 0.85));
+                    b.line_to(p(0.72, 0.3));
+                });
+                frame.stroke(&can, line);
+                frame.stroke(&Path::line(p(0.2, 0.28), p(0.8, 0.28)), line);
+                frame.stroke(&Path::line(p(0.42, 0.18), p(0.58, 0.18)), line);
+                frame.stroke(&Path::line(p(0.45, 0.42), p(0.46, 0.72)), line);
+                frame.stroke(&Path::line(p(0.55, 0.42), p(0.54, 0.72)), line);
+            }
+            Icon::Pause => {
+                for x in [0.32, 0.56] {
+                    frame.fill(
+                        &Path::rectangle(p(x, 0.24), iced::Size::new(s * 0.12, s * 0.52)),
+                        self.ink,
+                    );
+                }
+            }
+            Icon::Play => {
+                let wedge = Path::new(|b| {
+                    b.move_to(p(0.32, 0.22));
+                    b.line_to(p(0.78, 0.5));
+                    b.line_to(p(0.32, 0.78));
+                    b.close();
+                });
+                frame.fill(&wedge, self.ink);
+            }
+            Icon::Stop => {
+                frame.fill(
+                    &Path::rectangle(p(0.28, 0.28), iced::Size::new(s * 0.44, s * 0.44)),
+                    self.ink,
+                );
+            }
+            Icon::Lock { closed } => {
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        p(0.26, 0.46),
+                        iced::Size::new(s * 0.48, s * 0.36),
+                        (s * 0.06).into(),
+                    ),
+                    self.ink,
+                );
+                // The shackle: shut, or lifted on the left.
+                let shackle = Path::new(|b| {
+                    b.move_to(p(0.36, 0.46));
+                    b.line_to(p(0.36, 0.32));
+                    b.arc(canvas::path::Arc {
+                        center: p(0.5, 0.32),
+                        radius: s * 0.14,
+                        start_angle: iced::Radians(std::f32::consts::PI),
+                        end_angle: iced::Radians(2.0 * std::f32::consts::PI),
+                    });
+                    match closed {
+                        true => b.line_to(p(0.64, 0.46)),
+                        false => b.line_to(p(0.64, 0.36)),
+                    }
+                });
+                frame.stroke(&shackle, line);
+                if !closed {
+                    let chevron = Path::new(|b| {
+                        b.move_to(p(0.38, 0.14));
+                        b.line_to(p(0.5, 0.04));
+                        b.line_to(p(0.62, 0.14));
+                    });
+                    frame.stroke(&chevron, line);
+                }
+            }
             Icon::Face => {
                 frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
                 frame.fill(&Path::circle(p(0.38, 0.42), s * 0.05), self.ink);
@@ -311,6 +449,86 @@ impl canvas::Program<Message> for Drawing {
         }
         vec![frame.into_geometry()]
     }
+}
+
+/// A waveform (1276): the levels, 0 to 100, as rounded bars side by side,
+/// loud is tall, the quietest a dot; the live bar's newest at the right.
+struct Wave {
+    levels: Vec<u8>,
+    ink: Color,
+    /// How many bars the width is cut into: fewer levels stand at the
+    /// right, as the live bar scrolls in from there.
+    slots: usize,
+    /// It records: on a narrow canvas the newest are kept; standing, the
+    /// whole is folded by the one resampler.
+    moving: bool,
+}
+
+/// The narrowest a bar's pitch gets before the waveform keeps fewer.
+const WAVE_PITCH: f32 = 4.0;
+
+impl canvas::Program<Message> for Wave {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let room = ((bounds.width / WAVE_PITCH) as usize).max(1);
+        let folded;
+        let levels = match (self.levels.len() > room, self.moving) {
+            (false, _) => self.levels.as_slice(),
+            (true, true) => &self.levels[self.levels.len() - room..],
+            (true, false) => {
+                folded = loquax::ui::recording::LevelTrack::of(self.levels.clone())
+                    .bars(room, loquax::ui::recording::Fold::Peak);
+                folded.as_slice()
+            }
+        };
+        let slots = self.slots.min(room).max(levels.len()).max(1);
+        let pitch = bounds.width / slots as f32;
+        let bar = (pitch * 0.6).max(1.0);
+        let first = slots - levels.len();
+        for (i, &level) in levels.iter().enumerate() {
+            let h = (bounds.height * f32::from(level.min(100)) / 100.0).max(bar);
+            let x = (first + i) as f32 * pitch + (pitch - bar) / 2.0;
+            let y = (bounds.height - h) / 2.0;
+            frame.fill(
+                &Path::rounded_rectangle(
+                    Point::new(x, y),
+                    iced::Size::new(bar, h),
+                    (bar / 2.0).into(),
+                ),
+                self.ink,
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// `levels` as a waveform `slots` bars wide, `width` by `height`.
+fn wave<'a>(
+    levels: &[u8],
+    slots: usize,
+    moving: bool,
+    ink: Color,
+    width: Length,
+    height: f32,
+) -> Element<'a, Message> {
+    Canvas::new(Wave {
+        levels: levels.to_vec(),
+        ink,
+        slots,
+        moving,
+    })
+    .width(width)
+    .height(height)
+    .into()
 }
 
 fn drawing<'a>(icon: Icon, ink: Color, failed: (Color, Color), side: f32) -> Element<'a, Message> {
@@ -830,8 +1048,55 @@ impl App {
                 });
             inside = inside.push(row![stripe, said].spacing(8).height(Length::Shrink));
         }
-        if !bubble.body.is_empty() {
-            inside = inside.push(text(bubble.body.clone()).size(size::BODY).color(ink));
+        // The media first, inside the one bubble (1268). A photo (1220):
+        // its words, a press shows it whole in the system's viewer. The
+        // thumbnail in the window is a later slice.
+        if let Some(photo) = &node.photo {
+            inside = inside.push(flat(
+                text(format!("▣ {}", photo.words.resolve(self.lang)))
+                    .size(size::BODY - 2.0)
+                    .color(ink),
+                Message::Intent(photo.open.intent.clone()),
+            ));
+        }
+        // A file (1221): its name and size, a press saves it under the
+        // home and opens it with the system's handler.
+        for file in &node.files {
+            inside = inside.push(flat(
+                text(format!("▤ {} · {}", file.name, file.size))
+                    .size(size::BODY - 2.0)
+                    .color(ink),
+                Message::Intent(file.open.intent.clone()),
+            ));
+        }
+        // A voice message (1222): its length, a press plays it in the
+        // system's player.
+        if let Some(voice) = &node.voice {
+            let line = text(format!("♪ voice message · {}", voice.duration))
+                .size(size::BODY - 2.0)
+                .color(ink);
+            let line: Element<'_, Message> = match &voice.toggle {
+                Some(toggle) => flat(line, Message::Intent(toggle.intent.clone())).into(),
+                None => line.into(),
+            };
+            inside = inside.push(line);
+            // Its waveform (1276): the scene's bars, the recording's own
+            // track where the model has one.
+            if !voice.levels.is_empty() {
+                inside = inside.push(wave(
+                    &voice.levels,
+                    voice.levels.len(),
+                    false,
+                    meta,
+                    Length::Fixed(4.0 * voice.levels.len() as f32),
+                    22.0,
+                ));
+            }
+        }
+        // The words under the media, none where the scene has none
+        // (1268): a photo alone is the photo and its time.
+        if let Some(words) = &node.text {
+            inside = inside.push(text(words.clone()).size(size::BODY).color(ink));
         }
         if let Some(fix) = &bubble.fix {
             let mut words = loquax::telemetry::coordinates(&fix.location);
@@ -1010,6 +1275,9 @@ impl App {
     /// the pill with its emoji button and field, the round send button
     /// raising the scene's send.
     fn compose_bar<'a>(&'a self, open: &'a Chat, t: Colours) -> Element<'a, Message> {
+        if let Some(recording) = &open.compose.recording {
+            return self.recording_bar(recording, t);
+        }
         let mut bar = column![].spacing(6).padding([8, 12]);
         if let Some((_, quoted)) = &self.reply {
             bar = bar.push(
@@ -1049,6 +1317,46 @@ impl App {
             Message::Intent(Intent::Emoji),
         )
         .padding(6);
+        // The scene's buttons in the field's right edge (1270): those the
+        // window can do; today it has none of them, so none show.
+        let tail = open
+            .compose
+            .buttons
+            .iter()
+            .filter(|b| b.button.inside() && b.button != BarButton::Emoji)
+            .fold(row![].align_y(Alignment::Center), |tail, b| {
+                let icon = match b.button {
+                    BarButton::Locate => Icon::Locate,
+                    BarButton::Camera => Icon::Camera,
+                    _ => Icon::Mic,
+                };
+                let face = drawing(
+                    icon,
+                    colour(t.text_secondary),
+                    (Color::TRANSPARENT, Color::TRANSPARENT),
+                    28.0,
+                );
+                // The microphone is held, not clicked (1276): the button
+                // goes down with the mouse, the window follows the
+                // pointer until it comes up.
+                match b.button {
+                    BarButton::Microphone => tail.push(
+                        mouse_area(container(face).padding(6))
+                            .on_press(Message::RecPress)
+                            .interaction(mouse::Interaction::Pointer),
+                    ),
+                    _ => tail.push(flat(face, Message::Intent(b.action.intent.clone())).padding(6)),
+                }
+            });
+        // The round one: the plus while there is nothing to send, Send
+        // once there is (the scene's rule); the window's plus has no row
+        // yet, so the round button is Send.
+        let plus = open
+            .compose
+            .buttons
+            .iter()
+            .find(|b| b.button == BarButton::Plus)
+            .map(|b| b.action.intent.clone());
         let send = Message::Intent(open.compose.send.intent.clone());
         let enter = send.clone();
         let editor = text_editor(&self.compose)
@@ -1078,7 +1386,7 @@ impl App {
                 value: colour(t.text),
                 selection: colour(t.selected_row),
             });
-        let pill = container(row![face, editor].align_y(Alignment::Center))
+        let pill = container(row![face, editor, tail].align_y(Alignment::Center))
             .width(Length::Fill)
             .padding([0, 6])
             .style(move |_: &Theme| container::Style {
@@ -1086,16 +1394,20 @@ impl App {
                 border: border::rounded(size::COMPOSE_CORNER),
                 ..container::Style::default()
             });
+        let (round, press) = match plus {
+            Some(intent) => (Icon::Plus, Message::Intent(intent)),
+            None => (Icon::Send, send),
+        };
         let send = button(
             container(drawing(
-                Icon::Send,
+                round,
                 colour(t.on_send),
                 (Color::TRANSPARENT, Color::TRANSPARENT),
                 28.0,
             ))
             .center(size::SEND),
         )
-        .on_press(send)
+        .on_press(press)
         .padding(0)
         .width(size::SEND)
         .height(size::SEND)
@@ -1105,6 +1417,230 @@ impl App {
             ..button::Style::default()
         });
         container(bar.push(row![pill, send].spacing(8).align_y(Alignment::End)))
+            .width(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// The recording bar in the compose bar's place (1276,
+    /// `docs/src/concepts/loquax-voice-recording.md`): the red dot,
+    /// pulsing every half second while it records and is heard, hollow
+    /// once it stands; `REC 00:07`, amber in the last 30 s; the waveform;
+    /// while held the cancel hint and the grown red microphone with the
+    /// lock chip above it, once locked the bin, the pause and a big Send,
+    /// paused the play, the bin, resume; under it the line the scene says.
+    fn recording_bar<'a>(&'a self, bar: &'a RecordingBar, t: Colours) -> Element<'a, Message> {
+        let red = colour(t.rec_red);
+        let none = (Color::TRANSPARENT, Color::TRANSPARENT);
+        let running = bar.phase.running();
+        // The pulse as frames on the timer's clock, so a picture of one
+        // moment is always the same picture.
+        let bright = !bar.pulsing || (bar.timer.ms / 500).is_multiple_of(2);
+        let dot_ink = match bright {
+            true => red,
+            false => Color { a: 0.35, ..red },
+        };
+        let dot: Element<'_, Message> = match running {
+            true => container(Space::new().width(12).height(12))
+                .style(move |_: &Theme| container::Style {
+                    background: Some(Background::Color(dot_ink)),
+                    border: border::rounded(6),
+                    ..container::Style::default()
+                })
+                .into(),
+            false => container(Space::new().width(12).height(12))
+                .style(move |_: &Theme| container::Style {
+                    border: border::rounded(6).width(2).color(dot_ink),
+                    ..container::Style::default()
+                })
+                .into(),
+        };
+        let timer_ink = match bar.timer.amber {
+            true => colour(t.rec_amber),
+            false => red,
+        };
+        let timer = text(bar.timer.words.resolve(self.lang))
+            .size(20)
+            .color(timer_ink)
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            });
+        let wave_ink = match running {
+            true => colour(t.text),
+            false => colour(t.text_secondary),
+        };
+        let mut inside = row![
+            dot,
+            timer,
+            wave(
+                &bar.wave.levels,
+                loquax::ui::recording::LIVE_WINDOWS,
+                bar.wave.moving,
+                wave_ink,
+                Length::Fill,
+                28.0,
+            ),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        if let Some(hint) = &bar.cancel {
+            let ink = match hint.armed {
+                true => red,
+                false => colour(t.text_secondary),
+            };
+            // The hint follows the pointer left, up to the distance.
+            let shift = f32::from(hint.progress) * 0.4;
+            inside = inside.push(
+                container(
+                    text(format!("‹ {}", hint.words.resolve(self.lang)))
+                        .size(15)
+                        .color(ink),
+                )
+                .padding(iced::Padding {
+                    right: shift,
+                    ..iced::Padding::ZERO
+                }),
+            );
+        }
+        let icon_of = |verb: Verb| match verb {
+            Verb::Discard => Icon::Bin,
+            Verb::Pause => Icon::Pause,
+            Verb::Play => Icon::Play,
+            Verb::StopPlay => Icon::Stop,
+            _ => Icon::Mic,
+        };
+        let mut send = None;
+        for b in &bar.buttons {
+            let press = Message::Intent(b.action.intent.clone());
+            match b.verb {
+                Verb::Send => send = Some(press),
+                // Resume is a recorder's red dot: it records again; its
+                // words are the tooltip's.
+                Verb::Resume => {
+                    let dot =
+                        container(Space::new().width(16).height(16)).style(move |_: &Theme| {
+                            container::Style {
+                                background: Some(Background::Color(red)),
+                                border: border::rounded(8),
+                                ..container::Style::default()
+                            }
+                        });
+                    inside = inside.push(tooltip(
+                        flat(container(dot).center(26), press).padding(4),
+                        text(self.word(StrId::RecResume)).size(13),
+                        tooltip::Position::Top,
+                    ));
+                }
+                verb => {
+                    let ink = match verb {
+                        Verb::Discard => red,
+                        _ => colour(t.text),
+                    };
+                    inside = inside.push(tooltip(
+                        flat(drawing(icon_of(verb), ink, none, 26.0), press).padding(4),
+                        text(self.word(verb.label())).size(13),
+                        tooltip::Position::Top,
+                    ));
+                }
+            }
+        }
+        let pill = container(inside)
+            .width(Length::Fill)
+            .height(size::SEND)
+            .padding([0, 14])
+            .align_y(Alignment::Center)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.bar))),
+                border: border::rounded(size::COMPOSE_CORNER),
+                ..container::Style::default()
+            });
+        // The round button: the grown red microphone under the held
+        // pointer, a big Send once there is something to send.
+        let side = size::SEND + 8.0;
+        let (round, ground, press) = match (&bar.held, send) {
+            (Some(_), _) => (Icon::Mic, red, None),
+            (None, Some(press)) => (Icon::Send, colour(t.send), Some(press)),
+            (None, None) => (Icon::Send, colour(t.send), None),
+        };
+        let mut round =
+            button(container(drawing(round, colour(t.on_send), none, 30.0)).center(side))
+                .padding(0)
+                .width(side)
+                .height(side)
+                .style(move |_: &Theme, _| button::Style {
+                    background: Some(Background::Color(ground)),
+                    border: border::rounded(side / 2.0),
+                    ..button::Style::default()
+                });
+        if let Some(press) = press {
+            round = round.on_press(press);
+        }
+        // Above the button, the lock chip: open with its chevron while
+        // held, rising as the pointer goes up; closed once locked.
+        let mut lock_row = row![Space::new().width(Length::Fill)];
+        if let Some(lock) = &bar.lock {
+            let ink = match lock.closed {
+                true => red,
+                false => colour(t.text_secondary),
+            };
+            let chip = container(drawing(
+                Icon::Lock {
+                    closed: lock.closed,
+                },
+                ink,
+                none,
+                26.0,
+            ))
+            .padding(8)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.bar))),
+                border: border::rounded(14),
+                ..container::Style::default()
+            });
+            let rise = f32::from(lock.progress) * 0.16;
+            let chip: Element<'_, Message> = match &lock.action {
+                // A press while held is not to be had with one mouse
+                // button: the release over the chip locks.
+                Some(_) => mouse_area(chip)
+                    .on_enter(Message::RecOverLock(true))
+                    .on_exit(Message::RecOverLock(false))
+                    .into(),
+                None => chip.into(),
+            };
+            lock_row = lock_row.push(container(chip).width(side).center_x(side).padding(
+                iced::Padding {
+                    bottom: rise,
+                    ..iced::Padding::ZERO
+                },
+            ));
+        }
+        let mut column = column![
+            lock_row,
+            row![pill, round].spacing(8).align_y(Alignment::Center)
+        ]
+        .spacing(6)
+        .padding([8, 12]);
+        if let Some(notice) = &bar.notice {
+            let mut line = row![text(notice.words.resolve(self.lang))
+                .size(15)
+                .color(colour(t.rec_amber))
+                .width(Length::Fill)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if let Some(action) = &notice.action {
+                line = line.push(link(
+                    self.word(StrId::RecAllow),
+                    Message::Intent(action.intent.clone()),
+                    t,
+                ));
+            }
+            column = column.push(container(line).padding([0, 14]));
+        }
+        container(column)
             .width(Length::Fill)
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(colour(t.background))),

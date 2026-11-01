@@ -53,17 +53,30 @@ fn a_first_start_says_what_it_needs() {
     let answer = started(&loquax_android::start(&start_bytes(&base)));
     assert!(!answer.ok);
     assert_eq!(answer.need.as_deref(), Some("code"));
-    assert!(answer.error.unwrap().contains("reads no mailbox"));
+    assert_eq!(
+        answer.error.as_deref(),
+        Some("Scan or paste the code your mailbox shows.")
+    );
+    assert!(answer.details.unwrap().contains("reads no mailbox"));
 
-    let answer = started(&loquax_android::start(&start_bytes(&Start {
-        code: Some("lqxh1nonsense".to_string()),
-        ..base.clone()
-    })));
-    assert_eq!(answer.need.as_deref(), Some("code"));
-    assert!(answer
-        .error
-        .unwrap()
-        .starts_with("That is not a mailbox code"));
+    // The sentence in the phone's language, the parser's words under
+    // Details (1263, finding 8).
+    for (lang, said) in [
+        (None, "That code is not a mailbox code."),
+        (Some("de-DE"), "Das ist kein Postfach-Code."),
+    ] {
+        let answer = started(&loquax_android::start(&start_bytes(&Start {
+            code: Some("lqxh1nonsense".to_string()),
+            lang: lang.map(str::to_string),
+            ..base.clone()
+        })));
+        assert_eq!(answer.need.as_deref(), Some("code"));
+        assert_eq!(answer.error.as_deref(), Some(said));
+        assert!(answer
+            .details
+            .unwrap()
+            .starts_with("That is not a mailbox code"));
+    }
 
     // A code without an address dials the shipped rendezvous (1196); with
     // "mesh only" in the app's config there is nothing to dial, and the
@@ -75,7 +88,10 @@ fn a_first_start_says_what_it_needs() {
         ..base.clone()
     })));
     assert_eq!(answer.need.as_deref(), Some("server"));
-    assert!(answer.error.unwrap().contains("host:port"));
+    assert_eq!(
+        answer.error.as_deref(),
+        Some("Loquax does not know where your mailbox is. Type where it is below.")
+    );
 
     let answer = started(&loquax_android::start(&start_bytes(&Start {
         code: Some(code),
@@ -83,7 +99,8 @@ fn a_first_start_says_what_it_needs() {
         ..base
     })));
     assert_eq!(answer.need.as_deref(), Some("server"));
-    assert!(answer.error.unwrap().contains("has no port"));
+    assert!(answer.error.unwrap().contains("192.168.1.20:4242"));
+    assert!(answer.details.unwrap().contains("has no port"));
 
     let answer = started(&loquax_android::start(b"\xc1"));
     assert!(!answer.ok);
@@ -99,6 +116,22 @@ fn a_first_start_says_what_it_needs() {
     )))
     .expect("a Done");
     assert_eq!(done.error.as_deref(), Some("not started"));
+    // A code is read before anything runs (1263): the first start's
+    // scanner asks, in the phone's language.
+    let read = |text: &str, lang: Option<&str>| {
+        loquax_android::query(&schema::encode(&schema::Query::Lxma {
+            text: text.to_string(),
+            lang: lang.map(str::to_string),
+        }))
+    };
+    let done: schema::Done = rmp_serde::from_slice(&read("hello", Some("de"))).expect("a Done");
+    assert_eq!(done.error.as_deref(), Some("Das ist kein Loquax-Code."));
+    let mailbox: schema::Lxma = rmp_serde::from_slice(&read(
+        &code_for(&leviculum_core::Identity::generate(&mut rand_core::OsRng)),
+        None,
+    ))
+    .expect("a mailbox code reads");
+    assert_eq!(mailbox.kind, "mailbox");
     let event: Event =
         rmp_serde::from_slice(&loquax_android::next_event(Duration::ZERO).expect("an event"))
             .expect("an Event");
@@ -264,6 +297,33 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let (address, peer) = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         ugly_in(&session);
+        // A peer that wrote to us and is in no address book contact: its
+        // chat asks to save it to the phone's contacts. Added by its code,
+        // the same chat no longer asks while this session runs (walk
+        // finding 15): the user just added it.
+        let wrote = ugly_store::peer_hex(3);
+        let asks = |session: &Session| -> bool {
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: wrote.clone(),
+                    })
+                    .expect("messages"),
+            )
+            .expect("decode");
+            messages.ask_link
+        };
+        assert!(
+            asks(&session),
+            "a peer that wrote, not in the book: the banner"
+        );
+        session
+            .request(Request::AddContact {
+                lxma: wrote.clone(),
+                name: None,
+            })
+            .expect("added by address");
+        assert!(!asks(&session), "just added: no banner");
         let address = loquax::address::to_hex(&session.address());
         session
             .request(Request::Send {
@@ -695,7 +755,10 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         })
         .err()
         .expect("another home's code");
-        assert!(refused.text.contains("another mailbox"), "{refused:?}");
+        assert_eq!(
+            refused.text, "This phone already reads another mailbox.",
+            "{refused:?}"
+        );
     })
     .await
     .expect("the second session");
@@ -2979,11 +3042,18 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
         );
         assert_eq!(profile.version, loquax::VERSION);
 
+        // The first start's QR is the same code (1263, finding 1).
+        let me: schema::Me =
+            rmp_serde::from_slice(&session.query(schema::Query::Me).expect("me")).expect("me");
+        assert_eq!(me.lxma, profile.lxma);
+        assert_eq!(read_qr(me.qr_size, &me.qr.0), vec![profile.lxma.clone()]);
+
         // Our own code, parsed back: our address.
         let ours: schema::Lxma = rmp_serde::from_slice(
             &session
                 .query(schema::Query::Lxma {
                     text: profile.lxma.clone(),
+                    lang: None,
                 })
                 .expect("our code parses"),
         )
@@ -2995,10 +3065,12 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
             &session
                 .query(schema::Query::Lxma {
                     text: format!("{}\n", bob_code.to_uppercase()),
+                    lang: None,
                 })
                 .expect("bob's code parses"),
         )
         .expect("decode");
+        assert_eq!(scanned.kind, "contact");
         assert_eq!(scanned.address, bob_address);
         assert_eq!(scanned.lxma, bob_code);
         assert_eq!(scanned.known, "");
@@ -3012,6 +3084,7 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
             &session,
             schema::Query::Lxma {
                 text: bob_code.clone(),
+                lang: None,
             },
             20,
             |l: &schema::Lxma| l.known == "Bob",
@@ -3040,13 +3113,71 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
                 name: None,
             })
             .expect_err("a wrong code");
-        assert!(refused.contains("does not match"), "{refused}");
+        assert_eq!(refused, "This code is damaged. Ask for it again.");
         let refused = session
             .query(schema::Query::Lxma {
                 text: "hello".to_string(),
+                lang: None,
             })
             .expect_err("no code");
-        assert!(refused.contains("lxma://"), "{refused}");
+        assert_eq!(refused, "That is not a Loquax code.");
+
+        // An old code, the address alone in capitals as the first start's
+        // QR held it before 1263: a contact without a key, its chat open.
+        let carol = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+        let carol_address = loquax::home::lxmf_address(&carol.public_key_bytes()).expect("a");
+        let carol_hex = loquax::address::to_hex(&carol_address);
+        let old: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: carol_hex.to_uppercase(),
+                    lang: None,
+                })
+                .expect("an address reads"),
+        )
+        .expect("decode");
+        assert_eq!(
+            (old.kind.as_str(), old.address.as_str(), old.lxma.as_str()),
+            ("address", carol_hex.as_str(), carol_hex.as_str())
+        );
+        session
+            .request(Request::AddContact {
+                lxma: old.lxma,
+                name: Some("Carol".to_string()),
+            })
+            .expect("added by address");
+        wait_for(
+            &session,
+            schema::Query::Lxma {
+                text: carol_hex.clone(),
+                lang: None,
+            },
+            20,
+            |l: &schema::Lxma| l.known == "Carol",
+        );
+        // A mailbox's code reads as one, and is no contact.
+        let mailbox: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: code_for(&carol),
+                    lang: None,
+                })
+                .expect("a mailbox code reads"),
+        )
+        .expect("decode");
+        assert_eq!(
+            (mailbox.kind.as_str(), mailbox.address.as_str()),
+            ("mailbox", "")
+        );
+        assert_eq!(
+            session
+                .request(Request::AddContact {
+                    lxma: code_for(&carol),
+                    name: None,
+                })
+                .expect_err("no contact"),
+            "That code is for a mailbox, not for a friend."
+        );
         session
     })
     .await
@@ -3497,6 +3628,383 @@ async fn a_draft_survives_another_chat_and_a_new_session() {
     node.kill().await;
 }
 
+/// 1270, against a real home node: the compose bar through the facade.
+/// A phone with a camera has the five buttons and the plus; a typed
+/// letter makes it Send and hides the microphone. The camera's capture
+/// (the photo fixture as a camera writes it, EXIF turn, place and model
+/// in it) reaches the same scaling and stripping as a picked one: the
+/// staged photo is upright at the phone size, and the message Send makes
+/// of it and its caption is one row carrying exactly the bytes
+/// `loquax::photo::prepare` makes of a gallery pick. The position
+/// button's sheet says there is no fix, then shows the one the phone gave,
+/// and its row sends it as a report.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        camera: true,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let peer = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c".to_string();
+        session
+            .request(Request::Open { peer: peer.clone() })
+            .expect("open");
+        let bar = |session: &Session| -> schema::Bar {
+            asked(session, schema::Query::Bar { peer: peer.clone() })
+        };
+        let ids = |bar: &schema::Bar| bar.buttons.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
+        let empty = bar(&session);
+        assert_eq!(empty.round, "plus");
+        assert_eq!(ids(&empty), ["emoji", "locate", "camera", "record", "plus"]);
+        assert_eq!(empty.buttons[2].label, "Take a photo");
+        assert_eq!(empty.hint, "Message");
+        session
+            .request(Request::Draft {
+                peer: peer.clone(),
+                body: "h".to_string(),
+                reply: String::new(),
+            })
+            .expect("draft");
+        let typed = bar(&session);
+        assert_eq!(typed.round, "send");
+        assert_eq!(ids(&typed), ["emoji", "locate", "camera", "send"]);
+        session
+            .request(Request::Draft {
+                peer: peer.clone(),
+                body: String::new(),
+                reply: String::new(),
+            })
+            .expect("draft");
+
+        // The camera's capture, staged.
+        session
+            .request(Request::Stage {
+                peer: peer.clone(),
+                data: schema::Blob(PHOTO.to_vec()),
+            })
+            .expect("stage");
+        let staged = bar(&session);
+        let gallery = loquax::photo::prepare(PHOTO, loquax::ui::photos::PhotoSize::Phone)
+            .expect("the gallery path");
+        assert_eq!(
+            staged.staged,
+            format!(
+                "Photo to send, {}",
+                loquax::ui::photos::size_words(gallery.data.len())
+            )
+        );
+        assert_eq!(staged.round, "send", "a staged photo is something to send");
+        assert_eq!(staged.hint, "Add a caption");
+        let pixels: schema::PhotoPixels = asked(
+            &session,
+            schema::Query::Staged {
+                peer: peer.clone(),
+                edge: 4096,
+            },
+        );
+        assert_eq!(
+            (pixels.full_width, pixels.full_height),
+            (gallery.width, gallery.height)
+        );
+        assert_eq!(
+            (gallery.width, gallery.height),
+            (1200, 1600),
+            "upright, phone size"
+        );
+        assert!(red_corner(&pixels.rgba.0, pixels.width), "drawn upright");
+        let before: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        session
+            .request(Request::Send {
+                peer: peer.clone(),
+                body: "the view".to_string(),
+            })
+            .expect("send");
+        let after: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(
+            after.messages.len(),
+            before.messages.len() + 1,
+            "one message"
+        );
+        let sent = after.messages.last().expect("the photo's row");
+        assert_eq!(sent.body, "the view");
+        assert_eq!(sent.photo, gallery.format);
+        assert_eq!(
+            sent.photo_bytes as usize,
+            gallery.data.len(),
+            "the gallery's bytes"
+        );
+        assert_eq!(after.staged, "");
+        assert_eq!(after.round, "plus");
+
+        // The position button's sheet: no fix, then the phone's.
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: "position".to_string(),
+            })
+            .expect("sheet");
+        session.request(Request::NoFix).expect("no fix");
+        let none = bar(&session);
+        assert_eq!(none.sheet, "position");
+        assert_eq!(none.sheet_title, "My position");
+        assert!(!none.has_fix);
+        assert_eq!(none.fix_words, "Loquax does not know where you are yet.");
+        assert_eq!(none.sheet_rows[0].id, "sheet_location_on");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs() as i64;
+        session
+            .request(Request::Fix {
+                lat_e6: 43_773_100,
+                lon_e6: 11_256_000,
+                alt_e2: 0,
+                accuracy_e2: 500,
+                at: now,
+            })
+            .expect("fix");
+        let fixed = bar(&session);
+        assert!(fixed.has_fix);
+        assert_eq!(
+            (fixed.fix_lat_e6, fixed.fix_lon_e6),
+            (43_773_100, 11_256_000)
+        );
+        assert_eq!(fixed.sheet_rows[0].id, "sheet_share_now");
+        assert_eq!(fixed.sheet_rows[0].label, "Now, once");
+        session
+            .request(Request::ShareFix { peer: peer.clone() })
+            .expect("share");
+        let shared: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(shared.sheet, "", "the share closes the sheet");
+        let report = shared.messages.last().expect("the report's row");
+        assert!(report.ours);
+        assert_eq!(
+            (report.lat_e6, report.lon_e6),
+            (Some(43_773_100), Some(11_256_000))
+        );
+
+        // The plus's sheet: its three rows.
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: "attach".to_string(),
+            })
+            .expect("sheet");
+        let attach = bar(&session);
+        assert_eq!(
+            attach
+                .sheet_rows
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["sheet_gallery", "sheet_file", "sheet_position"]
+        );
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: String::new(),
+            })
+            .expect("close");
+        assert_eq!(bar(&session).sheet, "");
+        session.stop();
+    })
+    .await
+    .expect("the session");
+    node.kill().await;
+}
+
+/// 1273: a share for 15 minutes, started from the position sheet's row,
+/// sends the phone's fix at once, shows its chip in the chat, the ⌖ on
+/// the list's row and its row in Settings, Privacy; a share until stopped
+/// replaces it; Stop sends one report marked as the end, takes the chip,
+/// the sign and the row away, and the phone's store keeps no share.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_share_starts_lists_and_stops_with_its_end_report() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let phone_dir = phone.path().to_path_buf();
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let address = session.address();
+        let peer = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c".to_string();
+        session
+            .request(Request::Open { peer: peer.clone() })
+            .expect("open");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs() as i64;
+        session
+            .request(Request::Fix {
+                lat_e6: 43_773_100,
+                lon_e6: 11_256_000,
+                alt_e2: 0,
+                accuracy_e2: 500,
+                at: now,
+            })
+            .expect("fix");
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: "position".to_string(),
+            })
+            .expect("sheet");
+        let sheet: schema::Bar = asked(&session, schema::Query::Bar { peer: peer.clone() });
+        assert_eq!(
+            sheet
+                .sheet_rows
+                .iter()
+                .map(|r| (r.id.as_str(), r.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("sheet_share_now", "Now, once"),
+                ("sheet_share_15_min", "For 15 minutes"),
+                ("sheet_share_1_h", "For 1 hour"),
+                ("sheet_share_8_h", "For 8 hours"),
+                ("sheet_share_until_stopped", "Until I stop"),
+            ]
+        );
+        let none: schema::Shares = asked(&session, schema::Query::Shares);
+        assert!(none.shares.is_empty());
+        assert_eq!(none.title, "Position sharing");
+        // A report of ours shows its fix once the session knows its own
+        // address (`own_fix`), which the engine says when it is ready: on
+        // a loaded host after the share started, so the count is waited for.
+        let reports = |session: &Session, want: usize| -> usize {
+            let count = || {
+                let chat: schema::Messages =
+                    asked(session, schema::Query::Messages { peer: peer.clone() });
+                chat.messages
+                    .iter()
+                    .filter(|m| m.ours && m.lat_e6.is_some())
+                    .count()
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while count() < want && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            count()
+        };
+        assert!(
+            session
+                .request(Request::StartShare {
+                    peer: peer.clone(),
+                    span: "a while".to_string(),
+                })
+                .is_err(),
+            "a span the library does not know"
+        );
+        session
+            .request(Request::StartShare {
+                peer: peer.clone(),
+                span: "15_min".to_string(),
+            })
+            .expect("start");
+        let chat: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(chat.sheet, "", "the row closes the sheet");
+        assert!(
+            chat.share.starts_with("Sharing your position, ") && chat.share.ends_with(" min left"),
+            "{:?}",
+            chat.share
+        );
+        assert_eq!(chat.share_stop, "Stop");
+        assert_eq!(reports(&session, 1), 1, "the first fix at once");
+        let list: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        assert!(list
+            .conversations
+            .iter()
+            .any(|row| row.peer == peer && row.sharing));
+        let running: schema::Shares = asked(&session, schema::Query::Shares);
+        assert_eq!(running.shares.len(), 1);
+        assert_eq!(running.shares[0].peer, peer);
+        assert_eq!(running.shares[0].id, format!("share_{peer}"));
+        assert!((running.shares[0].until - (now + 900)).abs() <= 5);
+
+        session
+            .request(Request::StartShare {
+                peer: peer.clone(),
+                span: "until_stopped".to_string(),
+            })
+            .expect("until stopped");
+        let chat: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(chat.share, "Sharing your position until you stop");
+        let running: schema::Shares = asked(&session, schema::Query::Shares);
+        assert_eq!(running.shares[0].until, 0);
+
+        session
+            .request(Request::StopShare { peer: peer.clone() })
+            .expect("stop");
+        let chat: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(chat.share, "");
+        assert_eq!(reports(&session, 3), 3, "the first of each, and the end");
+        let list: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        assert!(list.conversations.iter().all(|row| !row.sharing));
+        let none: schema::Shares = asked(&session, schema::Query::Shares);
+        assert!(none.shares.is_empty());
+        session.stop();
+        address
+    })
+    .await
+    .map(|address| {
+        let store = loquax::store::Store::open_in(&phone_dir, address).expect("the phone's store");
+        assert!(store.shares().expect("shares").is_empty(), "no share kept");
+        let restored = store.restore().expect("restore");
+        let marks: Vec<leviculum_lxmf::telemetry::ShareMark> = restored
+            .iter()
+            .flat_map(|c| &c.messages)
+            .filter(|m| m.outbound)
+            .filter_map(|m| {
+                let (_, value) = m
+                    .fields
+                    .iter()
+                    .find(|(k, _)| *k == leviculum_lxmf::constants::FIELD_TELEMETRY)?;
+                let mut p = 0;
+                let blob = leviculum_lxmf::msgpack::read_bin(value, &mut p).ok()?;
+                Some(leviculum_lxmf::telemetry::ShareMark::of_blob(blob))
+            })
+            .collect();
+        assert_eq!(marks.len(), 3, "{marks:?}");
+        assert!(marks[..2].iter().all(|m| m.every == Some(900) && !m.ended));
+        assert!(marks[2].ended, "the stop's report is the end: {marks:?}");
+    })
+    .expect("the session");
+    node.kill().await;
+}
+
 /// 1230, against the ugly store: a read receipt from a peer turns the
 /// message of ours it names into `read` on the phone's rows, with the
 /// reader's time, adds no row, and the read and the peer's flag survive the
@@ -3582,4 +4090,1403 @@ fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
             .and_then(|m| m.delivery),
         Some(DeliveryState::Read { at: want })
     );
+}
+
+/// The photo fixture (1220, `loquax/tests/fixtures/make-photo.py`): 1800 x 2400
+/// as shown, stored turned with EXIF orientation 6, a GPS position and a
+/// camera model in its EXIF, a red block top left as it shows.
+const PHOTO: &[u8] = include_bytes!("../../loquax/tests/fixtures/photo-portrait.jpg");
+
+/// The image field of the fields map Python's router handed its delivery
+/// callback (`umsgpack.packb(message.fields)`), as our codec reads it.
+fn python_photo(message: &serde_json::Value) -> Option<(String, Vec<u8>)> {
+    let packed = message.get("fields")?.as_str()?;
+    let packed: Vec<u8> = (0..packed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).ok()?;
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).ok()?;
+        let start = at;
+        msgpack::skip(&packed, &mut at).ok()?;
+        if key == leviculum_lxmf::constants::FIELD_IMAGE {
+            let fields = [(key, packed[start..at].to_vec())];
+            return loquax::ui::photos::photo_parts(&fields)
+                .map(|(format, data)| (format, data.to_vec()));
+        }
+    }
+    None
+}
+
+/// Whether the top left of `rgba` (`width` wide) is the fixture's red
+/// block: the picture is upright.
+fn red_corner(rgba: &[u8], width: u32) -> bool {
+    let at = ((8 * width + 8) * 4) as usize;
+    rgba.get(at..at + 3)
+        .is_some_and(|p| p[0] > 200 && p[1] < 80 && p[2] < 80)
+}
+
+/// Photos both ways between the phone and the Python reference (1220).
+/// A photo Python sends as Sideband does, `fields[FIELD_IMAGE] = ["jpg",
+/// bytes]`, shows on the phone: its row says photo, its size upright and
+/// its words, and the library draws it upright. A photo the phone sends
+/// at each of the three sizes reaches Python's router as that field with
+/// the size's longest edge, upright, without the EXIF's place or camera;
+/// past one packet it travels to the phone's mailbox as a request
+/// resource (`ReticulumNode::send_request_awaited`). A picture that is
+/// none is refused with the reason, and nothing goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_travels_both_ways_with_python_lxmf_at_each_size() {
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    // Python to the phone, as Sideband sends one.
+    let mut field = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut field, 1);
+    leviculum_lxmf::msgpack::int(&mut field, leviculum_lxmf::constants::FIELD_IMAGE);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::string(&mut field, "jpg");
+    leviculum_lxmf::msgpack::bin(&mut field, PHOTO);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": "",
+                "fields": hex(&field),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let shown_python = python.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let row = loop {
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: shown_python.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode");
+            if let Some(row) = messages.messages.iter().find(|m| !m.photo.is_empty()) {
+                break row.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screens never showed the photo: {messages:?}"
+            );
+            session.next_event(Duration::from_millis(200));
+        };
+        assert_eq!(row.photo, "jpg");
+        assert_eq!(row.photo_bytes as usize, PHOTO.len());
+        assert_eq!((row.photo_w, row.photo_h), (1800, 2400), "upright");
+        assert_eq!(row.photo_words, "Photo, 361 KB");
+        assert_eq!(row.body, "");
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let listed = list
+            .conversations
+            .iter()
+            .find(|c| c.peer == shown_python)
+            .expect("listed");
+        assert_eq!(
+            (listed.last.as_str(), listed.kind.as_str()),
+            ("photo", "photo")
+        );
+        let pixels: schema::PhotoPixels = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Photo {
+                    peer: shown_python.clone(),
+                    key: row.key,
+                    edge: 480,
+                })
+                .expect("its pixels"),
+        )
+        .expect("decode");
+        assert_eq!((pixels.width, pixels.height), (360, 480));
+        assert_eq!(pixels.rgba.0.len(), 360 * 480 * 4);
+        assert!(red_corner(&pixels.rgba.0, pixels.width), "drawn upright");
+        session
+    })
+    .await
+    .expect("the photo on the phone");
+
+    // The phone to Python, at each size.
+    let mut session = session;
+    for (size, edge) in [("small", 800), ("phone", 1600), ("original", 2400)] {
+        let to = python.clone();
+        let (back, before) = (session, peer.received().len());
+        session = tokio::task::spawn_blocking(move || {
+            let chosen: schema::PhotoSizeChoice = rmp_serde::from_slice(
+                &back
+                    .query(schema::Query::PhotoSize {
+                        set: Some(size.to_string()),
+                    })
+                    .expect("set"),
+            )
+            .expect("decode");
+            assert_eq!(chosen.size, size);
+            back.request(Request::Photo {
+                peer: to,
+                data: schema::Blob(PHOTO.to_vec()),
+            })
+            .unwrap_or_else(|error| panic!("{size}: {error}"));
+            back
+        })
+        .await
+        .expect("sent");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (format, data) = loop {
+            let got = peer.received();
+            if let Some(photo) = got.iter().skip(before).find_map(python_photo) {
+                break photo;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{size}: Python never received the photo: {:?}",
+                got.len()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        assert_eq!(format, "jpg", "{size}");
+        let (w, h) = loquax::photo::dimensions(&data).expect("Python got a picture");
+        assert_eq!(w.max(h), edge, "{size}: {w}x{h}");
+        assert!(h > w, "{size}: upright, portrait: {w}x{h}");
+        let pixels = loquax::photo::fit(&data, 400).expect("decodes");
+        assert!(red_corner(&pixels.rgba, pixels.width), "{size}: upright");
+        for secret in [&b"Exif"[..], b"Pixel 8", b"GPS"] {
+            assert!(
+                !data.windows(secret.len()).any(|w| w == secret),
+                "{size}: carries {:?}",
+                String::from_utf8_lossy(secret)
+            );
+        }
+    }
+
+    // Negative: no picture, nothing sent, the reason said.
+    let to = python.clone();
+    let before = peer.received().len();
+    let session = tokio::task::spawn_blocking(move || {
+        let refused = session.request(Request::Photo {
+            peer: to,
+            data: schema::Blob(b"%PDF-1.7 a document".to_vec()),
+        });
+        assert!(
+            refused.as_ref().is_err_and(|e| e.contains("not a picture")),
+            "{refused:?}"
+        );
+        session
+    })
+    .await
+    .expect("refused");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(peer.received().len(), before, "nothing went");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}
+
+/// The file attachments field of the fields map Python's router handed its
+/// delivery callback, raw: the entries as the reference packed them.
+fn python_files(message: &serde_json::Value) -> Option<Vec<u8>> {
+    let packed = message.get("fields")?.as_str()?;
+    let packed: Vec<u8> = (0..packed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).ok()?;
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).ok()?;
+        let start = at;
+        msgpack::skip(&packed, &mut at).ok()?;
+        if key == leviculum_lxmf::constants::FIELD_FILE_ATTACHMENTS {
+            return Some(packed[start..at].to_vec());
+        }
+    }
+    None
+}
+
+/// Files both ways between the phone and the Python reference (1221).
+/// Files Python sends as Sideband does, `fields[FIELD_FILE_ATTACHMENTS] =
+/// [[name, bytes], …]`, show on the phone: a row each with its name, size
+/// and words, the list says the first name; saved for the open intent
+/// they land under the app's files with their bytes, a hostile name made
+/// safe. A file the phone sends reaches Python's router as that field,
+/// the name a str as Columba writes it and the bytes unchanged, past one
+/// packet through the phone's mailbox as a request resource. A file past
+/// the 990 KB a receiver takes is refused with both sizes, and nothing
+/// goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_travels_both_ways_with_python_lxmf() {
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    // Python to the phone, as Sideband sends files: two, one of them
+    // named to climb out of the folder it is saved in.
+    let report: Vec<u8> = (0..200_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let mut field = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut field, 1);
+    leviculum_lxmf::msgpack::int(
+        &mut field,
+        leviculum_lxmf::constants::FIELD_FILE_ATTACHMENTS,
+    );
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::string(&mut field, "Protokoll.pdf");
+    leviculum_lxmf::msgpack::bin(&mut field, &report);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::string(&mut field, "../../evil.sh");
+    leviculum_lxmf::msgpack::bin(&mut field, b"#!/bin/sh\n");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": "",
+                "fields": hex(&field),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let shown_python = python.clone();
+    let home = phone.path().to_path_buf();
+    let session = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let row = loop {
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: shown_python.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode");
+            if let Some(row) = messages.messages.iter().find(|m| !m.files.is_empty()) {
+                break row.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screens never showed the files: {messages:?}"
+            );
+            session.next_event(Duration::from_millis(200));
+        };
+        assert_eq!(row.body, "");
+        let shown: Vec<(&str, u32, &str, &str)> = row
+            .files
+            .iter()
+            .map(|f| (f.name.as_str(), f.bytes, f.size.as_str(), f.words.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "Protokoll.pdf",
+                    200_000,
+                    "200 KB",
+                    "File Protokoll.pdf, 200 KB"
+                ),
+                ("_.._evil.sh", 10, "10 B", "File _.._evil.sh, 10 B"),
+            ]
+        );
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let listed = list
+            .conversations
+            .iter()
+            .find(|c| c.peer == shown_python)
+            .expect("listed");
+        assert_eq!(
+            (listed.last.as_str(), listed.kind.as_str()),
+            ("Protokoll.pdf", "file")
+        );
+        for (index, want) in [(0u32, &report[..]), (1, &b"#!/bin/sh\n"[..])] {
+            let saved: schema::SavedFile = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::SaveFile {
+                        peer: shown_python.clone(),
+                        key: row.key,
+                        index,
+                    })
+                    .expect("saved"),
+            )
+            .expect("decode");
+            let path = std::path::PathBuf::from(&saved.path);
+            assert!(
+                path.starts_with(home.join(loquax::file_save::DIR)),
+                "under the app's files: {}",
+                saved.path
+            );
+            assert_eq!(std::fs::read(&path).expect("its bytes"), want);
+            assert_eq!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(saved.name.as_str())
+            );
+        }
+        assert!(session
+            .query(schema::Query::SaveFile {
+                peer: shown_python.clone(),
+                key: row.key,
+                index: 2,
+            })
+            .is_err());
+        session
+    })
+    .await
+    .expect("the files on the phone");
+
+    // The phone to Python.
+    let notes: Vec<u8> = (0..300_000u32)
+        .map(|i| (i.wrapping_mul(40_503) >> 8) as u8)
+        .collect();
+    let to = python.clone();
+    let before = peer.received().len();
+    let sent = notes.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        session
+            .request(Request::File {
+                peer: to,
+                name: "Grüße.txt".to_string(),
+                data: schema::Blob(sent),
+                size: 0,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        session
+    })
+    .await
+    .expect("sent");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let value = loop {
+        let got = peer.received();
+        if let Some(value) = got.iter().skip(before).find_map(python_files) {
+            break value;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python never received the file: {:?}",
+            got.len()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(1), "one file");
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(2), "[name, bytes]");
+    assert_eq!(msgpack::read_str(&value, &mut at), Ok("Grüße.txt"), "a str");
+    assert!(
+        msgpack::read_bin(&value, &mut at) == Ok(&notes[..]),
+        "the bytes"
+    );
+
+    // Negative: past what a receiver takes, nothing sent, both sizes said.
+    let to = python.clone();
+    let python_to = python.clone();
+    let before = peer.received().len();
+    let session = tokio::task::spawn_blocking(move || {
+        let refused = session.request(Request::File {
+            peer: to,
+            name: "film.mp4".to_string(),
+            data: schema::Blob(vec![0; loquax::ui::files::LARGEST + 1]),
+            size: 0,
+        });
+        assert_eq!(
+            refused,
+            Err("This file is 991 KB. A message carries at most 990 KB.".to_string())
+        );
+        // As Java hands one it stopped reading: the first megabyte and
+        // the count.
+        let refused = session.request(Request::File {
+            peer: python_to.clone(),
+            name: "film.mp4".to_string(),
+            data: schema::Blob(vec![0; 1_000_000]),
+            size: 48_300_000,
+        });
+        assert_eq!(
+            refused,
+            Err("This file is 48.3 MB. A message carries at most 990 KB.".to_string())
+        );
+        session
+    })
+    .await
+    .expect("refused");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(peer.received().len(), before, "nothing went");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}
+
+/// The audio field of a message Python's router received: its mode and
+/// bytes.
+fn python_audio(message: &serde_json::Value) -> Option<(u8, Vec<u8>)> {
+    let packed = message.get("fields")?.as_str()?;
+    let packed: Vec<u8> = (0..packed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).ok()?;
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).ok()?;
+        let start = at;
+        msgpack::skip(&packed, &mut at).ok()?;
+        if key == leviculum_lxmf::constants::FIELD_AUDIO {
+            let mut at = start;
+            msgpack::array_len(&packed, &mut at).ok()?;
+            let mode = u8::try_from(msgpack::read_uint(&packed, &mut at).ok()?).ok()?;
+            return Some((mode, msgpack::read_bin(&packed, &mut at).ok()?.to_vec()));
+        }
+    }
+    None
+}
+
+/// One of the reference codec tools (opus-tools' opusenc and opusdec,
+/// codec2's c2enc and c2dec: `sudo apt install opus-tools codec2`, listed
+/// in scripts/install-ci.sh), run to its end.
+fn codec_tool(tool: &str, args: &[&str]) {
+    let status = std::process::Command::new(tool)
+        .args(args)
+        .status()
+        .unwrap_or_else(|e| {
+            panic!("{tool}: {e} (sudo apt install opus-tools codec2, scripts/install-ci.sh)")
+        });
+    assert!(status.success(), "{tool} {args:?}: {status}");
+}
+
+fn le_samples(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|s| i16::from_le_bytes([s[0], s[1]]))
+        .collect()
+}
+
+fn le_bytes(samples: &[i16]) -> Vec<u8> {
+    samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+}
+
+/// Sends `audio` as `[mode, bytes]` from Python to `address` and waits for
+/// DELIVERED.
+async fn python_sends_voice(peer: &python_peer::PythonPeer, address: &str, mode: u8, audio: &[u8]) {
+    let mut field = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut field, 1);
+    leviculum_lxmf::msgpack::int(&mut field, leviculum_lxmf::constants::FIELD_AUDIO);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::uint(&mut field, u64::from(mode));
+    leviculum_lxmf::msgpack::bin(&mut field, audio);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": "",
+                "fields": hex(&field),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Voice messages both ways between the phone and the Python reference
+/// (1222), each side's sound made and judged by the reference codecs.
+/// Python sends Codec2 2400 as Sideband does on a slow link (frames from
+/// c2enc, no header) and Opus in Ogg as Columba and Sideband do (from
+/// opusenc): the phone's rows say a voice message with its length, its
+/// button plays and pauses, and its sound is the reference decoder's
+/// (c2dec, opusdec) within what two implementations of one codec differ
+/// by. A recording the phone sends reaches Python's router as
+/// `[AM_OPUS_OGG, bytes]`, and opusdec plays it back as what was
+/// recorded. A tap on the microphone, shorter than 0.6 s, sends nothing
+/// and says to hold it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_message_travels_both_ways_with_python_lxmf() {
+    use loquax::ui::voice::{AM_CODEC2_2400, AM_OPUS_OGG};
+    use loquax::voice::{likeness, test_speech};
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let work = tempfile::tempdir().expect("a work dir");
+    let file = |name: &str| work.path().join(name).display().to_string();
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    // The reference codecs make Python's two messages and say what they
+    // sound like.
+    let speech8 = test_speech(8_000, 2_000);
+    std::fs::write(file("in8.raw"), le_bytes(&speech8)).expect("raw");
+    codec_tool("c2enc", &["2400", &file("in8.raw"), &file("c2.bit")]);
+    codec_tool("c2dec", &["2400", &file("c2.bit"), &file("c2.raw")]);
+    let codec2 = std::fs::read(file("c2.bit")).expect("c2enc's frames");
+    assert_eq!(codec2.len(), 600, "six bytes a 20 ms frame, no header");
+    let c2_reference = le_samples(&std::fs::read(file("c2.raw")).expect("c2dec's"));
+    let speech16 = test_speech(16_000, 2_000);
+    std::fs::write(file("in16.raw"), le_bytes(&speech16)).expect("raw");
+    codec_tool(
+        "opusenc",
+        &[
+            "--quiet",
+            "--speech",
+            "--bitrate",
+            "12",
+            "--raw",
+            "--raw-rate",
+            "16000",
+            "--raw-chan",
+            "1",
+            &file("in16.raw"),
+            &file("ref.opus"),
+        ],
+    );
+    codec_tool(
+        "opusdec",
+        &[
+            "--quiet",
+            "--rate",
+            "24000",
+            &file("ref.opus"),
+            &file("ref.raw"),
+        ],
+    );
+    let opus = std::fs::read(file("ref.opus")).expect("opusenc's file");
+    let opus_reference = le_samples(&std::fs::read(file("ref.raw")).expect("opusdec's"));
+
+    python_sends_voice(&peer, &address, AM_CODEC2_2400, &codec2).await;
+    python_sends_voice(&peer, &address, AM_OPUS_OGG, &opus).await;
+    let shown_python = python.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let messages = |session: &Session| -> schema::Messages {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: shown_python.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode")
+        };
+        let rows = loop {
+            let rows: Vec<schema::MessageRow> = messages(&session)
+                .messages
+                .into_iter()
+                .filter(|m| m.voice_mode != 0)
+                .collect();
+            if rows.len() == 2 {
+                break rows;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screens never showed both voice messages: {rows:?}"
+            );
+            session.next_event(Duration::from_millis(200));
+        };
+        let shown: Vec<(u32, u32, &str, bool, &str)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.voice_mode,
+                    r.voice_ms,
+                    r.voice_duration.as_str(),
+                    r.voice_playable,
+                    r.voice_words.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (8, 2_000, "0:02", true, "Voice message, 0:02"),
+                (0x10, 2_000, "0:02", true, "Voice message, 0:02"),
+            ]
+        );
+        assert!(rows[0].voice_levels.0.is_empty(), "Codec2: an even bar");
+        assert_eq!(rows[1].voice_levels.0.len(), loquax::ui::voice::BARS);
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let listed = list
+            .conversations
+            .iter()
+            .find(|c| c.peer == shown_python)
+            .expect("listed");
+        assert_eq!(
+            (listed.last.as_str(), listed.kind.as_str()),
+            ("voice message 0:02", "voice")
+        );
+
+        // The sound is the reference decoder's.
+        let sound = |key: i64| -> schema::VoicePcm {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Voice {
+                        peer: shown_python.clone(),
+                        key,
+                    })
+                    .expect("decoded"),
+            )
+            .expect("decode")
+        };
+        let c2 = sound(rows[0].key);
+        assert_eq!(c2.rate, 8_000);
+        let c2 = le_samples(&c2.pcm.0);
+        assert_eq!(c2.len(), c2_reference.len());
+        let like = likeness(&c2_reference, &c2, 8);
+        assert!(like > 0.9, "Codec2 against c2dec: {like}");
+        let ours = sound(rows[1].key);
+        assert_eq!(ours.rate, 24_000);
+        let ours = le_samples(&ours.pcm.0);
+        let like = likeness(&opus_reference, &ours, 24);
+        assert!(like > 0.95, "Opus against opusdec: {like}");
+        assert!(
+            ours.len().abs_diff(opus_reference.len()) <= 24,
+            "{} against {}",
+            ours.len(),
+            opus_reference.len()
+        );
+
+        // The button plays and pauses.
+        let key = rows[1].key;
+        let play = |on: bool| {
+            session
+                .request(Request::PlayVoice {
+                    peer: shown_python.clone(),
+                    key,
+                    on,
+                })
+                .unwrap_or_else(|error| panic!("{error}"));
+            messages(&session)
+                .messages
+                .into_iter()
+                .find(|m| m.key == key)
+                .map(|m| m.voice_playing)
+        };
+        assert_eq!(play(true), Some(true));
+        assert_eq!(play(false), Some(false));
+        session
+    })
+    .await
+    .expect("the voice messages on the phone");
+
+    // The phone to Python: three seconds at the rate the microphone gave.
+    let recorded = test_speech(16_000, 3_000);
+    let to = python.clone();
+    let before = peer.received().len();
+    let pcm = le_bytes(&recorded);
+    let session = tokio::task::spawn_blocking(move || {
+        session
+            .request(Request::Voice {
+                peer: to,
+                pcm: schema::Blob(pcm),
+                rate: 16_000,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        session
+    })
+    .await
+    .expect("sent");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let (mode, ogg) = loop {
+        let got = peer.received();
+        if let Some(value) = got.iter().skip(before).find_map(python_audio) {
+            break value;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python never received the voice message: {:?}",
+            got.len()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(mode, AM_OPUS_OGG, "the mode every receiver plays");
+    assert!(ogg.starts_with(b"OggS"), "Opus in Ogg");
+    std::fs::write(file("ours.opus"), &ogg).expect("written");
+    codec_tool(
+        "opusdec",
+        &[
+            "--quiet",
+            "--rate",
+            "16000",
+            &file("ours.opus"),
+            &file("ours.raw"),
+        ],
+    );
+    let heard = le_samples(&std::fs::read(file("ours.raw")).expect("opusdec's"));
+    assert_eq!(
+        heard.len(),
+        recorded.len(),
+        "as long as recorded, no padding"
+    );
+    let like = likeness(&recorded, &heard, 80);
+    assert!(like > 0.8, "opusdec's against what was recorded: {like}");
+
+    // Negative: a tap on the microphone sends nothing and says to hold it.
+    let to = python.clone();
+    let before = peer.received().len();
+    let session = tokio::task::spawn_blocking(move || {
+        let refused = session.request(Request::Voice {
+            peer: to,
+            pcm: schema::Blob(le_bytes(&test_speech(16_000, 300))),
+            rate: 16_000,
+        });
+        assert_eq!(
+            refused,
+            Err("Hold the microphone to record, release to send.".to_string())
+        );
+        session
+    })
+    .await
+    .expect("refused");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(peer.received().len(), before, "nothing went");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}
+
+/// Lew's phone, 2026-11-01 (1268): a photo without words drew the picture
+/// and an empty bubble under it. The facade's rows carry the scene's
+/// words: a photo, a file or a voice message alone has an empty body
+/// (the app draws no text row then), a body of blanks is none, and a
+/// photo with words keeps them.
+#[test]
+fn media_without_words_has_an_empty_body() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let anna = ugly_store::peer(91);
+    let mut model = UiModel::<Line>::new(&[anna]);
+    let carrying = |n: u8, body: &str, fields| {
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [n; 32],
+            source: anna,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields,
+            verified: true,
+        })
+    };
+    let photo = || loquax::ui::photos::photo_fields("jpg", vec![7; 1_000]);
+    update(&mut model, carrying(1, "", photo()));
+    update(&mut model, carrying(2, " \n", photo()));
+    update(
+        &mut model,
+        carrying(3, "", loquax::ui::files::file_fields("a.txt", vec![7; 10])),
+    );
+    update(
+        &mut model,
+        carrying(
+            4,
+            "",
+            loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 90]),
+        ),
+    );
+    update(&mut model, carrying(5, "the view", photo()));
+    let rows = session::rows(&model, 0, Lang::En);
+    let shape: Vec<(&str, bool, usize, bool)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.body.as_str(),
+                !r.photo.is_empty(),
+                r.files.len(),
+                r.voice_mode != 0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("", true, 0, false),
+            ("", true, 0, false),
+            ("", false, 1, false),
+            ("", false, 0, true),
+            ("the view", true, 0, false),
+        ]
+    );
+}
+
+/// 1276 on the phone, against a real home node: the microphone's gestures
+/// and the recorder's levels go in as `record`, the bar's buttons as
+/// `recording`, and `Query::Recording` answers the scene's recording bar
+/// with what the recorder is to do, once.
+///
+/// - A press holds the bar up with a haptic tick and the recorder's
+///   start; the levels arrive in the wave, newest at the right.
+/// - Slid past 96 dp the hint says to release, and the release discards:
+///   nothing is sent.
+/// - A swipe up locks (a second tick), the release then does nothing;
+///   pause stands the wave still as the whole recording, play and its end
+///   swap the button, resume goes on, Send asks for the PCM. The PCM
+///   handed over is one voice message, whose bubble's levels are the
+///   recording's own track folded to 32 bars by peak.
+/// - A feed at the floor says, after 2 s and not before, that nothing is
+///   heard, offers the permission, and the dot stops pulsing; one heard
+///   window takes it back.
+/// - A voice message without a track of its own (1222's path) draws the
+///   decoded sound's once `Query::Voice` decoded it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_is_held_slid_away_locked_paused_and_sent_from_its_bar() {
+    use loquax::ui::recording::{level_of, Fold, LevelTrack, LIVE_WINDOWS};
+    use loquax::ui::voice::BARS;
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let peer = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c".to_string();
+        session
+            .request(Request::Open { peer: peer.clone() })
+            .expect("open");
+        let record = |input: &str, now: i64, dx: i32, dy: i32, rms: u32| {
+            session
+                .request(Request::Record {
+                    peer: peer.clone(),
+                    input: input.to_string(),
+                    now,
+                    dx,
+                    dy,
+                    rms,
+                })
+                .unwrap_or_else(|error| panic!("{input}: {error}"));
+        };
+        let tap = |verb: &str| {
+            session
+                .request(Request::Recording {
+                    peer: peer.clone(),
+                    verb: verb.to_string(),
+                })
+                .unwrap_or_else(|error| panic!("{verb}: {error}"));
+        };
+        let bar = || -> schema::Recording {
+            asked(&session, schema::Query::Recording { peer: peer.clone() })
+        };
+        let ids = |bar: &schema::Recording| -> Vec<String> {
+            bar.buttons.iter().map(|b| b.id.clone()).collect()
+        };
+        let chat = || -> schema::Messages {
+            asked(&session, schema::Query::Messages { peer: peer.clone() })
+        };
+        let voices = || -> Vec<schema::MessageRow> {
+            chat()
+                .messages
+                .into_iter()
+                .filter(|m| m.ours && m.voice_mode != 0)
+                .collect()
+        };
+        // Windows of `rms` from `from` on, `n` of them, 50 ms apart; their
+        // levels go into `track` too.
+        let feed = |track: &mut LevelTrack, from: i64, n: i64, rms: &dyn Fn(i64) -> u32| {
+            for w in 1..=n {
+                let r = rms(w);
+                record("level", from + w * 50, 0, 0, r);
+                track.push_rms(u16::try_from(r).expect("16 bits"));
+            }
+            from + n * 50
+        };
+
+        // Held, then slid away.
+        assert_eq!(bar().phase, "idle");
+        assert!(!bar().shown);
+        record("press", 10_000, 0, 0, 0);
+        let held = bar();
+        assert_eq!(held.effects, ["haptic_start", "start"]);
+        assert_eq!(bar().effects, Vec::<String>::new(), "handed out once");
+        assert_eq!((held.phase.as_str(), held.shown), ("held", true));
+        assert!(held.pulsing && held.moving);
+        assert_eq!(held.timer, "REC 00:00");
+        assert_eq!(held.held, "Release to send");
+        assert_eq!(held.cancel, "Slide left to cancel");
+        assert_eq!(held.lock, "Lock the recording");
+        assert!(!held.lock_closed);
+        assert!(held.buttons.is_empty());
+        assert_eq!(
+            (
+                held.cancel_dp,
+                held.lock_dp,
+                held.window_ms,
+                held.longest_ms,
+                held.wave_slots
+            ),
+            (96, 72, 50, 600_000, 60)
+        );
+        assert_eq!(chat().recording, "held");
+        let mut track = LevelTrack::default();
+        let now = feed(&mut track, 10_000, 20, &|w| 300 + 400 * (w as u32 % 5));
+        let heard = bar();
+        assert_eq!(heard.timer, "REC 00:01");
+        assert_eq!(heard.wave.0.len(), 20);
+        assert_eq!(heard.wave.0, track.levels());
+        // The newest, at the right edge: the 20th window, 20 % 5 = 0.
+        assert_eq!(heard.wave.0[19], level_of(300));
+        assert_eq!(heard.wave.0[18], level_of(300 + 400 * 4));
+        record("slide", 0, -60, 0, 0);
+        let sliding = bar();
+        assert_eq!((sliding.cancel_progress, sliding.armed), (62, false));
+        record("slide", 0, -100, 5, 0);
+        let armed = bar();
+        assert!(armed.armed);
+        assert_eq!(armed.cancel, "Release to cancel");
+        record("release", now + 10, 0, 0, 0);
+        let gone = bar();
+        assert_eq!(gone.effects, ["discard"]);
+        assert_eq!((gone.phase.as_str(), gone.shown), ("cancelled", false));
+        assert_eq!(chat().recording, "");
+        assert!(voices().is_empty(), "a slide away sends nothing");
+
+        // Locked, paused, heard back, resumed and sent.
+        record("press", 20_000, 0, 0, 0);
+        assert_eq!(bar().effects, ["haptic_start", "start"]);
+        let mut track = LevelTrack::default();
+        let now = feed(&mut track, 20_000, 30, &|w| 200 + 1_100 * (w as u32 % 7));
+        record("slide", 0, 0, -40, 0);
+        assert_eq!(bar().lock_progress, 55);
+        record("slide", 0, 3, -80, 0);
+        let locked = bar();
+        assert_eq!(locked.effects, ["haptic_lock"]);
+        assert_eq!(locked.phase, "locked");
+        assert!(locked.lock_closed);
+        assert_eq!(locked.lock, "Recording locked");
+        assert_eq!(ids(&locked), ["rec_discard", "rec_pause", "rec_send"]);
+        assert_eq!((locked.cancel.as_str(), locked.held.as_str()), ("", ""));
+        record("release", now + 5, 0, 0, 0);
+        let still = bar();
+        assert_eq!((still.phase.as_str(), still.effects.len()), ("locked", 0));
+        let now = feed(&mut track, now, 20, &|w| 50 + 700 * (w as u32 % 3));
+        tap("rec_pause");
+        let paused = bar();
+        assert_eq!(paused.effects, ["pause"]);
+        assert_eq!(paused.phase, "paused");
+        assert!(!paused.moving && !paused.pulsing);
+        assert_eq!(
+            ids(&paused),
+            ["rec_discard", "rec_play", "rec_resume", "rec_send"]
+        );
+        assert_eq!(paused.wave.0, track.bars(LIVE_WINDOWS, Fold::Peak));
+        assert_eq!(paused.timer, "REC 00:02");
+        // A level while paused is no window of the recording.
+        record("level", now + 50, 0, 0, 9_000);
+        assert_eq!(bar().wave.0, track.bars(LIVE_WINDOWS, Fold::Peak));
+        tap("rec_play");
+        let playing = bar();
+        assert_eq!(playing.effects, ["play"]);
+        assert_eq!(
+            ids(&playing),
+            ["rec_discard", "rec_stop_play", "rec_resume", "rec_send"]
+        );
+        record("played", 0, 0, 0, 0);
+        assert_eq!(
+            ids(&bar()),
+            ["rec_discard", "rec_play", "rec_resume", "rec_send"]
+        );
+        tap("rec_resume");
+        let resumed = bar();
+        assert_eq!(resumed.effects, ["resume"]);
+        assert_eq!(resumed.phase, "locked");
+        let now = feed(&mut track, now + 50, 20, &|w| 3_000 + 50 * w as u32);
+        assert_eq!(bar().timer, "REC 00:03");
+        let _ = now;
+        tap("rec_send");
+        let sent = bar();
+        assert_eq!(sent.effects, ["finish"]);
+        assert_eq!((sent.phase.as_str(), sent.shown), ("sent", false));
+        // The finish effect: Java hands the PCM over, as 1222 did.
+        session
+            .request(Request::Voice {
+                peer: peer.clone(),
+                pcm: schema::Blob(le_bytes(&loquax::voice::test_speech(16_000, 3_500))),
+                rate: 16_000,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        let ours = voices();
+        assert_eq!(ours.len(), 1, "one voice message");
+        assert_eq!(ours[0].voice_levels.0, track.bars(BARS, Fold::Peak));
+        assert_eq!(ours[0].voice_levels.0.len(), BARS);
+        // Decoding it to play keeps the recording's own track.
+        let _: schema::VoicePcm = asked(
+            &session,
+            schema::Query::Voice {
+                peer: peer.clone(),
+                key: ours[0].key,
+            },
+        );
+        assert_eq!(voices()[0].voice_levels.0, track.bars(BARS, Fold::Peak));
+
+        // Nothing heard.
+        record("press", 40_000, 0, 0, 0);
+        let mut quiet = LevelTrack::default();
+        let now = feed(&mut quiet, 40_000, 39, &|w| (w % 2) as u32);
+        let early = bar();
+        assert_eq!(early.notice, "", "not before 2 s");
+        assert!(early.pulsing);
+        let now = feed(&mut quiet, now, 1, &|_| 0);
+        let silent = bar();
+        assert_eq!(silent.timer_ms, 2_000);
+        assert_eq!(silent.notice, "Nothing heard. Is the microphone allowed?");
+        assert_eq!(silent.notice_allow, "Allow the microphone");
+        assert!(!silent.pulsing, "the dot stops pulsing");
+        assert!(silent.moving, "it still records");
+        tap("rec_allow");
+        assert_eq!(bar().effects, ["ask_microphone"]);
+        feed(&mut quiet, now, 1, &|_| 2);
+        let back = bar();
+        assert_eq!((back.notice.as_str(), back.pulsing), ("", true));
+        tap("rec_discard");
+        assert_eq!(bar().effects, ["discard"]);
+        assert_eq!(voices().len(), 1, "the discarded one went nowhere");
+
+        // Words the library does not know.
+        for (input, verb) in [("hold", "rec_send"), ("press", "rec_forward")] {
+            assert!(session
+                .request(Request::Record {
+                    peer: peer.clone(),
+                    input: input.to_string(),
+                    now: 0,
+                    dx: 0,
+                    dy: 0,
+                    rms: 0,
+                })
+                .map_or(true, |()| input == "press"));
+            assert!(session
+                .request(Request::Recording {
+                    peer: peer.clone(),
+                    verb: verb.to_string(),
+                })
+                .map_or(true, |()| verb == "rec_send"));
+        }
+        tap("rec_discard");
+
+        // 1222's path, no recording: the stream's stand-in, then the
+        // decoded sound's own track.
+        session
+            .request(Request::Voice {
+                peer: peer.clone(),
+                pcm: schema::Blob(le_bytes(&loquax::voice::test_speech(16_000, 2_000))),
+                rate: 16_000,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        let plain = voices().pop().expect("the second voice message");
+        let sound: schema::VoicePcm = asked(
+            &session,
+            schema::Query::Voice {
+                peer: peer.clone(),
+                key: plain.key,
+            },
+        );
+        let decoded = LevelTrack::from_pcm(&le_samples(&sound.pcm.0), sound.rate);
+        let drawn = voices().pop().expect("still there");
+        assert_eq!(drawn.voice_levels.0, decoded.bars(BARS, Fold::Peak));
+        session.stop();
+    })
+    .await
+    .expect("the session");
+    node.kill().await;
+}
+
+/// Link a device (1264, finding 7): two phones, one mailbox. The first
+/// holds the mailbox, whose node dials a Rust transport node standing in
+/// for the rendezvous (its servers file names it, as `code_list` then puts
+/// it into the code); the profile's "Link a device" answers a code of the
+/// `lqxh1` form `loquax mailbox admit` prints, its QR reads back to it
+/// through the scanner's decoder, good for the default day, and `linked`
+/// waits. The second phone starts with what the scanner read, as its first
+/// start's "Join an existing mailbox" hands it over, is admitted under the
+/// name it brought, and pulls the whole ugly store from the first phone's
+/// archive; the first then says the device came, by that name. Negative:
+/// the code is single use, a third phone with it is refused at the code.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_phone_links_to_the_mailbox_on_the_first_and_gets_its_history() {
+    let rns = tempfile::tempdir().expect("rns dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let entry = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+    let mut transport = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_server_listener(listener)
+        .storage_path(rns.path().join("storage"))
+        .build_sync()
+        .expect("the transport node");
+    transport.start().await.expect("start it");
+
+    let first = tempfile::tempdir().expect("first phone");
+    let mailbox = first.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("{entry}\n"),
+    )
+    .expect("servers file");
+    ugly_store::fill_archive(&mailbox);
+    let start = Start {
+        dir: first.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let (a, code, scanned) = tokio::task::spawn_blocking(move || {
+        let a = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        let linked: schema::Linked = asked(&a, schema::Query::Linked);
+        assert_eq!(linked.state, "none");
+        let code: schema::LinkCode = asked(&a, schema::Query::LinkDevice);
+        let scanned = read_qr(code.qr_size, &code.qr.0);
+        assert_eq!(scanned.len(), 1, "{scanned:?}");
+        (a, code, scanned.into_iter().next().unwrap_or_default())
+    })
+    .await
+    .expect("the first phone");
+    let (parsed, list) =
+        loquax::home::code::HomeCode::parse_with_rendezvous(&code.code).expect("a join code");
+    assert!(
+        code.code.starts_with(loquax::home::code::PREFIX),
+        "{}",
+        code.code
+    );
+    assert_eq!(
+        loquax::home::code::HomeCode::parse_with_rendezvous(&scanned).expect("the QR's"),
+        (parsed.clone(), list.clone())
+    );
+    assert_eq!(list, std::slice::from_ref(&entry));
+    let mailbox_key = loquax_android::mailbox::identity(first.path())
+        .expect("the mailbox identity")
+        .public_key_bytes();
+    assert_eq!(parsed.public_key, mailbox_key);
+    assert_eq!(u64::from(code.hours), loquax::home::DEFAULT_TOKEN_HOURS);
+    let a = tokio::task::spawn_blocking(move || {
+        let linked: schema::Linked = asked(&a, schema::Query::Linked);
+        assert_eq!(linked.state, "waiting");
+        a
+    })
+    .await
+    .expect("waiting");
+
+    let second = tempfile::tempdir().expect("second phone");
+    let start = Start {
+        dir: second.path().display().to_string(),
+        code: Some(scanned.clone()),
+        name: Some("Pixel 8".to_string()),
+        ..Start::default()
+    };
+    let b = tokio::task::spawn_blocking(move || {
+        let b = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        ugly_in(&b);
+        b
+    })
+    .await
+    .expect("the second phone");
+    assert_eq!(b.address(), a.address());
+    let a = tokio::task::spawn_blocking(move || {
+        let linked: schema::Linked =
+            wait_for(&a, schema::Query::Linked, 10, |l: &schema::Linked| {
+                l.state == "linked"
+            });
+        assert_eq!(linked.name, "Pixel 8");
+        a
+    })
+    .await
+    .expect("linked");
+
+    let third = tempfile::tempdir().expect("third phone");
+    let start = Start {
+        dir: third.path().display().to_string(),
+        code: Some(scanned),
+        name: Some("Fairphone".to_string()),
+        ..Start::default()
+    };
+    let refused = tokio::task::spawn_blocking(move || Session::start(&start).err())
+        .await
+        .expect("the third phone")
+        .expect("a used code is refused");
+    assert_eq!(refused.need, Some("code"), "{refused:?}");
+
+    tokio::task::spawn_blocking(move || {
+        b.stop();
+        a.stop();
+    })
+    .await
+    .expect("stopped");
+    transport.stop().await.expect("stop the transport node");
 }

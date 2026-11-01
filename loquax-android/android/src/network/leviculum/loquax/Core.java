@@ -1,5 +1,7 @@
 package network.leviculum.loquax;
 
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -15,8 +17,15 @@ import java.util.TimeZone;
  */
 final class Core {
     static final long VERSION = 1;
+    /** The phone has a camera (1270): set by {@link #sense} before a start. */
+    private static volatile boolean camera;
 
     private Core() {}
+
+    /** What the phone can do that the library's compose bar asks: a camera. */
+    static void sense(Context context) {
+        camera = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY);
+    }
 
     static Map<String, Object> map(Object... pairs) {
         Map<String, Object> map = new LinkedHashMap<>();
@@ -53,6 +62,17 @@ final class Core {
         return value instanceof Number ? ((Number) value).longValue() : 0;
     }
 
+    /** A real of an answer: a float, or an integer as one. */
+    static double real(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        return value instanceof Number ? ((Number) value).doubleValue() : 0;
+    }
+
+    /** A list of strings of an answer, empty for none (1276: the recorder's effects). */
+    static List<String> words(Map<String, Object> map, String key) {
+        return strings(map.get(key));
+    }
+
     static boolean bool(Map<String, Object> map, String key) {
         return Boolean.TRUE.equals(map.get(key));
     }
@@ -83,7 +103,8 @@ final class Core {
 
     /** Start; code and server null on a later start. Blocks: not on the UI thread. */
     static Map<String, Object> start(String dir, String server, String code, String name) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang());
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(),
+                "camera", camera);
         if (server != null) request.put("server", server);
         if (code != null) request.put("code", code);
         if (name != null) request.put("name", name);
@@ -96,7 +117,8 @@ final class Core {
      * it restores the address first. Blocks: not on the UI thread.
      */
     static Map<String, Object> startHere(String dir, String restore, String passphrase) {
-        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true);
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true,
+                "camera", camera);
         if (restore != null) {
             request.put("restore", restore);
             request.put("passphrase", passphrase);
@@ -119,9 +141,19 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "profile"))));
     }
 
+    /** A fresh join code of the mailbox on this phone for another device (1264): `code`, `qr`, `qr_size`, `hours`; `error` when not. */
+    static Map<String, Object> linkDevice() {
+        return answer(Native.query(MsgPack.pack(map("t", "linkdevice"))));
+    }
+
+    /** Whether a device came with the newest link code: `state` waiting, linked (with `name`), over or none. */
+    static Map<String, Object> linked() {
+        return answer(Native.query(MsgPack.pack(map("t", "linked"))));
+    }
+
     /** Whose contact code `text` is (`address`, `lxma`, `known`); `error` when it is none. */
     static Map<String, Object> lxma(String text) {
-        return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text))));
+        return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text, "lang", lang()))));
     }
 
     /** The contact of `lxma` under `name` (none when empty), its key to the mailbox, its chat open. */
@@ -178,6 +210,215 @@ final class Core {
     /** Send the message `key`, one of ours not sent, again: its red mark's tap (1232). */
     static String sendAgain(String peer, long key) {
         return command(map("t", "sendagain", "peer", peer, "key", key));
+    }
+
+    /**
+     * A picture the user picked with the paperclip's "Photo" (1220), as the
+     * picker gave it: the library scales and strips it and sends it.
+     */
+    static String photo(String peer, byte[] data) {
+        return command(map("t", "photo", "peer", peer, "data", data));
+    }
+
+    /**
+     * The photo of the message `key`, upright and scaled into an `edge`
+     * square by the library (1220), as a Bitmap; null when it has none or
+     * it does not decode. Not on the UI thread.
+     */
+    /**
+     * One gesture on the photo viewer (1269), folded into the state
+     * `state` holds (its `view_w`, `view_h`, `picture_w`, `picture_h`,
+     * `scale`, `pan_x`, `pan_y`) by the library's zoom, which needs no
+     * session: the state after it, where the picture lands and what a
+     * coast has room for (schema.rs, ZoomShown), itself such a state. `gesture` is the
+     * gesture's word and its reals: `factor`, `x`, `y`, `dx`, `dy`.
+     */
+    static Map<String, Object> zoom(Map<String, Object> state, String gesture, Object... reals) {
+        Map<String, Object> request = map("t", "zoom",
+                "view_w", real(state, "view_w"), "view_h", real(state, "view_h"),
+                "picture_w", real(state, "picture_w"), "picture_h", real(state, "picture_h"),
+                "scale", real(state, "scale"),
+                "pan_x", real(state, "pan_x"), "pan_y", real(state, "pan_y"),
+                "gesture", gesture);
+        for (int i = 0; i + 1 < reals.length; i += 2) {
+            request.put((String) reals[i], ((Number) reals[i + 1]).doubleValue());
+        }
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
+    /**
+     * The photo the camera took for `peer` (1270), as the capture wrote
+     * it: the library scales and strips it as a picked one and stages it
+     * in the compose bar. Not on the UI thread.
+     */
+    static String stage(String peer, byte[] data) {
+        return command(map("t", "stage", "peer", peer, "data", data));
+    }
+
+    /** The staged photo's cross. */
+    static String unstage(String peer) {
+        return command(map("t", "unstage", "peer", peer));
+    }
+
+    /** The compose bar's sheet: `attach`, `position`, or "" to close it. */
+    static String sheet(String peer, String kind) {
+        return command(map("t", "sheet", "peer", peer, "kind", kind));
+    }
+
+    /** The phone knows no own fix: the position sheet says so. */
+    static String noFix() {
+        return command(map("t", "nofix"));
+    }
+
+    /** The position sheet's "Send my position now": the last fix to `peer`. */
+    static String shareFix(String peer) {
+        return command(map("t", "sharefix", "peer", peer));
+    }
+
+    /**
+     * A share of the position for `peer`'s chat (1273): `span` is
+     * `15_min`, `1_h`, `8_h` or `until_stopped`.
+     */
+    static String startShare(String peer, String span) {
+        return command(map("t", "startshare", "peer", peer, "span", span));
+    }
+
+    /** The share's Stop: one last report marked as the end (1273). */
+    static String stopShare(String peer) {
+        return command(map("t", "stopshare", "peer", peer));
+    }
+
+    /** The running shares: Settings, Privacy and the share notification (1273). */
+    static Map<String, Object> shares() {
+        return answer(Native.query(MsgPack.pack(map("t", "shares"))));
+    }
+
+    /** `peer`'s compose bar alone: its buttons, its staged photo, its sheet (1270). */
+    static Map<String, Object> bar(String peer) {
+        return answer(Native.query(MsgPack.pack(map("t", "bar", "peer", peer))));
+    }
+
+    /** The staged photo's pixels in an `edge` box, or null. Not on the UI thread. */
+    static Bitmap stagedBitmap(String peer, int edge) {
+        return pixels(answer(Native.query(MsgPack.pack(
+                map("t", "staged", "peer", peer, "edge", (long) edge)))), null);
+    }
+
+    static Bitmap photoBitmap(String peer, long key, int edge) {
+        return photoBitmap(peer, key, edge, null);
+    }
+
+    /**
+     * The photo's pixels, scaled into `edge` by `edge`; with `full` not
+     * null, its two ints set to the picture's own size before the scale
+     * (1269, what the viewer zooms to).
+     */
+    static Bitmap photoBitmap(String peer, long key, int edge, int[] full) {
+        return pixels(answer(Native.query(MsgPack.pack(
+                map("t", "photo", "peer", peer, "key", key, "edge", (long) edge)))), full);
+    }
+
+    /** A PhotoPixels answer as a Bitmap, `full` as in photoBitmap; null for none. */
+    private static Bitmap pixels(Map<String, Object> answer, int[] full) {
+        Object rgba = answer.get("rgba");
+        long w = num(answer, "width");
+        long h = num(answer, "height");
+        if (!(rgba instanceof byte[]) || w <= 0 || h <= 0
+                || ((byte[]) rgba).length != w * h * 4) {
+            return null;
+        }
+        if (full != null) {
+            // An older library sends no full size: the pixels' own.
+            long fw = num(answer, "full_width");
+            long fh = num(answer, "full_height");
+            full[0] = (int) (fw > 0 ? fw : w);
+            full[1] = (int) (fh > 0 ? fh : h);
+        }
+        Bitmap bitmap = Bitmap.createBitmap((int) w, (int) h, Bitmap.Config.ARGB_8888);
+        bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap((byte[]) rgba));
+        return bitmap;
+    }
+
+    /**
+     * The Chats page's photo size (1220): `set` (small, phone, original)
+     * stored, or with null only asked; the size in force as "size".
+     */
+    static Map<String, Object> photoSize(String set) {
+        Map<String, Object> request = map("t", "photosize");
+        if (set != null) request.put("set", set);
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
+    /**
+     * A file the user picked with the paperclip's "File" (1221): its name
+     * and the bytes read, `size` the whole file's bytes counted where the
+     * reading stopped early, else 0. The library sends it, or says why not.
+     */
+    static String file(String peer, String name, byte[] data, long size) {
+        return command(map("t", "file", "peer", peer, "name", name, "data", data, "size", size));
+    }
+
+    /**
+     * The `index`th file of the message `key`, saved by the library under
+     * the app's files (1221): "path" and "name"; "error" when it cannot
+     * be. Not on the UI thread.
+     */
+    static Map<String, Object> saveFile(String peer, long key, int index) {
+        return answer(Native.query(MsgPack.pack(
+                map("t", "savefile", "peer", peer, "key", key, "index", (long) index))));
+    }
+
+    /**
+     * A recording the microphone made (1222): mono 16-bit PCM, little
+     * endian, at `rate`. The library codes it as Opus in Ogg and sends it,
+     * or says why not (too short, too long).
+     */
+    static String voice(String peer, byte[] pcm, int rate) {
+        return command(map("t", "voice", "peer", peer, "pcm", pcm, "rate", (long) rate));
+    }
+
+    /**
+     * The play button of the message `key` (`on`), its pause button or the
+     * player's end (1222): the library's bubble follows.
+     */
+    static String playVoice(String peer, long key, boolean on) {
+        return command(map("t", "playvoice", "peer", peer, "key", key, "on", on));
+    }
+
+    /**
+     * The voice message of the message `key`, decoded by the library
+     * (1222): "rate" and "pcm" (mono 16-bit little endian); "error" when it
+     * does not play. Not on the UI thread.
+     */
+    static Map<String, Object> voicePcm(String peer, long key) {
+        return answer(Native.query(MsgPack.pack(map("t", "voice", "peer", peer, "key", key))));
+    }
+
+    /**
+     * The microphone's gesture or the recorder's level for `peer`'s
+     * recording (1276): `press`, `slide` (`dx`, `dy` dp from where the
+     * finger landed), `release`, `cancel`, `level` (`rms` of the window),
+     * `tick` or `played`, at `now` on the uptime clock. Every field goes,
+     * each a long; {@link #recording} has what to do next.
+     */
+    static String record(String peer, String input, long now, int dx, int dy, int rms) {
+        return command(map("t", "record", "peer", peer, "input", input, "now", now,
+                "dx", (long) dx, "dy", (long) dy, "rms", (long) rms));
+    }
+
+    /** A button of the recording bar, by its id (`rec_lock` … `rec_allow`, 1276). */
+    static String recordingVerb(String peer, String verb) {
+        return command(map("t", "recording", "peer", peer, "verb", verb));
+    }
+
+    /**
+     * `peer`'s recording bar and the recorder's work since the last ask
+     * (1276): `phase`, `shown`, `pulsing`, `timer`, `wave` (bytes), the
+     * hint, the chip, `buttons`, `notice`, `effects`, and the library's
+     * distances `cancel_dp` and `lock_dp`.
+     */
+    static Map<String, Object> recording(String peer) {
+        return answer(Native.query(MsgPack.pack(map("t", "recording", "peer", peer))));
     }
 
     /** Delete the messages `keys`, asked already. */

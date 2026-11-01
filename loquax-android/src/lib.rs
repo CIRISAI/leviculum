@@ -32,8 +32,8 @@ pub mod pull_line;
 pub mod scan;
 pub mod schema;
 pub mod session;
+pub mod viewer;
 
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,6 +41,7 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::jint;
 use jni::EnvUnowned;
 
+use loquax::ui::strings::Lang;
 use schema::{Done, Event, Started, VERSION};
 use session::Session;
 
@@ -84,6 +85,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                         ok: true,
                         error: None,
                         need: None,
+                        details: None,
                         address: Some(loquax::address::to_hex(&session.address())),
                         server: Some(session.server().to_string()),
                         link: session.link(),
@@ -95,6 +97,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                     ok: false,
                     error: Some(error.text),
                     need: error.need.map(str::to_string),
+                    details: error.details,
                     address: None,
                     server: None,
                     link: false,
@@ -122,6 +125,16 @@ pub fn command(request: &[u8]) -> Vec<u8> {
 /// One [`schema::Query`]; its answer, or a [`schema::Done`] with the error.
 pub fn query(request: &[u8]) -> Vec<u8> {
     let answer = match (current(), schema::decode::<schema::Query>(request)) {
+        // A code read before anything runs: the first start's scanner.
+        (None, Ok(schema::Query::Lxma { text, lang })) => session::read_code(
+            &text,
+            Lang::of_tag(lang.as_deref().unwrap_or_default()),
+            |_| String::new(),
+        )
+        .map(|read| schema::encode(&read)),
+        // The photo viewer's zoom (1269): the state is the app's, no
+        // session is asked.
+        (_, Ok(schema::Query::Zoom(ask))) => Ok(viewer::answer(&ask)),
         (None, _) => Err("not started".to_string()),
         (_, Err(error)) => Err(error),
         (Some(session), Ok(query)) => session.query(query),
@@ -221,48 +234,6 @@ pub fn stop() {
     if let Some(session) = session {
         session.stop();
     }
-}
-
-/// What the app's first screen says about this device: the Loquax version,
-/// and whether `home` (the app's files directory, which is its loquax home)
-/// makes it a client of a home node, with the home node's LXMF address and
-/// the last archive entry pulled.
-pub fn describe(home: &Path) -> String {
-    let state = match loquax::home::client::load_client(home) {
-        Ok(None) => "This phone holds no mailbox and reads none.".to_string(),
-        Ok(Some(key)) => match loquax::home::lxmf_address(&key) {
-            Ok(address) if mailbox::is_here(home) => format!(
-                "The mailbox {} is on this phone, last entry pulled {}.",
-                loquax::address::to_hex(&address),
-                loquax::home::client::load_cursor(home)
-            ),
-            Ok(address) => format!(
-                "Reads the mailbox {}, last entry pulled {}.",
-                loquax::address::to_hex(&address),
-                loquax::home::client::load_cursor(home)
-            ),
-            Err(error) => error,
-        },
-        Err(error) => error,
-    };
-    format!("Loquax {}\n{state}", loquax::VERSION)
-}
-
-/// `static native String describe(String home)` of `Native`: [`describe`].
-/// A panic or a JNI failure becomes a Java `RuntimeException`.
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_network_leviculum_loquax_Native_describe<'caller>(
-    mut unowned: EnvUnowned<'caller>,
-    _class: JClass<'caller>,
-    home: JString<'caller>,
-) -> JString<'caller> {
-    unowned
-        .with_env(|env| -> Result<_, jni::errors::Error> {
-            let home = home.to_string();
-            JString::from_str(env, describe(Path::new(&home)))
-        })
-        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 /// The bytes of a Java `byte[]`, empty for `null`.
@@ -402,53 +373,4 @@ pub extern "system" fn Java_network_leviculum_loquax_Native_stop<'caller>(
             Ok(())
         })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use leviculum_core::Identity;
-
-    #[test]
-    fn a_fresh_home_is_no_client() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let text = describe(home.path());
-        assert!(text.starts_with(&format!("Loquax {}\n", loquax::VERSION)));
-        assert!(
-            text.ends_with("This phone holds no mailbox and reads none."),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn a_client_names_its_home_node_and_cursor() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let identity = Identity::generate(&mut rand_core::OsRng);
-        let key: [u8; 64] = identity.public_key_bytes();
-        loquax::home::client::save_client(home.path(), &key).expect("client");
-        loquax::home::client::save_cursor(home.path(), 42).expect("cursor");
-        let address = loquax::home::lxmf_address(&key).expect("address");
-        let text = describe(home.path());
-        assert!(
-            text.ends_with(&format!(
-                "Reads the mailbox {}, last entry pulled 42.",
-                loquax::address::to_hex(&address)
-            )),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn a_damaged_client_file_is_named() {
-        let home = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            home.path().join(loquax::home::client::CLIENT_FILE),
-            "not hex\n",
-        )
-        .expect("write");
-        let text = describe(home.path());
-        assert!(text.contains(loquax::home::client::CLIENT_FILE), "{text}");
-        assert!(text.contains("not a home identity's public key"), "{text}");
-    }
 }

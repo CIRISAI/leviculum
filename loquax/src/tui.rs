@@ -552,6 +552,9 @@ fn run_output(output: Output) -> Result<(), String> {
                 .map_err(|e| format!("copy: {e}"))
         }
         Output::Open(url) => open::that(&url).map_err(|e| format!("could not open {url}: {e}")),
+        Output::Photo(path) | Output::File(path) => {
+            open::that(&path).map_err(|e| format!("could not open {}: {e}", path.display()))
+        }
         Output::Mouse(on) => set_mouse_capture(on).map_err(|e| format!("mouse: {e}")),
         // The loop switches the painter itself.
         Output::MapDrawing(_) => Ok(()),
@@ -1238,6 +1241,8 @@ async fn run_script(
                 }
                 Output::Copy(text) => format!("osc52 {}", osc52(&text).replace('\x1b', "\\e")),
                 Output::Open(url) => format!("open {url}"),
+                Output::Photo(path) => format!("photo {}", path.display()),
+                Output::File(path) => format!("file {}", path.display()),
                 Output::Mouse(on) => format!("mouse {}", if on { "on" } else { "off" }),
             };
             dump(&mut terminal, &mut painter, None, &line)?;
@@ -1280,7 +1285,12 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
     let no_color = tier == Tier::Mono;
     let tokens = leviculum_ui::tokens(tier, theme);
     let compose_lines: Vec<&str> = view.compose.split('\n').collect();
-    let compose_rows = compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS);
+    // The recording bar takes the field's place (1276): its row, and the
+    // line under it when it says something.
+    let compose_rows = match &view.recording {
+        Some(bar) => bar.rows.len(),
+        None => compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS),
+    };
     // The model's rectangles, the ones the mouse hit-tests against.
     let area = frame.area();
     let screen = ui::Screen::of(area.width, area.height, compose_rows);
@@ -1385,15 +1395,21 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
         usize::from(inner.width),
         usize::from(inner.height),
     );
-    let shown: Vec<Line> = compose_lines
-        .iter()
-        .skip(top)
-        .take(usize::from(inner.height.max(1)))
-        .map(|line| Line::from(line.chars().skip(scroll).collect::<String>()))
-        .collect();
-    frame.render_widget(Paragraph::new(Text::from(shown)), inner);
+    match &view.recording {
+        Some(bar) => frame.render_widget(Paragraph::new(to_ratatui_text(&bar.rows)), inner),
+        None => {
+            let shown: Vec<Line> = compose_lines
+                .iter()
+                .skip(top)
+                .take(usize::from(inner.height.max(1)))
+                .map(|line| Line::from(line.chars().skip(scroll).collect::<String>()))
+                .collect();
+            frame.render_widget(Paragraph::new(Text::from(shown)), inner);
+        }
+    }
     let overlay = view.palette.is_some() || view.help || view.detail.is_some();
-    if focused && !overlay {
+    // No cursor in the recording bar: there is no text to type into.
+    if focused && !overlay && view.recording.is_none() {
         frame.set_cursor_position(Position::new(
             inner.x + (cursor_column - scroll) as u16,
             inner.y + (cursor_line - top) as u16,
@@ -1874,11 +1890,12 @@ mod tests {
         }
     }
 
-    /// A send that failed both ways: at 80x24 the toast wraps to three rows
-    /// and both legs' reasons are on screen, the frame pinned in
+    /// A send that failed both ways: at 80x24 the toast says it in plain
+    /// words and where the why is, no leg (1279, walk finding 22); the legs'
+    /// reasons are the detail view's. The frame pinned in
     /// `tests/fixtures/tui_toast_two_legs.frame`.
     #[test]
-    fn a_two_leg_failure_toast_wraps_and_shows_both_legs() {
+    fn a_two_leg_failure_toasts_plainly() {
         let mut model = Model::new(&[[0xab; 16]]);
         for name in ["tab", "tab", "h", "i", "enter"] {
             update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
@@ -1899,11 +1916,10 @@ mod tests {
             .draw(|frame| draw(frame, &view, None))
             .expect("draw");
         let screen = frame_text(terminal.backend().buffer());
-        assert!(screen.contains("not sent: direct: no route to"), "{screen}");
-        assert!(
-            screen.contains("propagated: no propagation node"),
-            "{screen}"
-        );
+        assert!(screen.contains(ui::NOT_SENT), "{screen}");
+        assert!(!screen.contains("propagated"), "{screen}");
+        // The send needed a relay and there is none: the header says so.
+        assert!(screen.contains("no relay"), "{screen}");
         let expected = include_str!("../tests/fixtures/tui_toast_two_legs.frame");
         if screen != expected {
             let kept = std::env::temp_dir().join("loquax-tui-toast-two-legs.frame");
@@ -1911,6 +1927,517 @@ mod tests {
             panic!(
                 "the frame moved; this run's is in {}, the pinned one in \
                  loquax/tests/fixtures/tui_toast_two_legs.frame\n{screen}",
+                kept.display()
+            );
+        }
+    }
+
+    /// Our position share's chip row (1273) at 80x24 and at 120x40: under
+    /// the mailbox's row on the wide pane, at the top of the narrow one,
+    /// the time left and that a click stops it; the frames pinned in
+    /// `tests/fixtures/tui_share_chip.frames`. A click on the row stops
+    /// the share with its end report, and the row goes.
+    #[test]
+    fn the_share_chip_row_says_the_time_left_and_a_click_stops_it() {
+        use leviculum_lxmf::telemetry::Location;
+        use loquax::ui::share::Span;
+        let peer = [0xab; 16];
+        let mut model = Model::new(&[peer]);
+        let t = 1_793_500_000;
+        let clock = |model: &mut Model, at: i64| {
+            update(
+                model,
+                UiEvent::Clock(WallTime {
+                    unix_secs: at,
+                    offset_secs: 3600,
+                }),
+            )
+        };
+        clock(&mut model, t);
+        update(
+            &mut model,
+            UiEvent::OwnFix(Some(Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: t,
+            })),
+        );
+        update(
+            &mut model,
+            UiEvent::StartShare {
+                peer,
+                span: Span::Hour1,
+            },
+        );
+        clock(&mut model, t + 18 * 60);
+        let mut frames = String::new();
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            update(
+                &mut model,
+                UiEvent::Resize {
+                    width: w,
+                    height: h,
+                },
+            );
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+            let view = ui::view(&model);
+            terminal
+                .draw(|frame| draw(frame, &view, None))
+                .expect("draw");
+            let screen = frame_text(terminal.backend().buffer());
+            assert!(
+                screen.contains("⌖ Sharing your position, 42 min left"),
+                "{screen}"
+            );
+            assert_eq!(screen.contains("· click to stop"), w == 120, "{screen}");
+            frames.push_str(&format!("=== {w}x{h}\n{screen}"));
+        }
+        let expected = include_str!("../tests/fixtures/tui_share_chip.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-share-chip.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_share_chip.frames\n{frames}",
+                kept.display()
+            );
+        }
+        // The click: on the chip row's first inner cell of the wide pane.
+        let screen = ui::Screen::of(120, 40, 1);
+        let row = screen.messages.y + 1 + model.chip_row().expect("a chip row") as u16;
+        let col = screen.messages.x + 3;
+        let mut effects = Vec::new();
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            effects.extend(update(
+                &mut model,
+                UiEvent::Mouse(MouseEvent {
+                    kind,
+                    column: col,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            ));
+        }
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ui::UiEffect::Send { to, .. } if *to == peer)),
+            "the end report: {effects:?}"
+        );
+        assert!(model.share(&peer).is_none());
+        assert_eq!(model.chip_row(), None);
+    }
+
+    /// Recording a voice message in the terminal (1276): `Alt-v` in
+    /// compose starts it locked and the compose box is the bar, the dot
+    /// and the timer, the waveform in block characters, the keys; `p`
+    /// pauses, and a microphone that heard nothing says so on the line
+    /// under it; the cap stops it into the preview with its line. Each at
+    /// 80 x 24 and 120 x 40, pinned in
+    /// `tests/fixtures/tui_recording.frames`. Then the keys and the
+    /// clicks: `v` sends, `Esc` and a click on `Esc cancel` throw it away,
+    /// a click on the silence line asks for the microphone.
+    #[test]
+    fn the_recording_bar_takes_the_compose_box_and_its_keys() {
+        use loquax::ui::recording::{rms, Effect, Input, Phase, WINDOW_MS};
+        let peer = [0xab; 16];
+        let key = |model: &mut Model, code: KeyCode, mods: KeyModifiers| {
+            update(model, UiEvent::Key(KeyEvent::new(code, mods)))
+        };
+        let fresh = || {
+            let mut model = Model::new(&[peer]);
+            model.names.remember(peer, "Anna Schulz");
+            update(&mut model, UiEvent::Open { peer });
+            update(&mut model, UiEvent::Elapsed(1_000));
+            let _ = key(&mut model, KeyCode::Tab, KeyModifiers::NONE);
+            let _ = key(&mut model, KeyCode::Tab, KeyModifiers::NONE);
+            assert_eq!(model.focus, Pane::Compose);
+            model
+        };
+        // `ms` of sound from 1000 on, a level a window: the speech's or
+        // silence.
+        let feed = |model: &mut Model, pcm: &[i16]| {
+            let window = (loquax::voice::RATE / (1000 / WINDOW_MS)) as usize;
+            let mut now = 1_000;
+            for chunk in pcm.chunks(window) {
+                now += u64::from(WINDOW_MS);
+                update(
+                    model,
+                    UiEvent::Record {
+                        peer,
+                        input: Input::Level {
+                            now,
+                            rms: rms(chunk),
+                        },
+                    },
+                );
+            }
+            now
+        };
+        let start = |model: &mut Model| {
+            let effects = key(model, KeyCode::Char('v'), KeyModifiers::ALT);
+            assert!(
+                effects.iter().any(|e| matches!(
+                    e,
+                    ui::UiEffect::Recording {
+                        effect: Effect::Start,
+                        ..
+                    }
+                )),
+                "{effects:?}"
+            );
+            assert!(matches!(model.recording.phase, Phase::Locked { .. }));
+        };
+        let speech = loquax::voice::test_speech(loquax::voice::RATE, 7_400);
+
+        let mut locked = fresh();
+        let typed = key(&mut locked, KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(
+            typed.is_empty() && locked.compose.value() == "v",
+            "a letter"
+        );
+        let _ = key(&mut locked, KeyCode::Backspace, KeyModifiers::NONE);
+        start(&mut locked);
+        feed(&mut locked, &speech);
+        // Typing does not reach the hidden field.
+        let _ = key(&mut locked, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(locked.compose.value(), "");
+
+        let mut paused = fresh();
+        start(&mut paused);
+        feed(&mut paused, &vec![0; 16_000 * 3]);
+        let _ = key(&mut paused, KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_eq!(paused.recording.phase, Phase::Paused);
+
+        let mut capped = fresh();
+        start(&mut capped);
+        let now = feed(&mut capped, &speech);
+        let since = 1_000;
+        update(
+            &mut capped,
+            UiEvent::Record {
+                peer,
+                input: Input::Tick {
+                    now: now.max(since + u64::from(loquax::voice::LONGEST_MS)),
+                },
+            },
+        );
+        assert_eq!(capped.recording.phase, Phase::Preview);
+
+        let mut frames = String::new();
+        for (name, model) in [
+            ("locked", &mut locked),
+            ("paused, nothing heard", &mut paused),
+            ("preview at the cap", &mut capped),
+        ] {
+            for (w, h) in [(80u16, 24u16), (120, 40)] {
+                update(
+                    model,
+                    UiEvent::Resize {
+                        width: w,
+                        height: h,
+                    },
+                );
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                let view = ui::view(model);
+                terminal
+                    .draw(|frame| draw(frame, &view, None))
+                    .expect("draw");
+                let screen = frame_text(terminal.backend().buffer());
+                frames.push_str(&format!("=== {name} {w}x{h}\n{screen}"));
+            }
+        }
+        for (want, state) in [
+            ("● REC 00:07", "locked"),
+            ("p pause · Enter send", "locked"),
+            ("p pause · Esc cancel · Enter send", "locked, wide"),
+            ("○ REC 00:03", "paused"),
+            ("Space play · p resume · Esc cancel · Enter send", "paused"),
+            ("Nothing heard. Is the microphone allowed?", "paused"),
+            ("○ REC 10:00", "preview"),
+            ("That is as long as a voice message can be", "preview"),
+        ] {
+            assert!(frames.contains(want), "{state}: {want:?}\n{frames}");
+        }
+        assert!(frames.contains('▇') && frames.contains('▁'), "{frames}");
+        let expected = include_str!("../tests/fixtures/tui_recording.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-recording.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_recording.frames\n{frames}",
+                kept.display()
+            );
+        }
+
+        // ASCII: the same bar in ASCII alone.
+        locked.ascii = true;
+        let bar = ui::view(&locked).recording.expect("the bar");
+        let row: String = bar.rows[0].cells.iter().map(|c| c.ch).collect();
+        assert!(row.starts_with("* REC 00:07  "), "{row}");
+        assert!(row.is_ascii(), "{row}");
+        locked.ascii = false;
+
+        // `v` sends what is recorded.
+        let sent = key(&mut locked, KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(
+            sent.iter().any(|e| matches!(
+                e,
+                ui::UiEffect::Recording {
+                    effect: Effect::Finish,
+                    ..
+                }
+            )),
+            "{sent:?}"
+        );
+        assert!(ui::view(&locked).recording.is_none(), "the field is back");
+        // The shell hands the coded recording back: its bubble draws the
+        // recording's own track as block characters.
+        let track = locked.recording.track.clone();
+        let data = loquax::voice::encode(&speech, loquax::voice::RATE).expect("coded");
+        update(&mut locked, UiEvent::SendVoice { peer, data });
+        let bars = track.bars(loquax::ui::voice::BARS, loquax::ui::recording::Fold::Peak);
+        let wave = loquax::ui::layout::waveform(&bars, bars.len(), false, false);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        let view = ui::view(&locked);
+        terminal
+            .draw(|frame| draw(frame, &view, None))
+            .expect("draw");
+        let screen = frame_text(terminal.backend().buffer());
+        assert!(screen.contains("♪ voice message · 0:08"), "7.4 s: {screen}");
+        assert!(screen.contains(&wave), "{wave}\n{screen}");
+
+        // `Esc` throws it away, and stays in compose.
+        let mut again = fresh();
+        start(&mut again);
+        feed(&mut again, &speech[..16_000]);
+        let gone = key(&mut again, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(gone.iter().any(|e| matches!(
+            e,
+            ui::UiEffect::Recording {
+                effect: Effect::Discard,
+                ..
+            }
+        )));
+        assert_eq!(again.focus, Pane::Compose);
+
+        // A click on `Esc cancel` in the bar, and one on the silence line.
+        let click = |model: &mut Model, col: u16, row: u16| {
+            let mut effects = Vec::new();
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                effects.extend(update(
+                    model,
+                    UiEvent::Mouse(MouseEvent {
+                        kind,
+                        column: col,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                ));
+            }
+            effects
+        };
+        let screen = ui::Screen::of(120, 40, paused.compose_rows());
+        let bar = ui::view(&paused).recording.expect("the bar");
+        let place = |verb| {
+            bar.buttons
+                .iter()
+                .find(|b| b.3 == verb)
+                .map(|&(r, c, _, _)| {
+                    (
+                        screen.compose.x + 1 + c as u16,
+                        screen.compose.y + 1 + r as u16,
+                    )
+                })
+                .expect("the button")
+        };
+        use loquax::ui::recording::Verb;
+        let (col, row) = place(Verb::AskMicrophone);
+        let asked = click(&mut paused, col, row);
+        assert!(
+            asked.iter().any(|e| matches!(
+                e,
+                ui::UiEffect::Recording {
+                    effect: Effect::AskMicrophone,
+                    ..
+                }
+            )),
+            "{asked:?}"
+        );
+        let (col, row) = place(Verb::Discard);
+        let thrown = click(&mut paused, col, row);
+        assert!(
+            thrown.iter().any(|e| matches!(
+                e,
+                ui::UiEffect::Recording {
+                    effect: Effect::Discard,
+                    ..
+                }
+            )),
+            "{thrown:?}"
+        );
+        assert!(ui::view(&paused).recording.is_none());
+    }
+
+    /// The first user in the terminal (1263, finding 6): the empty list
+    /// names the palette's command, the palette offers `new conversation`
+    /// and `add contact`, and a friend's code typed into either opens the
+    /// conversation, `add contact` asking the name next. The three screens
+    /// are pinned in `tests/fixtures/tui_palette_new.frames`.
+    #[test]
+    fn the_palette_starts_a_conversation_and_adds_a_contact() {
+        let keys = |model: &mut Model, text: &str| {
+            for ch in text.chars() {
+                let name = match ch {
+                    ' ' => "space".to_string(),
+                    _ => ch.to_string(),
+                };
+                update(model, UiEvent::Key(parse_key(&name).expect("key")));
+            }
+        };
+        let key = |model: &mut Model, name: &str| {
+            update(model, UiEvent::Key(parse_key(name).expect("key")));
+        };
+        let mut model = Model::new(&[]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 16,
+            },
+        );
+        let empty = screen(&model, 80, 16);
+        assert!(empty.contains(":new conversation"), "{empty}");
+        assert!(!empty.contains("--to"), "{empty}");
+
+        key(&mut model, ":");
+        let listed = screen(&model, 80, 16);
+        key(&mut model, "esc");
+        key(&mut model, ":");
+        keys(&mut model, "new conv");
+        key(&mut model, "enter");
+        let asking = screen(&model, 80, 16);
+        assert!(asking.contains("your friend's code or address"), "{asking}");
+
+        // An old code: the address alone, in capitals.
+        let bert = loquax::address::to_hex(&[0xbe; 16]).to_ascii_uppercase();
+        keys(&mut model, &bert);
+        key(&mut model, "enter");
+        assert_eq!(
+            model.conversations.get(model.selected).map(|c| c.peer),
+            Some([0xbe; 16])
+        );
+        assert_eq!(model.focus, Pane::Compose);
+
+        // Garbage says so in the phone's sentence and opens nothing.
+        key(&mut model, "esc");
+        key(&mut model, ":");
+        keys(&mut model, "new conv");
+        key(&mut model, "enter");
+        keys(&mut model, "hello");
+        key(&mut model, "enter");
+        assert_eq!(model.conversations.len(), 1);
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("That is not a Loquax code.")
+        );
+
+        // A contact code: the conversation, then its name asked.
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
+        let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key_bytes).expect("a code");
+        let peer = loquax::home::lxmf_address(&key_bytes).expect("an address");
+        key(&mut model, ":");
+        keys(&mut model, "add contact");
+        key(&mut model, "enter");
+        keys(&mut model, &code);
+        key(&mut model, "enter");
+        assert_eq!(
+            model.conversations.get(model.selected).map(|c| c.peer),
+            Some(peer)
+        );
+        let naming = screen(&model, 80, 16);
+        assert!(naming.contains("your name for"), "{naming}");
+        keys(&mut model, "Carol");
+        key(&mut model, "enter");
+        assert_eq!(model.names.petname(&peer), Some("Carol"));
+
+        let frames = format!(
+            "--- empty\n{empty}--- palette\n{listed}--- asking\n{asking}--- naming\n{naming}"
+        );
+        let expected = include_str!("../tests/fixtures/tui_palette_new.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-palette-new.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_palette_new.frames\n{frames}",
+                kept.display()
+            );
+        }
+    }
+
+    /// 1279, walk finding 23: `my code` shows the contact code a friend
+    /// pastes and its QR, which a phone's scanner reads as that code. At
+    /// 80x40 the whole QR is on screen; pinned in
+    /// `tests/fixtures/tui_my_code.frames`.
+    #[test]
+    fn my_code_shows_the_contact_code_and_its_qr() {
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
+        let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key_bytes).expect("a code");
+        let qr = loquax::home::qr::lines(&code).expect("a QR");
+        let mut model = Model::new(&[[0xab; 16]]);
+        model.own_code = Some(ui::OwnCode {
+            code: code.clone(),
+            qr: qr.clone(),
+        });
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 40,
+            },
+        );
+        for name in [":", "m", "y", "space", "c", "o", "d", "e", "enter"] {
+            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+        }
+        let shown = screen(&model, 80, 40);
+        assert!(shown.contains(" your code "), "{shown}");
+        // The code wraps at the box's width; its pieces are all there.
+        let flat: String = shown
+            .lines()
+            .map(|row| row.trim_matches(|c| c == '│' || c == ' '))
+            .collect();
+        assert!(flat.contains(&code), "{shown}");
+        for row in &qr {
+            assert!(shown.contains(row.as_str()), "the QR row {row:?}: {shown}");
+        }
+        update(&mut model, UiEvent::Key(parse_key("esc").expect("key")));
+        assert!(!screen(&model, 80, 40).contains(" your code "));
+
+        let expected = include_str!("../tests/fixtures/tui_my_code.frames");
+        if shown != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-my-code.frames");
+            let _ = std::fs::write(&kept, &shown);
+            panic!(
+                "the frame moved; this run's is in {}, the pinned one in \
+                 loquax/tests/fixtures/tui_my_code.frames\n{shown}",
                 kept.display()
             );
         }
@@ -2215,11 +2742,13 @@ mod tests {
             frames.push_str(&format!("--- {width} x {height} ---\n{shot}"));
             let rows: Vec<&str> = shot.lines().collect();
             // The list: Alice on top with the reply's time and the bar, Bob
-            // under her; the header with the trust state.
+            // under her; the header without a trust word for the default
+            // state (1279).
             assert!(rows[1].starts_with("│▌<4f4f4f4f…>"), "{shot}");
             assert!(rows[2].starts_with("│▌you: the tripod fits"), "{shot}");
             assert!(rows[4].starts_with("│ <b7b7b7b7…>"), "{shot}");
-            assert!(rows[0].contains("<4f4f4f4f…>  unknown"), "{shot}");
+            assert!(rows[0].contains("<4f4f4f4f…>──"), "{shot}");
+            assert!(!rows[0].contains("unknown"), "{shot}");
             // The rule, the date line, ours right, theirs left.
             assert!(shot.contains("── Today ──"), "{shot}");
             assert!(shot.contains(" 2 new "), "{shot}");
@@ -2362,6 +2891,103 @@ mod tests {
         }
     }
 
+    /// A photo, a file and a voice message without words (1268), drawn
+    /// from the model at 80 x 24: each its media line alone in its block
+    /// with its time, no empty row; then one of ours, the photo with its
+    /// mark closing the row, and one with words, the media above them.
+    /// Pinned in `tests/fixtures/tui_media.frames`.
+    #[test]
+    fn media_without_words_is_its_line_alone() {
+        let alice = [0x4f; 16];
+        let mut model = Model::new(&[alice]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        let recv = |m: &mut Model, id: u8, minute: u32, body: &str, fields| {
+            update(
+                m,
+                UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, minute, 3600)),
+            );
+            update(
+                m,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [id; 32],
+                    source: alice,
+                    title: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                    fields,
+                    verified: true,
+                }),
+            );
+        };
+        recv(
+            &mut model,
+            1,
+            1,
+            "",
+            loquax::ui::photos::photo_fields("jpg", vec![7; 312_400]),
+        );
+        recv(
+            &mut model,
+            2,
+            11,
+            "",
+            loquax::ui::files::file_fields("report.pdf", vec![7; 1_400]),
+        );
+        recv(
+            &mut model,
+            3,
+            21,
+            "",
+            loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 900]),
+        );
+        model.toasts.clear();
+        let mut frames = String::new();
+        let alone = screen(&model, 80, 24);
+        assert!(alone.contains("▣ photo · 313 KB"), "{alone}");
+        assert!(alone.contains("▤ report.pdf · 2 KB"), "{alone}");
+        assert!(alone.contains("♪ voice message"), "{alone}");
+        frames.push_str(&format!("--- photo, file, voice alone ---\n{alone}"));
+        update(
+            &mut model,
+            UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, 31, 3600)),
+        );
+        update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer: alice,
+                format: "jpg".into(),
+                data: vec![0xff, 0xd8, 0xff],
+            },
+        );
+        recv(
+            &mut model,
+            4,
+            41,
+            "the view from the hill",
+            loquax::ui::photos::photo_fields("jpg", vec![7; 1_000]),
+        );
+        model.toasts.clear();
+        frames.push_str(&format!(
+            "--- ours, then words under a photo ---\n{}",
+            screen(&model, 80, 24)
+        ));
+        let expected = include_str!("../tests/fixtures/tui_media.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-media.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_media.frames\n{frames}",
+                kept.display()
+            );
+        }
+    }
+
     /// The search of section 5's 120 x 40 mockup, drawn from the model at
     /// both sizes: the field and the messages group as `tripod` is typed,
     /// the third result opened with its match marked in place, both groups
@@ -2496,12 +3122,13 @@ mod tests {
             assert_eq!(under(&shot, &send), "send", "{width}: {shot}");
             assert!(send.iter().all(|&(_, row)| row == send[0].1));
             let mailbox = of(&|t| *t == Target::Mailbox);
-            // At 80 columns the header has room for the node, not how.
-            let said = match width {
-                80 => "propagation node 9c9c9c9c",
-                _ => "propagation node 9c9c9c9c adopted",
-            };
-            assert_eq!(under(&shot, &mailbox), said, "{width}: {shot}");
+            // With no trust word for an unnamed peer (1279) the header has
+            // room for the node and how at both sizes.
+            assert_eq!(
+                under(&shot, &mailbox),
+                "propagation node 9c9c9c9c adopted",
+                "{width}: {shot}"
+            );
             let badge = of(&|t| matches!(t, Target::Badge(_)));
             assert_eq!(under(&shot, &badge), "[1]", "{width}: {shot}");
             let marks = of(&|t| matches!(t, Target::Block { mark: true, .. }));

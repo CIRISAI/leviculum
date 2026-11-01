@@ -98,21 +98,115 @@ pub fn set_name(app: &Path, name: &str) -> Result<(), String> {
     std::fs::write(&path, name.trim()).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// The mailbox's store, beside the running home node's (SQLite takes both).
+fn store(app: &Path) -> Result<loquax::store::Store, String> {
+    let address = loquax::engine::delivery_address(&identity(app)?)?;
+    loquax::store::Store::open_in(&app.join(DIR), address).map_err(|e| e.to_string())
+}
+
 /// An admission for the screens: a token issued in the mailbox's store, as
-/// `loquax mailbox admit` issues one, and the code that carries it.
+/// `loquax mailbox admit` issues one ([`loquax::home::admit::open`]), and
+/// the code that carries it.
 pub fn admission(app: &Path) -> Result<HomeCode, String> {
-    let identity = identity(app)?;
-    let address = loquax::engine::delivery_address(&identity)?;
-    let mut store =
-        loquax::store::Store::open_in(&app.join(DIR), address).map_err(|e| e.to_string())?;
-    let mut token = [0u8; 16];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut token);
-    store
-        .issue_token(&token, SCREENS, leviculum_std::local_time::unix_now_secs())
-        .map_err(|e| e.to_string())?;
-    Ok(HomeCode {
-        public_key: identity.public_key_bytes(),
-        token,
+    let public_key = identity(app)?.public_key_bytes();
+    let now = leviculum_std::local_time::unix_now_secs();
+    loquax::home::admit::open(&mut store(app)?, public_key, SCREENS, Vec::new(), now)
+        .map(|admission| admission.code)
+        .map_err(|e| e.to_string())
+}
+
+/// The rendezvous list a code of this phone's mailbox carries (1264): what
+/// the mailbox dials itself ([`servers`]), as another device dials it. The
+/// shipped entry servers are the shipped rendezvous list, the access point
+/// port first (`loquax::home::rendezvous::DEFAULT`); a list of the
+/// servers file goes as it stands, since one server for both is what a
+/// file names (a test's, a power user's).
+pub fn code_list(app: &Path) -> Vec<String> {
+    let dialled = servers(app);
+    let shipped: Vec<String> = DEFAULT_SERVERS.iter().map(|s| (*s).to_string()).collect();
+    match dialled == shipped {
+        true => loquax::home::rendezvous::default_list(),
+        false => dialled,
+    }
+}
+
+/// How long this mailbox's codes are good for, in seconds: its config's
+/// `home_token_hours`, a day by default, as on a computer.
+pub fn token_ttl_secs(app: &Path) -> Result<i64, String> {
+    let config = loquax::config::load(&app.join(DIR)).map_err(|error| error.to_string())?;
+    Ok(loquax::home::token_ttl_secs(&config))
+}
+
+/// A device being linked (1264): its code's token, the devices the mailbox
+/// had admitted when the code was made, and when it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Linking {
+    pub token: [u8; 16],
+    pub known: Vec<([u8; 16], i64)>,
+    pub expires_at: i64,
+}
+
+/// Where a link stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Linked {
+    /// The code is open; no device redeemed it yet.
+    Waiting,
+    /// A device redeemed it, under this name.
+    Linked(String),
+    /// The code ran out or was withdrawn, and no device came with it.
+    Over,
+}
+
+/// "Link a device" (1264, finding 7): a code for another device of the
+/// same `lqxh1` form `loquax mailbox admit` prints, issued self-named so
+/// the device is listed under the name its join brings, the rendezvous
+/// list of [`code_list`] behind it; and what [`linked`] needs to see the
+/// device come.
+pub fn link_code(app: &Path) -> Result<(loquax::home::admit::Admission, Linking), String> {
+    let public_key = identity(app)?.public_key_bytes();
+    let ttl = token_ttl_secs(app)?;
+    let now = leviculum_std::local_time::unix_now_secs();
+    let mut store = store(app)?;
+    let known = store
+        .devices()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|device| (device.device, device.admitted_at))
+        .collect();
+    let admission = loquax::home::admit::open(
+        &mut store,
+        public_key,
+        loquax::home::admit::SELF_NAMED,
+        code_list(app),
+        now,
+    )
+    .map_err(|e| e.to_string())?;
+    let linking = Linking {
+        token: admission.code.token,
+        known,
+        expires_at: admission.expires_at(ttl),
+    };
+    Ok((admission, linking))
+}
+
+/// Whether the device of `linking` came: its token still open, a device
+/// admitted since that was not (a device admitted again counts, under its
+/// new name), or neither.
+pub fn linked(app: &Path, linking: &Linking) -> Result<Linked, String> {
+    let ttl = token_ttl_secs(app)?;
+    let now = leviculum_std::local_time::unix_now_secs();
+    let mut store = store(app)?;
+    let devices = store.devices().map_err(|e| e.to_string())?;
+    if let Some(device) = devices
+        .iter()
+        .find(|device| !linking.known.contains(&(device.device, device.admitted_at)))
+    {
+        return Ok(Linked::Linked(device.name.clone()));
+    }
+    let open = store.open_tokens(now, ttl).map_err(|e| e.to_string())?;
+    Ok(match open.iter().any(|open| open.token == linking.token) {
+        true => Linked::Waiting,
+        false => Linked::Over,
     })
 }
 
@@ -321,5 +415,48 @@ mod tests {
         assert_eq!(choose_here(app.path()).expect("again"), first);
         let code = admission(app.path()).expect("admission");
         assert_eq!(code.public_key, first);
+    }
+
+    /// A phone's link code (1264): the shipped entry servers go into it as
+    /// the shipped rendezvous list, a servers file's list as it stands; the
+    /// device redeeming it is seen under the name it brought, and a code
+    /// withdrawn with no device is over.
+    #[test]
+    fn a_link_code_carries_the_list_and_sees_its_device_come() {
+        let app = tempfile::tempdir().expect("app dir");
+        let key = choose_here(app.path()).expect("chosen");
+        assert_eq!(
+            code_list(app.path()),
+            loquax::home::rendezvous::default_list()
+        );
+        std::fs::write(
+            app.path().join(DIR).join(SERVERS_FILE),
+            "# a test's\n10.0.0.2:4242\n",
+        )
+        .expect("servers");
+        assert_eq!(code_list(app.path()), ["10.0.0.2:4242"]);
+        admission(app.path()).expect("the screens' own");
+        let (code, linking) = link_code(app.path()).expect("a link code");
+        let (parsed, list) = HomeCode::parse_with_rendezvous(&code.text()).expect("it reads back");
+        assert_eq!(parsed.public_key, key);
+        assert_eq!(list, ["10.0.0.2:4242"]);
+        assert_eq!(
+            linking.expires_at,
+            code.issued_at + 3600 * loquax::home::DEFAULT_TOKEN_HOURS as i64
+        );
+        assert_eq!(linked(app.path(), &linking), Ok(Linked::Waiting));
+        let mut store = store(app.path()).expect("store");
+        let now = leviculum_std::local_time::unix_now_secs();
+        store
+            .redeem_token_as(&code.code.token, &[7; 16], "Pixel 8", now, 3600)
+            .expect("redeemed");
+        assert_eq!(
+            linked(app.path(), &linking),
+            Ok(Linked::Linked("Pixel 8".to_string()))
+        );
+        let (other, linking) = link_code(app.path()).expect("another");
+        let prefix = loquax::address::to_hex(&other.code.token);
+        store.revoke_token(&prefix[..8]).expect("withdrawn");
+        assert_eq!(linked(app.path(), &linking), Ok(Linked::Over));
     }
 }

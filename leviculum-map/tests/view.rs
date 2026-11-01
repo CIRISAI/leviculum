@@ -513,6 +513,7 @@ fn every_region_in_a_view_is_drawn_the_deepest_last() {
         index: 0,
         len: 0,
         labels: None,
+        buildings: None,
     };
     let regions = [
         ("a.lmr", header(86_000_000, 86_800_000, 15)),

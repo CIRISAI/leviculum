@@ -17,6 +17,7 @@
 //! selected block in 16 colours and in monochrome) reverses the text alone,
 //! as the monochrome screen always has.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -29,7 +30,8 @@ use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
-use super::scene::PositionBadge;
+use super::recording::{Fold, LevelTrack, Verb};
+use super::scene::{PositionBadge, RecordingBar};
 use super::strings::{Arg, Lang, StrId, Text};
 use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
 use crate::names::Names;
@@ -75,6 +77,9 @@ pub struct Draw<'a> {
     /// The reader's read receipts switch (1233): off, read is drawn
     /// delivered ([`super::shown_delivery`]).
     pub receipts: bool,
+    /// The voice messages' level tracks the model holds (1276): a
+    /// bubble's waveform is its track's where there is one.
+    pub tracks: Option<&'a BTreeMap<([u8; 16], u64), LevelTrack>>,
 }
 
 /// A style drawn in a token's colours.
@@ -451,6 +456,54 @@ fn block(
         }
         _ => body,
     };
+    // The media first, the words under them (1268), as every target draws
+    // a bubble: a photo (1220) says so, `Enter` on it shows it whole in
+    // the system's viewer; a file (1221) its name and size, `Enter` saves
+    // it under the home and opens it; a voice message (1222) its length,
+    // `Enter` plays it. Without words the media is the block alone, no
+    // empty row under it.
+    let (dot, photo_glyph, file_glyph, voice_glyph) = match draw.ascii {
+        true => ("-", "[#]", "[f]", "[v]"),
+        false => ("·", "▣", "▤", "♪"),
+    };
+    let mut media = Vec::new();
+    if let Some(photo) = super::photos::photo_of(&message.fields) {
+        media.push(format!(
+            "{photo_glyph} photo {dot} {}",
+            super::photos::size_words(photo.bytes)
+        ));
+    }
+    for file in super::files::files_of(&message.fields) {
+        media.push(format!(
+            "{file_glyph} {} {dot} {}",
+            super::files::safe_name(&file.name),
+            super::photos::size_words(file.bytes)
+        ));
+    }
+    if let Some(voice) = super::voice::voice_of(&message.fields) {
+        media.push(format!(
+            "{voice_glyph} voice message {dot} {}",
+            super::voice::duration_words(voice.duration_ms)
+        ));
+        // Its waveform under it (1276), the scene's bars in block
+        // characters: the recording's own track or the decoded sound's
+        // where the model has one, the stream's packet sizes otherwise.
+        let track = draw
+            .tracks
+            .and_then(|tracks| tracks.get(&(peer, message.activity)));
+        let levels = match track {
+            Some(track) => track.bars(super::voice::BARS, Fold::Peak),
+            None => voice.levels.clone(),
+        };
+        if !levels.is_empty() {
+            let n = super::voice::BARS.min(cap).max(1);
+            media.push(waveform(&levels, n, false, draw.ascii));
+        }
+    }
+    if !body.trim().is_empty() {
+        media.push(body);
+    }
+    let body = media.join("\n");
     // A reaction drawn as a block, its signature broken: what it claims.
     let body = match (body.trim().is_empty(), message.reaction()) {
         (true, Some((_, content))) => format!("reacted {content}"),
@@ -744,4 +797,209 @@ fn entry(
     );
     push(&mut bottom, " ", RStyle::default());
     [top, bottom]
+}
+
+/// The eight steps of a level, 0 to 100, as block characters: loud is
+/// tall (1276).
+pub const LEVEL_BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// The same eight steps where the screen draws ASCII alone.
+pub const LEVEL_ASCII: [char; 8] = ['_', '.', '-', ':', '=', '+', '*', '#'];
+
+/// A level's character: one of the eight steps.
+pub fn level_glyph(level: u8, ascii: bool) -> char {
+    let step = usize::from(level.min(100)) * 8 / 101;
+    match ascii {
+        true => LEVEL_ASCII[step],
+        false => LEVEL_BLOCKS[step],
+    }
+}
+
+/// `levels` drawn `width` cells wide. Moving (it records), the newest
+/// stand at the right edge and a short track is blank to the left of
+/// them; standing, the whole track is folded to the width by the one
+/// resampler ([`LevelTrack::bars`]).
+pub fn waveform(levels: &[u8], width: usize, moving: bool, ascii: bool) -> String {
+    let shown: Vec<u8> = match moving {
+        true => levels[levels.len().saturating_sub(width)..].to_vec(),
+        false => LevelTrack::of(levels.to_vec()).bars(width, Fold::Peak),
+    };
+    let blank = width.saturating_sub(shown.len());
+    let mut out: String = core::iter::repeat_n(' ', blank).collect();
+    out.extend(shown.iter().map(|&l| level_glyph(l, ascii)));
+    out
+}
+
+/// The terminal's words for a recording bar's button (1276): the key
+/// and what it does. Send's key is the live send chord's, which `v` and
+/// `Alt-v` stand beside.
+pub fn rec_key_words(verb: Verb, send: &str) -> Option<String> {
+    let words = match verb {
+        Verb::Play => "Space play",
+        Verb::StopPlay => "Space stop",
+        Verb::Pause => "p pause",
+        Verb::Resume => "p resume",
+        Verb::Discard => "Esc cancel",
+        Verb::Send => return Some(format!("{send} send")),
+        Verb::Lock | Verb::AskMicrophone => return None,
+    };
+    Some(words.into())
+}
+
+/// The silence line's button, after its words: a click says how to let
+/// the microphone through.
+pub const REC_ALLOW: &str = "allow";
+
+/// The recording bar as the terminal draws it in the compose box, and
+/// where its buttons are.
+#[derive(Clone, Debug)]
+pub struct RecRows {
+    /// The bar's row, then the line under the waveform when it says
+    /// something.
+    pub rows: Vec<RLine>,
+    /// The buttons' cells: a row, its first column, how many columns, and
+    /// the verb a click raises.
+    pub buttons: Vec<(usize, usize, usize, Verb)>,
+}
+
+/// The order the terminal names the bar's buttons in: listening first,
+/// sending last, where the eye ends.
+fn rec_order(verb: Verb) -> u8 {
+    match verb {
+        Verb::Play | Verb::StopPlay => 0,
+        Verb::Pause | Verb::Resume => 1,
+        Verb::Discard => 2,
+        Verb::Send => 3,
+        Verb::Lock | Verb::AskMicrophone => 4,
+    }
+}
+
+/// `bar` in the compose box, `width` cells inside its border (1276):
+/// `● REC 00:07  ▁▂▃▅▇…  p pause · Esc cancel · Enter send`, the dot and
+/// the timer in the theme's red (the timer amber in the last 30 s), the
+/// dot hollow once it stands and dimmed every other half second while it
+/// pulses, the waveform as block characters, the keys muted; under it the
+/// line the scene says, in amber, its click where it has one. `send` is
+/// the live send chord, `tick` the model's quarter seconds.
+pub fn recording_rows(
+    bar: &RecordingBar,
+    width: usize,
+    ascii: bool,
+    tokens: &Tokens,
+    send: &str,
+    tick: u64,
+) -> RecRows {
+    let red = RStyle {
+        bold: true,
+        ..painted(tokens.error)
+    };
+    // No amber among the tokens: the terminal's 214 where it draws
+    // colour, which the renderer brings down to the tier's palette.
+    let amber = RStyle {
+        fg: tokens
+            .error
+            .fg
+            .map(|_| leviculum_ui::color::Ink::Rgb(0xff, 0xaf, 0x00)),
+        bold: true,
+        ..RStyle::default()
+    };
+    let muted = painted(tokens.muted);
+    let running = bar.phase.running();
+    let dot = match (running, ascii) {
+        (true, false) => "●",
+        (false, false) => "○",
+        (true, true) => "*",
+        (false, true) => "o",
+    };
+    let dot_style = match bar.pulsing && (tick / 2) % 2 == 1 {
+        true => muted,
+        false => red,
+    };
+    let timer = bar.timer.words.resolve(Lang::En);
+    let mut buttons: Vec<Verb> = bar.buttons.iter().map(|b| b.verb).collect();
+    buttons.sort_by_key(|&v| rec_order(v));
+    let mut keys: Vec<(Verb, String)> = buttons
+        .into_iter()
+        .filter_map(|v| rec_key_words(v, send).map(|w| (v, w)))
+        .collect();
+    let sep = match ascii {
+        true => " - ",
+        false => " · ",
+    };
+    let head = 1 + 1 + timer.chars().count() + 2;
+    let keys_len = |keys: &[(Verb, String)]| -> usize {
+        match keys.len() {
+            0 => 0,
+            n => 2 + keys.iter().map(|(_, w)| w.chars().count()).sum::<usize>() + 3 * (n - 1),
+        }
+    };
+    // Where the screen is narrow the keys go, `Esc cancel` first (the
+    // border names it too), then listening, then pausing, Send never: the
+    // waveform keeps eight cells.
+    for verb in [
+        Verb::Discard,
+        Verb::Play,
+        Verb::StopPlay,
+        Verb::Pause,
+        Verb::Resume,
+    ] {
+        if head + 8 + keys_len(&keys) <= width {
+            break;
+        }
+        keys.retain(|(v, _)| *v != verb);
+    }
+    let wave_width = width
+        .saturating_sub(head + keys_len(&keys))
+        .min(super::recording::LIVE_WINDOWS);
+    let mut row = RLine::default();
+    push(&mut row, dot, dot_style);
+    push(&mut row, " ", RStyle::default());
+    push(
+        &mut row,
+        &timer,
+        match bar.timer.amber {
+            true => amber,
+            false => red,
+        },
+    );
+    push(&mut row, "  ", RStyle::default());
+    push(
+        &mut row,
+        &waveform(&bar.wave.levels, wave_width, bar.wave.moving, ascii),
+        RStyle::default(),
+    );
+    let mut hits = Vec::new();
+    if !keys.is_empty() {
+        push(&mut row, "  ", RStyle::default());
+        for (n, (verb, words)) in keys.iter().enumerate() {
+            if n > 0 {
+                push(&mut row, sep, muted);
+            }
+            hits.push((0, row.cells.len(), words.chars().count(), *verb));
+            push(&mut row, words, muted);
+        }
+    }
+    row.cells.truncate(width);
+    let mut rows = vec![row];
+    if let Some(notice) = &bar.notice {
+        let mut line = RLine::default();
+        push(&mut line, &notice.words.resolve(Lang::En), amber);
+        if notice.action.is_some() {
+            push(&mut line, sep, muted);
+            hits.push((
+                1,
+                line.cells.len(),
+                REC_ALLOW.chars().count(),
+                Verb::AskMicrophone,
+            ));
+            push(&mut line, REC_ALLOW, muted);
+        }
+        line.cells.truncate(width);
+        rows.push(line);
+    }
+    hits.retain(|&(_, col, _, _)| col < width);
+    RecRows {
+        rows,
+        buttons: hits,
+    }
 }

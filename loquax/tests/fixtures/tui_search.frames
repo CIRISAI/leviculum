@@ -1,5 +1,5 @@
 --- 120 x 40: typed ---
-┌● Search────────────── esc closes ┐┌  <4f4f4f4f…>  unknown────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
+┌● Search────────────── esc closes ┐┌  <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
 │ / tripod                         ││                                                propagation node 9c9c9c9c adopted │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
@@ -40,7 +40,7 @@
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- 120 x 40: opened ---
-┌  Search────────────── esc closes ┐┌● <4f4f4f4f…>  unknown────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
+┌  Search────────────── esc closes ┐┌● <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
 │ / tripod                         ││                                                propagation node 9c9c9c9c adopted │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
@@ -81,7 +81,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- 120 x 40: both groups ---
-┌● Search────────────── esc closes ┐┌  <4f4f4f4f…>  unknown────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
+┌● Search────────────── esc closes ┐┌  <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
 │ / 4f4f                           ││                                                propagation node 9c9c9c9c adopted │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  1 ││                                                                                  │
@@ -122,7 +122,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- 120 x 40: closed ---
-┌● Loquax afafafaf─────────────────┐┌  <4f4f4f4f…>  unknown────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
+┌● Loquax afafafaf─────────────────┐┌  <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
 │ <b7b7b7b7…>                14:06 ││                                                propagation node 9c9c9c9c adopted │
 │ the tripod is with 4f4f4f4f  [1] ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -163,7 +163,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- 80 x 24: typed ---
-┌● Search──── esc closes ┐┌  <4f4f4f4f…>  unknown─── propagation node 9c9c9c9c ┐
+┌● Search──── esc closes ┐┌  <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │ / tripod               ││                                                    │
 │                        ││              yes, from ten. Shall I bring the T114 │
 │ MESSAGES             3 ││              and the long antenna, or is the stick │
@@ -188,7 +188,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- 80 x 24: opened ---
-┌  Search──── esc closes ┐┌● <4f4f4f4f…>  unknown─── propagation node 9c9c9c9c ┐
+┌  Search──── esc closes ┐┌● <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │ / tripod               ││                                                    │
 │                        ││              yes, from ten. Shall I bring the T114 │
 │ MESSAGES             3 ││              and the long antenna, or is the stick │
@@ -213,7 +213,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q qu
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- 80 x 24: both groups ---
-┌● Search──── esc closes ┐┌  <4f4f4f4f…>  unknown─── propagation node 9c9c9c9c ┐
+┌● Search──── esc closes ┐┌  <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │ / 4f4f                 ││                                                    │
 │                        ││              yes, from ten. Shall I bring the T114 │
 │ CONVERSATIONS        1 ││              and the long antenna, or is the stick │
@@ -238,7 +238,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- 80 x 24: closed ---
-┌● Loquax afafafaf───────┐┌  <4f4f4f4f…>  unknown─── propagation node 9c9c9c9c ┐
+┌● Loquax afafafaf───────┐┌  <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │ <b7b7b7b7…>      14:06 ││                                                    │
 │ the tripod is wit… [1] ││              yes, from ten. Shall I bring the T114 │
 │                        ││              and the long antenna, or is the stick │

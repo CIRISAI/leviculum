@@ -373,6 +373,9 @@ impl Job {
             cap: LOAD_CAP,
             profile: PROFILE,
             locale: user_language(),
+            // The phone and the window draw them from z16 (1191); the
+            // terminal and the M9 never read the section.
+            buildings: true,
         };
         // Not `*.lmr`, so no painter reads it half written.
         let part = self.dir.join(format!(

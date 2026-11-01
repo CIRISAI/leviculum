@@ -19,16 +19,19 @@ use std::path::PathBuf;
 
 use embedded_graphics::prelude::*;
 use leviculum_map::cells::{self, Encoding, Sets};
-use leviculum_map::draw::{draw_in_scaled, Ink};
+use leviculum_map::draw::{draw_in_scaled, draws_buildings, Ink, BUILDING_CAP};
 use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::Region;
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, FillStats, Scratch};
-use leviculum_mapfill::frame::Frame;
+use leviculum_mapfill::frame::{rgb888, Frame};
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
 use leviculum_mapfill::style::{MapTheme, Profile, Style};
 
 const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
+/// The same Florence cut again with its building sections (version 3,
+/// 1192): its tile blobs are `FLORENCE`'s byte for byte.
+const BUILDINGS: &[u8] = include_bytes!("../fixtures/buildings/firenze.lmr");
 
 /// The centre of the region's box.
 fn centre() -> LatLon {
@@ -43,8 +46,23 @@ fn centre() -> LatLon {
 /// frame cleared to the table's background: its pixels as RGB and what
 /// the filler counted.
 fn draw(view: &Viewport, ink: Ink, style: Style, percent: u32) -> (Vec<u8>, RenderStats) {
-    let r = Region::from_bytes(FLORENCE).expect("open");
-    let tiles = r.view(view).expect("tiles");
+    draw_from(FLORENCE, view, ink, style, percent)
+}
+
+/// [`draw`] from the region `bytes`, with its building sections where
+/// the view draws them, as the painter reads them.
+fn draw_from(
+    bytes: &[u8],
+    view: &Viewport,
+    ink: Ink,
+    style: Style,
+    percent: u32,
+) -> (Vec<u8>, RenderStats) {
+    let r = Region::from_bytes(bytes).expect("open");
+    let mut tiles = r.view(view).expect("tiles");
+    if draws_buildings(style, ink, view.zoom()) {
+        r.with_buildings(&mut tiles).expect("buildings");
+    }
     let (w, h) = view.size();
     let mut fb = vec![0u16; (w * h) as usize];
     let mut edges = vec![Edge::default(); 8192];
@@ -302,4 +320,157 @@ fn the_terminal_techniques_dump_their_golden_frames() {
         }
     }
     assert!(moved.is_empty(), "frames moved, this run's: {moved:?}");
+}
+
+/// The buildings' views (1192): z16 and z17, light and dark, at the
+/// window's line width and at the phone's (density 2.75), each its golden
+/// pixel for pixel, every footprint in view drawn and outlined, none an
+/// overflow. The phone and the window draw these through the same tiles
+/// (`loquax::tiles`), so a picture here is what both show.
+#[test]
+fn the_buildings_draw_their_goldens_from_z16() {
+    let at = project(centre());
+    let mut moved = Vec::new();
+    for zoom in [16u8, 17] {
+        for (theme, t) in [(MapTheme::Light, "light"), (MapTheme::Dark, "dark")] {
+            for (percent, who) in [(100u32, "window"), (275, "phone")] {
+                let name = format!("screen-{t}-{who}-480x320-z{zoom}.png");
+                let view = Viewport::new(at, zoom, 480, 320);
+                let style = Style::SCREEN.in_theme(theme);
+                let (rgb, st) = draw_from(BUILDINGS, &view, Ink::Colour, style, percent);
+                assert_eq!(st.overflows, 0, "{name}");
+                assert_eq!(st.blocks, 0, "{name}");
+                assert!(
+                    st.buildings > 100 && st.outline > st.buildings,
+                    "{name}: {st:?}"
+                );
+                // Without buildings the same view differs only where they are.
+                let (plain, _) = draw_from(
+                    BUILDINGS,
+                    &view,
+                    Ink::Colour,
+                    Style::PC.in_theme(theme),
+                    percent,
+                );
+                let fill = rgb888(
+                    theme
+                        .palette()
+                        .area(leviculum_mapfill::style::Class::Building),
+                );
+                let edge = rgb888(theme.palette().building_edge);
+                for (a, b) in rgb.chunks(3).zip(plain.chunks(3)) {
+                    assert!(a == b || a == fill || a == edge, "{name}: {a:?} over {b:?}");
+                }
+                if let Err(e) = std::panic::catch_unwind(|| same_as(&name, &rgb, 480, 320)) {
+                    moved.push(format!("{name}: {:?}", e.downcast_ref::<String>()));
+                }
+            }
+        }
+    }
+    assert!(moved.is_empty(), "moved:\n{}", moved.join("\n"));
+}
+
+/// The frames at z15 and shallower are today's with buildings on (1192):
+/// the region with building sections, drawn in the window's and the
+/// phone's finish, gives the committed goldens byte for byte, and z11 to
+/// z14 the frames of the region without them. A view the terminal draws
+/// (the PC's finish) never draws them, at z16 neither.
+#[test]
+fn the_frames_at_z15_and_shallower_are_todays() {
+    let at = project(centre());
+    for (name, style, zoom, (w, h)) in [
+        ("pc-light-480x240-z15.png", Style::SCREEN, 15, (480, 240)),
+        (
+            "pc-dark-480x240-z15.png",
+            Style::SCREEN.in_theme(MapTheme::Dark),
+            15,
+            (480, 240),
+        ),
+        ("pc-light-2x-640x320-z16.png", Style::PC, 16, (640, 320)),
+    ] {
+        let view = Viewport::new(at, zoom, w, h);
+        let percent = if zoom == 16 { 200 } else { 100 };
+        let (rgb, st) = draw_from(BUILDINGS, &view, Ink::Colour, style, percent);
+        assert_eq!(st.buildings, 0, "{name}");
+        same_as(name, &rgb, w, h);
+    }
+    for zoom in 11..=15 {
+        for theme in [MapTheme::Light, MapTheme::Dark] {
+            let view = Viewport::new(at, zoom, 480, 320);
+            let with = draw_from(
+                BUILDINGS,
+                &view,
+                Ink::Colour,
+                Style::SCREEN.in_theme(theme),
+                100,
+            );
+            let without = draw_from(FLORENCE, &view, Ink::Colour, Style::PC.in_theme(theme), 100);
+            assert!(with.0 == without.0, "z{zoom} {theme:?} moved");
+            assert_eq!(with.1, without.1, "z{zoom} {theme:?}");
+        }
+    }
+}
+
+/// The cap (1192): a z15 tile holding [`BUILDING_CAP`] footprints is drawn
+/// outlined, one more and the tile is drawn as blocks, every footprint
+/// filled, no outline, and the fills the same as the outlined ones'.
+#[test]
+fn a_tile_over_the_cap_is_drawn_as_blocks() {
+    use leviculum_map::buildings::{encode_section, Buildings};
+    let r = Region::from_bytes(FLORENCE).expect("open");
+    let view = Viewport::new(project(centre()), 16, 480, 320);
+    let squares = |n: u32| -> Vec<Vec<Vec<(i16, i16)>>> {
+        (0..n)
+            .map(|i| {
+                let (x, y) = ((i % 46) as i16 * 88, (i / 46) as i16 * 88);
+                vec![vec![(x, y), (x + 40, y), (x + 40, y + 40), (x, y + 40)]]
+            })
+            .collect()
+    };
+    let mut seen = Vec::new();
+    for n in [BUILDING_CAP, BUILDING_CAP + 1] {
+        let section = encode_section(&squares(n)).expect("section");
+        let b = Buildings::parse(&section).expect("parse");
+        assert_eq!(b.len(), n);
+        let mut tiles = r.view(&view).expect("tiles");
+        for t in tiles.iter_mut().filter(|t| t.tile.id.z == 15) {
+            t.buildings = Some(b);
+        }
+        let (w, h) = view.size();
+        let mut fb = vec![0u16; (w * h) as usize];
+        let mut edges = vec![Edge::default(); 8192];
+        let mut active = vec![0u16; 8192];
+        let mut heads = vec![0u16; h as usize];
+        let mut points = vec![Point::zero(); 8192];
+        let mut ring_ends = vec![0u16; 2048];
+        let mut frame = Frame::new(&mut fb, w, h).expect("frame");
+        let mut scratch = Scratch {
+            edges: &mut edges,
+            heads: &mut heads,
+            active: &mut active,
+        };
+        let mut work = Work {
+            points: &mut points,
+            ring_ends: &mut ring_ends,
+        };
+        let Ok(st) = draw_in_scaled(
+            &tiles,
+            r.area(&view),
+            Profile::Full,
+            Ink::Colour,
+            Style::SCREEN,
+            100,
+            &mut frame,
+            &mut scratch,
+            &mut work,
+            &mut NoClock,
+        );
+        assert!(st.buildings > 0, "{n}");
+        seen.push(st);
+    }
+    let (under, over) = (seen[0], seen[1]);
+    assert_eq!((under.blocks, over.blocks), (0, 2));
+    assert!(under.outline >= 4 * under.buildings, "{under:?}");
+    assert_eq!(over.outline, 0);
+    assert!(over.buildings >= under.buildings);
 }

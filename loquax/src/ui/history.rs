@@ -130,6 +130,12 @@ pub enum StoreWrite {
     /// Keep the conversation's draft as it stands, the empty one deleting
     /// it (1219).
     Draft { peer: [u8; 16], draft: Draft },
+    /// Keep the conversation's position share as it stands, none deleting
+    /// it (1273): a share survives a restart.
+    Share {
+        peer: [u8; 16],
+        share: Option<super::share::Share>,
+    },
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -333,6 +339,11 @@ impl<B> UiModel<B> {
                 });
             }
         }
+        writes.extend(
+            self.take_share_writes()
+                .into_iter()
+                .map(|(peer, share)| StoreWrite::Share { peer, share }),
+        );
         writes.append(&mut self.forgotten);
         writes
     }

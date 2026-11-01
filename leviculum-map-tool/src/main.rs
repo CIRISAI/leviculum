@@ -57,6 +57,10 @@ enum Cmd {
         /// where they differ; without it the local names alone.
         #[arg(long)]
         locale: Option<String>,
+        /// Cut the z15 tiles' building footprints into building sections
+        /// (region version 3); `--buildings false` writes version 2.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        buildings: bool,
     },
     /// Copy the tiles of a box of a PMTiles archive into a smaller one, as
     /// they are: the test fixture of the autoload (leviculum-mapcut/fixtures).
@@ -121,17 +125,30 @@ fn print_zoom(label: &str, s: &ZoomStats) {
         s.vertices_in, s.vertices_out, s.over_device, s.clamped, s.resimplified,
         s.point_labels, s.line_labels, s.label_bytes
     );
+    if s.buildings_in > 0 {
+        println!(
+            "MAPTOOL buildings zoom={label} pieces_in={} footprints={} vertices={} sections={} bytes={} degenerate={} over_device={}",
+            s.buildings_in, s.buildings_out, s.building_vertices, s.building_sections,
+            s.building_bytes, s.buildings_degenerate, s.buildings_over_device
+        );
+    }
 }
 
-fn cmd_cut(
-    inputs: &[String],
-    output: &Path,
-    bbox: &str,
-    zooms: (u8, u8),
+/// What `cut` keeps of its source, beside the box and the zooms.
+struct Keep {
     profile: u8,
     threads: Option<usize>,
     locale: Option<String>,
-) -> Res<()> {
+    buildings: bool,
+}
+
+fn cmd_cut(inputs: &[String], output: &Path, bbox: &str, zooms: (u8, u8), keep: Keep) -> Res<()> {
+    let Keep {
+        profile,
+        threads,
+        locale,
+        buildings,
+    } = keep;
     let t = Instant::now();
     let bounds = parse_bbox(bbox)?;
     let remote = |i: &String| i.starts_with("http://") || i.starts_with("https://");
@@ -152,6 +169,7 @@ fn cmd_cut(
             .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
             .unwrap_or(1),
         locale,
+        buildings,
     };
     let file = BufWriter::new(File::create(output)?);
     // A remote archive's tiles of the box are fetched first, in few
@@ -315,14 +333,26 @@ fn cmd_info(path: &Path) -> Res<()> {
             z.1 += u64::from(e.len);
         }
         println!(
-            "MAPTOOL info version=2 strings={} string_bytes={} label_sections={}",
-            l.strings, l.table_len, l.sections
+            "MAPTOOL info version={} strings={} string_bytes={} label_sections={} building_sections={}",
+            h.version_of(),
+            l.strings,
+            l.table_len,
+            l.sections,
+            region.building_sections()
         );
+    }
+    let mut built = std::collections::BTreeMap::<u8, (u64, u64)>::new();
+    for n in 0..region.building_sections() {
+        let e = region.building_entry(n).map_err(|e| format!("{e:?}"))?;
+        let z = built.entry(e.id.z).or_default();
+        z.0 += 1;
+        z.1 += u64::from(e.len);
     }
     for (z, (n, bytes)) in per {
         let (sections, label_bytes) = labels.get(&z).copied().unwrap_or_default();
+        let (building_sections, building_bytes) = built.get(&z).copied().unwrap_or_default();
         println!(
-            "MAPTOOL info zoom={z} entries={n} blob_bytes={bytes} label_sections={sections} label_bytes={label_bytes}"
+            "MAPTOOL info zoom={z} entries={n} blob_bytes={bytes} label_sections={sections} label_bytes={label_bytes} building_sections={building_sections} building_bytes={building_bytes}"
         );
     }
     Ok(())
@@ -433,14 +463,18 @@ fn main() -> Res<()> {
             profile,
             threads,
             locale,
+            buildings,
         } => cmd_cut(
             &inputs,
             &output,
             &bbox,
             (min_zoom, max_zoom),
-            profile,
-            threads,
-            locale,
+            Keep {
+                profile,
+                threads,
+                locale,
+                buildings,
+            },
         ),
         Cmd::Extract {
             output,

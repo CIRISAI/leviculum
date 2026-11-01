@@ -479,3 +479,184 @@ async fn a_fetch_from_a_nonexistent_node_fails_cleanly() {
 
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
+
+/// The image field Python's router handed its delivery callback, read by
+/// our codec: the format word and the picture's bytes.
+#[cfg(feature = "photos")]
+fn python_photo(message: &serde_json::Value) -> (String, Vec<u8>) {
+    use leviculum_lxmf::msgpack;
+    let packed = hex_bytes(message, "fields");
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).expect("a fields map");
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).expect("an int key");
+        let start = at;
+        msgpack::skip(&packed, &mut at).expect("a value");
+        if key == leviculum_lxmf::constants::FIELD_IMAGE {
+            let fields = [(key, packed[start..at].to_vec())];
+            let (format, data) = loquax::ui::photos::photo_parts(&fields).expect("[format, bytes]");
+            return (format, data.to_vec());
+        }
+    }
+    panic!("no image field in {message}");
+}
+
+/// Positive and negative (1220): `loquax send --photo` delivers the
+/// picture to a real Python LXMF inbox as the image field Columba and
+/// Sideband write, `[format, bytes]` under `FIELD_IMAGE`
+/// (`reference/LXMF/LXMF/LXMF.py:13`), scaled to the size asked for,
+/// upright and without its EXIF; over a link, since it is past one
+/// packet. A file that is no picture is a usage error and sends nothing.
+#[cfg(feature = "photos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_reaches_a_python_lxmf_receiver_as_the_image_field() {
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/photo-portrait.jpg"
+    );
+    let peer = PythonPeer::start();
+    let python_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    peer.lxmf_announce();
+
+    for (size, edge) in [("small", 800u32), ("phone", 1600)] {
+        let sent = mesh
+            .send(
+                vec![
+                    python_address.clone(),
+                    "--photo".to_string(),
+                    fixture.to_string(),
+                    "--photo-size".to_string(),
+                    size.to_string(),
+                    "--via".to_string(),
+                    "direct".to_string(),
+                    "--timeout".to_string(),
+                    "40".to_string(),
+                ],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(sent.code, Some(0), "{size}: {sent}");
+        let id = sent.enqueued_id();
+        let message = wait_for_python(&peer, &id, Duration::from_secs(40)).await;
+        assert!(hex_bytes(&message, "content").is_empty(), "{size}: no text");
+        let (format, data) = python_photo(&message);
+        assert_eq!(format, "jpg");
+        let (w, h) = loquax::photo::dimensions(&data).expect("a picture");
+        assert_eq!((w.max(h), h > w), (edge, true), "{size}: {w}x{h}, upright");
+        for secret in [&b"Exif"[..], b"Pixel 8", b"GPS"] {
+            assert!(!data.windows(secret.len()).any(|w| w == secret), "{size}");
+        }
+    }
+
+    let refused = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--photo".to_string(),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(refused.code, Some(2), "a usage error: {refused}");
+    assert!(refused.stderr.contains("not a picture"), "{refused}");
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// The file attachments field Python's router handed its delivery
+/// callback, raw: the entries as the reference packed them.
+fn python_files(message: &serde_json::Value) -> Vec<u8> {
+    use leviculum_lxmf::msgpack;
+    let packed = hex_bytes(message, "fields");
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).expect("a fields map");
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).expect("an int key");
+        let start = at;
+        msgpack::skip(&packed, &mut at).expect("a value");
+        if key == leviculum_lxmf::constants::FIELD_FILE_ATTACHMENTS {
+            return packed[start..at].to_vec();
+        }
+    }
+    panic!("no file attachments field in {message}");
+}
+
+/// Positive and negative (1221): `loquax send --file` delivers a file to a
+/// real Python LXMF inbox as the field Columba and Sideband write,
+/// `[[name, bytes]]` under `FIELD_FILE_ATTACHMENTS`
+/// (`reference/LXMF/LXMF/LXMF.py:12`), the name a str as Columba sends it
+/// and the bytes unchanged; over a link, since it is past one packet. A
+/// file past the 990 KB a receiver takes is a usage error and sends
+/// nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_reaches_a_python_lxmf_receiver_as_the_attachments_field() {
+    use leviculum_lxmf::msgpack;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("1221-file");
+    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    let name = "Protokoll Grüße.pdf";
+    let path = dir.join(name);
+    let data: Vec<u8> = (0..300_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    std::fs::write(&path, &data).expect("the file");
+    let large = dir.join("large.bin");
+    std::fs::write(&large, vec![0u8; loquax::ui::files::LARGEST + 1]).expect("the large file");
+
+    let peer = PythonPeer::start();
+    let python_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    peer.lxmf_announce();
+
+    let sent = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--file".to_string(),
+                path.display().to_string(),
+                "--via".to_string(),
+                "direct".to_string(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}");
+    let id = sent.enqueued_id();
+    let message = wait_for_python(&peer, &id, Duration::from_secs(40)).await;
+    assert!(hex_bytes(&message, "content").is_empty(), "no text");
+    let value = python_files(&message);
+    let mut at = 0;
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(1), "one file");
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(2), "[name, bytes]");
+    assert_eq!(
+        msgpack::read_str(&value, &mut at),
+        Ok(name),
+        "the name, a str"
+    );
+    assert!(
+        msgpack::read_bin(&value, &mut at) == Ok(&data[..]),
+        "the bytes unchanged"
+    );
+
+    let refused = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--file".to_string(),
+                large.display().to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(refused.code, Some(2), "a usage error: {refused}");
+    assert!(
+        refused.stderr.contains("A message carries at most 990 KB"),
+        "{refused}"
+    );
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+    let _ = std::fs::remove_dir_all(&dir);
+}

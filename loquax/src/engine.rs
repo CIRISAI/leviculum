@@ -1209,7 +1209,7 @@ impl Engine {
         out: &mut TickOutput,
     ) {
         let method = match request.via {
-            Via::Direct => delivery_method(request.body.len()),
+            Via::Direct => delivery_method(content_len(&request.body, &request.fields)),
             Via::Link => DeliveryMethod::Direct,
             Via::Propagated => {
                 // Guarded here rather than only in the CLI ordering, because
@@ -1500,6 +1500,17 @@ fn candidates(ready: &Ready, routes: &[Route]) -> Vec<Candidate> {
             }
         })
         .collect()
+}
+
+/// The bytes a message's content costs on the wire: its body and its
+/// fields with a generous allowance for each field's framing (key, array
+/// and bin headers). A photo (1220) has an empty body and is all fields;
+/// counting the body alone sent it opportunistically into the router's
+/// oversized fallback.
+fn content_len(body: &[u8], fields: &[leviculum_lxmf::Field]) -> usize {
+    fields.iter().fold(body.len(), |sum, (_, value)| {
+        sum.saturating_add(value.len() + 9)
+    })
 }
 
 /// Which LXMF delivery method a body of this size should use.
@@ -2622,6 +2633,13 @@ mod tests {
     fn short_bodies_go_by_packet_and_long_ones_by_link() {
         assert_eq!(delivery_method(8), DeliveryMethod::Opportunistic);
         assert_eq!(delivery_method(64_000), DeliveryMethod::Direct);
+        // A photo: no body, its bytes in a field (1220).
+        let photo = crate::ui::photos::photo_fields("jpg", vec![0; 100_000]);
+        assert_eq!(
+            delivery_method(content_len(b"", &photo)),
+            DeliveryMethod::Direct
+        );
+        assert_eq!(content_len(b"hi", &[]), 2);
     }
 
     /// Mine `job` with the test clock and recorded effects, on a runtime

@@ -2,11 +2,13 @@ package network.leviculum.loquax;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
@@ -14,6 +16,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.LruCache;
 import android.text.Editable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -43,6 +46,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * One conversation, after a modern messenger's layout (1129): a bar with
@@ -94,6 +99,30 @@ public class ChatActivity extends Activity implements Events.Listener {
     private TextView status;
     private EditText compose;
     private ImageButton send;
+    /**
+     * The compose bar's buttons by the scene's ids (1270): emoji, locate,
+     * camera, record inside the field, plus and send as the round one
+     * outside it. Which show is the library's (the compose node).
+     */
+    private final Map<String, ImageButton> barButtons = new java.util.HashMap<>();
+    private ImageButton record;
+    private View stagedBar;
+    private ImageView stagedView;
+    private TextView stagedWords;
+    /** The staged photo's words the thumbnail was drawn for. */
+    private String stagedShown = "";
+    /** The compose bar's sheet while open, and the answer it was built from. */
+    private Dialog sheet;
+    private String sheetShown = "";
+    /** The camera's capture (1270) and the camera permission it needs first. */
+    private static final int CAMERA = 48;
+    private static final int CAMERA_ASK = 0x10ca;
+    /**
+     * In a debuggable build, a picture of this name in the app's files is
+     * what the camera takes (1270): the device walk's fake capture, since
+     * an emulator has no camera app to hand the capture to.
+     */
+    static final String CAMERA_FIXTURE = "camera-fixture.jpg";
     private Adapter adapter;
     private ListView list;
     private boolean homeClient;
@@ -116,10 +145,48 @@ public class ChatActivity extends Activity implements Events.Listener {
     /** The last header the library gave: name, link, banner, petname. */
     private Map<String, Object> header = Core.map();
     private View banner;
+    /** Our share's chip (1273), its words and its Stop. */
+    private View shareChip;
+    private TextView shareWords;
+    private Button shareStop;
     /** Whether the address goes into the new contact the editor is creating. */
     private boolean insertWithAddress;
     /** The contact screen's request code. */
     private static final int CONTACT = 45;
+    /** The system picker's answer for the paperclip's "Photo" (1220). */
+    private static final int PHOTO = 46;
+    /** The system picker's answer for the paperclip's "File" (1221). */
+    private static final int FILE = 47;
+    /**
+     * The most bytes of a picked file kept: past the library's 990 KB cap,
+     * so it says the refusal; the rest is only counted.
+     */
+    private static final int FILE_KEEP = 1000 * 1000;
+    /** The longer side of a bubble's photo, in dp. */
+    private static final int PHOTO_DP = 240;
+    /** The most bytes of a picked picture read; past it the pick is refused. */
+    private static final int PICKED_MAX = 64 * 1024 * 1024;
+
+    /** Thumbnails the library drew, by message key: 16 MiB of them. */
+    private final LruCache<Long, Bitmap> thumbs = new LruCache<Long, Bitmap>(16 * 1024 * 1024) {
+        @Override
+        protected int sizeOf(Long key, Bitmap bitmap) {
+            return bitmap.getByteCount();
+        }
+    };
+    /** Decodes thumbnails and hands picked pictures over, one at a time. */
+    private final ExecutorService photos = Executors.newSingleThreadExecutor();
+    /** Voice messages (1222): the coding of one recorded, the player's decoding and writing. */
+    private final ExecutorService voices = Executors.newSingleThreadExecutor();
+    private final ExecutorService playback = Executors.newSingleThreadExecutor();
+    private final Voice.Player player = new Voice.Player();
+    /**
+     * The recording bar (1276): the compose row gives way to it while a
+     * voice message records; the library decides, it draws and records.
+     */
+    private RecordingBar recordingBar;
+    /** The played part of the voice message playing, for its bar when the row is drawn again. */
+    private float played;
     /**
      * The last search in this conversation and the key of its match shown, null for none: a key
      * has either sign (Rust's schema::wire_key), so no number stands for none.
@@ -132,6 +199,9 @@ public class ChatActivity extends Activity implements Events.Listener {
      * group and the library's words (a position's age, the day line) ripen.
      */
     private final Handler ticker = new Handler(Looper.getMainLooper());
+    /** Whether the system was asked for the microphone once (1276). */
+    private static final String MIC_ASKS = "asks";
+    private static final String MIC_ASKED = "microphone";
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
@@ -183,12 +253,85 @@ public class ChatActivity extends Activity implements Events.Listener {
                 pickEmoji();
             }
         });
-        final ImageButton attach = (ImageButton) findViewById(R.id.attach);
-        attach.setImageDrawable(new Glyph(Glyph.Kind.ATTACH, getColor(R.color.text_secondary)));
-        attach.setOnClickListener(new View.OnClickListener() {
+        int secondary = getColor(R.color.text_secondary);
+        barButtons.put("emoji", emoji);
+        ImageButton locate = (ImageButton) findViewById(R.id.locate);
+        locate.setImageDrawable(new Glyph(Glyph.Kind.LOCATE, secondary));
+        locate.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                attach(attach);
+                openSheet("position");
+            }
+        });
+        barButtons.put("locate", locate);
+        ImageButton camera = (ImageButton) findViewById(R.id.camera);
+        camera.setImageDrawable(new Glyph(Glyph.Kind.CAMERA, secondary));
+        camera.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                takePhoto();
+            }
+        });
+        barButtons.put("camera", camera);
+        record = (ImageButton) findViewById(R.id.record);
+        record.setImageDrawable(new Glyph(Glyph.Kind.MIC, secondary));
+        barButtons.put("record", record);
+        // The microphone in the field (1222, 1270, 1276), as in Signal:
+        // held, the compose row is the recording bar and it records; let
+        // go, the message goes; slid left, it is gone; swiped up, it
+        // locks. It shows only while there is nothing typed.
+        recordingBar = new RecordingBar(this, (RecordFrame) findViewById(R.id.compose_frame),
+                findViewById(R.id.compose_row), record, new RecordingBar.Host() {
+                    @Override
+                    public String peer() {
+                        return peer;
+                    }
+
+                    @Override
+                    public void line(String text) {
+                        ChatActivity.this.line(text);
+                    }
+
+                    @Override
+                    public boolean mayRecord() {
+                        return microphoneAllowed();
+                    }
+
+                    @Override
+                    public void stopPlaying() {
+                        player.stop();
+                    }
+
+                    @Override
+                    public void send(byte[] pcm, int rate) {
+                        sendVoice(pcm, rate);
+                    }
+
+                    @Override
+                    public void askMicrophone() {
+                        askForMicrophone();
+                    }
+                });
+        ImageButton plus = (ImageButton) findViewById(R.id.plus);
+        plus.setImageDrawable(new Glyph(Glyph.Kind.PLUS, getColor(R.color.on_send)));
+        plus.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openSheet("attach");
+            }
+        });
+        barButtons.put("plus", plus);
+        barButtons.put("send", send);
+        stagedBar = findViewById(R.id.staged_bar);
+        stagedView = (ImageView) findViewById(R.id.staged);
+        stagedWords = (TextView) findViewById(R.id.staged_words);
+        ImageButton unstage = (ImageButton) findViewById(R.id.staged_remove);
+        unstage.setImageDrawable(new Glyph(Glyph.Kind.CLOSE, secondary));
+        unstage.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                say(Core.unstage(peer));
+                sendable();
             }
         });
         replyBar = findViewById(R.id.reply_bar);
@@ -224,6 +367,16 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
         });
         banner = findViewById(R.id.book_banner);
+        shareChip = findViewById(R.id.share_chip);
+        shareWords = findViewById(R.id.share_words);
+        shareStop = findViewById(R.id.share_stop);
+        shareStop.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                say(Core.stopShare(peer));
+                refresh();
+            }
+        });
         ((Button) findViewById(R.id.book_add)).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -301,6 +454,69 @@ public class ChatActivity extends Activity implements Events.Listener {
         });
     }
 
+    /**
+     * Whether the microphone may record: at its first use the permission
+     * is asked, and the press after the grant records.
+     */
+    private boolean microphoneAllowed() {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+        askedMicrophone();
+        requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, Voice.ASK);
+        return false;
+    }
+
+    /** Remembers that the system was asked for the microphone once. */
+    private void askedMicrophone() {
+        getSharedPreferences(MIC_ASKS, MODE_PRIVATE).edit().putBoolean(MIC_ASKED, true).apply();
+    }
+
+    /**
+     * The silence line's button (1276, `ask_microphone`), as the location's
+     * way runs (1201): ask while the system still may show its question,
+     * else (asked and refused for good, or granted and still nothing heard,
+     * the privacy switch or another app) open the app's page of the
+     * phone's settings, where the microphone is allowed.
+     */
+    private void askForMicrophone() {
+        boolean granted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        boolean asked = getSharedPreferences(MIC_ASKS, MODE_PRIVATE).getBoolean(MIC_ASKED, false);
+        if (!granted && (!asked
+                || shouldShowRequestPermissionRationale(android.Manifest.permission.RECORD_AUDIO))) {
+            recordingBar.verb("rec_discard");
+            askedMicrophone();
+            requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, Voice.ASK);
+            return;
+        }
+        recordingBar.verb("rec_discard");
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.fromParts("package", getPackageName(), null)));
+        } catch (RuntimeException none) {
+            line(getString(R.string.voice_no_microphone));
+        }
+    }
+
+    /** The recording's PCM, handed over on the library's `finish`: coded and sent off the UI thread. */
+    private void sendVoice(final byte[] pcm, final int rate) {
+        voices.execute(new Runnable() {
+            @Override
+            public void run() {
+                final String error = Core.voice(peer, pcm, rate);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        say(error);
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
     @Override
     protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
@@ -338,16 +554,33 @@ public class ChatActivity extends Activity implements Events.Listener {
     @Override
     protected void onPause() {
         ticker.removeCallbacks(tick);
+        recordingBar.leave();
+        player.stop();
         Core.front(false);
         Events.listen(null);
         Core.close();
         super.onPause();
     }
 
-    /** Back ends a selection first, then a reply being written, then the screen. */
+    @Override
+    protected void onDestroy() {
+        // A picked picture already handed over still goes; thumbnails
+        // still owed are not drawn.
+        dropSheet();
+        photos.shutdown();
+        voices.shutdown();
+        player.stop();
+        recordingBar.destroy();
+        playback.shutdownNow();
+        super.onDestroy();
+    }
+
+    /** Back closes a sheet first, then a selection, then a reply being written, then the screen. */
     @Override
     public void onBackPressed() {
-        if (selection != null) {
+        if (sheet != null) {
+            closeSheet();
+        } else if (selection != null) {
             select(null);
         } else if (replyTo != null) {
             replyTo(null);
@@ -367,11 +600,397 @@ public class ChatActivity extends Activity implements Events.Listener {
         Ui.showLine(status, text, true);
     }
 
-    /** The send button is bright with text to send and dimmed without. */
+    private void line(String text, boolean stays) {
+        Ui.showLine(status, text, stays);
+    }
+
+    /**
+     * The compose bar as the library has it now (1270): asked on every
+     * change of the field, so the plus turns into Send with the first
+     * letter and the microphone hides.
+     */
     private void sendable() {
-        boolean some = !compose.getText().toString().trim().isEmpty();
-        send.setEnabled(some);
-        send.setAlpha(some ? 1f : 0.38f);
+        if (peer != null) {
+            bar(Core.bar(peer));
+        }
+    }
+
+    /**
+     * The compose bar from an answer that carries it (the chat's or the
+     * bar's own): the buttons the scene lists show, with its words, the
+     * rest is gone; the field's hint; the staged photo; the sheet.
+     */
+    private void bar(Map<String, Object> answer) {
+        List<Map<String, Object>> buttons = Core.list(answer, "buttons");
+        if (buttons.isEmpty()) {
+            // An answer without a bar (an error, a session not up yet).
+            return;
+        }
+        Set<String> shown = new LinkedHashSet<>();
+        for (Map<String, Object> button : buttons) {
+            String id = Core.str(button, "id");
+            shown.add(id);
+            ImageButton view = barButtons.get(id);
+            if (view != null) {
+                view.setContentDescription(Core.str(button, "label"));
+            }
+        }
+        for (Map.Entry<String, ImageButton> button : barButtons.entrySet()) {
+            button.getValue().setVisibility(shown.contains(button.getKey()) ? View.VISIBLE : View.GONE);
+        }
+        String hint = Core.str(answer, "hint");
+        if (!hint.isEmpty()) {
+            compose.setHint(hint);
+        }
+        showStaged(Core.str(answer, "staged"));
+        showSheet(answer);
+        recordingBar.adopt(Core.str(answer, "recording"));
+    }
+
+    /** The staged photo's row: its thumbnail drawn off the UI thread once per photo. */
+    private void showStaged(final String words) {
+        if (words.isEmpty()) {
+            stagedBar.setVisibility(View.GONE);
+            stagedView.setImageDrawable(null);
+            stagedShown = "";
+            return;
+        }
+        stagedBar.setVisibility(View.VISIBLE);
+        stagedWords.setText(words);
+        stagedView.setContentDescription(words);
+        if (words.equals(stagedShown)) {
+            return;
+        }
+        stagedShown = words;
+        final int edge = dp(64);
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                final Bitmap thumb = Core.stagedBitmap(peer, edge * 2);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (words.equals(stagedShown)) {
+                            stagedView.setImageBitmap(thumb);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * The plus's sheet or the position button's (1270): the library opens
+     * it and says what it holds; the position sheet asks for a fix first.
+     */
+    private void openSheet(String kind) {
+        say(Core.sheet(peer, kind));
+        if ("position".equals(kind)) {
+            findFix();
+        }
+        sendable();
+    }
+
+    /** The sheet goes, the library told. */
+    private void closeSheet() {
+        if (peer != null) {
+            say(Core.sheet(peer, ""));
+        }
+        dropSheet();
+    }
+
+    private void dropSheet() {
+        if (sheet != null) {
+            Dialog open = sheet;
+            sheet = null;
+            sheetShown = "";
+            open.setOnDismissListener(null);
+            open.dismiss();
+        }
+    }
+
+    /**
+     * The phone's fix to the library for the position sheet: the debug
+     * build's seeded one, else one fresh fix where the permission is
+     * there, else none (the sheet then offers to turn location on).
+     */
+    private void findFix() {
+        android.location.Location seeded = locator.fixture();
+        if (seeded != null) {
+            say(Locator.tell(seeded));
+            return;
+        }
+        if (!locator.allowed()) {
+            say(Locator.tell(null));
+            return;
+        }
+        locator.once(new Locator.Fix() {
+            @Override
+            public void on(android.location.Location location) {
+                say(Locator.tell(location));
+                sendable();
+            }
+        });
+    }
+
+    /**
+     * The sheet the answer says is open, built as a bottom sheet as the
+     * map's Friends sheet is: its title, the position sheet's map of the
+     * own fix and its words, its rows by the scene's ids. Rebuilt only
+     * when what it shows changed.
+     */
+    private void showSheet(Map<String, Object> answer) {
+        final String kind = Core.str(answer, "sheet");
+        if (kind.isEmpty()) {
+            dropSheet();
+            return;
+        }
+        List<Map<String, Object>> rows = Core.list(answer, "sheet_rows");
+        StringBuilder key = new StringBuilder(kind).append('|')
+                .append(Core.str(answer, "sheet_title")).append('|')
+                .append(Core.str(answer, "fix_words")).append('|')
+                .append(Core.num(answer, "fix_lat_e6")).append(',')
+                .append(Core.num(answer, "fix_lon_e6"));
+        for (Map<String, Object> row : rows) {
+            key.append('|').append(Core.str(row, "id")).append('=').append(Core.str(row, "label"));
+        }
+        if (sheet != null && key.toString().equals(sheetShown)) {
+            return;
+        }
+        dropSheet();
+        float density = getResources().getDisplayMetrics().density;
+        int pad = Math.round(16 * density);
+        final Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setId(R.id.sheet);
+        root.setBackgroundResource(R.drawable.sheet);
+        root.setPadding(0, Math.round(8 * density), 0, pad);
+        View handle = new View(this);
+        handle.setBackgroundResource(R.drawable.handle);
+        LinearLayout.LayoutParams handleAt =
+                new LinearLayout.LayoutParams(Math.round(32 * density), Math.round(4 * density));
+        handleAt.gravity = Gravity.CENTER_HORIZONTAL;
+        handleAt.bottomMargin = Math.round(8 * density);
+        root.addView(handle, handleAt);
+        TextView title = new TextView(this);
+        title.setText(Core.str(answer, "sheet_title"));
+        title.setTextColor(getColor(R.color.text));
+        title.setTextSize(20);
+        title.setPadding(pad, 0, pad, Math.round(8 * density));
+        root.addView(title);
+        if ("position".equals(kind)) {
+            if (Core.bool(answer, "has_fix")) {
+                // The own fix on the shared map, the crosshair's zoom.
+                MapView map = new MapView(this, getFilesDir().getAbsolutePath(), new MapView.Listener() {
+                    @Override
+                    public void onShown(Map<String, Object> shown) {}
+
+                    @Override
+                    public void onMark(Map<String, Object> mark) {}
+
+                    @Override
+                    public void onTapAway() {}
+
+                    @Override
+                    public void onFinger() {}
+                });
+                map.setId(R.id.sheet_map);
+                long lat = Core.num(answer, "fix_lat_e6");
+                long lon = Core.num(answer, "fix_lon_e6");
+                map.centreAt(lat, lon, 16_000);
+                map.own(lat, lon);
+                LinearLayout.LayoutParams mapAt = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, Math.round(160 * density));
+                mapAt.setMargins(pad, 0, pad, Math.round(8 * density));
+                root.addView(map, mapAt);
+            }
+            TextView words = new TextView(this);
+            words.setId(R.id.sheet_fix_words);
+            words.setText(Core.str(answer, "fix_words"));
+            words.setTextColor(getColor(R.color.text_secondary));
+            words.setTextSize(14);
+            words.setPadding(pad, 0, pad, Math.round(8 * density));
+            root.addView(words);
+        }
+        for (Map<String, Object> row : rows) {
+            final String id = Core.str(row, "id");
+            TextView line = new TextView(this);
+            line.setText(Core.str(row, "label"));
+            line.setTextColor(getColor(R.color.text));
+            line.setTextSize(17);
+            line.setMinHeight(Math.round(52 * density));
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(pad, 0, pad, 0);
+            line.setBackgroundResource(android.R.drawable.list_selector_background);
+            int viewId = getResources().getIdentifier(id, "id", getPackageName());
+            if (viewId != 0) {
+                line.setId(viewId);
+            }
+            line.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    sheetRow(id);
+                }
+            });
+            root.addView(line);
+        }
+        dialog.setContentView(root);
+        android.view.Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawableResource(android.R.color.transparent);
+            window.setGravity(Gravity.BOTTOM);
+            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+        dialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface d) {
+                if (sheet == dialog) {
+                    sheet = null;
+                    sheetShown = "";
+                    if (peer != null) {
+                        say(Core.sheet(peer, ""));
+                        sendable();
+                    }
+                }
+            }
+        });
+        sheet = dialog;
+        sheetShown = key.toString();
+        dialog.show();
+    }
+
+    /**
+     * A row of the sheet, by the scene's id (1270): the system's pickers
+     * for Gallery and File (1220, 1221), the position sheet, its share,
+     * the location permission (1201).
+     */
+    private void sheetRow(String id) {
+        switch (id) {
+            case "sheet_gallery":
+                closeSheet();
+                startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT)
+                        .setType("image/*")
+                        .addCategory(Intent.CATEGORY_OPENABLE), PHOTO);
+                break;
+            case "sheet_file":
+                closeSheet();
+                startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT)
+                        .setType("*/*")
+                        .addCategory(Intent.CATEGORY_OPENABLE), FILE);
+                break;
+            case "sheet_position":
+                openSheet("position");
+                break;
+            case "sheet_share_now": {
+                String error = Core.shareFix(peer);
+                line(error == null
+                        ? getString(R.string.shared_to, Core.str(header, "name"))
+                        : getString(R.string.share_failed, error));
+                sendable();
+                refresh();
+                break;
+            }
+            case "sheet_share_15_min":
+            case "sheet_share_1_h":
+            case "sheet_share_8_h":
+            case "sheet_share_until_stopped": {
+                // A share (1273): the library sends on the fixes the share
+                // service brings; the service starts as the list says it runs.
+                String error = Core.startShare(peer, id.substring("sheet_share_".length()));
+                if (error != null) {
+                    line(getString(R.string.share_failed, error));
+                }
+                ShareService.start(this);
+                sendable();
+                refresh();
+                break;
+            }
+            case "sheet_location_on":
+                locator.ask(new Runnable() {
+                    @Override
+                    public void run() {
+                        findFix();
+                        sendable();
+                    }
+                }, new Runnable() {
+                    @Override
+                    public void run() {
+                        line(getString(R.string.location_off));
+                    }
+                });
+                break;
+            default:
+                break;
+        }
+    }
+
+    /**
+     * The camera (1270): the platform's camera app through the capture
+     * intent, its photo written into CaptureProvider's file, staged in
+     * the bar on return; the camera permission first, which the manifest's
+     * CAMERA (for the scanner) makes the capture intent need. A debug
+     * build with the walk's fixture takes that instead.
+     */
+    private void takePhoto() {
+        final java.io.File fixture = new java.io.File(getFilesDir(), CAMERA_FIXTURE);
+        boolean debuggable = (getApplicationInfo().flags
+                & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        if (debuggable && fixture.isFile()) {
+            stagePhoto(android.net.Uri.fromFile(fixture));
+            return;
+        }
+        if (checkSelfPermission(android.Manifest.permission.CAMERA)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {android.Manifest.permission.CAMERA}, CAMERA_ASK);
+            return;
+        }
+        Intent capture = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+                .putExtra(android.provider.MediaStore.EXTRA_OUTPUT, CaptureProvider.uri(this))
+                .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        if (capture.resolveActivity(getPackageManager()) == null) {
+            line(getString(R.string.camera_no_app));
+            return;
+        }
+        CaptureProvider.file(this).delete();
+        startActivityForResult(capture, CAMERA);
+    }
+
+    /**
+     * The photo the camera wrote, read off the UI thread, to the library,
+     * which scales and strips it as a picked one and stages it (1270).
+     */
+    private void stagePhoto(final android.net.Uri uri) {
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                String error;
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[64 * 1024];
+                    int n;
+                    while (in != null && (n = in.read(chunk)) > 0 && bytes.size() <= PICKED_MAX) {
+                        bytes.write(chunk, 0, n);
+                    }
+                    error = bytes.size() == 0 || bytes.size() > PICKED_MAX
+                            ? getString(R.string.photo_unreadable)
+                            : Core.stage(peer, bytes.toByteArray());
+                } catch (java.io.IOException | SecurityException e) {
+                    error = getString(R.string.photo_unreadable);
+                }
+                final String said = error;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        say(said);
+                        sendable();
+                        compose.requestFocus();
+                    }
+                });
+            }
+        });
     }
 
     /** The bar's menu: pull now, the map, the address book and the name. */
@@ -515,39 +1134,30 @@ public class ChatActivity extends Activity implements Events.Listener {
         return getString(R.string.matched_display);
     }
 
-    /**
-     * The attachment menu (1201): the own position, sent once to this
-     * chat when the user picks it; the permission first if need be.
-     */
-    private void attach(View anchor) {
-        PopupMenu popup = new PopupMenu(this, anchor);
-        popup.getMenu().add(0, R.string.attach_position, 0, R.string.attach_position);
-        popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
-            @Override
-            public boolean onMenuItemClick(MenuItem item) {
-                if (item.getItemId() == R.string.attach_position) {
-                    locator.shareWith(peer, Core.str(header, "name"), new Locator.Fix() {
-                        @Override
-                        public void on(android.location.Location location) {
-                            refresh();
-                        }
-                    }, new Locator.Say() {
-                        @Override
-                        public void line(String text) {
-                            ChatActivity.this.line(text);
-                        }
-                    });
-                }
-                return true;
-            }
-        });
-        popup.show();
-    }
-
     @Override
     public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(code, permissions, results);
         if (locator.result(code)) {
+            return;
+        }
+        if (code == CAMERA_ASK) {
+            // Granted: the photo is taken now. Refused: the line says why.
+            if (results.length > 0 && results[0]
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                takePhoto();
+            } else {
+                line(getString(R.string.camera_no_app));
+            }
+            return;
+        }
+        if (code == Voice.ASK) {
+            // Granted: the next press records. Refused: why it does not.
+            if (results.length == 0 || results[0]
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                line(getString(R.string.voice_no_microphone));
+            } else {
+                line(getString(R.string.voice_hold));
+            }
             return;
         }
         if (code == Book.ASK && Book.canRead(this)) {
@@ -678,7 +1288,21 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
             return;
         }
+        if (request == CAMERA) {
+            if (result == RESULT_OK) {
+                stagePhoto(android.net.Uri.fromFile(CaptureProvider.file(this)));
+            }
+            return;
+        }
         if (result != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        if (request == PHOTO) {
+            sendPhoto(data.getData());
+            return;
+        }
+        if (request == FILE) {
+            sendFile(data.getData());
             return;
         }
         if (request != Book.PICK && request != Book.INSERT) {
@@ -696,6 +1320,351 @@ public class ChatActivity extends Activity implements Events.Listener {
         String error = Core.link(peer, copy);
         line(error != null ? error : getString(R.string.linked_to, Core.str(copy, "name")));
         refresh();
+    }
+
+    /**
+     * The picked picture's bytes, read off the UI thread, to the library,
+     * which scales, strips and sends it (1220); what it refuses is said.
+     */
+    private void sendPhoto(final android.net.Uri uri) {
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                String error;
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[64 * 1024];
+                    int n;
+                    while (in != null && (n = in.read(chunk)) > 0 && bytes.size() <= PICKED_MAX) {
+                        bytes.write(chunk, 0, n);
+                    }
+                    error = bytes.size() > PICKED_MAX
+                            ? getString(R.string.photo_unreadable)
+                            : Core.photo(peer, bytes.toByteArray());
+                } catch (java.io.IOException | SecurityException e) {
+                    error = getString(R.string.photo_unreadable);
+                }
+                final String said = error;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (said != null) {
+                            line(said);
+                        }
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * The picked file's name and bytes, read off the UI thread, to the
+     * library, which sends it or says why not (1221): past FILE_KEEP only
+     * counted, so a film is not held in memory to be refused.
+     */
+    private void sendFile(final android.net.Uri uri) {
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                String name = "";
+                try (android.database.Cursor cursor = getContentResolver().query(uri,
+                        new String[] {android.provider.OpenableColumns.DISPLAY_NAME},
+                        null, null, null)) {
+                    if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                        name = cursor.getString(0);
+                    }
+                } catch (RuntimeException e) {
+                    name = "";
+                }
+                if (name.isEmpty() && uri.getLastPathSegment() != null) {
+                    name = uri.getLastPathSegment();
+                }
+                String error;
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[64 * 1024];
+                    long count = 0;
+                    int n;
+                    while (in != null && (n = in.read(chunk)) > 0) {
+                        int keep = (int) Math.max(0, Math.min(n, FILE_KEEP - count));
+                        bytes.write(chunk, 0, keep);
+                        count += n;
+                    }
+                    error = in == null
+                            ? getString(R.string.file_unreadable)
+                            : Core.file(peer, name, bytes.toByteArray(),
+                                    count > bytes.size() ? count : 0);
+                } catch (java.io.IOException | SecurityException e) {
+                    error = getString(R.string.file_unreadable);
+                }
+                final String said = error;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (said != null) {
+                            line(said);
+                        }
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * A row's files (1221): one line each in its bubble (1268), its name
+     * and size in the bubble's ink, said as the library words it; a tap
+     * opens it, a long press shares it. Gone for a row without.
+     */
+    private void files(LinearLayout box, Map<String, Object> row, boolean ours) {
+        box.removeAllViews();
+        List<Map<String, Object>> files = Core.list(row, "files");
+        box.setVisibility(files.isEmpty() ? View.GONE : View.VISIBLE);
+        final long key = Core.num(row, "key");
+        for (int i = 0; i < files.size(); i++) {
+            Map<String, Object> file = files.get(i);
+            final int index = i;
+            TextView line = new TextView(this);
+            line.setText("\u25A4  " + Core.str(file, "name") + "\n" + Core.str(file, "size"));
+            line.setTextSize(15);
+            line.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
+            line.setPadding(0, dp(2), 0, dp(2));
+            line.setMaxWidth(dp(280));
+            line.setContentDescription(Core.str(file, "words"));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.bottomMargin = dp(2);
+            line.setLayoutParams(params);
+            line.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    openFile(key, index, false);
+                }
+            });
+            line.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    openFile(key, index, true);
+                    return true;
+                }
+            });
+            box.addView(line);
+        }
+    }
+
+    /**
+     * A row's voice message (1222): the play or pause button, the level
+     * bar and the length in its bubble (1268), in the bubble's ink, said
+     * as the library words it; a tap plays or pauses it. Gone for a row
+     * without.
+     */
+    private void voice(LinearLayout box, final Map<String, Object> row, boolean ours) {
+        box.removeAllViews();
+        if (Core.num(row, "voice_mode") == 0) {
+            box.setVisibility(View.GONE);
+            box.setTag(null);
+            return;
+        }
+        final long key = Core.num(row, "key");
+        box.setVisibility(View.VISIBLE);
+        box.setTag("voice_" + key);
+        int ink = getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text);
+        box.setContentDescription(Core.str(row, "voice_words"));
+        boolean playing = Core.bool(row, "voice_playing") && player.playing() == key;
+        ImageButton toggle = new ImageButton(this);
+        toggle.setImageDrawable(new Glyph(playing ? Glyph.Kind.PAUSE : Glyph.Kind.PLAY, ink));
+        toggle.setBackground(null);
+        toggle.setPadding(dp(8), dp(8), dp(8), dp(8));
+        toggle.setContentDescription(getString(playing ? R.string.scene_pause_voice
+                : R.string.scene_play_voice));
+        toggle.setEnabled(Core.bool(row, "voice_playable"));
+        toggle.setAlpha(Core.bool(row, "voice_playable") ? 1f : 0.38f);
+        toggle.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
+        toggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleVoice(key);
+            }
+        });
+        box.addView(toggle);
+        Voice.Bar bar = new Voice.Bar(this);
+        Object levels = row.get("voice_levels");
+        bar.set(levels instanceof byte[] ? (byte[]) levels : null, ink, playing ? played : 0f);
+        bar.setTag("voice_bar");
+        LinearLayout.LayoutParams barSize = new LinearLayout.LayoutParams(dp(150), dp(28));
+        barSize.setMarginStart(dp(4));
+        barSize.setMarginEnd(dp(10));
+        bar.setLayoutParams(barSize);
+        box.addView(bar);
+        TextView length = new TextView(this);
+        length.setText(Core.str(row, "voice_duration"));
+        length.setTextSize(13);
+        length.setTextColor(ink);
+        box.addView(length);
+    }
+
+    /** A tap on a voice message's button: it plays, or the one playing stops. */
+    private void toggleVoice(final long key) {
+        if (player.playing() == key) {
+            player.stop();
+            return;
+        }
+        player.stop();
+        say(Core.playVoice(peer, key, true));
+        played = 0f;
+        refresh();
+        playback.execute(new Runnable() {
+            @Override
+            public void run() {
+                Map<String, Object> sound = Core.voicePcm(peer, key);
+                Object pcm = sound.get("pcm");
+                if (!Core.bool(sound, "ok") || !(pcm instanceof byte[])) {
+                    final String error = Core.str(sound, "error");
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Core.playVoice(peer, key, false);
+                            line(error);
+                            refresh();
+                        }
+                    });
+                    return;
+                }
+                player.play(key, (byte[]) pcm, (int) Core.num(sound, "rate"), new Voice.Listener() {
+                    @Override
+                    public void progress(long at, float done) {
+                        played = done;
+                        View box = list.findViewWithTag("voice_" + at);
+                        View bar = box == null ? null : box.findViewWithTag("voice_bar");
+                        if (bar instanceof Voice.Bar) ((Voice.Bar) bar).progress(done);
+                    }
+
+                    @Override
+                    public void ended(long at) {
+                        played = 0f;
+                        Core.playVoice(peer, at, false);
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * The library saves the file under the app's files (1221); the app the
+     * system has for its kind opens it, or the share sheet takes it, with
+     * read access to that one file (FilesProvider).
+     */
+    private void openFile(final long key, final int index, final boolean share) {
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                final Map<String, Object> saved = Core.saveFile(peer, key, index);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        android.net.Uri uri = Core.bool(saved, "ok")
+                                ? FilesProvider.uri(ChatActivity.this, Core.str(saved, "path"))
+                                : null;
+                        if (uri == null) {
+                            line(getString(R.string.file_unreadable));
+                            return;
+                        }
+                        String name = Core.str(saved, "name");
+                        String type = FilesProvider.type(name);
+                        Intent send = new Intent(Intent.ACTION_SEND)
+                                .setType(type)
+                                .putExtra(Intent.EXTRA_STREAM, uri)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        send.setClipData(ClipData.newRawUri(name, uri));
+                        Intent chooser = Intent.createChooser(send, name)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        Intent view = new Intent(Intent.ACTION_VIEW)
+                                .setDataAndType(uri, type)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        try {
+                            startActivity(share ? chooser : view);
+                        } catch (android.content.ActivityNotFoundException e) {
+                            try {
+                                startActivity(chooser);
+                            } catch (android.content.ActivityNotFoundException again) {
+                                line(getString(R.string.file_no_app));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * A row's photo (1220): sized to its shape within PHOTO_DP, the
+     * library's thumbnail from the cache or drawn now, a tap to the whole
+     * photo; gone for a row without one.
+     */
+    private void photo(final ImageView view, Map<String, Object> row) {
+        if (Core.str(row, "photo").isEmpty()) {
+            view.setVisibility(View.GONE);
+            view.setTag(null);
+            view.setImageDrawable(null);
+            view.setOnClickListener(null);
+            return;
+        }
+        final long key = Core.num(row, "key");
+        long w = Core.num(row, "photo_w");
+        long h = Core.num(row, "photo_h");
+        int box = dp(PHOTO_DP);
+        int vw = box;
+        int vh = box;
+        if (w > 0 && h > 0) {
+            if (w >= h) {
+                vh = (int) Math.max(dp(48), box * h / w);
+            } else {
+                vw = (int) Math.max(dp(48), box * w / h);
+            }
+        }
+        ViewGroup.LayoutParams params = view.getLayoutParams();
+        params.width = vw;
+        params.height = vh;
+        view.setLayoutParams(params);
+        view.setVisibility(View.VISIBLE);
+        view.setContentDescription(Core.str(row, "photo_words"));
+        view.setTag(key);
+        Bitmap cached = thumbs.get(key);
+        if (cached != null) {
+            view.setImageBitmap(cached);
+        } else {
+            view.setImageDrawable(new android.graphics.drawable.ColorDrawable(
+                    getColor(R.color.bubble_theirs)));
+            final int edge = Math.max(vw, vh);
+            photos.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final Bitmap bitmap = Core.photoBitmap(peer, key, edge);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (bitmap == null) {
+                                return;
+                            }
+                            thumbs.put(key, bitmap);
+                            if (Long.valueOf(key).equals(view.getTag())) {
+                                view.setImageBitmap(bitmap);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        view.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(ChatActivity.this, PhotoActivity.class)
+                        .putExtra(PhotoActivity.PEER, peer)
+                        .putExtra(PhotoActivity.KEY, key));
+            }
+        });
     }
 
     /** The contact screen of this conversation's peer (1146). */
@@ -835,10 +1804,12 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     private void send() {
         String body = compose.getText().toString();
-        if (body.trim().isEmpty()) {
+        // A staged photo goes with the text as its caption, or alone (1270).
+        boolean staged = stagedBar.getVisibility() == View.VISIBLE;
+        if (body.trim().isEmpty() && !staged) {
             return;
         }
-        String error = replyTo == null
+        String error = replyTo == null || staged
                 ? Core.send(peer, body) : Core.reply(peer, Core.str(replyTo, "id"), body);
         if (error != null) {
             line(error);
@@ -1235,7 +2206,14 @@ public class ChatActivity extends Activity implements Events.Listener {
                 + (Core.bool(answer, "verified") ? " \u2714" : ""));
         avatar.show(peer, answer);
         banner.setVisibility(Core.bool(answer, "ask_link") ? View.VISIBLE : View.GONE);
+        // The share's chip (1273): the library's words, or none.
+        String sharing = Core.str(answer, "share");
+        shareChip.setVisibility(sharing.isEmpty() ? View.GONE : View.VISIBLE);
+        shareWords.setText(sharing);
+        shareStop.setText(Core.str(answer, "share_stop"));
+        shareStop.setContentDescription(Core.str(answer, "share_stop"));
         homeClient = Core.bool(answer, "home_client");
+        bar(answer);
         rows.clear();
         rows.addAll(Core.list(answer, "messages"));
         if (selection != null) {
@@ -1366,8 +2344,16 @@ public class ChatActivity extends Activity implements Events.Listener {
                     : new float[] {top, top, big, big, big, big, bottom, bottom});
             bubble.setBackground(shape);
 
+            photo((ImageView) view.findViewById(R.id.photo), row);
+            files((LinearLayout) view.findViewById(R.id.files), row, ours);
+            voice((LinearLayout) view.findViewById(R.id.voice), row, ours);
+
+            // The words under the media, none where the scene has none
+            // (1268): a photo alone is the photo and its time in one bubble.
             TextView body = (TextView) view.findViewById(R.id.body);
-            body.setText(text(row, ours, now));
+            CharSequence words = text(row, ours, now);
+            body.setText(words);
+            body.setVisibility(words.length() == 0 ? View.GONE : View.VISIBLE);
             body.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
             quote(view, row, ours);
 

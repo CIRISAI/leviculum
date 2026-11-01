@@ -87,6 +87,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -157,6 +158,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -227,6 +229,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -297,6 +300,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -367,6 +371,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -437,6 +442,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -507,6 +513,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -577,6 +584,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -647,6 +655,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -717,6 +726,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -787,6 +797,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -857,6 +868,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -927,6 +939,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -997,6 +1010,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -1067,6 +1081,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -1137,6 +1152,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -1207,6 +1223,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -1277,6 +1294,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       }
@@ -1387,5 +1405,6 @@
       "args": [],
       "key": "tab_chats"
     }
-  }
+  },
+  "whereabouts": null
 }

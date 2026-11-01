@@ -6,6 +6,9 @@
 //! finger, a finger that stopped), the room a coast has to the world's
 //! edge, and a coast frame by frame that slows down, converges, stops at
 //! the edge and ends so the view is drawn at rest.
+//!
+//! The recorder's level feed (1276), `Levels.java`, runs the same way with
+//! `tests/java/LevelsTest.java`: its windows are the library's.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -42,4 +45,76 @@ fn the_fling_decides_and_coasts_as_the_phone_does() {
         String::from_utf8_lossy(&ran.stderr)
     );
     assert!(out.contains("checks passed"), "{out}");
+}
+
+/// The recorder's level feed (1276): `Levels.java`, the window cutting and
+/// the RMS the phone hands the library every 50 ms, run on the host with
+/// `tests/java/LevelsTest.java` over speech, loud full-scale sound and
+/// digital silence, in odd pieces so a sample splits across two reads.
+/// Window for window it is `loquax::ui::recording::rms` of the same
+/// samples, as `LevelTrack::from_pcm` cuts them; the last, short window
+/// stays with the recorder until more sound comes.
+#[test]
+fn the_recorders_windows_are_the_librarys() {
+    use loquax::ui::recording::rms;
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("levels-classes");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&work)
+        .arg(manifest.join("android/src/network/leviculum/loquax/Levels.java"))
+        .arg(manifest.join("tests/java/LevelsTest.java"))
+        .output()
+        .expect("javac runs");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let rate = 16_000u32;
+    let mut samples = loquax::voice::test_speech(rate, 1_000);
+    samples.extend((0..4_000).map(|i| if i % 2 == 0 { i16::MAX } else { i16::MIN }));
+    samples.extend(std::iter::repeat_n(0, 8_000));
+    samples.extend([5, -5, 3]);
+    let file = work.join("pcm.raw");
+    std::fs::write(
+        &file,
+        samples
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    )
+    .expect("the PCM");
+    let window = (rate / 20) as usize;
+    let want: Vec<String> = samples
+        .chunks_exact(window)
+        .map(|chunk| rms(chunk).to_string())
+        .chain([format!("samples {window}")])
+        .collect();
+    assert!(want.iter().any(|w| w == "32767"), "full scale is in it");
+    assert!(want.iter().any(|w| w == "0"), "silence is in it");
+    for piece in ["333", "1600", "7"] {
+        let ran = Command::new("java")
+            .arg("-ea")
+            .arg("-cp")
+            .arg(&work)
+            .arg("network.leviculum.loquax.LevelsTest")
+            .arg(&file)
+            .arg(rate.to_string())
+            .arg(piece)
+            .output()
+            .expect("java runs");
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let got: Vec<String> = String::from_utf8_lossy(&ran.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(got, want, "pieces of {piece} bytes");
+    }
 }

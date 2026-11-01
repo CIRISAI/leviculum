@@ -11,11 +11,12 @@
 //! carry one, and the model key behind it must come back whole.
 
 use loquax_android::schema::{
-    self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
-    Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links,
-    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow,
-    Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow,
-    Start, Started, SuggestionRow, Suggestions,
+    self, AddressRow, Addresses, Backup, Bar, BarButton, Blob, CandidateRow, Chip, ContactCopy,
+    ConversationRow, Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info,
+    LinkCode, LinkRow, Linked, Links, MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown,
+    MapThemeChoice, Me, MessageRow, Messages, PositionRow, Query, Recents, Recording, RegionRow,
+    Request, Run, RunRow, ShareRow, Shared, SharedRow, Shares, Start, Started, SuggestionRow,
+    Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -97,34 +98,38 @@ fn start() -> impl Strategy<Value = Start> {
     (
         (text(), opt_text(), opt_text(), opt_text()),
         (i32s(), any::<bool>(), opt_text(), opt_text()),
-        opt_text(),
+        (opt_text(), any::<bool>()),
     )
         .prop_map(
-            |((dir, server, code, name), (offset, here, restore, passphrase), lang)| Start {
-                dir,
-                server,
-                code,
-                name,
-                offset,
-                lang,
-                here,
-                restore,
-                passphrase,
+            |((dir, server, code, name), (offset, here, restore, passphrase), (lang, camera))| {
+                Start {
+                    dir,
+                    server,
+                    code,
+                    name,
+                    offset,
+                    lang,
+                    here,
+                    restore,
+                    passphrase,
+                    camera,
+                }
             },
         )
 }
 
 fn started() -> impl Strategy<Value = Started> {
     (
-        (u32s(), any::<bool>(), opt_text(), opt_text()),
+        (u32s(), any::<bool>(), opt_text(), opt_text(), opt_text()),
         (opt_text(), opt_text(), any::<bool>(), any::<bool>()),
     )
         .prop_map(
-            |((v, ok, error, need), (address, server, link, here))| Started {
+            |((v, ok, error, need, details), (address, server, link, here))| Started {
                 v,
                 ok,
                 error,
                 need,
+                details,
                 address,
                 server,
                 link,
@@ -169,6 +174,19 @@ fn request() -> impl Strategy<Value = Request> {
         }),
         (text(), i64s(), text()).prop_map(|(peer, key, to)| Request::Forward { peer, key, to }),
         (text(), i64s()).prop_map(|(peer, key)| Request::SendAgain { peer, key }),
+        (text(), blob()).prop_map(|(peer, data)| Request::Photo { peer, data }),
+        (text(), text(), blob(), any::<u64>()).prop_map(|(peer, name, data, size)| Request::File {
+            peer,
+            name,
+            data,
+            size
+        }),
+        (text(), blob(), u32s()).prop_map(|(peer, pcm, rate)| Request::Voice { peer, pcm, rate }),
+        (text(), i64s(), any::<bool>()).prop_map(|(peer, key, on)| Request::PlayVoice {
+            peer,
+            key,
+            on
+        }),
         (text(), keys()).prop_map(|(peer, keys)| Request::Delete { peer, keys }),
         text().prop_map(|emoji| Request::Used { emoji }),
         Just(Request::Pull),
@@ -206,6 +224,33 @@ fn request() -> impl Strategy<Value = Request> {
             body,
             reply
         }),
+        (text(), blob()).prop_map(|(peer, data)| Request::Stage { peer, data }),
+        text().prop_map(|peer| Request::Unstage { peer }),
+        (text(), text()).prop_map(|(peer, kind)| Request::Sheet { peer, kind }),
+        (i32s(), i32s(), i32s(), u32s(), i64s()).prop_map(
+            |(lat_e6, lon_e6, alt_e2, accuracy_e2, at)| Request::Fix {
+                lat_e6,
+                lon_e6,
+                alt_e2,
+                accuracy_e2,
+                at,
+            }
+        ),
+        Just(Request::NoFix),
+        text().prop_map(|peer| Request::ShareFix { peer }),
+        (text(), text()).prop_map(|(peer, span)| Request::StartShare { peer, span }),
+        text().prop_map(|peer| Request::StopShare { peer }),
+        ((text(), text()), (i64s(), i32s(), i32s(), u32s())).prop_map(
+            |((peer, input), (now, dx, dy, rms))| Request::Record {
+                peer,
+                input,
+                now,
+                dx,
+                dy,
+                rms,
+            }
+        ),
+        (text(), text()).prop_map(|(peer, verb)| Request::Recording { peer, verb }),
     ]
 }
 
@@ -243,7 +288,9 @@ fn query() -> impl Strategy<Value = Query> {
             .prop_map(|(lat_e6, lon_e6)| Query::Friends { lat_e6, lon_e6 }),
         Just(Query::Shared),
         Just(Query::Profile),
-        text().prop_map(|text| Query::Lxma { text }),
+        Just(Query::LinkDevice),
+        Just(Query::Linked),
+        (text(), opt_text()).prop_map(|(text, lang)| Query::Lxma { text, lang }),
         (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
             Query::MapRegions {
                 delete,
@@ -252,6 +299,18 @@ fn query() -> impl Strategy<Value = Query> {
         }),
         opt_text().prop_map(|set| Query::MapTheme { set }),
         prop::option::of(any::<bool>()).prop_map(|set| Query::MapFling { set }),
+        opt_text().prop_map(|set| Query::PhotoSize { set }),
+        (text(), i64s(), u32s()).prop_map(|(peer, key, edge)| Query::Photo { peer, key, edge }),
+        (text(), u32s()).prop_map(|(peer, edge)| Query::Staged { peer, edge }),
+        text().prop_map(|peer| Query::Bar { peer }),
+        Just(Query::Shares),
+        (text(), i64s(), u32s()).prop_map(|(peer, key, index)| Query::SaveFile {
+            peer,
+            key,
+            index
+        }),
+        (text(), i64s()).prop_map(|(peer, key)| Query::Voice { peer, key }),
+        text().prop_map(|peer| Query::Recording { peer }),
     ]
 }
 
@@ -273,6 +332,31 @@ fn chip() -> impl Strategy<Value = Chip> {
     })
 }
 
+fn file_row() -> impl Strategy<Value = FileRow> {
+    (text(), u32s(), text(), text()).prop_map(|(name, bytes, size, words)| FileRow {
+        name,
+        bytes,
+        size,
+        words,
+    })
+}
+
+/// A row's voice message (1222), boxed on its own: one more tuple inline
+/// overflowed the test thread's stack in [`the_lists_round_trip`].
+type VoiceParts = (u32, u32, String, Blob, (bool, bool), String);
+
+fn voice_parts() -> BoxedStrategy<VoiceParts> {
+    (
+        u32s(),
+        u32s(),
+        text(),
+        blob(),
+        any::<(bool, bool)>(),
+        text(),
+    )
+        .boxed()
+}
+
 /// The rows are boxed: with the scene's fields (1217) their tuples together
 /// overflow the test thread's stack in [`the_lists_round_trip`].
 fn message_row() -> BoxedStrategy<MessageRow> {
@@ -290,6 +374,9 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         (u32s(), i64s(), i64s()),
         (text(), u32s()),
         (any::<(bool, bool, bool, bool)>(), text(), text()),
+        (text(), u32s(), u32s(), u32s(), text()),
+        prop::collection::vec(file_row(), 0..3),
+        voice_parts(),
     )
         .prop_map(
             |(
@@ -300,6 +387,16 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (updates, since, read_at),
                 (liveness, cadence_s),
                 ((joins_before, joins_after, meta, newest), day, live),
+                (photo, photo_bytes, photo_w, photo_h, photo_words),
+                files,
+                (
+                    voice_mode,
+                    voice_ms,
+                    voice_duration,
+                    voice_levels,
+                    (voice_playable, voice_playing),
+                    voice_words,
+                ),
             )| MessageRow {
                 id,
                 ours,
@@ -328,6 +425,19 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 newest,
                 day,
                 live,
+                photo,
+                photo_bytes,
+                photo_w,
+                photo_h,
+                photo_words,
+                files,
+                voice_mode,
+                voice_ms,
+                voice_duration,
+                voice_levels,
+                voice_playable,
+                voice_playing,
+                voice_words,
             },
         )
         .boxed()
@@ -357,6 +467,8 @@ fn messages() -> BoxedStrategy<Messages> {
         ),
         live(),
         (text(), text(), text()),
+        bar(),
+        share_chip(),
     )
         .prop_map(
             |(
@@ -366,6 +478,8 @@ fn messages() -> BoxedStrategy<Messages> {
                 (announced, petname, others, verified, receipts),
                 (liveness, cadence_s, last_fix_at),
                 (ring, draft, draft_reply),
+                bar,
+                (share, share_stop),
             )| Messages {
                 v,
                 peer,
@@ -391,9 +505,161 @@ fn messages() -> BoxedStrategy<Messages> {
                 ring,
                 draft,
                 draft_reply,
+                round: bar.round,
+                buttons: bar.buttons,
+                hint: bar.hint,
+                staged: bar.staged,
+                sheet: bar.sheet,
+                sheet_title: bar.sheet_title,
+                sheet_rows: bar.sheet_rows,
+                has_fix: bar.has_fix,
+                fix_lat_e6: bar.fix_lat_e6,
+                fix_lon_e6: bar.fix_lon_e6,
+                fix_words: bar.fix_words,
+                share,
+                share_stop,
+                recording: bar.recording,
             },
         )
         .boxed()
+}
+
+/// The recording bar (1276), boxed as [`bar`] is.
+fn recording() -> BoxedStrategy<Recording> {
+    (
+        (u32s(), any::<bool>(), text(), any::<bool>(), any::<bool>()),
+        (
+            text(),
+            u32s(),
+            any::<bool>(),
+            blob(),
+            any::<bool>(),
+            text(),
+            u32s(),
+        ),
+        (text(), u32s(), any::<bool>(), text()),
+        (text(), any::<bool>(), u32s()),
+        (
+            prop::collection::vec(bar_button(), 0..5),
+            text(),
+            text(),
+            texts(),
+        ),
+        (u32s(), u32s(), u32s(), u32s()),
+    )
+        .prop_map(
+            |(
+                (v, ok, phase, shown, pulsing),
+                (timer, timer_ms, amber, wave, moving, wave_label, wave_slots),
+                (cancel, cancel_progress, armed, held),
+                (lock, lock_closed, lock_progress),
+                (buttons, notice, notice_allow, effects),
+                (cancel_dp, lock_dp, window_ms, longest_ms),
+            )| Recording {
+                v,
+                ok,
+                phase,
+                shown,
+                pulsing,
+                timer,
+                timer_ms,
+                amber,
+                wave,
+                moving,
+                wave_label,
+                wave_slots,
+                cancel,
+                cancel_progress,
+                armed,
+                held,
+                lock,
+                lock_closed,
+                lock_progress,
+                buttons,
+                notice,
+                notice_allow,
+                effects,
+                cancel_dp,
+                lock_dp,
+                window_ms,
+                longest_ms,
+            },
+        )
+        .boxed()
+}
+
+/// The chat's share chip (1273), boxed as [`bar`] is.
+fn share_chip() -> BoxedStrategy<(String, String)> {
+    (text(), text()).boxed()
+}
+
+/// Settings, Privacy's running shares (1273).
+fn shares() -> impl Strategy<Value = Shares> {
+    (
+        (u32s(), text(), text(), text()),
+        prop::collection::vec(
+            (text(), text(), text(), text(), i64s()).prop_map(|(peer, id, name, words, until)| {
+                ShareRow {
+                    peer,
+                    id,
+                    name,
+                    words,
+                    until,
+                }
+            }),
+            0..3,
+        ),
+    )
+        .prop_map(|((v, title, empty, stop), shares)| Shares {
+            v,
+            title,
+            empty,
+            stop,
+            shares,
+        })
+}
+
+/// The compose bar's fields (1270), boxed: inlined into [`messages`] the
+/// strategy's type nests deep enough to overflow a test thread's stack.
+fn bar() -> BoxedStrategy<Bar> {
+    (
+        (
+            u32s(),
+            text(),
+            prop::collection::vec(bar_button(), 0..6),
+            text(),
+            text(),
+        ),
+        (text(), text(), prop::collection::vec(bar_button(), 0..4)),
+        (any::<bool>(), i32s(), i32s(), text(), text()),
+    )
+        .prop_map(
+            |(
+                (v, round, buttons, hint, staged),
+                (sheet, sheet_title, sheet_rows),
+                (has_fix, fix_lat_e6, fix_lon_e6, fix_words, recording),
+            )| Bar {
+                v,
+                round,
+                buttons,
+                hint,
+                staged,
+                sheet,
+                sheet_title,
+                sheet_rows,
+                has_fix,
+                fix_lat_e6,
+                fix_lon_e6,
+                fix_words,
+                recording,
+            },
+        )
+        .boxed()
+}
+
+/// A compose bar's button or a sheet's row (1270).
+fn bar_button() -> impl Strategy<Value = BarButton> {
+    (text(), text()).prop_map(|(id, label)| BarButton { id, label })
 }
 
 /// A liveness as the rows carry it (1209): the word, the cadence and the
@@ -415,6 +681,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
         ),
         live(),
         (text(), text(), text(), text(), text()),
+        any::<bool>(),
     )
         .prop_map(
             |(
@@ -423,6 +690,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (state, photo, (linked, pinned, muted), updates, read_at),
                 (liveness, cadence_s, last_fix_at),
                 (live, ring, pin, pin_label, draft),
+                sharing,
             )| ConversationRow {
                 peer,
                 name,
@@ -450,6 +718,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 pin,
                 pin_label,
                 draft,
+                sharing,
             },
         )
         .boxed()
@@ -867,6 +1136,21 @@ proptest! {
     }
 
     #[test]
+    fn the_compose_bar_round_trips(bar in bar()) {
+        round_trips(&bar)?;
+    }
+
+    #[test]
+    fn the_running_shares_round_trip(shares in shares()) {
+        round_trips(&shares)?;
+    }
+
+    #[test]
+    fn the_recording_bar_round_trips(recording in recording()) {
+        round_trips(&recording)?;
+    }
+
+    #[test]
     fn a_contact_screen_round_trips(detail in detail()) {
         round_trips(&detail)?;
     }
@@ -886,10 +1170,20 @@ proptest! {
         round_trips(&Recents { v, emoji: rows.clone() })?;
         round_trips(&Done { v, ok, error: error.clone() })?;
         round_trips(&Backup { v, line: line.clone(), qr_size, qr: qr.clone() })?;
+        round_trips(&LinkCode {
+            v,
+            code: line.clone(),
+            qr_size,
+            qr: qr.clone(),
+            hours: names.4,
+            expires_at: names.3,
+        })?;
+        round_trips(&Linked { v, state: names.0.clone(), name: names.1.clone() })?;
         round_trips(&Me {
             v,
             address: names.0.clone(),
             fingerprint: names.1.clone(),
+            lxma: names.2.clone().unwrap_or_default(),
             qr_size,
             qr,
             name: line.clone(),

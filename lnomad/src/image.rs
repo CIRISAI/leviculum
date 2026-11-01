@@ -16,6 +16,8 @@
 #[cfg(feature = "tui")]
 pub use leviculum_ui_ratatui::images::{choose_backend, Backend};
 
+use crate::app::strings::{with, Lang, StrId, Text};
+
 /// The file extensions treated as inline images, lowercase.
 ///
 /// Deliberately the same list the `image` dependency is compiled with: an
@@ -272,15 +274,23 @@ pub fn human_bytes(len: usize) -> String {
 /// see the picture still learns what it is, how big it is and that the link
 /// under it will save or open it.
 pub fn status_line(name: &str, state: &SlotState) -> String {
+    status_text(name, state).resolve(Lang::En)
+}
+
+/// [`status_line`] in the catalogue's words. The picture's own facts (its
+/// format, size and bytes) and a failure's reason are not words of the
+/// catalogue and stay as they are.
+pub fn status_text(name: &str, state: &SlotState) -> Text {
     match state {
-        SlotState::Queued => format!("[{name}: queued]"),
-        SlotState::Loading => format!("[{name}: loading...]"),
-        SlotState::Ready { probe, .. } => describe(name, Some(probe)),
-        SlotState::Text { probe, reason } => {
-            format!("[{} - {reason}]", describe_inner(name, probe.as_ref()))
-        }
-        SlotState::TooMany => format!("[{name}: not fetched]"),
-        SlotState::Failed(reason) => format!("[{name}: {reason}]"),
+        SlotState::Queued => with(StrId::ImageQueued, name),
+        SlotState::Loading => with(StrId::ImageLoading, name),
+        SlotState::Ready { probe, .. } => Text::Raw(describe(name, Some(probe))),
+        SlotState::Text { probe, reason } => Text::Raw(format!(
+            "[{} - {reason}]",
+            describe_inner(name, probe.as_ref())
+        )),
+        SlotState::TooMany => with(StrId::ImageNotFetched, name),
+        SlotState::Failed(reason) => Text::Raw(format!("[{name}: {reason}]")),
     }
 }
 

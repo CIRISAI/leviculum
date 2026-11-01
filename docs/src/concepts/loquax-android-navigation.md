@@ -93,8 +93,8 @@ when it exists, never as a disabled placeholder.
 
 The list as it is now (rows, long press, pins, archive), under the common
 bar. The pencil stays the round button bottom right. It opens "New
-conversation", whose first choice becomes "Scan a QR code", then the
-address field.
+conversation": "Scan a code" first, "Paste a code" second, the typed
+address under a closed Advanced (1263).
 
 ## Map
 
@@ -200,8 +200,17 @@ Lew, 2026-10-31: Loquax may read the phone's location. Rules:
    the user shares it: from the map's empty state button, from a pin's
    card ("Share mine" with that friend), or from the chat's attachment
    menu. Reading the location for the crosshair sends nothing.
-5. Live sharing (a position every few minutes for an hour) is deferred
-   until the battery measurement exists.
+5. Sharing for a while (1273, Lew 2026-11-01: once, for a certain time,
+   or until stopped, and ending it simple): the chat's position sheet
+   offers "Now, once", "For 15 minutes", "For 1 hour", "For 8 hours" and
+   "Until I stop". While a share runs the chat shows a chip at its top
+   ("Sharing your position, 42 min left", or "… until you stop") with a
+   Stop, the list's row a small ⌖ in the accent colour, Settings, Privacy,
+   "Position sharing" lists every running share with its Stop, and a
+   foreground service shows "Loquax shares your position" with a Stop of
+   its own. The rules and the numbers are in [the map](loquax-map.md),
+   "Sharing for a while". The battery side is measured by tier R (1177)
+   afterwards, not assumed.
 
 ## Settings
 
@@ -260,13 +269,25 @@ parses it once for every frontend; its test pins the string byte for
 byte against Columba's encoder, and the QR code is byte mode, verbatim,
 because Columba compares the prefix case for case.
 
-A scanned or pasted code (the pencil's field takes one too) asks for the
-contact's name, keeps it as the reader's name for the address, hands the
-key to the mailbox (`/key`, docs/src/concepts/loquax-home-node.md) and
-opens the chat. The facade has `Query::Profile`, `Query::Lxma` (whose a
-code is, before the name is asked) and `Request::AddContact`. The parser
-refuses a code whose address is not the one its key makes, with words
-for the screen.
+A scanned or pasted code (the pencil's "Scan a code" and "Paste a code"
+take one too) asks for the contact's name, keeps it as the reader's name
+for the address, hands the key to the mailbox (`/key`,
+docs/src/concepts/loquax-home-node.md) and opens the chat. The facade has
+`Query::Profile`, `Query::Lxma` (what a code is and whose, before the
+name is asked) and `Request::AddContact`.
+
+One reader takes every code (1263, finding 1 of the ninety percent walk):
+`loquax::code::read`, used by the phone's scanners and pencil, the
+terminal's palette and the window's field. It takes a contact code, an
+address alone (32 hex digits, either case, groups of four, `lxmf@`; the
+first start's QR held one before 1263, and an old screenshot must still
+work) and a mailbox's `lqxh1` code, which goes to the join. A text that
+is none is said in one sentence of the catalogue: "That is not a Loquax
+code." or, for one of ours that is damaged (a contact code whose address
+is not its key's, a cut code), "This code is damaged. Ask for it again."
+The scanner shows that sentence instead of ignoring the code. The first
+start's "Your address" shows the profile's contact code as its QR, and
+its Share sends it.
 
 No new colours: the card is white because a QR code is black on white,
 and every text on the screen uses the background's text and secondary
@@ -307,9 +328,9 @@ a friend already on screen is one tap away from the map (the pin).
 ## Deferred
 
 - **The Calls tab**, with LXST; it appears when calls work.
-- **Live sharing** for an hour, after the battery measurement: a
-  position every few minutes keeps the radio and the GPS awake, and that
-  cost is measured before it ships, as for the keepalives of
+- **Live sharing** was here; Lew lifted it on 2026-11-01 (1273, above).
+  Its cost, the radio and the GPS kept awake, is measured by tier R
+  (1177) afterwards, as for the keepalives of
   [the home node](loquax-home-node.md).
 - **Routing**: never ours; Navigate hands off to the phone's app.
 
@@ -320,7 +341,8 @@ a friend already on screen is one tap away from the map (the pin).
   Help), back behaviour for sub views, Refresh and Map out of the menu.
   Map gets the whole screen; moon, "All" and "Load area" go; the map
   theme control moves to Settings, Appearance; the settings list gets its
-  eight entries (pages that do not exist yet show what exists today).
+  eight entries (pages that do not exist yet show what exists today);
+  1220 added a ninth, Chats, with the photo size.
   Built in 1199 with two choices of its own: on the Map tab the search
   icon stays hidden until the Friends sheet of 1200 gives it something to
   find, and the map's one chip says "Loading the map of this area…" or
@@ -360,7 +382,11 @@ a friend already on screen is one tap away from the map (the pin).
   position" picks the chat first (the empty map has no friend to send
   to), so it is two taps there; the card's "Share mine" and the chat's
   attachment menu (a paper clip in the compose field, one entry "My
-  position" for now) send at once. A share is a report of ours with no
+  position" then; "Photo" joined it above in 1220,
+  [photos](loquax-photos.md), and "File" in 1221,
+  [files](loquax-files.md)) send at once. With nothing typed the send
+  button is the microphone (1222, [voice messages](loquax-voice.md)):
+  held it records, released it sends, slid left it cancels. A share is a report of ours with no
   text, the Telemeter alone, and the chat shows it as our bubble with the
   position line. The Maps page names a map by its middle ("Around 52.52°
   N, 13.40° E"), since the region files carry no place name; Delete asks
@@ -381,4 +407,6 @@ a friend already on screen is one tap away from the map (the pin).
   open a chooser?
 - **Unread badge** on the Chats tab: count of messages or of chats?
 - **Help**: a page in the app, or a link to the book on
-  leviculum.network?
+  leviculum.network? Since 1278 the menu opens the user help page,
+  leviculum.network/help, or /help-de on a German phone (`help_url`), not
+  the book.

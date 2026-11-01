@@ -59,10 +59,15 @@ pub enum Target {
     Mailbox,
     /// The peer's position in the header: the peer on the map.
     Position,
+    /// Our position share's chip row (1273): a click stops the share.
+    ShareChip,
     /// The compose box's text, at this character of it.
     Compose { at: usize },
     /// The word `send` on the compose box's border. Transmits: a send.
     Send,
+    /// A button of the recording bar in the compose box, or its silence
+    /// line's click (1276), by the verb it raises.
+    Rec(super::recording::Verb),
     /// A footer button.
     Footer(FooterAct),
     /// Inside the open palette or detail view.
@@ -142,7 +147,7 @@ pub fn target_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Targ
         .find(|slot| rect_contains(slot.rect, col, row))
         .map(|slot| slot.item.action);
 
-    if model.help || model.palette.is_some() || model.detail.is_some() {
+    if model.help || model.palette.is_some() || model.detail_open() {
         if let (Some(_), Some(act)) = (&model.palette, button) {
             return Target::Footer(act);
         }
@@ -192,6 +197,18 @@ pub fn target_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Targ
         let box_ = inner(screen.compose, true);
         if !rect_contains(box_, col, row) {
             return Target::Pane(Pane::Compose);
+        }
+        // The recording bar in the field's place (1276): its buttons, and
+        // no text to put a cursor in.
+        if let Some(bar) = &shown.recording {
+            let (x, y) = (usize::from(col - box_.x), usize::from(row - box_.y));
+            return bar
+                .buttons
+                .iter()
+                .find(|&&(r, c, len, _)| r == y && x >= c && x < c + len)
+                .map_or(Target::Pane(Pane::Compose), |&(_, _, _, verb)| {
+                    Target::Rec(verb)
+                });
         }
         return Target::Compose {
             at: compose_index(
@@ -310,10 +327,7 @@ struct Rows {
 fn rows<B: InputBuffer>(model: &UiModel<B>, laid: &Laid) -> Rows {
     let screen = screen(model);
     let area = inner(screen.messages, false);
-    let header = match model.sizes().messages.0 >= WIDE_HEADER {
-        true => 2,
-        false => 0,
-    };
+    let header = model.header_rows();
     let height = model.message_rows();
     let top = model.top_of(laid.rows.len());
     let shown = laid.rows.len().saturating_sub(top).min(height);
@@ -351,6 +365,9 @@ fn messages_target<B: InputBuffer>(
     }
     let r = usize::from(row - at.area.y);
     let c = usize::from(col - at.area.x);
+    if model.chip_row() == Some(r) {
+        return Target::ShareChip;
+    }
     if r < at.header {
         // The mailbox row: the peer's position from its second cell, the
         // mailbox's words flush right after it.
@@ -407,7 +424,7 @@ fn messages_target<B: InputBuffer>(
 pub fn viewport<B: InputBuffer>(model: &UiModel<B>) -> Option<([u8; 16], Vec<u64>)> {
     let conversation = model.conversations.get(model.selected)?;
     let peer = conversation.peer;
-    if model.map.is_some() || model.help || model.detail.is_some() {
+    if model.map.is_some() || model.help || model.detail_open() {
         return Some((peer, Vec::new()));
     }
     let laid = model.laid();

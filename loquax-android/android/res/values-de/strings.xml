@@ -9,7 +9,6 @@
     <string name="action_run">Alle %1$d Positionen zeigen</string>
     <string name="run_title">%1$d Positionen</string>
     <string name="new_conversation">Neue Unterhaltung</string>
-    <string name="address_label">Die LXMF-Adresse, an die du schreibst: 32 Hex-Ziffern, wie die App des Gegenübers sie zeigt.</string>
     <string name="paste">Einfügen</string>
     <string name="open">Öffnen</string>
     <string name="refresh">Aktualisieren</string>
@@ -60,7 +59,7 @@
     <string name="unlink">Verknüpfung lösen</string>
     <string name="rename">Umbenennen</string>
     <string name="rename_hint">Dein Name für sie; leer löscht ihn</string>
-    <string name="book_banner">Nicht in deinen Kontakten. Hinzufügen?</string>
+    <string name="book_banner">In den Kontakten deines Telefons speichern?</string>
     <string name="book_add">Hinzufügen</string>
     <string name="not_now">Jetzt nicht</string>
     <string name="another_contact">Anderer Kontakt…</string>
@@ -158,7 +157,6 @@
     <string name="address_text">Zeig das den Leuten, die dir schreiben sollen.</string>
     <string name="write_message">Nachricht schreiben</string>
     <string name="name_for_others">Dein Name für andere</string>
-    <string name="optional">freiwillig</string>
     <string name="backup_address">Adresse sichern</string>
     <string name="done">Fertig</string>
     <string name="restore_title">Deine Adresse aus einer Sicherung</string>
@@ -187,12 +185,18 @@
     <string name="propagation_node_text">Solange dein Postfach offline ist, wartet Post für dich bei einem Propagation Node im Netz, den Loquax selbst wählt.</string>
     <string name="here_running">Dein Postfach läuft auf diesem Telefon</string>
     <string name="here_running_unread">Dein Postfach läuft auf diesem Telefon, %1$d ungelesen</string>
+    <string name="connecting">Nicht verbunden, neuer Versuch läuft</string>
+    <string name="connected">Mit deinem Postfach verbunden</string>
+    <string name="connected_unread">Mit deinem Postfach verbunden, %1$d ungelesen</string>
+    <string name="not_connected">Nicht verbunden, neuer Versuch läuft</string>
     <string name="scan_code">Code scannen</string>
     <string name="scan_backup">Papiersicherung scannen</string>
     <string name="scan_hint">Halte den Code vor die Kamera.</string>
     <string name="scan_no_camera">Die Kamera lässt sich nicht nutzen. Füge den Code stattdessen ein.</string>
+    <string name="scan_wrong_kind">Dieser Code ist für etwas anderes. Scanne den Code, nach dem hier gefragt wird.</string>
     <!-- The main views and the settings (1199). -->
     <string name="help">Hilfe</string>
+    <string name="help_url">https://leviculum.network/help-de</string>
     <string name="settings_profile">Profil</string>
     <string name="settings_profile_summary">Name, Adresse, QR-Code</string>
     <string name="settings_mailbox_summary">Wo es liegt</string>
@@ -201,6 +205,8 @@
     <string name="settings_notifications">Benachrichtigungen</string>
     <string name="settings_notifications_summary">Neue Nachrichten, stumme Chats</string>
     <string name="settings_notifications_text">Loquax meldet jede neue Nachricht. Um einen Chat stumm zu schalten, halte ihn in der Liste gedrückt, dann Stumm. Ton und Vibration stehen in Androids Einstellungen für Loquax.</string>
+    <string name="settings_chats">Chats</string>
+    <string name="settings_chats_summary">Fotogröße</string>
     <string name="settings_privacy">Privatsphäre</string>
     <string name="settings_privacy_summary">Lesebestätigungen, blockierte Kontakte, geteilte Positionen</string>
     <string name="settings_maps">Karten</string>
@@ -258,6 +264,17 @@
     <string name="profile_mailbox_away">Postfach: auf %1$s, seit %2$s</string>
     <string name="profile_mailbox_away_undated">Postfach: auf %1$s</string>
     <string name="profile_mailbox_change">Anderes Postfach verwenden</string>
+    <!-- Ein Gerät mit dem Postfach auf diesem Handy verbinden (1264). -->
+    <string name="profile_link_device">Gerät verbinden</string>
+    <string name="link_title">Gerät verbinden</string>
+    <string name="link_text">Installiere Loquax auf deinem anderen Gerät, wähle „Einem bestehenden Postfach beitreten“ und scanne diesen Code.</string>
+    <string name="link_good_for">Gilt %1$d Stunden, für ein Gerät.</string>
+    <string name="link_waiting">Warte auf das andere Gerät…</string>
+    <string name="link_linked">Gerät verbunden: %1$s</string>
+    <string name="link_over">Dieser Code ist abgelaufen. Mach einen neuen.</string>
+    <string name="link_share">Code teilen</string>
+    <string name="join_existing">Einem bestehenden Postfach beitreten</string>
+    <string name="join_existing_text">Tippe auf dem Handy mit deinem Postfach auf dein Bild, dann auf „Gerät verbinden“. Scanne den Code, den es zeigt, hier oder füge ihn ein.</string>
     <string name="profile_identity">Identitäts-Hash</string>
     <string name="profile_home_node">Heimknoten</string>
     <string name="profile_rendezvous">Treffpunkt (● verbunden)</string>

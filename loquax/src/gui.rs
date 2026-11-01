@@ -34,6 +34,7 @@
 
 pub mod chat;
 pub mod map;
+pub mod viewer;
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -101,6 +102,9 @@ pub struct Seen {
     /// The reader's switch "Send read receipts" (1233), the settings'
     /// row.
     pub receipts: bool,
+    /// The photo a press on a bubble's photo last asked to see whole
+    /// (1269), decoded by the shell: a new one opens the viewer.
+    pub photo: Option<viewer::Picture>,
 }
 
 impl Seen {
@@ -111,10 +115,11 @@ impl Seen {
             loading: shell.model.map_loading.clone(),
             maps: shell.maps.epoch(),
             autoload: shell.model.map_autoload,
-            style: Style::PC.in_theme(map_theme(shell.model.map_theme, None)),
+            style: Style::SCREEN.in_theme(map_theme(shell.model.map_theme, None)),
             scene: shell.model.scene(LayoutClass::Wide),
             now: shell.model.now,
             receipts: shell.model.reading.on,
+            photo: None,
         }
     }
 }
@@ -125,6 +130,12 @@ impl Seen {
 pub enum Want {
     Map(MapWant),
     Ui(UiEvent),
+    /// A gesture or a button of the recording (1276), timed by the shell
+    /// on the clock the model's recording counts by.
+    Record {
+        peer: [u8; 16],
+        input: loquax::ui::recording::Input,
+    },
 }
 
 /// `loquax gui`: the shell started as the terminal starts it, driven on
@@ -167,11 +178,34 @@ async fn drive(
     shell.apply(UiEvent::Clock(local_now()));
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
     let mut last: Option<Seen> = None;
+    let mut photo: Option<viewer::Picture> = None;
     loop {
         // The map view asks for no copy, link or mouse capture; what the
-        // model asks of a terminal has no meaning in the window yet.
-        shell.outputs.clear();
-        let now = Seen::of(&shell);
+        // model asks of a terminal has no meaning in the window yet, but a
+        // photo, which the window's viewer shows (1269), and a file, which
+        // the system's handler opens (1221).
+        for output in shell.outputs.drain(..) {
+            let path = match output {
+                shell::Output::Photo(path) => match picture(&path, photo.as_ref()) {
+                    Ok(decoded) => {
+                        photo = Some(decoded);
+                        continue;
+                    }
+                    // What the window cannot decode the system may show.
+                    Err(error) => {
+                        tracing::warn!("{}: {error}", path.display());
+                        path
+                    }
+                },
+                shell::Output::File(path) => path,
+                _ => continue,
+            };
+            if let Err(error) = open::that(&path) {
+                tracing::warn!("could not open {}: {error}", path.display());
+            }
+        }
+        let mut now = Seen::of(&shell);
+        now.photo = photo.clone();
         if last.as_ref() != Some(&now) {
             if seen.unbounded_send(now.clone()).is_err() {
                 break;
@@ -186,12 +220,30 @@ async fn drive(
             Some(want) = asks.recv() => match want {
                 Want::Map(want) => shell.map_ask(want),
                 Want::Ui(event) => shell.apply(event),
+                Want::Record { peer, input } => shell.record(peer, input),
             },
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => shell.tick(&mut clocks),
         }
     }
     shell
+}
+
+/// The photo file at `path` decoded for the viewer, its serial past
+/// `last`'s.
+fn picture(
+    path: &std::path::Path,
+    last: Option<&viewer::Picture>,
+) -> Result<viewer::Picture, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let pixels = loquax::photo::fit(&bytes, 4096).map_err(|e| e.to_string())?;
+    Ok(viewer::Picture {
+        serial: last.map_or(1, |p| p.serial + 1),
+        width: pixels.width,
+        height: pixels.height,
+        full: pixels.full,
+        rgba: Arc::new(pixels.rgba),
+    })
 }
 
 /// Open the window and run it until it is closed.
@@ -254,6 +306,19 @@ pub enum Message {
     Intent(Intent),
     /// The top bar's gear: the settings page (1233).
     Settings,
+    /// The mouse on the photo viewer (1269).
+    Viewer(viewer::Input),
+    /// The viewer's Close.
+    ViewerClose,
+    /// The microphone went down under the mouse (1276): it records while
+    /// held.
+    RecPress,
+    /// The pointer, in logical pixels, while the microphone is held.
+    RecCursor(Point),
+    /// The mouse button came up while the microphone was held.
+    RecRelease,
+    /// The pointer went onto the lock chip, or off it, while held.
+    RecOverLock(bool),
 }
 
 impl Message {
@@ -273,6 +338,8 @@ impl Message {
                 | Message::WheelRest
                 | Message::Prefetched(_)
                 | Message::Settings
+                | Message::Viewer(_)
+                | Message::ViewerClose
         )
     }
 }
@@ -465,6 +532,14 @@ struct App {
     lang: Lang,
     /// The scene of [`Seen`] in the window's class: what is drawn.
     scene: Scene,
+    /// The photo whole while it is open (1269), over everything.
+    viewer: Option<viewer::Viewer>,
+    /// The microphone held by the mouse (1276): the chat it records for,
+    /// where the pointer was first seen since, and whether it is over
+    /// the lock chip.
+    rec_held: Option<[u8; 16]>,
+    rec_origin: Option<Point>,
+    rec_over_lock: bool,
 }
 
 impl App {
@@ -497,10 +572,11 @@ impl App {
                 loading: None,
                 maps: 0,
                 autoload: false,
-                style: Style::PC,
+                style: Style::SCREEN,
                 scene: empty.clone(),
                 now: None,
                 receipts: true,
+                photo: None,
             },
             asks,
             fitted_at: None,
@@ -534,6 +610,10 @@ impl App {
             deleting: None,
             lang: Lang::En,
             scene: empty,
+            viewer: None,
+            rec_held: None,
+            rec_origin: None,
+            rec_over_lock: false,
         }
     }
 
@@ -557,6 +637,57 @@ impl App {
         }
     }
 
+    /// Hand a gesture or a button of the recording to the model, through
+    /// the shell's clock (1276).
+    fn record(&self, peer: [u8; 16], input: loquax::ui::recording::Input) {
+        if let Some(asks) = &self.asks {
+            let _ = asks.send(Want::Record { peer, input });
+        }
+    }
+
+    /// The microphone held with the mouse (1276): down is the press,
+    /// every move the slide from where the pointer was first seen, in
+    /// logical pixels as dp (left and up negative), up the release, or
+    /// the lock where it comes up over the chip.
+    fn rec_mouse(&mut self, message: Message) {
+        use loquax::ui::recording::{Input, Verb};
+        match message {
+            Message::RecPress => {
+                let Some(peer) = self.scene.chat.as_ref().map(|c| c.peer) else {
+                    return;
+                };
+                self.rec_held = Some(peer);
+                self.rec_origin = None;
+                self.rec_over_lock = false;
+                self.record(peer, Input::Press { now: 0 });
+            }
+            Message::RecCursor(at) => {
+                let Some(peer) = self.rec_held else {
+                    return;
+                };
+                let origin = *self.rec_origin.get_or_insert(at);
+                self.record(
+                    peer,
+                    Input::Slide {
+                        dx: (at.x - origin.x).round() as i32,
+                        dy: (at.y - origin.y).round() as i32,
+                    },
+                );
+            }
+            Message::RecRelease => {
+                let Some(peer) = self.rec_held.take() else {
+                    return;
+                };
+                match std::mem::take(&mut self.rec_over_lock) {
+                    true => self.record(peer, Input::Verb(Verb::Lock)),
+                    false => self.record(peer, Input::Release { now: 0 }),
+                }
+            }
+            Message::RecOverLock(over) => self.rec_over_lock = over && self.rec_held.is_some(),
+            _ => {}
+        }
+    }
+
     /// What a chat message changes; a task for what iced does for it.
     fn chat(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -565,14 +696,27 @@ impl App {
             Message::NewAddress(typed) => self.new_address = Some(typed),
             Message::NewGo => {
                 let typed = self.new_address.clone().unwrap_or_default();
-                match loquax::address::parse(typed.trim()) {
-                    Ok(peer) => {
+                // The one reader every frontend asks (1263): a contact
+                // code, an address, and what is neither in plain words.
+                match loquax::code::read(&typed).map(|code| code.address()) {
+                    Ok(Some(peer)) => {
                         self.new_address = None;
                         return self.intent(Intent::OpenChat { peer });
                     }
-                    Err(error) => self.seen.notice = Some(format!("'{}': {error}", typed.trim())),
+                    Ok(None) => {
+                        self.seen.notice = Some(
+                            loquax::ui::strings::StrId::CodeIsMailbox
+                                .text(self.lang)
+                                .to_string(),
+                        )
+                    }
+                    Err(why) => self.seen.notice = Some(why.say(self.lang).to_string()),
                 }
             }
+            Message::RecPress
+            | Message::RecCursor(_)
+            | Message::RecRelease
+            | Message::RecOverLock(_) => self.rec_mouse(message),
             Message::Compose(action) => {
                 let edit = action.is_edit();
                 self.compose.perform(action);
@@ -691,7 +835,7 @@ impl App {
                 self.screen = Screen::Chats;
                 return iced::widget::operation::focus(chat::SEARCH_FIELD);
             }
-            Intent::NewConversation => {
+            Intent::NewConversation | Intent::AddContact { .. } => {
                 self.new_address = match self.new_address {
                     Some(_) => None,
                     None => Some(String::new()),
@@ -806,6 +950,16 @@ impl App {
                 }
             }
             Intent::SendAgain { peer, key } => self.tell(UiEvent::SendAgain { peer, key }),
+            Intent::ViewPhoto { peer, key } => self.tell(UiEvent::ViewPhoto { peer, key }),
+            Intent::OpenFile { peer, key, index } => {
+                self.tell(UiEvent::OpenFile { peer, key, index })
+            }
+            Intent::PlayVoice { peer, key } => self.tell(UiEvent::PlayVoice { peer, key }),
+            // The recording bar's buttons (1276).
+            Intent::Recording { peer, verb } => {
+                self.record(peer, loquax::ui::recording::Input::Verb(verb))
+            }
+            Intent::PauseVoice { peer, key } => self.tell(UiEvent::PauseVoice { peer, key }),
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed,
@@ -908,11 +1062,18 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut all = vec![
             window::events().map(|(_, event)| Message::Window(event)),
             keyboard::listen().map(Message::Key),
             iced::system::theme_changes().map(Message::SystemTheme),
-        ])
+        ];
+        // The pointer anywhere in the window while the microphone is held
+        // (1276): it may leave the button, and the release counts
+        // wherever it is.
+        if self.rec_held.is_some() {
+            all.push(iced::event::listen_with(held_pointer));
+        }
+        Subscription::batch(all)
     }
 
     fn now_ms(&self) -> u64 {
@@ -943,7 +1104,24 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // The viewer is over everything: a key is its Esc or nothing.
+        if let (Some(viewer), Message::Key(event)) = (&mut self.viewer, &message) {
+            if chord(event).is_some_and(|k| k.code == KeyCode::Esc) && viewer.back() {
+                self.viewer = None;
+            }
+            return Task::none();
+        }
         match message {
+            Message::Viewer(input) => {
+                if let Some(viewer) = &mut self.viewer {
+                    viewer.input(input, Instant::now());
+                }
+                return Task::none();
+            }
+            Message::ViewerClose => {
+                self.viewer = None;
+                return Task::none();
+            }
             Message::Intent(intent) => return self.intent(intent),
             Message::Settings => {
                 self.screen = Screen::Settings;
@@ -972,6 +1150,13 @@ impl App {
         match message {
             Message::Seen(seen) => {
                 let landed = seen.maps != self.seen.maps;
+                if let Some(photo) = seen
+                    .photo
+                    .as_ref()
+                    .filter(|p| self.seen.photo.as_ref() != Some(p))
+                {
+                    self.viewer = Some(viewer::Viewer::new(photo, self.window));
+                }
                 self.seen = *seen;
                 self.rescene();
                 self.restore_draft();
@@ -1235,6 +1420,9 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if let Some(viewer) = &self.viewer {
+            return viewer.view();
+        }
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
             (Screen::Settings, _, _) => self.settings_pane(),
@@ -1504,6 +1692,24 @@ impl canvas::Program<Message> for MapCanvas<'_> {
     }
 }
 
+/// What the held microphone follows (1276): the pointer's moves and the
+/// left button's release, anywhere in the window.
+fn held_pointer(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _: window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::RecCursor(position))
+        }
+        iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            Some(Message::RecRelease)
+        }
+        _ => None,
+    }
+}
+
 /// The language the desktop's locale names: the scene's words are said in
 /// it.
 fn locale() -> Lang {
@@ -1598,10 +1804,11 @@ mod tests {
             loading: None,
             maps,
             autoload: false,
-            style: Style::PC,
+            style: Style::SCREEN,
             scene: crate::shell::Model::new(&[]).scene(LayoutClass::Wide),
             now: None,
             receipts: true,
+            photo: None,
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -1837,11 +2044,77 @@ mod tests {
             loading: None,
             maps: 0,
             autoload: false,
-            style: Style::PC,
+            style: Style::SCREEN,
             scene: model.scene(LayoutClass::Wide),
             now: model.now,
             receipts: model.reading.on,
+            photo: None,
         }
+    }
+
+    /// A press on a bubble's photo (1269): the shell's file decoded for
+    /// the window, its own size kept; the window opens the viewer over
+    /// everything, the wheel zooms it, Esc goes to 1x and then closes, and
+    /// the same photo seen again does not open it again, a new press does.
+    #[test]
+    fn a_photo_opens_in_the_windows_viewer_and_zooms() {
+        let dir = std::env::temp_dir().join(format!("loquax-1269-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("photo.png");
+        image::RgbaImage::from_pixel(5000, 100, image::Rgba([200, 30, 30, 255]))
+            .save(&path)
+            .expect("a png");
+        let first = picture(&path, None).expect("decodes");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((first.width, first.height), (4096, 82));
+        assert_eq!(first.full, (5000, 100));
+        assert_eq!(first.serial, 1);
+
+        let model = chat_model();
+        let mut app = App::new(florence(), None);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.viewer.is_none());
+        let mut seen = seen_of(&model);
+        seen.photo = Some(first.clone());
+        app.apply(Message::Seen(Box::new(seen.clone())));
+        let viewer = app.viewer.as_ref().expect("the viewer opens");
+        // 5000 px on a 1100 px wide window: its own size is past 4x.
+        assert!((viewer.zoom.max_scale() - 5000.0 / 1100.0).abs() < 1e-9);
+        let _ = app.update(Message::Viewer(viewer::Input::Wheel(
+            Point::new(550.0, 360.0),
+            3.0,
+        )));
+        let scale = app.viewer.as_ref().map(|v| v.zoom.scale());
+        assert!(scale.is_some_and(|s| s > 1.9), "{scale:?}");
+        let esc = Message::Key(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        let _ = app.update(esc.clone());
+        assert!(app.viewer.as_ref().is_some_and(|v| v.zoom.at_rest()));
+        let _ = app.update(esc);
+        assert!(app.viewer.is_none());
+        // The same photo in the next Seen: still closed.
+        app.apply(Message::Seen(Box::new(seen.clone())));
+        assert!(app.viewer.is_none());
+        // A new press, the same photo: open again.
+        seen.photo = picture_again(&first);
+        app.apply(Message::Seen(Box::new(seen)));
+        assert!(app.viewer.is_some());
+        let _ = app.update(Message::ViewerClose);
+        assert!(app.viewer.is_none());
+    }
+
+    fn picture_again(last: &viewer::Picture) -> Option<viewer::Picture> {
+        Some(viewer::Picture {
+            serial: last.serial + 1,
+            ..last.clone()
+        })
     }
 
     /// The window over `chat_model`, with the channel to the shell.
@@ -2114,7 +2387,10 @@ mod tests {
         let _ = app.update(Message::NewAddress("not hex".to_string()));
         let _ = app.update(Message::NewGo);
         assert!(told(&mut rx).is_empty());
-        assert!(app.seen.notice.is_some());
+        assert_eq!(
+            app.seen.notice.as_deref(),
+            Some("That is not a Loquax code.")
+        );
         assert!(app.new_address.is_some(), "the field stays for a fix");
         let hex = loquax::address::to_hex(&BERT);
         let _ = app.update(Message::NewAddress(hex));
@@ -2244,6 +2520,202 @@ mod tests {
         assert_eq!(px(&dark, ground.0, ground.1), [0x17, 0x18, 0x1b]);
         map::tests::same_as("gui-chat-light.png", &light, w, h);
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
+    }
+
+    /// A photo, a file and a voice message without words (1268): each is
+    /// one bubble, its media first and its time (and for ours the mark)
+    /// in its last row, no empty text row under it. Pixel for pixel the
+    /// golden, light.
+    #[test]
+    fn media_without_words_is_one_bubble_each() {
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        model.names.remember(OWN, "Mia Sander");
+        model.names.remember(ANNA, "Anna Schulz");
+        let carrying = |model: &mut crate::shell::Model, id: u8, fields| {
+            update(
+                model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [id; 32],
+                    source: ANNA,
+                    title: Vec::new(),
+                    body: Vec::new(),
+                    fields,
+                    verified: true,
+                }),
+            );
+        };
+        update(&mut model, UiEvent::Clock(at(30, 9, 10)));
+        carrying(
+            &mut model,
+            1,
+            loquax::ui::photos::photo_fields("jpg", vec![7; 312_400]),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 20)));
+        carrying(
+            &mut model,
+            2,
+            loquax::ui::files::file_fields("report.pdf", vec![7; 1_400]),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 30)));
+        carrying(
+            &mut model,
+            3,
+            loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 900]),
+        );
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        update(&mut model, UiEvent::Clock(at(30, 9, 40)));
+        update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer: ANNA,
+                format: "jpg".into(),
+                data: vec![0xff, 0xd8, 0xff],
+            },
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let open = app.scene.chat.as_ref().expect("the chat");
+        let bubbles: Vec<_> = open.groups.iter().flat_map(|g| &g.bubbles).collect();
+        assert_eq!(bubbles.len(), 4, "one bubble a message");
+        assert!(bubbles.iter().all(|b| b.text.is_none() && b.place.meta));
+        assert!(bubbles[3].bubble.ours && bubbles[3].mark.is_some());
+        let (w, h) = (900, 560);
+        app.window = Size::new(w as f32, h as f32);
+        map::tests::same_as("gui-chat-media.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// `pcm` as the microphone's levels for Anna's recording, a window
+    /// every 50 ms from `from` on; the time after the last.
+    fn levels_of(model: &mut crate::shell::Model, pcm: &[i16], from: u64) -> u64 {
+        use loquax::ui::recording::{rms, Input, WINDOW_MS};
+        let mut now = from;
+        for chunk in pcm.chunks((loquax::voice::RATE / (1000 / WINDOW_MS)) as usize) {
+            now += u64::from(WINDOW_MS);
+            update(
+                model,
+                UiEvent::Record {
+                    peer: ANNA,
+                    input: Input::Level {
+                        now,
+                        rms: rms(chunk),
+                    },
+                },
+            );
+        }
+        now
+    }
+
+    fn rec(model: &mut crate::shell::Model, input: loquax::ui::recording::Input) {
+        update(model, UiEvent::Record { peer: ANNA, input });
+    }
+
+    /// The recording bar in the window (1276), pixel for pixel the
+    /// goldens, light, 900 x 560: held (the red dot, `REC 00:03`, the
+    /// live waveform, the cancel hint followed 40 px left, the grown red
+    /// microphone with the open lock chip risen above it), locked after a
+    /// voice message already went (its bubble draws the recording's own
+    /// waveform; the bar has the bin, the pause and the big Send under
+    /// the closed lock), and paused after three silent seconds (the
+    /// hollow dot, the play, the bin, resume, and the amber line with its
+    /// Allow). Each picture is the same when taken again.
+    #[test]
+    fn the_recording_bar_is_the_golden_held_locked_and_paused() {
+        use loquax::ui::recording::{Input, Phase, Verb};
+        let speech = loquax::voice::test_speech(loquax::voice::RATE, 7_400);
+        let (w, h) = (900, 560);
+        let shot = |model: &crate::shell::Model| {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+            app.apply(Message::Seen(Box::new(seen_of(model))));
+            app.window = Size::new(w as f32, h as f32);
+            let first = shoot(&app, w, h);
+            assert_eq!(shoot(&app, w, h), first, "a second picture is the same");
+            first
+        };
+
+        let mut held = chat_model();
+        rec(&mut held, Input::Press { now: 1_000 });
+        levels_of(&mut held, &speech[..48_000], 1_000);
+        rec(&mut held, Input::Slide { dx: -40, dy: -30 });
+        assert!(matches!(held.recording.phase, Phase::Held { .. }));
+
+        let mut locked = chat_model();
+        rec(&mut locked, Input::Press { now: 1_000 });
+        let end = levels_of(&mut locked, &speech[..48_000], 1_000);
+        rec(&mut locked, Input::Release { now: end });
+        assert_eq!(locked.recording.phase, Phase::Sent);
+        let data = loquax::voice::encode(&speech[..48_000], loquax::voice::RATE).expect("coded");
+        update(&mut locked, UiEvent::SendVoice { peer: ANNA, data });
+        rec(&mut locked, Input::Press { now: 20_000 });
+        rec(&mut locked, Input::Verb(Verb::Lock));
+        levels_of(&mut locked, &speech, 20_000);
+        assert!(matches!(locked.recording.phase, Phase::Locked { .. }));
+
+        let mut paused = chat_model();
+        rec(&mut paused, Input::Press { now: 1_000 });
+        rec(&mut paused, Input::Verb(Verb::Lock));
+        levels_of(&mut paused, &vec![0; 48_000], 1_000);
+        rec(&mut paused, Input::Verb(Verb::Pause));
+        assert_eq!(paused.recording.phase, Phase::Paused);
+
+        for (name, model) in [
+            ("gui-recording-held.png", &held),
+            ("gui-recording-locked.png", &locked),
+            ("gui-recording-paused.png", &paused),
+        ] {
+            map::tests::same_as(name, &shot(model), w, h);
+        }
+    }
+
+    /// The mouse on the window's microphone (1276): down is the press,
+    /// the moves are slides from where the pointer was first seen, up is
+    /// the release; up over the lock chip locks instead; the bar's
+    /// buttons are the model's verbs. Every one goes to the shell, which
+    /// times it.
+    #[test]
+    fn the_mouse_holds_slides_locks_and_releases_the_microphone() {
+        use loquax::ui::recording::{Input, Verb};
+        let (mut app, mut rx) = chat_window();
+        let mut sent = || {
+            let mut out = Vec::new();
+            while let Ok(want) = rx.try_recv() {
+                if let Want::Record { peer, input } = want {
+                    assert_eq!(peer, ANNA);
+                    out.push(input);
+                }
+            }
+            out
+        };
+        let _ = app.update(Message::RecPress);
+        let _ = app.update(Message::RecCursor(Point::new(800.0, 500.0)));
+        let _ = app.update(Message::RecCursor(Point::new(700.0, 480.0)));
+        let _ = app.update(Message::RecRelease);
+        assert_eq!(
+            sent(),
+            [
+                Input::Press { now: 0 },
+                Input::Slide { dx: 0, dy: 0 },
+                Input::Slide { dx: -100, dy: -20 },
+                Input::Release { now: 0 },
+            ]
+        );
+        // Released again: nothing, it is no longer held.
+        let _ = app.update(Message::RecRelease);
+        let _ = app.update(Message::RecCursor(Point::new(1.0, 1.0)));
+        assert!(sent().is_empty());
+        // Up over the chip: the lock.
+        let _ = app.update(Message::RecPress);
+        let _ = app.update(Message::RecOverLock(true));
+        let _ = app.update(Message::RecRelease);
+        assert_eq!(sent(), [Input::Press { now: 0 }, Input::Verb(Verb::Lock)]);
+        // A button of the bar.
+        let _ = app.update(Message::Intent(Intent::Recording {
+            peer: ANNA,
+            verb: Verb::Pause,
+        }));
+        assert_eq!(sent(), [Input::Verb(Verb::Pause)]);
     }
 
     /// A narrow window stacks as the phone does, and a resize switches

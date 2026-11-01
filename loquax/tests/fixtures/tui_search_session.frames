@@ -1,7 +1,7 @@
 === 120x40 ===
 --- frame 1: typed ---
-┌● Search────────────── esc closes ┐┌  <5ec0ea2e…>  unknown────────────────────────── 5ec0ea2ecbc35ac16053c86cc29663ec ┐
-│ / tripod                         ││                                                              no propagation node │
+┌● Search────────────── esc closes ┐┌  <5ec0ea2e…>─────────────────────────────────── 5ec0ea2ecbc35ac16053c86cc29663ec ┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
 │ ▌you to <5ec0ea2e…>        14:07 ││                                                                                  │
@@ -41,8 +41,8 @@
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- frame 2: opened ---
-┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / tripod                         ││                                                              no propagation node │
+┌  Search────────────── esc closes ┐┌● <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
 │  you to <5ec0ea2e…>        14:07 ││                                                                                  │
@@ -82,8 +82,8 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: next ---
-┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / tripod                         ││                                                              no propagation node │
+┌  Search────────────── esc closes ┐┌● <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
 │  you to <5ec0ea2e…>        14:07 ││                                                                                  │
@@ -123,8 +123,8 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: previous ---
-┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / tripod                         ││                                                              no propagation node │
+┌  Search────────────── esc closes ┐┌● <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / tripod                         ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ MESSAGES                       3 ││                                                                                  │
 │  you to <5ec0ea2e…>        14:07 ││                                                                                  │
@@ -164,8 +164,8 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: both groups ---
-┌● Search────────────── esc closes ┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ / 61dd                           ││                                                              no propagation node │
+┌● Search────────────── esc closes ┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / 61dd                           ││                                                                         no relay │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  1 ││                                                                                  │
 │ ▌<«61dd»b79a…>             14:06 ││                                                                                  │
@@ -205,8 +205,8 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- frame 6: closed ---
-┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│ <5ec0ea2e…>                14:07 ││                                                              no propagation node │
+┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ <5ec0ea2e…>                14:07 ││                                                                         no relay │
 │ you: the tripod stays in the va… ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │▌<61ddb79a…>                14:06 ││                                                                                  │
@@ -247,7 +247,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === 80x24 ===
 --- frame 1: typed ---
-┌● Search──── esc closes ┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌● Search──── esc closes ┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
@@ -272,7 +272,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- frame 2: opened ---
-┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Search──── esc closes ┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
@@ -297,7 +297,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q qu
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 3: next ---
-┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Search──── esc closes ┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
@@ -322,7 +322,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 4: previous ---
-┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Search──── esc closes ┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │ / tripod               ││                                                    │
 │                        ││                                                    │
 │ MESSAGES             3 ││                                                    │
@@ -347,7 +347,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 5: both groups ---
-┌● Search──── esc closes ┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Search──── esc closes ┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │ / 61dd                 ││                                                    │
 │                        ││                                                    │
 │ CONVERSATIONS        1 ││                                                    │
@@ -372,7 +372,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- frame 6: closed ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │ <5ec0ea2e…>      14:07 ││                                                    │
 │ you: the tripod stays… ││                                                    │
 │                        ││                                                    │

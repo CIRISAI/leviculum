@@ -28,6 +28,7 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Map;
 
 /**
  * The scanner (1152): the back camera's preview in a plain TextureView,
@@ -37,11 +38,16 @@ import java.util.Arrays;
  *
  * Started for a result; the code's text comes back as {@link #TEXT}.
  * {@link #PREFIX} says what is wanted: `lqxh1` for a mailbox's join code,
- * `lqxb1` for a paper backup, `lxma://` for a contact's code (1187);
- * several, split by `|`, take any of them. Another code in view is ignored.
+ * `lqxb1` for a paper backup; several, split by `|`, take any of them;
+ * {@link #CODES} takes every code a friend or a mailbox shows, as the
+ * library reads it (loquax::code, 1263): a contact code, an address alone,
+ * a mailbox's code. Another code in view is not ignored: the line at the
+ * bottom says in one sentence why it is not taken, and the scan goes on.
  */
 public class ScanActivity extends Activity {
     static final String PREFIX = "prefix";
+    /** The {@link #PREFIX} for any code a friend or a mailbox shows. */
+    static final String CODES = "codes";
     static final String TEXT = "text";
     private static final int ASK_CAMERA = 1;
     /** The largest frame asked for: enough for a code on a screen or paper. */
@@ -239,28 +245,51 @@ public class ScanActivity extends Activity {
         buffer.get(bytes);
         image.close();
         String text = Native.scan(bytes, width, height, stride);
+        if (text == null || text.isEmpty()) {
+            decoding = false;
+            return;
+        }
+        final String why = refusal(text);
         decoding = false;
-        if (text != null && !text.isEmpty() && wanted(text)) {
-            found = true;
-            final String code = text;
+        if (why != null) {
             runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
-                    setResult(RESULT_OK, new Intent().putExtra(TEXT, code));
-                    finish();
+                    if (!found && !why.contentEquals(said.getText())) {
+                        said.setText(why);
+                    }
                 }
             });
+            return;
         }
+        found = true;
+        final String code = text;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                setResult(RESULT_OK, new Intent().putExtra(TEXT, code));
+                finish();
+            }
+        });
     }
 
-    /** Whether `text` begins with one of the prefixes asked for, in any case. */
-    private boolean wanted(String text) {
+    /**
+     * Why `text` is not taken here, in one sentence; null when it is: in
+     * {@link #CODES} what the library says of it, else whether it begins
+     * with one of the prefixes asked for, in any case.
+     */
+    private String refusal(String text) {
+        if (prefixes.length == 1 && CODES.equals(prefixes[0])) {
+            Map<String, Object> read = Core.lxma(text);
+            return read.containsKey("error") ? Core.str(read, "error") : null;
+        }
         for (String prefix : prefixes) {
             if (text.regionMatches(true, 0, prefix, 0, prefix.length())) {
-                return true;
+                return null;
             }
         }
-        return false;
+        Map<String, Object> read = Core.lxma(text);
+        return read.containsKey("error") ? Core.str(read, "error") : getString(R.string.scan_wrong_kind);
     }
 
     private void failed() {

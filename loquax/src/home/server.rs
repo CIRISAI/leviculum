@@ -491,10 +491,10 @@ fn join(
     device: [u8; 16],
     now_secs: i64,
 ) -> Vec<u8> {
-    let Ok((token, _name)) = wire::read_join_request(data) else {
+    let Ok((token, brought)) = wire::read_join_request(data) else {
         return wire::status_answer(Status::Malformed);
     };
-    match store.redeem_token(&token, &device, now_secs, home.token_ttl_secs) {
+    match store.redeem_token_as(&token, &device, &brought, now_secs, home.token_ttl_secs) {
         Ok(Redeemed::Admitted { name }) => {
             tracing::info!(
                 "HOME admitted device={} name={name:?}",

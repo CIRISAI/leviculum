@@ -54,10 +54,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     static final String ARCHIVED = "archived";
     /** The extra that opens the Map tab on a friend (1224): its address. */
     static final String MAP_AT = "map_at";
+    /**
+     * The extra with a friend's code from outside (walk finding 12): an
+     * lxma:// link tapped in another app, or a text shared to Loquax that
+     * carries one. "Add contact" asks the name over the list.
+     */
+    static final String ADD_CODE = "add_code";
     /** The saved state's key of the selected tab. */
     private static final String TAB = "tab";
-    /** Help (1199): the book, until the app has a page of its own. */
-    static final String HELP_URL = "https://leviculum.network/docs/";
     /** Every row the library listed, and those the search leaves. */
     private final List<Map<String, Object>> all = new ArrayList<>();
     private final List<Map<String, Object>> rows = new ArrayList<>();
@@ -150,6 +154,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         }
         if (savedInstanceState == null) {
             mapAt(getIntent());
+            addCode(getIntent());
         }
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, text));
         search.setOnClickListener(new View.OnClickListener() {
@@ -289,11 +294,24 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         }
     }
 
+    /** A friend's code from outside, {@link #ADD_CODE}: the name asked, the chat opened. */
+    private void addCode(Intent intent) {
+        String code = intent == null ? null : intent.getStringExtra(ADD_CODE);
+        if (code != null && !code.isEmpty()) {
+            intent.removeExtra(ADD_CODE);
+            String why = AddContact.take(this, code, null);
+            if (why != null) {
+                android.widget.Toast.makeText(this, why, android.widget.Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
         mapAt(intent);
+        addCode(intent);
     }
 
     /**
@@ -344,10 +362,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
                 if (item.getItemId() == R.string.help) {
+                    // The user help page in the app's language (walk
+                    // finding 18): help_url is /help, /help-de in German.
+                    String help = screen.getString(R.string.help_url);
                     try {
-                        screen.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(HELP_URL)));
+                        screen.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(help)));
                     } catch (android.content.ActivityNotFoundException e) {
-                        android.widget.Toast.makeText(screen, HELP_URL, android.widget.Toast.LENGTH_LONG).show();
+                        android.widget.Toast.makeText(screen, help, android.widget.Toast.LENGTH_LONG).show();
                     }
                 } else {
                     screen.startActivity(new Intent(screen, SettingsActivity.class));
@@ -638,6 +659,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));
             final String peer = Core.str(row, "peer");
             ((AvatarView) view.findViewById(R.id.avatar)).show(peer, row);
+            // Our share runs here (1273).
+            view.findViewById(R.id.sharing).setVisibility(
+                    Core.bool(row, "sharing") ? View.VISIBLE : View.GONE);
             // The map pin (1224) in the library's tint: the map on the peer.
             String tint = Core.str(row, "pin");
             ImageView pin = (ImageView) view.findViewById(R.id.pin);

@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::strings::{with, Arg, Lang, StrId, Text};
 use crate::discovery::NomadNodeRegistry;
 
 /// Hex digits of the short hash shown after a name (`name ·fa01`), the same
@@ -365,40 +366,60 @@ pub fn direct_hit<'a>(hits: &'a [SearchHit], query: &str) -> Option<&'a SearchHi
 
 /// How long ago `then` was, at `now`, in the result list's words.
 pub fn ago(now: u64, then: u64) -> String {
+    ago_text(now, then).resolve(Lang::En)
+}
+
+/// [`ago`] in the catalogue's words.
+pub fn ago_text(now: u64, then: u64) -> Text {
     let secs = now.saturating_sub(then);
+    let n = |id: StrId, unit: u64| Text::Key(id, vec![Arg::Int((secs / unit) as i64)]);
     match secs {
-        0..=59 => "just now".to_string(),
-        60..=3599 => format!("{} min ago", secs / 60),
-        3600..=86_399 => format!("{} h ago", secs / 3600),
-        _ => format!("{} d ago", secs / 86_400),
+        0..=59 => Text::key(StrId::JustNow),
+        60..=3599 => n(StrId::MinutesAgo, 60),
+        3600..=86_399 => n(StrId::HoursAgo, 3600),
+        _ => n(StrId::DaysAgo, 86_400),
     }
+}
+
+/// The keys a name is pinned to, as `·hash4` words.
+fn pinned_to(pins: &PinStore, name: &str) -> String {
+    let pinned: Vec<String> = pins
+        .dests_for(name)
+        .iter()
+        .map(|d| format!("·{}", hash4(d)))
+        .collect();
+    pinned.join(" ")
 }
 
 /// One result-list row: `name ·hash4`, hops, last seen, and the pin mark.
 pub fn result_row(hit: &SearchHit, pins: &PinStore, now: u64) -> String {
+    result_text(hit, pins, now).resolve(Lang::En)
+}
+
+/// [`result_row`] in the catalogue's words.
+pub fn result_text(hit: &SearchHit, pins: &PinStore, now: u64) -> Text {
     let hops = match hit.hops {
-        Some(1) => "1 hop".to_string(),
-        Some(h) => format!("{h} hops"),
-        None => "? hops".to_string(),
+        Some(1) => Text::key(StrId::OneHop),
+        Some(h) => Text::Key(StrId::Hops, vec![Arg::Int(h.into())]),
+        None => Text::key(StrId::HopsNone),
     };
     let mark = match &hit.mark {
-        PinMark::Pinned => "  pinned".to_string(),
-        PinMark::Unpinned => String::new(),
-        PinMark::Conflict => {
-            let name = hit.name.as_deref().unwrap_or("");
-            let pinned: Vec<String> = pins
-                .dests_for(name)
-                .iter()
-                .map(|d| format!("·{}", hash4(d)))
-                .collect();
-            format!("  ! name pinned to {}", pinned.join(" "))
-        }
-        PinMark::PinnedAs(name) => format!("  pinned as {name}"),
+        PinMark::Pinned => Text::key(StrId::MarkPinned),
+        PinMark::Unpinned => Text::Raw(String::new()),
+        PinMark::Conflict => with(
+            StrId::MarkConflict,
+            pinned_to(pins, hit.name.as_deref().unwrap_or("")),
+        ),
+        PinMark::PinnedAs(name) => with(StrId::MarkPinnedAs, name.clone()),
     };
-    format!(
-        "{}  ·  {hops}  ·  {}{mark}",
-        hit.label(),
-        ago(now, hit.last_seen)
+    Text::Key(
+        StrId::NameRow,
+        vec![
+            Arg::Str(hit.label()),
+            Arg::Text(Box::new(hops)),
+            Arg::Text(Box::new(ago_text(now, hit.last_seen))),
+            Arg::Text(Box::new(mark)),
+        ],
     )
 }
 
@@ -406,16 +427,19 @@ pub fn result_row(hit: &SearchHit, pins: &PinStore, now: u64) -> String {
 /// hash: which key the name is pinned to, which one this is, and what a yes
 /// does.
 pub fn conflict_prompt(hit: &SearchHit, pins: &PinStore) -> String {
+    conflict_text(hit, pins).resolve(Lang::En)
+}
+
+/// [`conflict_prompt`] in the catalogue's words.
+pub fn conflict_text(hit: &SearchHit, pins: &PinStore) -> Text {
     let name = hit.name.as_deref().unwrap_or("");
-    let pinned: Vec<String> = pins
-        .dests_for(name)
-        .iter()
-        .map(|d| format!("·{}", hash4(d)))
-        .collect();
-    format!(
-        "\"{name}\" is pinned to {}; this is ·{}, another key. Open and pin it too? y/n",
-        pinned.join(" "),
-        hash4(&hit.dest)
+    Text::Key(
+        StrId::NameConflict,
+        vec![
+            Arg::Str(name.to_string()),
+            Arg::Str(pinned_to(pins, name)),
+            Arg::Str(hash4(&hit.dest)),
+        ],
     )
 }
 

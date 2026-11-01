@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -94,6 +94,11 @@
 //! the frame says the choice as `fling`, and how far its view may still
 //! move north and south before the world's edge as `room_north` and
 //! `room_south`, which a coast stops at. An older app reads none of them.
+//! The photo viewer's zoom (1269) came within version 1 too: the query
+//! [`Query::Zoom`] with its [`ZoomShown`], the first that carries reals
+//! (msgpack float 64, which `MsgPack.java` reads and since then writes),
+//! and [`PhotoPixels::full_width`] and [`PhotoPixels::full_height`]. An
+//! older app sends no `zoom` and reads neither size.
 //! The scene's words (1217) came within version 1 too: [`Start::lang`],
 //! the list's `search`, a row's `live` and `ring`, and a bubble's
 //! `joins_before`, `joins_after`, `day`, `meta`, `newest` and `live`. The
@@ -108,6 +113,17 @@
 //! list row's [`ConversationRow::draft`] and the chat's [`Messages::draft`]
 //! and [`Messages::draft_reply`]. An older app sends no draft, and keeps
 //! none.
+//! The compose bar of 1270 came within version 1 too: [`Start::camera`],
+//! the requests [`Request::Stage`], [`Request::Unstage`],
+//! [`Request::Sheet`], [`Request::Fix`], [`Request::NoFix`] and
+//! [`Request::ShareFix`], [`Query::Staged`], [`Query::Bar`] with its [`Bar`], and the chat's bar fields from
+//! [`Messages::round`] on. An older app sends none of them and reads none.
+//! Sharing a position for a while (1273) came within version 1 too:
+//! [`Request::StartShare`] and [`Request::StopShare`], the chat's
+//! [`Messages::share`] and [`Messages::share_stop`], the list row's
+//! [`ConversationRow::sharing`], and [`Query::Shares`] with its
+//! [`Shares`]. An older app offers no share and shows none; a share a
+//! newer app started keeps running in the library until its end time.
 //! The viewport (1231) came within version 1 too: [`Request::Viewport`].
 //! An app that sends none sends no read receipts.
 //! Read receipts (1230) came within version 1 too: the delivery word
@@ -119,6 +135,18 @@
 //! The switch (1233) came within version 1 too: [`Query::Receipts`] with
 //! its [`ReceiptsChoice`]. An older app shows no switch, and the phone
 //! sends receipts unless its config says `read_receipts = off`.
+//! Recording a voice message (1276) came within version 1 too: the
+//! requests [`Request::Record`] (`record`, the microphone's gestures and
+//! the recorder's levels) and [`Request::Recording`] (`recording`, the
+//! bar's buttons), [`Query::Recording`] with its [`Recording`], and
+//! [`Messages::recording`] and [`Bar::recording`]. An older app sends
+//! neither request and records as 1222 did, straight into
+//! [`Request::Voice`], which is unchanged but for its cap (10 min, was
+//! 5); its bubbles draw the levels they always drew, now the
+//! recording's own track where the model has one.
+//! Linking a device (1264) came within version 1 too: [`Query::LinkDevice`]
+//! with its [`LinkCode`] and [`Query::Linked`] with its [`Linked`]. An
+//! older app offers no "Link a device".
 
 use serde::{Deserialize, Serialize};
 
@@ -165,6 +193,10 @@ pub struct Start {
     pub restore: Option<String>,
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// The phone has a camera (1270, `FEATURE_CAMERA_ANY`): the compose
+    /// bar gets its camera button. An older app sends none, and gets none.
+    #[serde(default)]
+    pub camera: bool,
 }
 
 /// What became of [`Start`].
@@ -177,6 +209,10 @@ pub struct Started {
     /// What the join screen has to ask for when `ok` is false: `code`,
     /// `server`, or nothing when the error is of another kind.
     pub need: Option<String>,
+    /// What went wrong in the mailbox's own words, behind the screen's
+    /// Details (1263); `error` is the one plain sentence.
+    #[serde(default)]
+    pub details: Option<String>,
     /// The home node's LXMF address, which is this phone's own.
     pub address: Option<String>,
     /// The server the session talks to.
@@ -196,12 +232,17 @@ pub struct Started {
 pub enum Request {
     /// Opened a conversation, a new one by typing the address: its unread
     /// are read and marked so, and a pull starts.
-    Open { peer: String },
+    Open {
+        peer: String,
+    },
     /// Went back to the list: no conversation is open, so what arrives
     /// stays unread.
     Close,
     /// Sent text in a conversation, through the home node's `/send`.
-    Send { peer: String, body: String },
+    Send {
+        peer: String,
+        body: String,
+    },
     /// Reacted to a message.
     React {
         peer: String,
@@ -217,29 +258,93 @@ pub enum Request {
     },
     /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation to `to`: its text and content fields again.
-    Forward { peer: String, key: i64, to: String },
+    Forward {
+        peer: String,
+        key: i64,
+        to: String,
+    },
     /// Tapped the red mark of the message `key` of `peer`'s conversation,
     /// one of ours not sent: it goes again (1232), the failed one leaves.
-    SendAgain { peer: String, key: i64 },
+    SendAgain {
+        peer: String,
+        key: i64,
+    },
+    /// Picked a picture with the paperclip's "Photo" (1220): the system
+    /// picker's bytes as they came. The session scales and strips them
+    /// by the reader's photo size (`loquax::photo::prepare`) and sends
+    /// them to `peer` as the image field; a picture it cannot send
+    /// answers the request with the reason.
+    Photo {
+        peer: String,
+        data: Blob,
+    },
+    /// Picked a file with the paperclip's "File" (1221): its display name
+    /// and bytes as the picker gave them. The session sends them to `peer`
+    /// as the file attachments field; one past the 990 KB a receiver
+    /// takes answers the request with both sizes. Java stops reading a
+    /// file past 1 MB and only counts the rest: `size` is the whole
+    /// file's bytes it counted, 0 for `data`'s length.
+    File {
+        peer: String,
+        name: String,
+        data: Blob,
+        #[serde(default)]
+        size: u64,
+    },
+    /// Held the microphone and let go (1222): the recording as
+    /// `AudioRecord` made it, mono 16-bit PCM, little endian, at `rate`.
+    /// The session codes it as Opus in Ogg off the lock
+    /// (`loquax::voice::encode`) and sends it to `peer` as the audio
+    /// field; one shorter than 0.6 s or longer than the cap (10 min,
+    /// `loquax::ui::voice::LONGEST_MS`, 1276) answers the request with
+    /// the reason. Since 1276 Java sends it on the recording's `finish`
+    /// effect ([`Recording::effects`]), and the model keeps the
+    /// recording's level track as the bubble's waveform.
+    Voice {
+        peer: String,
+        pcm: Blob,
+        rate: u32,
+    },
+    /// Tapped a voice message's play button (`on`) or its pause button,
+    /// or the player came to its end (1222): the bubble's button follows.
+    /// [`Query::Voice`] has the sound.
+    #[serde(rename = "playvoice")]
+    PlayVoice {
+        peer: String,
+        key: i64,
+        on: bool,
+    },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
-    Delete { peer: String, keys: Vec<i64> },
+    Delete {
+        peer: String,
+        keys: Vec<i64>,
+    },
     /// Picked `emoji` into a message: it joins the recents, as a reaction
     /// sent does.
-    Used { emoji: String },
+    Used {
+        emoji: String,
+    },
     /// Asked for a pull now: the refresh button.
     Pull,
     /// A screen of the app came to the front (`true`) or left it: while in
     /// front and with the watching link down, the session pulls every
     /// minute.
-    Front { front: bool },
+    Front {
+        front: bool,
+    },
     /// These bubbles of `peer`'s chat are on screen, at least half of each,
     /// by their [`MessageRow::key`], on every change (1231): the core
     /// decides from it, and from the front, what was read.
-    Viewport { peer: String, keys: Vec<i64> },
+    Viewport {
+        peer: String,
+        keys: Vec<i64>,
+    },
     /// The name recipients see, for the mailbox on this phone (the first
     /// start's last screen, 1152).
-    Name { name: String },
+    Name {
+        name: String,
+    },
     /// Linked `peer` to a contact of the address book the user picked or
     /// confirmed (1139), or the link's copy refreshed: what the contact
     /// said right then, its thumbnail's bytes among it.
@@ -249,36 +354,66 @@ pub enum Request {
         contact: ContactCopy,
     },
     /// Took `peer`'s link away; its copied name and photo go with it.
-    Unlink { peer: String },
+    Unlink {
+        peer: String,
+    },
     /// "Not now" on `peer`'s banner: it does not ask again.
     #[serde(rename = "notnow")]
-    NotNow { peer: String },
+    NotNow {
+        peer: String,
+    },
     /// The user's own name for `peer`, the empty one clearing it: kept
     /// here and handed to the home node for the home's other devices.
-    Rename { peer: String, name: String },
+    Rename {
+        peer: String,
+        name: String,
+    },
     /// The address book's IM rows with protocol LXMF (with
     /// `READ_CONTACTS`): each address loquax knows and has not linked
     /// becomes a link, unless two contacts carry it.
-    Relink { rows: Vec<ImRow> },
+    Relink {
+        rows: Vec<ImRow>,
+    },
     /// Pinned the conversation to the top of the list, or loosened it
     /// (1146). Pin, mute, archive and block reach the home's other devices.
-    Pin { peer: String, on: bool },
+    Pin {
+        peer: String,
+        on: bool,
+    },
     /// Muted the conversation for `secs` from now, for always when
     /// negative, or unmuted it with 0.
-    Mute { peer: String, secs: i64 },
+    Mute {
+        peer: String,
+        secs: i64,
+    },
     /// Moved the conversation into the archive, or back.
-    Archive { peer: String, on: bool },
+    Archive {
+        peer: String,
+        on: bool,
+    },
     /// Blocked the peer, or lifted the block.
-    Block { peer: String, on: bool },
+    Block {
+        peer: String,
+        on: bool,
+    },
     /// Marked the peer's identity verified after comparing it in person,
     /// or took it back; on this device only.
-    Verify { peer: String, on: bool },
+    Verify {
+        peer: String,
+        on: bool,
+    },
     /// Marked the conversation unread on this device, or read as opening
     /// it would.
-    Unread { peer: String, on: bool },
+    Unread {
+        peer: String,
+        on: bool,
+    },
     /// Deleted the conversation from this device, or from every device of
     /// the home.
-    Forget { peer: String, everywhere: bool },
+    Forget {
+        peer: String,
+        everywhere: bool,
+    },
     /// Shared the phone's own position with `peer`, the user asked for it
     /// (1201): from the empty map, a friend's card or the chat. The fix in
     /// the wire's integers; `at` is when the phone took it, unix seconds.
@@ -294,7 +429,8 @@ pub enum Request {
         at: i64,
     },
     /// A contact from its contact code, `lxma://<address>:<key>` (1187,
-    /// `loquax::lxma`): scanned or pasted. `name`, when given, becomes the
+    /// `loquax::lxma`), or from its address alone (1263, an old code):
+    /// scanned or pasted. `name`, when given, becomes the
     /// reader's name for it; the home node is handed the key, so a message
     /// can go out before any announce was heard; the conversation opens.
     #[serde(rename = "addcontact")]
@@ -312,6 +448,85 @@ pub enum Request {
         body: String,
         #[serde(default)]
         reply: String,
+    },
+    /// The camera took a photo for `peer` (1270): the bytes as the
+    /// capture wrote them. The session scales and strips them as a
+    /// [`Request::Photo`]'s and stages them in the compose bar, where the
+    /// next [`Request::Send`] takes them with its body as the caption.
+    Stage {
+        peer: String,
+        data: Blob,
+    },
+    /// The staged photo's cross.
+    Unstage {
+        peer: String,
+    },
+    /// The compose bar's plus (`attach`) or position button (`position`)
+    /// opened its sheet over `peer`'s chat; an empty `kind` closed it
+    /// (1270). The chat's [`Messages::sheet`] says what it holds.
+    Sheet {
+        #[serde(default)]
+        peer: String,
+        #[serde(default)]
+        kind: String,
+    },
+    /// The phone's newest own fix for the position sheet (1270), as
+    /// [`Request::Share`]'s; [`Request::NoFix`] when it has none.
+    Fix {
+        lat_e6: i32,
+        lon_e6: i32,
+        #[serde(default)]
+        alt_e2: i32,
+        #[serde(default)]
+        accuracy_e2: u32,
+        at: i64,
+    },
+    NoFix,
+    /// The position sheet's "Now, once": the fix of the last
+    /// [`Request::Fix`] goes to `peer` as a report.
+    ShareFix {
+        peer: String,
+    },
+    /// One of the position sheet's share rows (1273): a share for `peer`
+    /// starts, `span` one of `15_min`, `1_h`, `8_h`, `until_stopped`. The
+    /// library sends on the fixes [`Request::Fix`] brings.
+    StartShare {
+        peer: String,
+        span: String,
+    },
+    /// The share's Stop (the chat's chip, Settings, Privacy, the
+    /// notification): one last report marked as the end goes.
+    StopShare {
+        peer: String,
+    },
+    /// The microphone's gesture or the recorder's word for `peer`'s
+    /// recording (1276, `loquax::ui::recording::Input`): `press` (at
+    /// `now`), `slide` (the finger `dx`, `dy` dp from where it landed,
+    /// left and up negative), `release` (at `now`), `cancel` (the system
+    /// took the gesture), `level` (one 50 ms window recorded, its `rms`
+    /// at `now`), `tick` (the clock at `now`) or `played` (the preview's
+    /// end). `now` is the phone's monotonic milliseconds
+    /// (`SystemClock.uptimeMillis`). What the recorder is to do comes
+    /// back in [`Query::Recording`]'s `effects`.
+    Record {
+        peer: String,
+        input: String,
+        #[serde(default)]
+        now: i64,
+        #[serde(default)]
+        dx: i32,
+        #[serde(default)]
+        dy: i32,
+        #[serde(default)]
+        rms: u32,
+    },
+    /// A button of `peer`'s recording bar (1276), by its resource id:
+    /// `rec_lock`, `rec_pause`, `rec_resume`, `rec_play`,
+    /// `rec_stop_play`, `rec_send`, `rec_discard`, or the silence line's
+    /// `rec_allow`.
+    Recording {
+        peer: String,
+        verb: String,
     },
 }
 
@@ -380,8 +595,9 @@ impl<'de> Deserialize<'de> for Blob {
     }
 }
 
-/// What the screen wants to show.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What the screen wants to show. `PartialEq` alone: [`Query::Zoom`]
+/// carries reals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Query {
     /// The conversation list, in the list's order; with `search` only the
@@ -439,9 +655,24 @@ pub enum Query {
     /// contact code and its QR, where the mailbox is, and the advanced
     /// facts.
     Profile,
-    /// Whether `text` is a contact code, and whose (1187): what the scanner
-    /// and the new conversation field ask before the name.
-    Lxma { text: String },
+    /// "Link a device" on the profile (1264): a fresh join code of the
+    /// mailbox on this phone for another device, as [`LinkCode`]; refused
+    /// on a phone whose mailbox is on a computer. Each ask opens a new
+    /// code; [`Query::Linked`] watches the newest.
+    LinkDevice,
+    /// Whether a device came with the newest [`Query::LinkDevice`] code.
+    Linked,
+    /// Whether `text` is a code, which kind and whose (1187, 1263,
+    /// `loquax::code::read`): what the scanner and the new conversation
+    /// screen ask before the name. A text that is none is refused in one
+    /// sentence of `lang` (a BCP 47 tag; the session's language when
+    /// none). Answered without a session too, `known` then empty: the
+    /// first start's scanner asks before anything runs.
+    Lxma {
+        text: String,
+        #[serde(default)]
+        lang: Option<String>,
+    },
     /// The Maps page (1207): with `delete` that region file deleted
     /// ([`RegionRow::name`]), with `set_autoload` the automatic download
     /// stored, then the regions of the app's maps directory. A page's
@@ -470,6 +701,248 @@ pub enum Query {
         #[serde(default)]
         set: Option<bool>,
     },
+    /// The Chats page's photo size (1220): `set` (`small`, `phone`,
+    /// `original`) stored when given, the size in force answered as
+    /// [`PhotoSizeChoice`].
+    PhotoSize {
+        #[serde(default)]
+        set: Option<String>,
+    },
+    /// The photo of the message `key` of `peer`'s conversation, decoded
+    /// upright and scaled into an `edge` by `edge` box, never up (1220):
+    /// a bubble's thumbnail, the full view. Answered as [`PhotoPixels`].
+    Photo { peer: String, key: i64, edge: u32 },
+    /// The photo staged in `peer`'s compose bar (1270), scaled into an
+    /// `edge` box as [`Query::Photo`]'s; answered as [`PhotoPixels`].
+    Staged { peer: String, edge: u32 },
+    /// `peer`'s compose bar alone (1270), asked on every change of the
+    /// field so the plus turns into Send as the first letter is typed;
+    /// answered as [`Bar`], the same fields [`Messages`] carries.
+    Bar { peer: String },
+    /// The running position shares (1273), Settings, Privacy's list and
+    /// the share notification's; answered as [`Shares`].
+    Shares,
+    /// The `index`th file of the message `key` of `peer`'s conversation,
+    /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
+    /// the name made safe) for the open or share intent (1221). Answered
+    /// as [`SavedFile`].
+    SaveFile { peer: String, key: i64, index: u32 },
+    /// The voice message of the message `key` of `peer`'s conversation,
+    /// decoded for `AudioTrack` (1222): Opus at 24 kHz, Codec2 at 8 kHz.
+    /// Answered as [`VoicePcm`]. A message without a level track of its
+    /// own (one received) gets the decoded sound's from then on (1276,
+    /// `LevelTrack::from_pcm`): its bubble's `voice_levels` follow.
+    Voice { peer: String, key: i64 },
+    /// `peer`'s recording bar and what the recorder is to do since the
+    /// last ask (1276); answered as [`Recording`]. Java asks it after
+    /// every [`Request::Record`] and [`Request::Recording`]: the effects
+    /// are handed out once.
+    Recording { peer: String },
+    /// One gesture on the photo viewer (1269), folded into the zoom it
+    /// was at, needing no session: the viewer's state is the app's,
+    /// handed back as [`ZoomShown`] gave it, the logic
+    /// `loquax::ui::zoom`'s, which the window runs too. Answered as
+    /// [`ZoomShown`].
+    Zoom(ZoomAsk),
+}
+
+/// What [`Query::Zoom`] asks: the viewer's state, in screen pixels, and
+/// one gesture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoomAsk {
+    pub view_w: f64,
+    pub view_h: f64,
+    /// The picture's native size, not the Bitmap's: it bounds the zoom.
+    pub picture_w: f64,
+    pub picture_h: f64,
+    /// The zoom, a multiple of the fit; 1 when absent.
+    #[serde(default = "one")]
+    pub scale: f64,
+    /// The picture's centre from the screen's centre.
+    #[serde(default)]
+    pub pan_x: f64,
+    #[serde(default)]
+    pub pan_y: f64,
+    /// `pinch` (`factor` about `x`, `y`), `pan` (by `dx`, `dy`),
+    /// `doubletap` (at `x`, `y`), `back`, `swipe` (a drag of `dx`, `dy`
+    /// from where it went down: whether it closes), `resize` (to
+    /// `view_w`, `view_h`, the state kept) or `none` (the state alone).
+    pub gesture: String,
+    #[serde(default)]
+    pub factor: f64,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub dx: f64,
+    #[serde(default)]
+    pub dy: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// What [`Query::Zoom`] answers: the state after the gesture (the app
+/// hands it back with the next), where the picture lands (`left`, `top`, `width`, `height`, screen pixels), the
+/// room a coast has to each edge, and what the gesture moved.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ZoomShown {
+    pub v: u32,
+    pub ok: bool,
+    /// The state, as [`ZoomAsk`] takes it back.
+    pub view_w: f64,
+    pub view_h: f64,
+    pub picture_w: f64,
+    pub picture_h: f64,
+    pub scale: f64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+    pub room_left: f64,
+    pub room_right: f64,
+    pub room_up: f64,
+    pub room_down: f64,
+    pub max_scale: f64,
+    /// At 1x: the whole picture.
+    pub at_rest: bool,
+    /// The viewer closes: `back` at 1x, or a `swipe` that closes.
+    pub close: bool,
+    /// What a `pan` moved, less where an edge stopped it: a coast that
+    /// moves nothing has reached the edge.
+    pub moved_x: f64,
+    pub moved_y: f64,
+}
+
+/// What [`Query::Voice`] answers: mono 16-bit PCM, little endian, the
+/// layout `AudioTrack` takes with `ENCODING_PCM_16BIT`, and its rate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoicePcm {
+    pub v: u32,
+    pub ok: bool,
+    pub rate: u32,
+    pub pcm: Blob,
+}
+
+/// What [`Query::Recording`] answers (1276,
+/// `docs/src/concepts/loquax-voice-recording.md`): the scene's recording
+/// bar for the peer in the phone's words, and the recorder's work. With
+/// no bar up, `shown` is false and the parts are empty; `phase` still
+/// says how the last recording went (`cancelled`, `sent`) or `idle`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recording {
+    pub v: u32,
+    pub ok: bool,
+    /// `idle`, `held`, `locked`, `paused`, `preview`, `cancelled` or
+    /// `sent` (`recording::Phase::word`).
+    pub phase: String,
+    /// The bar is up: held, locked, paused or stopped at the cap.
+    pub shown: bool,
+    /// The red dot pulses: it records and is heard, or not yet doubted.
+    pub pulsing: bool,
+    /// `REC 00:07`, its milliseconds, and amber in the last 30 s.
+    pub timer: String,
+    pub timer_ms: u32,
+    pub amber: bool,
+    /// The waveform: levels 0 to 100, oldest first, the newest at the
+    /// right edge; `moving` while it records. Its words for a screen
+    /// reader.
+    pub wave: Blob,
+    pub moving: bool,
+    pub wave_label: String,
+    /// How many bars the moving waveform stands across the width
+    /// (`recording::LIVE_WINDOWS`, three seconds): fewer levels fill it
+    /// from the right.
+    pub wave_slots: u32,
+    /// While held: `Slide left to cancel`, or `Release to cancel` once
+    /// `armed`; how far the finger is toward it, 0 to 100. Empty else.
+    pub cancel: String,
+    pub cancel_progress: u32,
+    pub armed: bool,
+    /// While held: the microphone's words under the finger
+    /// (`Release to send`); empty else.
+    pub held: String,
+    /// The lock chip's words, empty for no chip; closed once locked; how
+    /// far the finger swiped up toward it, 0 to 100. A tap on an open
+    /// chip is `rec_lock`.
+    pub lock: String,
+    pub lock_closed: bool,
+    pub lock_progress: u32,
+    /// The bin, pause or resume, play or stop, Send, in the order drawn,
+    /// by resource id with their words; each is a [`Request::Recording`].
+    pub buttons: Vec<BarButton>,
+    /// The line under the waveform (nothing heard, or the cap); empty
+    /// for none. `notice_allow` is its button's words when it has the
+    /// way to the microphone's permission (`rec_allow`), else empty.
+    pub notice: String,
+    pub notice_allow: String,
+    /// What the recorder is to do, in order, since the last ask:
+    /// `haptic_start`, `haptic_lock`, `haptic_cap`, `start`, `pause`,
+    /// `resume`, `stop`, `finish` (hand the PCM over as
+    /// [`Request::Voice`]), `discard`, `play`, `stop_play`,
+    /// `ask_microphone`.
+    pub effects: Vec<String>,
+    /// The core's distances and window (`recording::CANCEL_DP`,
+    /// `LOCK_DP`, `WINDOW_MS`) and the cap (`voice::LONGEST_MS`): Java
+    /// keeps no copy of its own.
+    pub cancel_dp: u32,
+    pub lock_dp: u32,
+    pub window_ms: u32,
+    pub longest_ms: u32,
+}
+
+/// What [`Query::SaveFile`] answers: where the file is, under the app's
+/// files, and the name it was saved under.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedFile {
+    pub v: u32,
+    pub ok: bool,
+    pub path: String,
+    pub name: String,
+}
+
+/// One file a bubble carries (1221).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRow {
+    /// The name the sender wrote, made safe to show and save
+    /// (`loquax::ui::files::safe_name`).
+    pub name: String,
+    pub bytes: u32,
+    /// `312 KB`.
+    pub size: String,
+    /// What a screen reader says: `File report.pdf, 312 KB`.
+    pub words: String,
+}
+
+/// What [`Query::PhotoSize`] answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhotoSizeChoice {
+    pub v: u32,
+    pub ok: bool,
+    /// `small`, `phone` or `original`.
+    pub size: String,
+}
+
+/// What [`Query::Photo`] answers: RGBA rows without padding, the layout
+/// of `Bitmap.Config.ARGB_8888`'s buffer, which
+/// `Bitmap.copyPixelsFromBuffer` takes as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhotoPixels {
+    pub v: u32,
+    pub ok: bool,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Blob,
+    /// The picture's own size before it was scaled (1269): the viewer
+    /// zooms to it at most, when that is past 4x.
+    #[serde(default)]
+    pub full_width: u32,
+    #[serde(default)]
+    pub full_height: u32,
 }
 
 /// What [`Query::MapRegions`] answers: the regions, newest first, their
@@ -642,6 +1115,31 @@ pub struct Backup {
     pub qr: Blob,
 }
 
+/// What [`Query::LinkDevice`] answers: the code `loquax mailbox admit`
+/// would print for this mailbox (`lqxh1...@` and the rendezvous list), its
+/// QR as [`Backup::qr`] has a code's, and how long it is good for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkCode {
+    pub v: u32,
+    pub code: String,
+    pub qr_size: u32,
+    pub qr: Blob,
+    /// Its life in whole hours, for "Good for 24 hours".
+    pub hours: u32,
+    /// Its end, unix seconds.
+    pub expires_at: i64,
+}
+
+/// What [`Query::Linked`] answers: `state` is `waiting` (the code is
+/// open), `linked` (a device came, `name` it), `over` (the code ran out or
+/// was withdrawn and nobody came) or `none` (no code was asked for).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Linked {
+    pub v: u32,
+    pub state: String,
+    pub name: String,
+}
+
 /// What [`Query::Me`] answers: the address to give people, as text and as
 /// a QR code, and the mailbox's facts the screen shows beside it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -650,8 +1148,13 @@ pub struct Me {
     pub address: String,
     /// The address in groups of four, as the contact screen shows one.
     pub fingerprint: String,
+    /// The contact code, the same as [`Profile::lxma`]: what the first
+    /// start's QR holds and its Share sends (1263), one code everywhere.
+    #[serde(default)]
+    pub lxma: String,
     pub qr_size: u32,
-    /// `qr_size` squared modules, one byte each, row by row.
+    /// The QR code of [`Me::lxma`] as [`Profile::qr`] has it: `qr_size`
+    /// squared modules, one byte each, row by row.
     pub qr: Blob,
     /// The name recipients see; empty when none was given.
     pub name: String,
@@ -701,12 +1204,20 @@ pub struct Profile {
     pub version: String,
 }
 
-/// What [`Query::Lxma`] answers for a contact code: whose it is, and the
-/// code as it parsed, for [`Request::AddContact`].
+/// What [`Query::Lxma`] answers for a code (`loquax::code::read`, 1263):
+/// what it is, whose, and the code as it parsed, for
+/// [`Request::AddContact`] or the join.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lxma {
     pub v: u32,
+    /// `contact` for a contact code, `address` for a friend's address
+    /// alone, `mailbox` for a mailbox's join code.
+    #[serde(default)]
+    pub kind: String,
+    /// The friend's address as lowercase hex; empty for a mailbox's code.
     pub address: String,
+    /// What [`Request::AddContact`] or the join takes: the contact code
+    /// as Columba writes it, the address, or the mailbox's code as read.
     pub lxma: String,
     /// The name every screen gives that address today: a petname or an
     /// announced name when one is known, else empty.
@@ -986,6 +1497,10 @@ pub struct ConversationRow {
     /// conversation.
     #[serde(default)]
     pub draft: String,
+    /// A share of our position runs in this chat (1273): the row shows a
+    /// small ⌖ in the accent colour on our side.
+    #[serde(default)]
+    pub sharing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1109,9 +1624,46 @@ pub struct MessageRow {
     /// position 3 h ago`; empty on every other row.
     #[serde(default)]
     pub live: String,
+    /// The photo it carries (1220), else empty and 0: the format word
+    /// the sender wrote, its bytes, the size it shows at upright (0 by 0
+    /// for one that does not decode), and what a screen reader says,
+    /// `Photo, 279 KB`. [`Query::Photo`] has its pixels.
+    #[serde(default)]
+    pub photo: String,
+    #[serde(default)]
+    pub photo_bytes: u32,
+    #[serde(default)]
+    pub photo_w: u32,
+    #[serde(default)]
+    pub photo_h: u32,
+    #[serde(default)]
+    pub photo_words: String,
+    /// The files it carries (1221), in the sender's order; a tap on one
+    /// asks [`Query::SaveFile`] with its place.
+    #[serde(default)]
+    pub files: Vec<FileRow>,
+    /// The voice message it carries (1222), else 0 and empty: the
+    /// sender's audio mode, its length in ms and as `0:07`, the level bar
+    /// (32 heights 0 to 100, empty for an even bar), whether this build
+    /// plays it and whether it plays now, and what a screen reader says,
+    /// `Voice message, 0:07`. [`Query::Voice`] has the sound.
+    #[serde(default)]
+    pub voice_mode: u32,
+    #[serde(default)]
+    pub voice_ms: u32,
+    #[serde(default)]
+    pub voice_duration: String,
+    #[serde(default)]
+    pub voice_levels: Blob,
+    #[serde(default)]
+    pub voice_playable: bool,
+    #[serde(default)]
+    pub voice_playing: bool,
+    #[serde(default)]
+    pub voice_words: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Messages {
     pub v: u32,
     pub peer: String,
@@ -1178,6 +1730,109 @@ pub struct Messages {
     /// none.
     #[serde(default)]
     pub draft_reply: String,
+    /// The compose bar (1270, the scene's compose node): the round
+    /// button, `plus` or `send`, and every button in the order drawn by
+    /// its id (`emoji`, `locate`, `camera`, `record`, then `plus` or
+    /// `send`), each with its words.
+    #[serde(default)]
+    pub round: String,
+    #[serde(default)]
+    pub buttons: Vec<BarButton>,
+    /// The field's hint: `Message`, or `Add a caption` with a photo staged.
+    #[serde(default)]
+    pub hint: String,
+    /// The staged photo's words (`Photo to send, 312 KB`); empty for none.
+    /// [`Query::Staged`] has its pixels.
+    #[serde(default)]
+    pub staged: String,
+    /// The open sheet: `attach`, `position`, or empty for none; its title
+    /// and rows in the order shown.
+    #[serde(default)]
+    pub sheet: String,
+    #[serde(default)]
+    pub sheet_title: String,
+    #[serde(default)]
+    pub sheet_rows: Vec<BarButton>,
+    /// The position sheet's fix for its map (degrees times a million),
+    /// whether there is one, and its age or that there is none, in words.
+    #[serde(default)]
+    pub has_fix: bool,
+    #[serde(default)]
+    pub fix_lat_e6: i32,
+    #[serde(default)]
+    pub fix_lon_e6: i32,
+    #[serde(default)]
+    pub fix_words: String,
+    /// The chip at the top of the chat while our share runs there (1273),
+    /// in the phone's language: `Sharing your position, 42 min left`, or
+    /// `… until you stop`; empty for none. `share_stop` is its button's
+    /// word.
+    #[serde(default)]
+    pub share: String,
+    #[serde(default)]
+    pub share_stop: String,
+    /// While a voice message records for this chat (1276): the bar's
+    /// phase (`held`, `locked`, `paused`, `preview`), and the compose
+    /// bar gives way to the recording bar, which [`Query::Recording`]
+    /// draws; empty for none.
+    #[serde(default)]
+    pub recording: String,
+}
+
+/// What [`Query::Shares`] answers (1273): the running shares, by peer,
+/// and the page's words.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shares {
+    pub v: u32,
+    /// `Position sharing`.
+    pub title: String,
+    /// What shows with no share.
+    pub empty: String,
+    /// `Stop`.
+    pub stop: String,
+    pub shares: Vec<ShareRow>,
+}
+
+/// A running share (1273).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareRow {
+    pub peer: String,
+    /// The row's resource id, `share_<peer>`; its Stop's is
+    /// `share_stop_<peer>`.
+    pub id: String,
+    pub name: String,
+    /// `Sharing your position, 42 min left`.
+    pub words: String,
+    /// When it ends, unix seconds; 0 until stopped.
+    pub until: i64,
+}
+
+/// What [`Query::Bar`] answers: the compose bar's fields of [`Messages`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bar {
+    pub v: u32,
+    pub round: String,
+    pub buttons: Vec<BarButton>,
+    pub hint: String,
+    pub staged: String,
+    pub sheet: String,
+    pub sheet_title: String,
+    pub sheet_rows: Vec<BarButton>,
+    pub has_fix: bool,
+    pub fix_lat_e6: i32,
+    pub fix_lon_e6: i32,
+    pub fix_words: String,
+    /// [`Messages::recording`].
+    #[serde(default)]
+    pub recording: String,
+}
+
+/// A button of the compose bar or a row of its sheet (1270): its resource
+/// id, which is also what Java switches on, and its words.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BarButton {
+    pub id: String,
+    pub label: String,
 }
 
 /// What happened, for the screen.

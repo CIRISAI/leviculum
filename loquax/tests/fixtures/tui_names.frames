@@ -1,5 +1,5 @@
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -16,7 +16,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: named ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd  unknown─────────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  Bob ·61dd─────────────────────────────────────────┐
 │▌Bob ·61dd              ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -33,7 +33,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: collision ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd ≈  unknown · same name as ·5ec0── no pn ┐
+┌● Loquax afbda7b3───────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
 │▌Bob ·61dd ≈            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: petname ---
-┌● Loquax afbda7b3───────┐┌  Carol ·8f77  known · announces Caroline──── no pn ┐
+┌● Loquax afbda7b3───────┐┌  Carol ·8f77  known · announces Caroline───────────┐
 │ Bob ·61dd ≈            ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -67,7 +67,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: rename ---
-┌● Loquax afbda7b3───────┐┌  Carol ·8f77  known · announces Caroline──── no pn ┐
+┌● Loquax afbda7b3───────┐┌  Carol ·8f77  known · announces Caroline───────────┐
 │ Bob ·61dd ≈            ││                                                    │
 │                   ┌ commands ────────────────────────────┐                   │
 │                   │> Carol Meyer                         │                   │
@@ -101,7 +101,7 @@ Enter run │ Esc close
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: blocked ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd ≈  unknown · same name as ·5ec0── no pn ┐
+┌● Loquax afbda7b3───────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
 │▌Bob ·61dd ≈            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │

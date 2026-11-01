@@ -288,7 +288,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:152`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:164`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -722,7 +722,9 @@ the propagation node page's decision, or fills a gap they leave:
   section 2, "Blocking, and names from the palette".)
 - **Trust** is the three words of the propagation node page in the header:
   `known` with a petname, `blocked` with a block (over a petname),
-  `unknown` else. Beside a petname that differs from what the peer
+  `unknown` else; since 1279 (the ninety percent walk, finding 21) the
+  default `unknown` is not drawn, and the header says nothing of a missing
+  propagation node until a send needs one (`no relay`). Beside a petname that differs from what the peer
   announces the header adds `announces Ally`, the provenance of option C.
   `blocked` was only said until Lew decided what it does on 2026-10-28
   (1082): stored silently, see the propagation node page, section 2.
@@ -785,7 +787,7 @@ or fills a gap it leaves:
   blank row under the last of them when an unpinned one follows. No key and
   no mouse target, as the element text has it.
 - **The palette ranks** a name typed whole and then one it begins before
-  the scattered matches (`leviculum-ui/src/commands.rs:164`); without it
+  the scattered matches (`leviculum-ui/src/commands.rs:176`); without it
   `:pin` and `Enter` ran `previous conversation`, whose letters hold
   `p`, `i`, `n` in order.
 - **The unread count** and the `new` rule survive a restart: a conversation
@@ -877,7 +879,7 @@ falls from 5.9:1 to 4.3:1.
 1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
 2. `--color truecolor|256|16`: that tier. `lnomad` had the flag with two
    values (`lnomad/src/main.rs:65`); `loquax` has it now
-   (`loquax/src/main.rs:362`), and both have `16`.
+   (`loquax/src/main.rs:364`), and both have `16`.
 3. `COLORTERM` is `truecolor` or `24bit`: truecolor (the rule
    `resolve_depth` had before 1042).
 4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
@@ -917,16 +919,16 @@ first rung it is.
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:287`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:292`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);
 - a terminal that does not answer in time and sets no `COLORFGBG` gives
   dark, as in `lnomad`;
 - a palette action `theme` toggles for the session, the way `t` calls
-  `toggle_theme` in lnomad (`lnomad/src/app/event.rs:746`); no key, the
+  `toggle_theme` in lnomad (`lnomad/src/app/event.rs:770`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:3105`).
+  (`loquax/src/ui.rs:3455`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -1123,7 +1125,7 @@ to 8.6:1 in 256; the ladder's three tones are among the values measured.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:905`) writes characters only, and the existing
+  (`loquax/src/tui.rs:908`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1186,7 +1188,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:1031`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:1034`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:

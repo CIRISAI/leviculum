@@ -1,6 +1,6 @@
 === first ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: delivered ---
-┌  Loquax afbda7b3───────┐┌  Bob ·61dd  unknown─────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  Bob ·61dd─────────────────────────────────────────┐
 │▌Bob ·61dd        12:00 ││                                                    │
 │▌you: are you at the f… ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: cut off ---
-┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: leaving in ten    ││                                                    │
 │                        ││                                                    │
@@ -76,7 +76,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 === second ===
 --- frame 1: restarted ---
-┌● Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: leaving in ten    ││                                                    │
 │                        ││                                                    │
@@ -101,7 +101,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: ledger ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: leaving in ten    ││                                                    │
 │                        ││                                                    │
@@ -126,7 +126,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: bob ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd  unknown─────────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  Bob ·61dd─────────────────────────────────────────┐
 │ <5ec0ea2e…>      12:00 ││                                                    │
 │ you: leaving in ten    ││                                                    │
 │                        ││                                                    │
@@ -151,7 +151,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: pinned ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd  unknown─────────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  Bob ·61dd─────────────────────────────────────────┐
 │▌Bob ·61dd        12:00 ││                                                    │
 │▌yes, from ten          ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
@@ -176,7 +176,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: asked ---
-┌  Loquax afbda7b3───────┐┌● Bob ·61dd  unknown─────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● Bob ·61dd─────────────────────────────────────────┐
 │▌Bob ·61dd        12:00 ││                                                    │
 │▌yes, from ten          ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
@@ -201,7 +201,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: deleted ---
-┌  Loquax afbda7b3───────┐┌● Bob ·61dd  unknown─────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● Bob ·61dd─────────────────────────────────────────┐
 │▌Bob ·61dd        12:00 ││                                                    │
 │▌you: are you at the f… ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
@@ -227,7 +227,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === third ===
 --- frame 1: again ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd  unknown─────────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  Bob ·61dd─────────────────────────────────────────┐
 │▌Bob ·61dd        12:00 ││                                                    │
 │▌you: are you at the f… ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │

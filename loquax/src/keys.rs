@@ -37,6 +37,15 @@
 //! message. `L` in the two command panes and `Alt-l` from every pane put the
 //! open conversation's peer on the map.
 //!
+//! A voice message (1276, `docs/src/concepts/loquax-voice-recording.md`):
+//! `Alt-v` in compose records, locked at once, since a terminal has no
+//! hold. Plain `v` cannot start it: in compose `v` is a letter, and a
+//! message that begins with one ("vielleicht") would start a recording.
+//! While the recording bar stands in the field's place ([`RECORDING`])
+//! nothing is typed, so the bar's keys are plain: `v` (or `Alt-v`, or the
+//! send chord) sends, `Esc` and `Ctrl-g` discard, `p` pauses and resumes,
+//! `Space` plays what is paused.
+//!
 //! Not here yet, because what they run is a later slice: new conversation
 //! (`m`, `C`), hints (`f`),
 //! and `Ctrl-x Ctrl-c` (a two-key sequence, which the table does not
@@ -82,6 +91,9 @@ const RESULTS: Panes = Panes(SEARCH.0 | LIST.0);
 pub const ENTER_BREAKS: Ctx = Ctx(1 << 1);
 /// A search is open: the list shows its results.
 pub const SEARCHING: Ctx = Ctx(1 << 2);
+/// A voice message records for the open conversation (1276): the
+/// recording bar is the compose box, and its keys are the bar's.
+pub const RECORDING: Ctx = Ctx(1 << 3);
 
 /// What a key runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +136,23 @@ pub enum Action {
     OpenMessage,
     /// The open conversation's peer on the map, at its latest fix.
     PeerOnMap,
+    /// Something the recording of a voice message does (1276).
+    Record(RecKey),
+}
+
+/// What a key does to a voice message's recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecKey {
+    /// Start one, locked.
+    Start,
+    /// Send it.
+    Send,
+    /// Throw it away.
+    Discard,
+    /// Pause it, or go on with it.
+    Pause,
+    /// Hear what is paused, or stop hearing it.
+    Play,
 }
 
 /// What a key does on the map.
@@ -274,6 +303,15 @@ pub const ROWS: &[Row<Action>] = {
             .palette("archive")
             .note("a message brings it back unless muted"),
         Row::new("list the archived, or the rest", CONVERSATIONS, &[]).palette("archived"),
+        Row::new("start a conversation", CONVERSATIONS, &[])
+            .palette("new conversation")
+            .note("a friend's code or address"),
+        Row::new("add a contact", CONVERSATIONS, &[])
+            .palette("add contact")
+            .note("a friend's code, then a name"),
+        Row::new("show your code and its QR", CONVERSATIONS, &[])
+            .palette("my code")
+            .note("for a friend to scan or paste"),
         Row::new("import from another messenger", CONVERSATIONS, &[])
             .palette("import")
             .note("contacts and history; the identity: loquax import"),
@@ -498,6 +536,43 @@ pub const ROWS: &[Row<Action>] = {
             COMPOSE_GROUP,
             &[&[key(Char('c'), CTRL, ClearDraft, COMPOSE)]],
         ),
+        // A voice message (1276): the bar's keys while it records.
+        Row::new(
+            "record a voice message",
+            COMPOSE_GROUP,
+            &[&[key(Char('v'), ALT, Record(RecKey::Start), COMPOSE).unless(RECORDING)]],
+        )
+        .note("starts locked; v alone is a letter while you type"),
+        Row::new(
+            "send the voice message",
+            COMPOSE_GROUP,
+            &[&[
+                key(Char('v'), Mods::Plain, Record(RecKey::Send), COMPOSE).when(RECORDING),
+                key(Char('v'), ALT, Record(RecKey::Send), COMPOSE)
+                    .when(RECORDING)
+                    .quiet(),
+            ]],
+        )
+        .note("while recording; the send chord sends it too")
+        .tx(),
+        Row::new(
+            "throw the voice message away",
+            COMPOSE_GROUP,
+            &[
+                &[key(Esc, NONE, Record(RecKey::Discard), COMPOSE).when(RECORDING)],
+                &[key(Char('g'), CTRL, Record(RecKey::Discard), COMPOSE).when(RECORDING)],
+            ],
+        ),
+        Row::new(
+            "pause or go on recording",
+            COMPOSE_GROUP,
+            &[&[key(Char('p'), Mods::Plain, Record(RecKey::Pause), COMPOSE).when(RECORDING)]],
+        ),
+        Row::new(
+            "listen to the paused recording, or stop",
+            COMPOSE_GROUP,
+            &[&[key(Char(' '), Mods::Plain, Record(RecKey::Play), COMPOSE).when(RECORDING)]],
+        ),
         // The map.
         Row::new(
             "the map of the peers' positions",
@@ -645,19 +720,19 @@ pub const ROWS: &[Row<Action>] = {
         Row::new(
             "back out: compose, messages, list; close an overlay",
             EVERYWHERE,
+            // In compose while a voice message records, the two throw it
+            // away instead (1276).
             &[
-                &[key(
-                    Esc,
-                    NONE,
-                    Back,
-                    Panes(MESSAGES.0 | COMPOSE.0 | OVERLAY.0),
-                )],
-                &[key(
-                    Char('g'),
-                    CTRL,
-                    Back,
-                    Panes(MESSAGES.0 | COMPOSE.0 | OVERLAY.0),
-                )],
+                &[
+                    key(Esc, NONE, Back, Panes(MESSAGES.0 | OVERLAY.0)),
+                    key(Esc, NONE, Back, COMPOSE).unless(RECORDING).quiet(),
+                ],
+                &[
+                    key(Char('g'), CTRL, Back, Panes(MESSAGES.0 | OVERLAY.0)),
+                    key(Char('g'), CTRL, Back, COMPOSE)
+                        .unless(RECORDING)
+                        .quiet(),
+                ],
             ],
         )
         .footer_droppable("back", 5),
@@ -912,16 +987,25 @@ mod tests {
         SEARCH,
         MAP,
     ];
-    const CTXS: [Ctx; 8] = [
-        Ctx::NONE,
-        Ctx::ENHANCED,
-        ENTER_BREAKS,
-        Ctx(Ctx::ENHANCED.0 | ENTER_BREAKS.0),
-        SEARCHING,
-        Ctx(SEARCHING.0 | Ctx::ENHANCED.0),
-        Ctx(SEARCHING.0 | ENTER_BREAKS.0),
-        Ctx(SEARCHING.0 | Ctx::ENHANCED.0 | ENTER_BREAKS.0),
-    ];
+    /// Every setting: each of the four context bits on and off.
+    const CTXS: [Ctx; 16] = {
+        let mut out = [Ctx::NONE; 16];
+        let bits = [Ctx::ENHANCED.0, ENTER_BREAKS.0, SEARCHING.0, RECORDING.0];
+        let mut i = 0;
+        while i < 16 {
+            let mut ctx = 0;
+            let mut b = 0;
+            while b < 4 {
+                if i & (1 << b) != 0 {
+                    ctx |= bits[b];
+                }
+                b += 1;
+            }
+            out[i] = Ctx(ctx);
+            i += 1;
+        }
+        out
+    };
 
     /// Every action `key` reaches at the winning rank across both tables.
     fn hits(key: &KeyEvent, pane: Panes, ctx: Ctx) -> Vec<Action> {
@@ -1019,16 +1103,59 @@ mod tests {
     }
 
     /// The quiet keyboard: the one transmitting chord a reader can type by
-    /// accident is `Enter` in compose.
+    /// accident is `Enter` in compose. `v` sends a voice message only
+    /// while one records (1276): the bar is in the field's place then, so
+    /// no typing reaches it, and the reader started the recording on
+    /// purpose with `Alt-v`.
     #[test]
     fn the_only_single_keystroke_that_transmits_is_send_in_compose() {
         let mut single = Vec::new();
         for row in ROWS.iter().filter(|r| r.tx) {
             for chord in row.chords().filter(|c| c.is_single_keystroke()) {
-                single.push((chord.label(), chord.panes));
+                single.push((chord.label(), chord.panes, chord.when));
             }
         }
-        assert_eq!(single, [("Enter", COMPOSE)]);
+        assert_eq!(
+            single,
+            [("Enter", COMPOSE, Ctx::NONE), ("v", COMPOSE, RECORDING)]
+        );
+    }
+
+    /// The recording's keys (1276): `Alt-v` starts and, once it records,
+    /// sends; `v` is a letter until then and sends after; `Esc` throws it
+    /// away in compose and still backs out of the messages; `p` and
+    /// `Space` are the bar's alone.
+    #[test]
+    fn the_recordings_keys_belong_to_the_bar_while_it_records() {
+        let k = |code, mods| KeyEvent::new(code, mods);
+        let (v, alt_v) = (
+            k(KeyCode::Char('v'), KeyModifiers::NONE),
+            k(KeyCode::Char('v'), KeyModifiers::ALT),
+        );
+        let esc = k(KeyCode::Esc, KeyModifiers::NONE);
+        let rec = |key| Some(Action::Record(key));
+        assert_eq!(resolve(&alt_v, COMPOSE, Ctx::NONE), rec(RecKey::Start));
+        assert_eq!(resolve(&v, COMPOSE, Ctx::NONE), None, "a letter");
+        assert_eq!(resolve(&v, COMPOSE, RECORDING), rec(RecKey::Send));
+        assert_eq!(resolve(&alt_v, COMPOSE, RECORDING), rec(RecKey::Send));
+        assert_eq!(resolve(&esc, COMPOSE, RECORDING), rec(RecKey::Discard));
+        assert_eq!(resolve(&esc, COMPOSE, Ctx::NONE), Some(Action::Back));
+        assert_eq!(
+            resolve(&esc, panes_of(crate::ui::Pane::Messages), RECORDING),
+            Some(Action::Back)
+        );
+        let p = k(KeyCode::Char('p'), KeyModifiers::NONE);
+        let space = k(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(resolve(&p, COMPOSE, RECORDING), rec(RecKey::Pause));
+        assert_eq!(resolve(&space, COMPOSE, RECORDING), rec(RecKey::Play));
+        assert_eq!(resolve(&p, COMPOSE, Ctx::NONE), None);
+        // The send chord stays the send chord: the model sends the
+        // recording with it.
+        let enter = k(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            resolve(&enter, COMPOSE, RECORDING),
+            Some(Action::Run(Command::Send))
+        );
     }
 
     /// A chord only an enhanced terminal sends always has a sibling every

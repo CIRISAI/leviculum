@@ -2,7 +2,9 @@
 
 The pictures and cell dumps `../golden.rs` holds the map's draw to, one
 per profile (1099): drawn from `../../fixtures/firenze.lmr`, compared pixel
-by pixel. A change that moves one leaves this run's picture in
+by pixel. The `screen-*` pictures are the buildings (1192), drawn from
+`../../fixtures/buildings/firenze.lmr` at the window's and the phone's
+line widths. A change that moves one leaves this run's picture in
 `$TMPDIR/leviculum-golden/`; look at it, and copy it here when the change
 is the one intended.
 

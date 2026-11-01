@@ -35,35 +35,56 @@ public class MainActivity extends Activity {
     static final String JOIN = "join";
     /** The extra with a code the scanner read: joined at once when it carries the address. */
     static final String CODE = "code";
-    private TextView status;
     private TextView error;
     private View form;
     private EditText code;
     private EditText server;
     private Button join;
+    private Button retry;
+    private TextView detailsToggle;
+    private TextView details;
     /** The conversation an imto tap asked for, opened once started. */
     private String imto;
+    /** A friend's code from outside (walk finding 12), added once started. */
+    private String contact;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Intent intent = getIntent();
+        // Recreated, the code was added already.
+        contact = savedInstanceState == null ? contactCode(intent) : null;
+        // A friend's code on a phone that is not set up yet: the first
+        // start comes first, the code is not kept.
         if (!WelcomeActivity.settled(this) && !intent.getBooleanExtra(JOIN, false)
-                && !Intent.ACTION_SEND.equals(intent.getAction())) {
+                && (!Intent.ACTION_SEND.equals(intent.getAction()) || contactCode(intent) != null)) {
             startActivity(new Intent(this, WelcomeActivity.class));
             finish();
             return;
         }
         setContentView(R.layout.activity_main);
-        status = (TextView) findViewById(R.id.status);
         error = (TextView) findViewById(R.id.error);
         form = findViewById(R.id.form);
         code = (EditText) findViewById(R.id.code);
         server = (EditText) findViewById(R.id.server);
         join = (Button) findViewById(R.id.join);
-        // The app's files directory is its loquax home: the place
-        // `home-client` and `home-cursor` live, as $LNMSG_HOME on a desktop.
-        status.setText(Native.describe(home()));
+        retry = (Button) findViewById(R.id.join_retry);
+        detailsToggle = (TextView) findViewById(R.id.join_details_toggle);
+        details = (TextView) findViewById(R.id.join_details);
+        retry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                start(true);
+            }
+        });
+        detailsToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showDetails(details.getVisibility() != View.VISIBLE);
+            }
+        });
+        // No status line above the form (walk finding 20): the version
+        // is the profile's, under Advanced.
         form.setVisibility(View.GONE);
         join.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -94,11 +115,45 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         imto = Book.imtoPeer(intent);
+        contact = contactCode(intent);
         if (shared(intent)) {
             start(true);
-        } else if (imto != null) {
+        } else if (imto != null || contact != null) {
             start(false);
         }
+    }
+
+    /**
+     * A friend's code the intent brings (walk finding 12): an lxma:// link
+     * tapped in another app, or the first word of a shared text the code
+     * reader takes as a friend's code. A mailbox code is not one: it keeps
+     * the join's path. Null for none.
+     */
+    private static String contactCode(Intent intent) {
+        if (intent == null) {
+            return null;
+        }
+        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null
+                && "lxma".equalsIgnoreCase(intent.getData().getScheme())) {
+            return intent.getData().toString();
+        }
+        if (!Intent.ACTION_SEND.equals(intent.getAction())) {
+            return null;
+        }
+        CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        if (text == null || !homeCode(text.toString()).isEmpty()) {
+            return null;
+        }
+        for (String word : text.toString().split("\\s+")) {
+            if (!AddContact.is(word)) {
+                continue;
+            }
+            Map<String, Object> read = Core.lxma(word);
+            if (!read.containsKey("error") && !"mailbox".equals(Core.str(read, "kind"))) {
+                return word;
+            }
+        }
+        return null;
     }
 
     /**
@@ -159,12 +214,17 @@ public class MainActivity extends Activity {
     private void start(final boolean joining) {
         final String typedCode = joining ? code.getText().toString().trim() : null;
         final String typedServer = joining ? server.getText().toString().trim() : null;
+        final boolean first = typedCode != null && !typedCode.isEmpty();
         join.setEnabled(false);
+        retry.setVisibility(View.GONE);
+        detailsToggle.setVisibility(View.GONE);
+        details.setVisibility(View.GONE);
         error.setText(joining ? getString(R.string.joining) : getString(R.string.starting));
         final String home = home();
         new Thread(new Runnable() {
             @Override
             public void run() {
+                Core.sense(getApplicationContext());
                 final Map<String, Object> answer = Core.start(
                         home,
                         typedServer == null || typedServer.isEmpty() ? null : typedServer,
@@ -173,20 +233,41 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        started(answer);
+                        started(answer, first);
                     }
                 });
             }
         }, "loquax-start").start();
     }
 
-    private void started(Map<String, Object> started) {
+    /** The mailbox's own words under Details, open or folded. */
+    private void showDetails(boolean open) {
+        detailsToggle.setText(getString(R.string.details) + (open ? "  ▴" : "  ▾"));
+        details.setVisibility(open && !details.getText().toString().isEmpty() ? View.VISIBLE : View.GONE);
+    }
+
+    /** The start's answer; `joined` when a code was handed in, the phone's first join. */
+    private void started(Map<String, Object> started, boolean joined) {
         join.setEnabled(true);
         if (Core.bool(started, "ok")) {
             Events.start();
             // The session outlives this screen from here on.
             LoquaxService.start(this);
-            startActivity(new Intent(this, ConversationsActivity.class));
+            if (joined && imto == null) {
+                // Joined just now: the address page once, so the user sees
+                // their QR and their name (walk finding 13); its Done goes
+                // on to the conversations.
+                startActivity(new Intent(this, WelcomeActivity.class)
+                        .putExtra(WelcomeActivity.SHOW, WelcomeActivity.ADDRESS_PAGE));
+                finish();
+                return;
+            }
+            Intent list = new Intent(this, ConversationsActivity.class);
+            if (contact != null) {
+                list.putExtra(ConversationsActivity.ADD_CODE, contact);
+                contact = null;
+            }
+            startActivity(list);
             if (imto != null) {
                 startActivity(new Intent(this, ChatActivity.class).putExtra(ChatActivity.PEER, imto));
             }
@@ -195,6 +276,11 @@ public class MainActivity extends Activity {
         }
         form.setVisibility(View.VISIBLE);
         error.setText(Core.str(started, "error"));
+        retry.setVisibility(View.VISIBLE);
+        String said = Core.str(started, "details");
+        details.setText(said);
+        detailsToggle.setVisibility(said.isEmpty() ? View.GONE : View.VISIBLE);
+        showDetails(false);
         String need = Core.str(started, "need");
         if ("server".equals(need)) {
             server.requestFocus();

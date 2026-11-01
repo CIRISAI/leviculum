@@ -216,6 +216,82 @@ fn a_dark_phone_draws_the_dark_table() {
     assert!(share < 50, "not the light table: {share} %");
 }
 
+/// The phone draws the buildings (1192), and in the window's pixels:
+/// over the Florence cut with its building sections, its frame at z16 and
+/// z17, light and dark, once its names faded in, is the window's golden
+/// of the same view pixel for pixel (`loquax/tests/golden/gui-buildings-*.png`, drawn by
+/// `loquax::mapframe` as the window draws): one library, one picture,
+/// buildings and names. Over the cut without them the frame differs, by
+/// footprints.
+#[test]
+fn the_phone_draws_the_buildings_as_the_window_does() {
+    let home = home();
+    let maps = home.path().join("maps");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../leviculum-map/fixtures/buildings/firenze.lmr");
+    std::fs::copy(fixture, maps.join("firenze.lmr")).expect("the region");
+    let bare = tempfile::tempdir().expect("bare");
+    std::fs::create_dir_all(bare.path().join("maps")).expect("maps");
+    std::fs::copy(
+        home.path().join(loquax::config::CONFIG_FILE),
+        bare.path().join(loquax::config::CONFIG_FILE),
+    )
+    .expect("config");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr"),
+        bare.path().join("maps/firenze.lmr"),
+    )
+    .expect("the region");
+    // The frame once its names faded in (1205): the renderer's clock
+    // held, then held a second further.
+    let settled = |ask: &MapRequest| {
+        let dir = Path::new(&ask.dir);
+        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
+        loquax_android::map::tune_clock(dir, Some(0));
+        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
+        loquax_android::map::tune_clock(dir, Some(5_000));
+        let settled = frame(&loquax_android::map::render(ask, Some(Vec::new()), now()));
+        loquax_android::map::tune_clock(dir, None);
+        settled
+    };
+    for zoom in [16u8, 17] {
+        for (dark, t) in [(false, "light"), (true, "dark")] {
+            let ask = |dir: &Path| MapRequest {
+                zoom: Some(zoom),
+                ..request(dir, dark)
+            };
+            let (shown, rgba) = settled(&ask(home.path()));
+            assert_eq!((shown.w, shown.h), (W, H));
+            let (_, without) = settled(&ask(bare.path()));
+            let share = same_share(&rgba, &without);
+            assert!(
+                share < 95,
+                "z{zoom} {t}: buildings drawn, {share} % the same"
+            );
+            let window = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../loquax/tests/golden/gui-buildings-{t}-z{zoom}.png"
+            ));
+            let bytes = std::fs::read(&window).expect("the window's golden");
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+                .read_info()
+                .expect("png");
+            let mut want = vec![0; reader.output_buffer_size().expect("size")];
+            let info = reader.next_frame(&mut want).expect("frame");
+            want.truncate(info.buffer_size());
+            let rgb: Vec<u8> = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            let differ = want
+                .chunks(3)
+                .zip(rgb.chunks(3))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                differ, 0,
+                "z{zoom} {t}: the phone is not the window's picture"
+            );
+        }
+    }
+}
+
 /// The map's own switch (1133): with the phone dark, a toggle draws the
 /// light table and stores it as the config's `map_theme`, the other keys
 /// kept; the choice wins over the phone from then on, for a renderer that
@@ -1922,4 +1998,116 @@ fn a_coast_ends_with_a_frame_at_rest_that_sets_its_names() {
     placed.sort();
     assert_ne!(after, before, "the view at rest names other places");
     assert_eq!(after, placed, "the frame at rest sets its view's names");
+}
+
+/// The device walk's `buildings` step (1193) on the host: its constants
+/// in `scripts/device-walk.py` held to the renderer. Over the walk's
+/// Frankfurt region the phone's frame on the walk's place, asked as the
+/// exported map screen asks it (`at_zoom_milli`), shows the building fill
+/// of either table, through RGB565 as the walk looks for it, on well over
+/// the walk's least share of its samples of the middle half at z16, and
+/// on next to none at z15, where no building is drawn.
+#[test]
+fn the_walks_frankfurt_shows_the_building_fill_at_z16_and_not_at_z15() {
+    use leviculum_mapfill::style::Class;
+    let script = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/device-walk.py"),
+    )
+    .expect("the walk");
+    let value = |name: &str| -> String {
+        let line = script
+            .lines()
+            .find(|l| l.starts_with(&format!("{name} = ")))
+            .unwrap_or_else(|| panic!("{name} in the walk"));
+        line[name.len() + 3..].trim().to_string()
+    };
+    let numbers = |name: &str| -> Vec<f64> {
+        value(name)
+            .trim_matches(|c| c == '(' || c == ')')
+            .split(',')
+            .map(|n| n.trim().parse().expect("a number"))
+            .collect()
+    };
+    let fill = |name: &str| -> [u8; 3] {
+        let n = numbers(name);
+        [n[0] as u8, n[1] as u8, n[2] as u8]
+    };
+    let place = numbers("FRANKFURT_E6");
+    let grid = numbers("BUILDINGS_GRID");
+    let least = numbers("BUILDINGS_LEAST")[0];
+    let z15_most = numbers("BUILDINGS_Z15_MOST")[0];
+    let fills = [fill("BUILDING_FILL_LIGHT"), fill("BUILDING_FILL_DARK")];
+    assert_eq!(
+        fills,
+        [
+            rgb888(MapTheme::Light.palette().area(Class::Building)),
+            rgb888(MapTheme::Dark.palette().area(Class::Building)),
+        ],
+        "the walk's fills are the tables' through RGB565"
+    );
+
+    let home = tempfile::tempdir().expect("home");
+    let maps = home.path().join("maps");
+    std::fs::create_dir_all(&maps).expect("maps");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../leviculum-map/fixtures/frankfurt/roemer.lmr"),
+        maps.join("frankfurt-roemer.lmr"),
+    )
+    .expect("the region");
+    std::fs::write(
+        home.path().join(loquax::config::CONFIG_FILE),
+        "map_autoload = off\n",
+    )
+    .expect("config");
+    // A phone's screen at half its pixels and half its density: the same
+    // ground as 1080 x 2400 at 2.75.
+    let (w, h) = (540u32, 1200u32);
+    let share = |zoom: u32, dark: bool| -> f64 {
+        let ask = MapRequest {
+            dir: home.path().display().to_string(),
+            w,
+            h,
+            density_milli: 1375,
+            dark,
+            at_lat_e6: Some(place[0] as i32),
+            at_lon_e6: Some(place[1] as i32),
+            at_zoom_milli: Some(zoom),
+            ..MapRequest::default()
+        };
+        let (shown, rgba) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        assert_eq!(shown.zoom_milli, zoom, "{shown:?}");
+        let (cols, rows) = (grid[0] as u32, grid[1] as u32);
+        // The walk's sample_grid over its middle_half.
+        let (x1, y1, x2, y2) = (shown.w / 4, shown.h / 4, shown.w * 3 / 4, shown.h * 3 / 4);
+        let mut hits = 0;
+        for r in 0..rows {
+            let y = y1 + (2 * r + 1) * (y2 - y1) / (2 * rows);
+            for c in 0..cols {
+                let x = x1 + (2 * c + 1) * (x2 - x1) / (2 * cols);
+                let i = ((y * shown.w + x) * 4) as usize;
+                let p = &rgba[i..i + 3];
+                if fills
+                    .iter()
+                    .any(|f| f.iter().zip(p).all(|(a, b)| a.abs_diff(*b) <= 3))
+                {
+                    hits += 1;
+                }
+            }
+        }
+        f64::from(hits) / f64::from(cols * rows)
+    };
+    for dark in [false, true] {
+        let z16 = share(16_000, dark);
+        let z15 = share(15_000, dark);
+        assert!(
+            z16 >= 2.0 * least,
+            "dark={dark}: z16 fill {z16:.3}, the walk wants {least} with room"
+        );
+        assert!(
+            z15 <= z15_most,
+            "dark={dark}: z15 fill {z15:.3}, the walk allows {z15_most}"
+        );
+        eprintln!("dark={dark} fill z16={z16:.3} z15={z15:.3}");
+    }
 }

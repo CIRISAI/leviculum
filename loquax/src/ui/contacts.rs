@@ -22,6 +22,7 @@ use leviculum_ui::toast::ToastKind;
 
 use super::{Palette, UiEffect, UiModel, NONE_OPEN};
 use crate::names::{self, Contact, Trust};
+use crate::ui::strings::{Lang, StrId};
 
 /// What the open palette asks for instead of a command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,10 @@ pub enum Ask {
     /// conversation: a digit picks a quick one, `Enter` sends what was
     /// typed ([`super::reactions`]).
     React { peer: [u8; 16], target: [u8; 32] },
+    /// A friend's code or address (1263, finding 6), read by
+    /// [`crate::code::read`]: its conversation opens, and with `name`
+    /// the palette asks the reader's name for it next (`add contact`).
+    Code { name: bool },
 }
 
 impl<B> UiModel<B> {
@@ -82,6 +87,10 @@ impl<B> UiModel<B> {
                 "Enter sets it, empty clears it".to_string(),
             ],
             Ask::React { peer, target } => self.react_rows(peer, target),
+            Ask::Code { .. } => vec![
+                "your friend's code or address".to_string(),
+                "Enter opens the conversation".to_string(),
+            ],
         }
     }
 
@@ -224,6 +233,45 @@ impl<B: InputBuffer + Default> UiModel<B> {
         match ask {
             Ask::Rename(peer) => self.rename(peer, &typed),
             Ask::React { peer, target } => self.react(peer, target, &typed),
+            Ask::Code { name } => self.take_code(&typed, name),
         }
+    }
+
+    /// The palette's `new conversation` and `add contact`: ask for the
+    /// friend's code.
+    pub(super) fn ask_code(&mut self, name: bool) {
+        self.palette = Some(Palette {
+            ask: Some(Ask::Code { name }),
+            ..Palette::default()
+        });
+    }
+
+    /// A friend's code typed or pasted into the palette: the conversation
+    /// open with the cursor in compose, then the name asked for when
+    /// `name`. A code that is none is said in a toast, the same sentence
+    /// the phone shows.
+    fn take_code(&mut self, typed: &str, name: bool) -> Vec<UiEffect> {
+        let code = match crate::code::read(typed) {
+            Ok(code) => code,
+            Err(why) => {
+                self.toast(ToastKind::Error, why.say(Lang::En).to_string());
+                return Vec::new();
+            }
+        };
+        let Some(peer) = code.address() else {
+            self.toast(
+                ToastKind::Error,
+                StrId::CodeIsMailbox.text(Lang::En).to_string(),
+            );
+            return Vec::new();
+        };
+        self.show_blocked = false;
+        let index = self.conversation(peer);
+        self.select(index);
+        self.focus = super::Pane::Compose;
+        if name {
+            self.ask_rename();
+        }
+        Vec::new()
     }
 }

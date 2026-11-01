@@ -66,6 +66,7 @@ pub const VERSION: &str = env!("LEVICULUM_VERSION");
 pub mod address;
 pub mod body;
 pub mod clock;
+pub mod code;
 pub mod config;
 pub mod display_name;
 pub mod effects;
@@ -77,6 +78,8 @@ pub mod export;
 #[cfg(feature = "std")]
 pub mod fanout;
 pub mod fetch;
+#[cfg(feature = "std")]
+pub mod file_save;
 pub mod home;
 #[cfg(feature = "std")]
 pub mod identity;
@@ -95,6 +98,8 @@ pub mod mapnames;
 pub mod name_match;
 pub mod names;
 pub mod outbox;
+#[cfg(feature = "photos")]
+pub mod photo;
 #[cfg(feature = "picture")]
 pub mod picture;
 #[cfg(feature = "screenmap")]
@@ -108,4 +113,6 @@ pub mod telemetry;
 #[cfg(feature = "picture")]
 pub mod tiles;
 pub mod ui;
+#[cfg(feature = "voice")]
+pub mod voice;
 pub mod when;

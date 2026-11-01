@@ -14,9 +14,6 @@ final class Native {
 
     private Native() {}
 
-    /** The loquax version and this device's home node client state. */
-    static native String describe(String home);
-
     /** Start the session; blocks while a first start joins. */
     static native byte[] start(byte[] request);
 

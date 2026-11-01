@@ -22,9 +22,10 @@ use core::fmt::Debug;
 
 use serde_json::{json, Value};
 
-/// A language the catalogues speak.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// A language the catalogues speak; English unless a locale says other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Lang {
+    #[default]
     En,
     De,
 }

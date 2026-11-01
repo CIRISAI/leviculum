@@ -58,17 +58,65 @@
         "role": "text_field",
         "selected": false
       },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
       "hint": {
         "args": [],
         "key": "compose_hint"
       },
       "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
       "reply": null,
+      "round": "send",
       "send": {
         "enabled": true,
         "intent": "Send { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), body: None }",
         "label_key": "send"
       },
+      "staged": null,
       "text": ""
     },
     "groups": [
@@ -118,6 +166,7 @@
             "at": 1780000014,
             "body": "Treffen wir uns um 18:00 am Bahnhof?",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775809",
             "live": null,
@@ -126,6 +175,7 @@
             "mark_node": null,
             "msg_id": "7b8639856744e54679f2710a6631fe785104fdcc4ead830e3de9eb05b22fd550",
             "ours": false,
+            "photo": null,
             "place": {
               "day": true,
               "joins_after": false,
@@ -134,7 +184,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": {
@@ -207,6 +259,7 @@
             "at": 1780000614,
             "body": "naïve façade, smörgåsbord, Ærøskøbing",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775810",
             "live": null,
@@ -223,6 +276,7 @@
             },
             "msg_id": "2f8c1cf237127d66fed021a79efc364940c1b0b1c58352640a02c4c04168d6c9",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -231,7 +285,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -288,6 +344,7 @@
             "at": 1780001214,
             "body": "日本語のテキストも",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775811",
             "live": null,
@@ -296,6 +353,7 @@
             "mark_node": null,
             "msg_id": "4b29f184bc8a0b2b30afccf6852e671435b260d078cbc4bbcc8ec09e4f9fa4b7",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -304,7 +362,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "日本語のテキストも",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -361,6 +421,7 @@
             "at": 1780001814,
             "body": "Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 ",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775812",
             "live": null,
@@ -381,6 +442,7 @@
             },
             "msg_id": "22384fcde2a5da539caed4a66888481e83a1c3f108f727856e1c7f6234c5f590",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -389,7 +451,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 Grüße 🐀 ",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -446,6 +510,7 @@
             "at": 1780002414,
             "body": "zwei\nZeilen",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775813",
             "live": null,
@@ -454,6 +519,7 @@
             "mark_node": null,
             "msg_id": "aa1f6d23d52fa1133b8110ac6e460d397e05fd6c1d519435739c9bb6cd9763ca",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -462,7 +528,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -519,6 +587,7 @@
             "at": 1780003014,
             "body": "ja",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775814",
             "live": null,
@@ -535,6 +604,7 @@
             },
             "msg_id": "18e50c4e5d4cea0e6ec5f3afff564426e0f8d24cf2a80c151ee8d6cf3009c6ad",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -543,7 +613,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "ja",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -600,6 +672,7 @@
             "at": 1780003614,
             "body": "Grüße aus Köln, die Straße ist nass",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775815",
             "live": null,
@@ -608,6 +681,7 @@
             "mark_node": null,
             "msg_id": "10ae77bbb2192e66f0f6df339a93c8909c27c136de20d5779a6eb47bbfb02b65",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -616,7 +690,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -673,6 +749,7 @@
             "at": 1780004214,
             "body": "Antwort 7: genau, äh, so 🙂",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775816",
             "live": null,
@@ -689,6 +766,7 @@
             },
             "msg_id": "43b81f6c5b85180093007aa2951a442f533251c20dbcbcd1ecf746743d6a1282",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -701,7 +779,9 @@
               "to": "10ae77bbb2192e66f0f6df339a93c8909c27c136de20d5779a6eb47bbfb02b65"
             },
             "since": null,
-            "updates": 0
+            "text": "Antwort 7: genau, äh, so 🙂",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -758,6 +838,7 @@
             "at": 1780004814,
             "body": "Treffen wir uns um 18:00 am Bahnhof?",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775817",
             "live": null,
@@ -766,6 +847,7 @@
             "mark_node": null,
             "msg_id": "7c75a848d26dff6b08d8dae950fe609e6bc41626035ff935e49bf0b254e5eda5",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -774,7 +856,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -837,6 +921,7 @@
                 "ours": true
               }
             ],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775818",
             "live": null,
@@ -853,6 +938,7 @@
             },
             "msg_id": "b1ea84f989ab0bf6a525d6d4f70a93637b5a7a114a7194f61cb4fdf7dfcac560",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -861,7 +947,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -918,6 +1006,7 @@
             "at": 1780006014,
             "body": "日本語のテキストも",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775819",
             "live": null,
@@ -926,6 +1015,7 @@
             "mark_node": null,
             "msg_id": "7f5523098399f3dc7195beb5f6bc1acd639a5e95005a36f7235769a26797a3b7",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -934,7 +1024,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "日本語のテキストも",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -990,6 +1082,7 @@
             "at": 1780007214,
             "body": "zwei\nZeilen",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775821",
             "live": null,
@@ -998,6 +1091,7 @@
             "mark_node": null,
             "msg_id": "1c01467b138a65ce384b242a6082992d9f969cf676e04b8b2321f1ab8c7463b8",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1006,7 +1100,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1063,6 +1159,7 @@
             "at": 1780007814,
             "body": "ja",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775822",
             "live": null,
@@ -1079,6 +1176,7 @@
             },
             "msg_id": "e3bb1562e41a0a9322de5a2744abab18ab2d212b712fdff90e9bad8a7a8350bc",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1087,7 +1185,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "ja",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1144,6 +1244,7 @@
             "at": 1780008414,
             "body": "hier bin ich",
             "chips": [],
+            "files": [],
             "fix": [
               48139000,
               11256000
@@ -1155,6 +1256,7 @@
             "mark_node": null,
             "msg_id": "a500a8e58d7d453bf9f4eeb250ee6548913023a80e4745aa041edc91b8c168cd",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1163,7 +1265,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "hier bin ich",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1220,6 +1324,7 @@
             "at": 1780009014,
             "body": "ok 👍",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775824",
             "live": null,
@@ -1236,6 +1341,7 @@
             },
             "msg_id": "90c527a5d420e0e8f03ea1d387a2b3a5763abe0f3fd9f2f3a43357de68040086",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1244,7 +1350,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1301,6 +1409,7 @@
             "at": 1780009614,
             "body": "Treffen wir uns um 18:00 am Bahnhof?",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775825",
             "live": null,
@@ -1309,6 +1418,7 @@
             "mark_node": null,
             "msg_id": "e24dffafac91305197e799b0f4b07ea92805c0413027991d97937f4987b34b19",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1317,7 +1427,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1374,6 +1486,7 @@
             "at": 1780010214,
             "body": "naïve façade, smörgåsbord, Ærøskøbing",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775826",
             "live": null,
@@ -1390,6 +1503,7 @@
             },
             "msg_id": "12b642963385f993601fc008055f27a7cc87262144428952cbb678a17e765024",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1398,7 +1512,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1468,6 +1584,7 @@
             "at": 1780010814,
             "body": "",
             "chips": [],
+            "files": [],
             "fix": [
               48102000,
               11256000
@@ -1498,6 +1615,7 @@
             "mark_node": null,
             "msg_id": "75f60ec9f02cb5a6731f79d8a62e68f8680a970b1c001adebabd0519de62eade",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1506,7 +1624,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": null,
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1563,6 +1683,7 @@
             "at": 1780011414,
             "body": "😀🐀🚲 drei Emoji am Stück",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775828",
             "live": null,
@@ -1583,6 +1704,7 @@
             },
             "msg_id": "635d2037b60d8c320240aeaec7ac785e1a732a9ef003ee430421951e80d97ab7",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1591,7 +1713,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "😀🐀🚲 drei Emoji am Stück",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1648,6 +1772,7 @@
             "at": 1780012014,
             "body": "zwei\nZeilen",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775829",
             "live": null,
@@ -1656,6 +1781,7 @@
             "mark_node": null,
             "msg_id": "90e3ba799e8404e69f110e5781f4b849921ffb450d30bc0441aa2661de4a5968",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1664,7 +1790,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1721,6 +1849,7 @@
             "at": 1780012614,
             "body": "Antwort 21: genau, äh, so 🙂",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775830",
             "live": null,
@@ -1737,6 +1866,7 @@
             },
             "msg_id": "72f16b73f7393705523903f39269e9ebf645a21e840ef734880db410b8ccbb9a",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1749,7 +1879,9 @@
               "to": "90e3ba799e8404e69f110e5781f4b849921ffb450d30bc0441aa2661de4a5968"
             },
             "since": null,
-            "updates": 0
+            "text": "Antwort 21: genau, äh, so 🙂",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1812,6 +1944,7 @@
                 "ours": false
               }
             ],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775831",
             "live": null,
@@ -1820,6 +1953,7 @@
             "mark_node": null,
             "msg_id": "ce421edebc5f4d20af14949b576ec18a9b40cfb2008d6329b3924db2e3ce605e",
             "ours": false,
+            "photo": null,
             "place": {
               "day": true,
               "joins_after": false,
@@ -1828,7 +1962,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": {
@@ -1891,6 +2027,7 @@
             "at": 1780013814,
             "body": "ok 👍",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775832",
             "live": null,
@@ -1907,6 +2044,7 @@
             },
             "msg_id": "63a27b29f754a764202099ea03bdb9db62539570c7c742d9c527e01b94fa9dbf",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1915,7 +2053,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1973,6 +2113,7 @@
             "at": 1780015014,
             "body": "naïve façade, smörgåsbord, Ærøskøbing",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775834",
             "live": null,
@@ -1989,6 +2130,7 @@
             },
             "msg_id": "0a33adc2928c66416e7f358bba5c82083d1ba8a6c3f4f3490f634c57ef89c9c8",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -1997,7 +2139,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2054,6 +2198,7 @@
             "at": 1780015614,
             "body": "日本語のテキストも",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775835",
             "live": null,
@@ -2062,6 +2207,7 @@
             "mark_node": null,
             "msg_id": "54396480988dad991d3a5fff65b6a37447000321af5e3220572086d595c37ff7",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2070,7 +2216,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "日本語のテキストも",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2127,6 +2275,7 @@
             "at": 1780016214,
             "body": "😀🐀🚲 drei Emoji am Stück",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775836",
             "live": null,
@@ -2147,6 +2296,7 @@
             },
             "msg_id": "4360875067b3098a912c3577b549f8a53cabb2495562da35f4d6bee1b13aefb4",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2155,7 +2305,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "😀🐀🚲 drei Emoji am Stück",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2212,6 +2364,7 @@
             "at": 1780016814,
             "body": "zwei\nZeilen",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775837",
             "live": null,
@@ -2220,6 +2373,7 @@
             "mark_node": null,
             "msg_id": "5b86ece08cbd63104470dce4584c93a0e154f09c484a61e6c947fdcaf5574a08",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2228,7 +2382,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2285,6 +2441,7 @@
             "at": 1780017414,
             "body": "",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775838",
             "live": null,
@@ -2301,6 +2458,7 @@
             },
             "msg_id": "1a26b581b7078fda81bb26e897bd3e67de28ad0d86cdc6bc2d64b4ee183e4e22",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2309,7 +2467,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": null,
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2366,6 +2526,7 @@
             "at": 1780018014,
             "body": "Grüße aus Köln, die Straße ist nass",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775839",
             "live": null,
@@ -2374,6 +2535,7 @@
             "mark_node": null,
             "msg_id": "d2cec915dafa847248b1b52f26d11e0a4c97989c6995ec3728e4bcdcef8319e0",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2382,7 +2544,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2439,6 +2603,7 @@
             "at": 1780018614,
             "body": "ok 👍",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775840",
             "live": null,
@@ -2455,6 +2620,7 @@
             },
             "msg_id": "12c749829dbcb3a648e4981d5abfada5915d7b0801d862ff3a729f8f910499a4",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2463,7 +2629,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2520,6 +2688,7 @@
             "at": 1780019214,
             "body": "Treffen wir uns um 18:00 am Bahnhof?",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775841",
             "live": null,
@@ -2528,6 +2697,7 @@
             "mark_node": null,
             "msg_id": "fd452ed4aae1533843b8bb9cd7f31a79a59f9369e37d96c3e22344db3fe6ac7a",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2536,7 +2706,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Treffen wir uns um 18:00 am Bahnhof?",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2593,6 +2765,7 @@
             "at": 1780019814,
             "body": "naïve façade, smörgåsbord, Ærøskøbing",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775842",
             "live": null,
@@ -2609,6 +2782,7 @@
             },
             "msg_id": "ede53cd369e05a45977035bdfcb33856f0707a8266d88f01e5fa522654e28802",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2617,7 +2791,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "naïve façade, smörgåsbord, Ærøskøbing",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2674,6 +2850,7 @@
             "at": 1780020414,
             "body": "Antwort 34: genau, äh, so 🙂",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775843",
             "live": null,
@@ -2682,6 +2859,7 @@
             "mark_node": null,
             "msg_id": "ee1e53ed6cbe45346d7c9eab34f28bbdfe139f226a52c318c93956396af8673c",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2694,7 +2872,9 @@
               "to": "ede53cd369e05a45977035bdfcb33856f0707a8266d88f01e5fa522654e28802"
             },
             "since": null,
-            "updates": 0
+            "text": "Antwort 34: genau, äh, so 🙂",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2751,6 +2931,7 @@
             "at": 1780021014,
             "body": "😀🐀🚲 drei Emoji am Stück",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775844",
             "live": null,
@@ -2771,6 +2952,7 @@
             },
             "msg_id": "3516eb57fb1ef4c6e8a55ea8d352d51b0ad5caf0e334affe0235cf35ee47d4b0",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2779,7 +2961,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "😀🐀🚲 drei Emoji am Stück",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2836,6 +3020,7 @@
             "at": 1780021614,
             "body": "zwei\nZeilen",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775845",
             "live": null,
@@ -2844,6 +3029,7 @@
             "mark_node": null,
             "msg_id": "259bc2c89f96a051155f39806226efd78ed6e293de2ee6f716432b504a793031",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2852,7 +3038,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "zwei\nZeilen",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2909,6 +3097,7 @@
             "at": 1780022214,
             "body": "ja",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775846",
             "live": null,
@@ -2925,6 +3114,7 @@
             },
             "msg_id": "27249a1fe4448ce2d40d594927698677e56ab9e280eec9b4cf98b8efa8d7aa24",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -2933,7 +3123,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "ja",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2990,6 +3182,7 @@
             "at": 1780022814,
             "body": "Grüße aus Köln, die Straße ist nass",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775847",
             "live": null,
@@ -2998,6 +3191,7 @@
             "mark_node": null,
             "msg_id": "10ce6ed6bc48026220a42c6a90847a032fdcf2ebc0efdc6bac29ac9b5aa3887d",
             "ours": false,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -3006,7 +3200,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "Grüße aus Köln, die Straße ist nass",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -3063,6 +3259,7 @@
             "at": 1780023414,
             "body": "ok 👍",
             "chips": [],
+            "files": [],
             "fix": null,
             "id": "bubble_9223372036854775848",
             "live": null,
@@ -3079,6 +3276,7 @@
             },
             "msg_id": "a0b30881b4b9158656fd8d6dc5befc80fe17ba84a0d06b964dcddfe9de25787f",
             "ours": true,
+            "photo": null,
             "place": {
               "day": false,
               "joins_after": false,
@@ -3087,7 +3285,9 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "text": "ok 👍",
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -3100,7 +3300,8 @@
       }
     ],
     "id": "chat",
-    "peer": "1d0abf792296d6027f9c456dda8a1f95"
+    "peer": "1d0abf792296d6027f9c456dda8a1f95",
+    "share": null
   },
   "chips": [],
   "class": "Compact",
@@ -3146,5 +3347,6 @@
     "title": {
       "raw": "Jürgen 🚲 ·1d0a"
     }
-  }
+  },
+  "whereabouts": null
 }

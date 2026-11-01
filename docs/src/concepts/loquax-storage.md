@@ -176,6 +176,16 @@ this page leaves, or departs from it:
   `conversations.receipts` is 1 while the peer's latest message carried the
   `lev` receipt mark ([read receipts](loquax-read-receipts.md)). A schema 8
   file gains both columns empty in place.
+- **Position shares** (schema 10, 1273). `shares`, a row a conversation
+  while our share runs there: its span (`15_min`, `1_h`, `8_h`,
+  `until_stopped`), its start and end in unix seconds (no end until
+  stopped), and the last report it sent (the fix's integers, when it went,
+  whether it went for a move), from which its cadence goes on after a
+  restart. Written on every start, report and stop, deleted at the stop
+  and with its conversation. A share whose end passed while the app was
+  gone ends at the first clock with its end report. A row with a span
+  this program does not know, or half a last report, is refused as
+  corrupt. A schema 9 file gains the empty table in place.
 - **Writes.** The model notes what a fold changed, and the shell writes it
   in one `BEGIN IMMEDIATE` transaction before the next event, rollback
   journal, `synchronous=FULL`, foreign keys on. A crash leaves the store as

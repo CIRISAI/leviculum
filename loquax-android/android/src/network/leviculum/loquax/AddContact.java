@@ -11,11 +11,13 @@ import android.widget.Toast;
 import java.util.Map;
 
 /**
- * A contact from its contact code, `lxma://<address>:<key>` (1187), the
- * code Columba and Sideband share: scanned on the profile or pasted into
- * the pencil's field. The library says whose it is; the user names it;
- * the library keeps the name, hands the key to the mailbox and opens the
- * conversation, which this opens on screen.
+ * A friend from their code (1187, 1263): a contact code
+ * `lxma://<address>:<key>`, the code Columba and Sideband share, or an
+ * address alone, the first start's old QR. Scanned or pasted on the
+ * pencil's screen or the profile. The library reads it (loquax::code) and
+ * says whose it is; the user names it; the library keeps the name, hands
+ * the key to the mailbox and opens the conversation, which this opens on
+ * screen. A mailbox's code goes to the join.
  */
 final class AddContact {
     private static final String PREFIX = "lxma://";
@@ -28,16 +30,31 @@ final class AddContact {
     }
 
     /**
-     * Ask for the name of the contact `text` is the code of, add it and
-     * open its chat, then run `then` (null for nothing). A code that is
-     * none says why and asks nothing.
+     * Take the code `text`: a friend's asks the name, adds them and opens
+     * their chat, then runs `then` (null for nothing); a mailbox's opens
+     * the join with it. A text that is no code returns why, in one
+     * sentence for the screen, and asks nothing; null otherwise.
      */
-    static void ask(final Activity activity, String text, final Runnable then) {
+    static String take(final Activity activity, String text, final Runnable then) {
         Map<String, Object> code = Core.lxma(text.trim());
         if (code.containsKey("error")) {
-            Toast.makeText(activity, Core.str(code, "error"), Toast.LENGTH_LONG).show();
-            return;
+            return Core.str(code, "error");
         }
+        if ("mailbox".equals(Core.str(code, "kind"))) {
+            activity.startActivity(new Intent(activity, MainActivity.class)
+                    .putExtra(MainActivity.JOIN, true)
+                    .putExtra(MainActivity.CODE, Core.str(code, "lxma")));
+            if (then != null) {
+                then.run();
+            }
+            return null;
+        }
+        ask(activity, code, then);
+        return null;
+    }
+
+    /** Ask for the name of the friend `code` read as, add them and open their chat. */
+    private static void ask(final Activity activity, Map<String, Object> code, final Runnable then) {
         final String address = Core.str(code, "address");
         final String lxma = Core.str(code, "lxma");
         final EditText name = new EditText(activity);

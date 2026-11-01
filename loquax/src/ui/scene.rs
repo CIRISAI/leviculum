@@ -49,9 +49,12 @@ use alloc::vec::Vec;
 use serde_json::{json, Map, Value};
 
 use super::chat::{self, Bubble, ListRow, Placement};
+use super::compose::{self, Button, Round, SheetRow};
 use super::intent::{Intent, Messages, Switch, Target};
 use super::liveness::{self, Liveness};
+use super::recording::{self, Fold, LevelTrack, Phase, Verb};
 use super::strings::{Arg, StrId, Text};
+use super::voice::BARS;
 use super::UiModel;
 use crate::address::to_hex;
 use crate::when::WallTime;
@@ -97,10 +100,48 @@ pub enum NodeId {
     Bubble(u64),
     /// The delivery mark of one of ours, by its message's key (1232).
     Mark(u64),
+    /// A bubble's photo, by its message's key (1220).
+    Photo(u64),
+    /// A bubble's file, by its message's key and its place among the
+    /// message's files (1221).
+    File(u64, usize),
+    /// A bubble's voice message, by its message's key (1222).
+    Voice(u64),
     Compose,
+    /// The compose bar's microphone (1222).
+    Record,
+    /// The compose bar's other buttons (1270): the emoji, the position
+    /// button, the camera, and the round button outside the field as the
+    /// plus or as Send.
+    Emoji,
+    Locate,
+    Camera,
+    Plus,
+    Send,
+    /// The photo staged in the compose bar (1270).
+    Staged,
+    /// The recording bar (1276) and its parts: the timer, the live
+    /// waveform, the slide-to-cancel hint, the line under the waveform
+    /// (nothing heard, the cap), and a button or the lock chip by its
+    /// verb. The microphone held keeps [`NodeId::Record`].
+    RecBar,
+    RecTimer,
+    RecWave,
+    RecCancel,
+    RecNotice,
+    Rec(Verb),
     Sheet,
+    /// A row of the sheet the compose bar opened (1270).
+    SheetRow(SheetRow),
     Card,
     Chip(u32),
+    /// The chip at the top of a chat while its position share runs (1273),
+    /// and its Stop.
+    ShareChip,
+    ShareStop,
+    /// A running share in Settings, Privacy, by its peer (1273); its Stop.
+    ShareRow([u8; 16]),
+    ShareRowStop([u8; 16]),
 }
 
 impl NodeId {
@@ -120,10 +161,31 @@ impl NodeId {
             NodeId::Group(key) => format!("group_{key}"),
             NodeId::Bubble(key) => format!("bubble_{key}"),
             NodeId::Mark(key) => format!("mark_{key}"),
+            NodeId::Photo(key) => format!("photo_{key}"),
+            NodeId::File(key, index) => format!("file_{key}_{index}"),
+            NodeId::Voice(key) => format!("voice_{key}"),
             NodeId::Compose => "compose".to_string(),
+            NodeId::Record => "record".to_string(),
+            NodeId::Emoji => "emoji".to_string(),
+            NodeId::Locate => "locate".to_string(),
+            NodeId::Camera => "camera".to_string(),
+            NodeId::Plus => "plus".to_string(),
+            NodeId::Send => "send".to_string(),
+            NodeId::Staged => "staged".to_string(),
+            NodeId::RecBar => "rec_bar".to_string(),
+            NodeId::RecTimer => "rec_timer".to_string(),
+            NodeId::RecWave => "rec_wave".to_string(),
+            NodeId::RecCancel => "rec_cancel".to_string(),
+            NodeId::RecNotice => "rec_notice".to_string(),
+            NodeId::Rec(verb) => verb.word().to_string(),
             NodeId::Sheet => "sheet".to_string(),
+            NodeId::SheetRow(row) => format!("sheet_{}", row.word()),
             NodeId::Card => "card".to_string(),
             NodeId::Chip(n) => format!("chip_{n}"),
+            NodeId::ShareChip => "share_chip".to_string(),
+            NodeId::ShareStop => "share_stop".to_string(),
+            NodeId::ShareRow(peer) => format!("share_{}", to_hex(peer)),
+            NodeId::ShareRowStop(peer) => format!("share_stop_{}", to_hex(peer)),
         }
     }
 }
@@ -322,6 +384,9 @@ pub struct Row {
     /// `Draft: …` (1219), which stands in for the last line, in italics,
     /// while a message typed in a conversation not open is not sent.
     pub draft: Option<Text>,
+    /// A share of our position runs in this chat (1273): the row shows a
+    /// small ⌖ in the accent colour on our side.
+    pub sharing: bool,
 }
 
 /// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
@@ -361,11 +426,27 @@ pub struct BubbleNode {
     /// Grouping, corners, the day line, whether the time and mark show
     /// ([`chat::placements`]): no renderer computes it again.
     pub place: Placement,
+    /// The words the bubble reads (1268): its body, none when the body
+    /// holds nothing to read. A bubble is one shape whatever it carries:
+    /// its media first (the photo, the file rows, the voice player), these
+    /// words under them, the time and the mark closing the last row. A
+    /// renderer draws no text row where this is none, so a photo without
+    /// words is the photo and its time in one bubble.
+    pub text: Option<String>,
     /// The newest report's words (`live · every 10 min · 2 min ago`).
     pub live: Option<Text>,
     /// Ours only: the ladder's mark, what a screen reader says for it,
     /// and for a failed one the tap that sends it again (1232).
     pub mark: Option<MarkNode>,
+    /// The photo it carries (1220): the renderer draws its thumbnail
+    /// (`crate::photo::thumbnail`), a tap shows it whole.
+    pub photo: Option<PhotoNode>,
+    /// The files it carries (1221): a row each, its name, size and the
+    /// tap that saves and opens it.
+    pub files: Vec<FileNode>,
+    /// The voice message it carries (1222): its play or pause button,
+    /// length and level bar.
+    pub voice: Option<VoiceNode>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
@@ -380,6 +461,58 @@ pub struct MarkNode {
     pub words: Text,
     /// [`Intent::SendAgain`] on [`chat::Mark::Failed`], else none.
     pub activate: Option<Action>,
+}
+
+/// A bubble's photo: what it is, what a screen reader says, and the tap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhotoNode {
+    pub id: NodeId,
+    pub format: String,
+    pub bytes: usize,
+    /// `Photo, 312 KB`.
+    pub words: Text,
+    /// [`Intent::ViewPhoto`].
+    pub open: Action,
+}
+
+/// A bubble's file: its name, size, what a screen reader says, and the
+/// tap (1221).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileNode {
+    pub id: NodeId,
+    /// The name the sender wrote, as [`super::files::safe_name`] makes it
+    /// safe to show and save: a renderer never sees a path or a control
+    /// character of a stranger's.
+    pub name: String,
+    pub bytes: usize,
+    /// `312 KB`: the row's second line.
+    pub size: String,
+    /// `File report.pdf, 312 KB`.
+    pub words: Text,
+    /// [`Intent::OpenFile`].
+    pub open: Action,
+}
+
+/// A bubble's voice message (1222): what the player shows and the tap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceNode {
+    pub id: NodeId,
+    /// The sender's audio mode (`crate::ui::voice::AM_OPUS_OGG`, ...).
+    pub mode: u8,
+    pub bytes: usize,
+    pub duration_ms: u32,
+    /// `0:07`.
+    pub duration: String,
+    /// The level bar: [`super::voice::BARS`] heights from 0 to 100, empty
+    /// where the stream does not tell; a renderer draws an even bar then.
+    pub levels: Vec<u8>,
+    /// Whether it plays right now: the button shows pause.
+    pub playing: bool,
+    /// [`Intent::PlayVoice`], or [`Intent::PauseVoice`] while it plays;
+    /// none for a mode this build does not play.
+    pub toggle: Option<Action>,
+    /// `Voice message, 0:07`.
+    pub words: Text,
 }
 
 /// The screen reader's words for `mark`; `read_at` is the reader's time
@@ -428,6 +561,331 @@ pub struct Compose {
     /// The message a reply being written answers.
     pub reply: Option<[u8; 32]>,
     pub send: Action,
+    /// The microphone (1222): held, it records; released, the platform
+    /// fills [`Intent::SendVoice`] with what it recorded; slid away, it
+    /// cancels. Its words are the hint to hold it.
+    pub record: Action,
+    /// The round button outside the field (1270): the plus while there
+    /// is nothing to send, Send once there is ([`Round::of`]).
+    pub round: Round,
+    /// The bar's buttons in the order drawn (1270,
+    /// [`compose::buttons`]): those inside the field, then the round
+    /// one. What the shell cannot do is not among them.
+    pub buttons: Vec<ComposeButton>,
+    /// The photo the camera took, waiting for Send and its caption.
+    pub staged: Option<StagedNode>,
+    /// While a voice message records for this chat (1276): the bar the
+    /// renderer draws instead of the field and its buttons.
+    pub recording: Option<RecordingBar>,
+    pub a11y: A11y,
+}
+
+/// The recording bar (1276, `docs/src/concepts/loquax-voice-recording.md`):
+/// the compose bar while a voice message records, held, locked, paused
+/// or stopped at the cap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordingBar {
+    pub id: NodeId,
+    pub phase: Phase,
+    /// The red dot pulses: it records and is heard, or not yet doubted.
+    pub pulsing: bool,
+    pub timer: RecTimer,
+    pub wave: RecWave,
+    /// "Slide left to cancel" while held, "Release to cancel" once past
+    /// the distance.
+    pub cancel: Option<RecHint>,
+    /// The microphone, grown and red, while held: the finger is on it.
+    pub held: Option<RecHint>,
+    /// The lock chip above the button: open while held (a tap locks),
+    /// closed once locked.
+    pub lock: Option<LockChip>,
+    /// The bin, pause or resume, play, Send, in the order drawn.
+    pub buttons: Vec<RecButton>,
+    /// The line under the waveform: nothing heard (with the way to the
+    /// permission), or the cap.
+    pub notice: Option<RecNotice>,
+    pub a11y: A11y,
+}
+
+/// `REC 00:07`, amber in the last 30 s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecTimer {
+    pub id: NodeId,
+    pub ms: u32,
+    pub words: Text,
+    pub amber: bool,
+}
+
+/// The waveform: the newest windows while it records, scrolling right to
+/// left, the whole recording folded to the same width once it stands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecWave {
+    pub id: NodeId,
+    /// Levels 0 to 100, oldest first: at most
+    /// [`recording::LIVE_WINDOWS`].
+    pub levels: Vec<u8>,
+    /// It records: the newest bar is at the right edge and moves.
+    pub moving: bool,
+    pub a11y: A11y,
+}
+
+/// A part of the bar that says something and does nothing itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecHint {
+    pub id: NodeId,
+    pub words: Text,
+    /// How far the finger is toward it, 0 to 100.
+    pub progress: u8,
+    /// Past it: a release does it.
+    pub armed: bool,
+}
+
+/// The lock chip.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LockChip {
+    pub id: NodeId,
+    pub closed: bool,
+    /// How far the finger swiped up toward it, 0 to 100.
+    pub progress: u8,
+    /// [`Verb::Lock`] while open.
+    pub action: Option<Action>,
+    pub a11y: A11y,
+}
+
+/// A button of the bar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecButton {
+    pub id: NodeId,
+    pub verb: Verb,
+    pub action: Action,
+    pub a11y: A11y,
+}
+
+/// The line under the waveform.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecNotice {
+    pub id: NodeId,
+    pub words: Text,
+    /// The way to the microphone's permission when nothing is heard.
+    pub action: Option<Action>,
+}
+
+/// `peer`'s recording bar, while one records for that chat.
+pub fn recording_bar<B>(model: &UiModel<B>, peer: [u8; 16]) -> Option<RecordingBar> {
+    let rec = &model.recording;
+    if rec.peer != peer || !rec.phase.shown() {
+        return None;
+    }
+    let verb = |verb: Verb| Action::of(Intent::Recording { peer, verb });
+    let held = matches!(rec.phase, Phase::Held { .. });
+    let levels = match rec.phase.running() {
+        true => rec.track.live(recording::LIVE_WINDOWS).to_vec(),
+        false => rec.track.bars(recording::LIVE_WINDOWS, Fold::Peak),
+    };
+    let verbs: &[Verb] = match (rec.phase, rec.previewing) {
+        (Phase::Locked { .. }, _) => &[Verb::Discard, Verb::Pause, Verb::Send],
+        (Phase::Paused, false) => &[Verb::Discard, Verb::Play, Verb::Resume, Verb::Send],
+        (Phase::Paused, true) => &[Verb::Discard, Verb::StopPlay, Verb::Resume, Verb::Send],
+        (Phase::Preview, false) => &[Verb::Discard, Verb::Play, Verb::Send],
+        (Phase::Preview, true) => &[Verb::Discard, Verb::StopPlay, Verb::Send],
+        _ => &[],
+    };
+    let notice = match (rec.silent(), rec.said) {
+        (true, _) => Some(RecNotice {
+            id: NodeId::RecNotice,
+            words: Text::key(StrId::RecSilent),
+            action: Some(verb(Verb::AskMicrophone)),
+        }),
+        (false, Some(recording::Said::Cap)) => Some(RecNotice {
+            id: NodeId::RecNotice,
+            words: Text::key(StrId::RecCap),
+            action: None,
+        }),
+        _ => None,
+    };
+    let lock = match rec.phase {
+        Phase::Held { .. } => Some(LockChip {
+            id: NodeId::Rec(Verb::Lock),
+            closed: false,
+            progress: rec.lock_progress(),
+            action: Some(verb(Verb::Lock)),
+            a11y: A11y::of(
+                NodeId::Rec(Verb::Lock),
+                Role::Button,
+                Text::key(StrId::RecLock),
+            ),
+        }),
+        Phase::Locked { .. } => Some(LockChip {
+            id: NodeId::Rec(Verb::Lock),
+            closed: true,
+            progress: 100,
+            action: None,
+            a11y: A11y::of(
+                NodeId::Rec(Verb::Lock),
+                Role::Chip,
+                Text::key(StrId::RecLocked),
+            ),
+        }),
+        _ => None,
+    };
+    let timer = rec.timer_words();
+    Some(RecordingBar {
+        id: NodeId::RecBar,
+        phase: rec.phase,
+        pulsing: rec.pulsing(),
+        timer: RecTimer {
+            id: NodeId::RecTimer,
+            ms: rec.elapsed(),
+            words: timer.clone(),
+            amber: rec.amber(),
+        },
+        wave: RecWave {
+            id: NodeId::RecWave,
+            levels,
+            moving: rec.phase.running(),
+            a11y: A11y::of(NodeId::RecWave, Role::Bar, Text::key(StrId::RecWave)),
+        },
+        cancel: held.then(|| RecHint {
+            id: NodeId::RecCancel,
+            words: Text::key(match rec.armed() {
+                true => StrId::RecReleaseCancel,
+                false => StrId::VoiceCancel,
+            }),
+            progress: rec.cancel_progress(),
+            armed: rec.armed(),
+        }),
+        held: held.then(|| RecHint {
+            id: NodeId::Record,
+            words: Text::key(StrId::RecHeld),
+            progress: 0,
+            armed: false,
+        }),
+        lock,
+        buttons: verbs
+            .iter()
+            .map(|&v| RecButton {
+                id: NodeId::Rec(v),
+                verb: v,
+                action: verb(v),
+                a11y: A11y::of(NodeId::Rec(v), Role::Button, Text::key(v.label())),
+            })
+            .collect(),
+        notice,
+        a11y: A11y::of(NodeId::RecBar, Role::Bar, timer),
+    })
+}
+
+impl RecordingBar {
+    fn to_json(&self) -> Value {
+        let hint = |h: &RecHint| {
+            json!({
+                "id": h.id.resource(),
+                "words": h.words.to_json(),
+                "progress": h.progress,
+                "armed": h.armed,
+            })
+        };
+        json!({
+            "id": self.id.resource(),
+            "phase": self.phase.word(),
+            "pulsing": self.pulsing,
+            "timer": {
+                "id": self.timer.id.resource(),
+                "ms": self.timer.ms,
+                "words": self.timer.words.to_json(),
+                "amber": self.timer.amber,
+            },
+            "wave": {
+                "id": self.wave.id.resource(),
+                "levels": self.wave.levels,
+                "moving": self.wave.moving,
+                "a11y": self.wave.a11y.to_json(),
+            },
+            "cancel": opt(self.cancel.as_ref(), hint),
+            "held": opt(self.held.as_ref(), hint),
+            "lock": opt(self.lock.as_ref(), |l| json!({
+                "id": l.id.resource(),
+                "closed": l.closed,
+                "progress": l.progress,
+                "action": opt(l.action.as_ref(), Action::to_json),
+                "a11y": l.a11y.to_json(),
+            })),
+            "buttons": self.buttons.iter().map(|b| json!({
+                "id": b.id.resource(),
+                "action": b.action.to_json(),
+                "a11y": b.a11y.to_json(),
+            })).collect::<Vec<_>>(),
+            "notice": opt(self.notice.as_ref(), |n| json!({
+                "id": n.id.resource(),
+                "words": n.words.to_json(),
+                "action": opt(n.action.as_ref(), Action::to_json),
+            })),
+            "a11y": self.a11y.to_json(),
+        })
+    }
+
+    /// The action of the part `id` names.
+    pub fn action(&self, id: NodeId) -> Option<&Action> {
+        if let Some(lock) = self.lock.as_ref().filter(|l| l.id == id) {
+            return lock.action.as_ref();
+        }
+        if matches!(id, NodeId::RecNotice | NodeId::Rec(Verb::AskMicrophone)) {
+            return self.notice.as_ref().and_then(|n| n.action.as_ref());
+        }
+        self.buttons.iter().find(|b| b.id == id).map(|b| &b.action)
+    }
+}
+
+/// A button of the compose bar (1270).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComposeButton {
+    pub id: NodeId,
+    pub button: Button,
+    pub action: Action,
+    pub a11y: A11y,
+}
+
+/// The photo staged in the compose bar (1270): its size in words, its
+/// cross.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StagedNode {
+    pub id: NodeId,
+    pub format: String,
+    pub bytes: usize,
+    pub words: Text,
+    pub remove: Action,
+    pub a11y: A11y,
+}
+
+/// What the position sheet shows above its row (1270): the own fix for
+/// its map preview, and its age, or the words that there is none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Whereabouts {
+    /// Degrees times a million, north and east.
+    pub fix: Option<(i32, i32)>,
+    pub words: Text,
+}
+
+/// The chip at the top of a chat while our position share runs there
+/// (1273): "Sharing your position, 42 min left" or "… until you stop",
+/// and its Stop, one tap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareChip {
+    pub id: NodeId,
+    pub words: Text,
+    pub stop: Action,
+    pub a11y: A11y,
+}
+
+/// A running share as Settings, Privacy, "Position sharing" lists it
+/// (1273): with whom, for how long, and its Stop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareRow {
+    pub id: NodeId,
+    pub peer: [u8; 16],
+    pub name: String,
+    pub words: Text,
+    pub stop: Action,
     pub a11y: A11y,
 }
 
@@ -437,6 +895,8 @@ pub struct Chat {
     pub id: NodeId,
     pub peer: [u8; 16],
     pub bar: TopBar,
+    /// Our share's chip, while one runs here (1273).
+    pub share: Option<ShareChip>,
     pub groups: Vec<Group>,
     pub compose: Compose,
     pub a11y: A11y,
@@ -470,6 +930,8 @@ pub struct Scene {
     pub list: Option<List>,
     pub chat: Option<Chat>,
     pub sheet: Option<Sheet>,
+    /// The position sheet's fix and words (1270), while it is open.
+    pub whereabouts: Option<Whereabouts>,
     pub card: Option<Card>,
     pub chips: Vec<Chip>,
 }
@@ -483,6 +945,10 @@ impl<B> UiModel<B> {
             Some(chat) => ScreenId::Chat { peer: chat.peer },
             None => ScreenId::Chats,
         };
+        let (sheet, whereabouts) = match &chat {
+            Some(chat) => bar_sheet(self, chat.peer),
+            None => (None, None),
+        };
         Scene {
             class: LayoutClass::Wide,
             screen,
@@ -490,7 +956,8 @@ impl<B> UiModel<B> {
             tabs: Some(tabs(self)),
             list: Some(list(self)),
             chat,
-            sheet: None,
+            sheet,
+            whereabouts,
             card: None,
             chips: Vec::new(),
         }
@@ -550,6 +1017,45 @@ impl Scene {
             NodeId::Mark(key) => self
                 .bubble(NodeId::Bubble(key))
                 .and_then(|node| node.mark.as_ref()?.activate.as_ref()),
+            NodeId::Photo(key) => self
+                .bubble(NodeId::Bubble(key))
+                .and_then(|node| node.photo.as_ref())
+                .map(|photo| &photo.open),
+            NodeId::File(key, index) => self
+                .bubble(NodeId::Bubble(key))
+                .and_then(|node| node.files.get(index))
+                .map(|file| &file.open),
+            NodeId::Voice(key) => self
+                .bubble(NodeId::Bubble(key))
+                .and_then(|node| node.voice.as_ref())
+                .and_then(|voice| voice.toggle.as_ref()),
+            NodeId::Record => self.chat.as_ref().map(|chat| &chat.compose.record),
+            NodeId::Emoji | NodeId::Locate | NodeId::Camera | NodeId::Plus | NodeId::Send => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.compose.buttons.iter().find(|b| b.id == id))
+                .map(|b| &b.action),
+            NodeId::Staged => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.compose.staged.as_ref())
+                .map(|staged| &staged.remove),
+            NodeId::Rec(_) | NodeId::RecNotice => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.compose.recording.as_ref())
+                .and_then(|bar| bar.action(id)),
+            NodeId::ShareChip | NodeId::ShareStop => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.share.as_ref())
+                .map(|chip| &chip.stop),
+            NodeId::SheetRow(row) => self.sheet.as_ref().and_then(|sheet| {
+                sheet
+                    .actions
+                    .iter()
+                    .find(|a| sheet_row(&a.intent) == Some(row))
+            }),
             _ => None,
         }
     }
@@ -727,8 +1233,72 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         live,
         position,
         draft,
+        sharing: model.share(peer).is_some(),
         row,
     }
+}
+
+/// How long a share has left, in the catalogue's words, rounded up: `42
+/// min`, `8 h`; none for one that runs until stopped.
+pub fn share_left(share: &super::share::Share, now: i64) -> Option<Text> {
+    let left = share.left_s(now)?;
+    Some(match left {
+        ..3600 => Text::Key(
+            StrId::MinutesAgo,
+            Vec::from([Arg::Int(((left + 59) / 60).max(1))]),
+        ),
+        _ => Text::Key(StrId::HoursAgo, Vec::from([Arg::Int((left + 3599) / 3600)])),
+    })
+}
+
+/// What a running share says: "Sharing your position, 42 min left", or
+/// "… until you stop".
+pub fn share_words(share: &super::share::Share, now: i64) -> Text {
+    match share_left(share, now) {
+        Some(left) => Text::Key(StrId::SharingLeft, Vec::from([Arg::Text(Box::new(left))])),
+        None => Text::key(StrId::SharingUntilStop),
+    }
+}
+
+/// The chip of `peer`'s chat while our share runs there (1273).
+pub fn share_chip<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Option<ShareChip> {
+    let share = model.share(peer)?;
+    let now = model.now.map_or(share.started_at, |now| now.unix_secs);
+    let words = share_words(share, now);
+    Some(ShareChip {
+        id: NodeId::ShareChip,
+        a11y: A11y::of(NodeId::ShareChip, Role::Chip, words.clone()),
+        words,
+        stop: Action::of(Intent::StopShare { peer: *peer }),
+    })
+}
+
+/// Settings, Privacy, "Position sharing" (1273): every running share, by
+/// the peer's name, each with its Stop.
+pub fn share_rows<B>(model: &UiModel<B>) -> Vec<ShareRow> {
+    model
+        .shares
+        .running
+        .iter()
+        .map(|(peer, share)| {
+            let now = model.now.map_or(share.started_at, |now| now.unix_secs);
+            let name = model.names.label(peer);
+            let words = share_words(share, now);
+            let id = NodeId::ShareRow(*peer);
+            ShareRow {
+                id,
+                peer: *peer,
+                a11y: A11y::of(
+                    id,
+                    Role::Row,
+                    Text::Join(Vec::from([Text::Raw(name.clone()), words.clone()])),
+                ),
+                name,
+                words,
+                stop: Action::of(Intent::StopShare { peer: *peer }),
+            }
+        })
+        .collect()
 }
 
 /// The open chat of conversation `c`: its bar, its bubbles grouped, its
@@ -765,7 +1335,13 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
     let now = model.now;
     let mut groups: Vec<Group> = Vec::new();
     for (bubble, place) in bubbles.into_iter().zip(places) {
-        let node = bubble_node(peer, bubble, place, now);
+        let playing = model.playing
+            == Some(super::voice::Playing {
+                peer,
+                key: bubble.key,
+            });
+        let track = model.voice_track(peer, bubble.key);
+        let node = bubble_node(peer, bubble, place, now, playing, track);
         match groups.last_mut() {
             Some(group) if place.joins_before => group.bubbles.push(node),
             _ => {
@@ -797,6 +1373,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         id: NodeId::Chat,
         peer,
         bar,
+        share: share_chip(model, &peer),
         groups,
         compose: compose(model, c),
         a11y: A11y::of(NodeId::Chat, Role::Chat, Text::Raw(name)),
@@ -808,6 +1385,8 @@ pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
     let conversation = model.conversations.get(c);
     let peer = conversation.map_or([0; 16], |c| c.peer);
     let draft = conversation.map(|c| &c.draft);
+    let round = model.round(peer);
+    let staged = model.bar.staged.contains_key(&peer);
     Compose {
         id: NodeId::Compose,
         hint: Text::key(StrId::ComposeHint),
@@ -817,12 +1396,149 @@ pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
             to: Target::Peer(peer),
             body: None,
         }),
+        record: Action::of(Intent::SendVoice {
+            peer,
+            pcm: Vec::new(),
+            rate: 0,
+        }),
+        round,
+        buttons: compose::buttons(model.bar.abilities, round)
+            .into_iter()
+            .map(|button| compose_button(peer, button))
+            .collect(),
+        staged: model.bar.staged.get(&peer).map(|staged| {
+            let words = Text::Key(
+                StrId::Staged,
+                Vec::from([Arg::Str(super::photos::size_words(staged.data.len()))]),
+            );
+            StagedNode {
+                id: NodeId::Staged,
+                format: staged.format.clone(),
+                bytes: staged.data.len(),
+                a11y: A11y::of(NodeId::Staged, Role::Button, words.clone()),
+                words,
+                remove: Action::of(Intent::Unstage { peer }),
+            }
+        }),
+        recording: recording_bar(model, peer),
         a11y: A11y::of(
             NodeId::Compose,
             Role::TextField,
-            Text::key(StrId::ComposeHint),
+            Text::key(match staged {
+                true => StrId::CaptionHint,
+                false => StrId::ComposeHint,
+            }),
         ),
     }
+}
+
+/// One button of `peer`'s compose bar, its action and its words.
+fn compose_button(peer: [u8; 16], button: Button) -> ComposeButton {
+    let (id, intent) = match button {
+        Button::Emoji => (NodeId::Emoji, Intent::Emoji),
+        Button::Locate => (NodeId::Locate, Intent::Locate { peer }),
+        Button::Camera => (NodeId::Camera, Intent::Camera { peer }),
+        Button::Microphone => (
+            NodeId::Record,
+            Intent::SendVoice {
+                peer,
+                pcm: Vec::new(),
+                rate: 0,
+            },
+        ),
+        Button::Plus => (NodeId::Plus, Intent::Attach { peer }),
+        Button::Send => (
+            NodeId::Send,
+            Intent::Send {
+                to: Target::Peer(peer),
+                body: None,
+            },
+        ),
+    };
+    let action = Action::of(intent);
+    ComposeButton {
+        id,
+        button,
+        a11y: A11y::of(id, Role::Button, Text::key(action.label_key)),
+        action,
+    }
+}
+
+/// The row of a sheet `intent` is, if it is one.
+pub fn sheet_row(intent: &Intent) -> Option<SheetRow> {
+    match intent {
+        Intent::SendPhoto { .. } => Some(SheetRow::Gallery),
+        Intent::SendFile { .. } => Some(SheetRow::File),
+        Intent::Locate { .. } => Some(SheetRow::Position),
+        Intent::ShareFix { .. } => Some(SheetRow::ShareNow),
+        Intent::StartShare { span, .. } => Some(SheetRow::ShareFor(*span)),
+        Intent::LocationOn => Some(SheetRow::LocationOn),
+        _ => None,
+    }
+}
+
+/// The sheet the compose bar of `peer`'s chat opened (1270): the plus's
+/// rows, or the position sheet's one row and what it shows above it.
+pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Option<Whereabouts>) {
+    let Some(open) = model.bar.sheet.filter(|s| s.peer() == peer) else {
+        return (None, None);
+    };
+    let (title, rows, whereabouts) = match open {
+        compose::Sheet::Attach { .. } => (
+            StrId::Attach,
+            compose::attach_rows(model.bar.abilities),
+            None,
+        ),
+        compose::Sheet::Position { .. } => {
+            let fix = model.bar.own_fix.as_ref();
+            let words = match (fix, model.now) {
+                (None, _) => Text::key(StrId::NoFix),
+                (Some(fix), Some(now)) if now.unix_secs - fix.last_update >= 60 => Text::Key(
+                    StrId::FixAge,
+                    Vec::from([Arg::Text(Box::new(ago(now.unix_secs - fix.last_update)))]),
+                ),
+                (Some(_), _) => Text::key(StrId::FixNow),
+            };
+            let whereabouts = Whereabouts {
+                fix: fix.map(|f| (f.latitude_e6, f.longitude_e6)),
+                words,
+            };
+            (
+                StrId::Locate,
+                compose::position_rows(fix),
+                Some(whereabouts),
+            )
+        }
+    };
+    let actions = rows
+        .into_iter()
+        .map(|row| {
+            Action::of(match row {
+                SheetRow::Gallery => Intent::SendPhoto {
+                    peer,
+                    data: Vec::new(),
+                },
+                SheetRow::File => Intent::SendFile {
+                    peer,
+                    name: String::new(),
+                    data: Vec::new(),
+                    size: 0,
+                },
+                SheetRow::Position => Intent::Locate { peer },
+                SheetRow::ShareNow => Intent::ShareFix { peer },
+                SheetRow::ShareFor(span) => Intent::StartShare { peer, span },
+                SheetRow::LocationOn => Intent::LocationOn,
+            })
+        })
+        .collect();
+    let sheet = Sheet {
+        id: NodeId::Sheet,
+        title: Text::key(title),
+        rows: Vec::new(),
+        actions,
+        a11y: A11y::of(NodeId::Sheet, Role::Sheet, Text::key(title)),
+    };
+    (Some(sheet), whereabouts)
 }
 
 fn bubble_node(
@@ -830,6 +1546,8 @@ fn bubble_node(
     bubble: Bubble,
     place: Placement,
     now: Option<WallTime>,
+    playing: bool,
+    track: Option<&LevelTrack>,
 ) -> BubbleNode {
     let id = NodeId::Bubble(bubble.key);
     let now_secs = now.map(|now| now.unix_secs);
@@ -856,8 +1574,67 @@ fn bubble_node(
         },
         confirmed: false,
     }));
-    let spoken = match (&live, bubble.body.is_empty()) {
-        (Some(live), true) => live.clone(),
+    let photo = bubble.photo.as_ref().map(|photo| PhotoNode {
+        id: NodeId::Photo(bubble.key),
+        format: photo.format.clone(),
+        bytes: photo.bytes,
+        words: Text::Key(
+            StrId::Photo,
+            Vec::from([Arg::Str(super::photos::size_words(photo.bytes))]),
+        ),
+        open: Action::of(Intent::ViewPhoto {
+            peer,
+            key: bubble.key,
+        }),
+    });
+    let files: Vec<FileNode> = bubble
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| FileNode {
+            id: NodeId::File(bubble.key, index),
+            name: super::files::safe_name(&file.name),
+            bytes: file.bytes,
+            size: super::photos::size_words(file.bytes),
+            words: super::files::file_words(file),
+            open: Action::of(Intent::OpenFile {
+                peer,
+                key: bubble.key,
+                index,
+            }),
+        })
+        .collect();
+    let voice = bubble.voice.as_ref().map(|voice| VoiceNode {
+        id: NodeId::Voice(bubble.key),
+        mode: voice.mode,
+        bytes: voice.bytes,
+        duration_ms: voice.duration_ms,
+        duration: super::voice::duration_words(voice.duration_ms),
+        // The recording's own track or the decoded sound's where the
+        // model has one, the stream's packet sizes otherwise; the same
+        // resampler either way (1276).
+        levels: track.map_or_else(|| voice.levels.clone(), |t| t.bars(BARS, Fold::Peak)),
+        playing,
+        toggle: voice.playable().then(|| {
+            let key = bubble.key;
+            Action::of(match playing {
+                true => Intent::PauseVoice { peer, key },
+                false => Intent::PlayVoice { peer, key },
+            })
+        }),
+        words: super::voice::voice_words(voice),
+    });
+    let spoken = match (
+        &live,
+        &photo,
+        files.first(),
+        &voice,
+        bubble.body.trim().is_empty(),
+    ) {
+        (Some(live), _, _, _, true) => live.clone(),
+        (_, Some(photo), _, _, true) => photo.words.clone(),
+        (_, _, Some(file), _, true) => file.words.clone(),
+        (_, _, _, Some(voice), true) => voice.words.clone(),
         _ => Text::Raw(bubble.body.clone()),
     };
     let mark = bubble.mark.map(|mark| MarkNode {
@@ -870,13 +1647,18 @@ fn bubble_node(
             })
         }),
     });
+    let text = (!bubble.body.trim().is_empty()).then(|| bubble.body.clone());
     BubbleNode {
         id,
         a11y: A11y::of(id, Role::Bubble, spoken),
+        text,
         bubble,
         place,
         live,
         mark,
+        photo,
+        files,
+        voice,
         actions,
     }
 }
@@ -1060,6 +1842,7 @@ impl Row {
             "live": opt(self.live.as_ref(), Text::to_json),
             "position": opt(self.position.as_ref(), PositionBadge::to_json),
             "draft": opt(self.draft.as_ref(), Text::to_json),
+            "sharing": self.sharing,
             "selected": self.item.selected,
             "activate": self.item.activate.to_json(),
             "menu": actions(&self.item.menu),
@@ -1076,6 +1859,7 @@ impl BubbleNode {
             "msg_id": opt(b.id, |id| hex(&id)),
             "ours": b.ours,
             "body": b.body,
+            "text": self.text,
             "mark": opt(b.mark, |m| json!(m.word())),
             "at": wall(b.at),
             "chips": b.chips.iter().map(|c| json!({
@@ -1099,6 +1883,32 @@ impl BubbleNode {
                 "words": m.words.to_json(),
                 "activate": opt(m.activate.as_ref(), Action::to_json),
             })),
+            "photo": opt(self.photo.as_ref(), |p| json!({
+                "id": p.id.resource(),
+                "format": p.format,
+                "bytes": p.bytes,
+                "words": p.words.to_json(),
+                "open": p.open.to_json(),
+            })),
+            "files": self.files.iter().map(|f| json!({
+                "id": f.id.resource(),
+                "name": f.name,
+                "bytes": f.bytes,
+                "size": f.size,
+                "words": f.words.to_json(),
+                "open": f.open.to_json(),
+            })).collect::<Vec<_>>(),
+            "voice": opt(self.voice.as_ref(), |v| json!({
+                "id": v.id.resource(),
+                "mode": v.mode,
+                "bytes": v.bytes,
+                "duration_ms": v.duration_ms,
+                "duration": v.duration,
+                "levels": v.levels,
+                "playing": v.playing,
+                "toggle": opt(v.toggle.as_ref(), Action::to_json),
+                "words": v.words.to_json(),
+            })),
             "actions": actions(&self.actions),
             "a11y": self.a11y.to_json(),
         })
@@ -1111,6 +1921,12 @@ impl Chat {
             "id": self.id.resource(),
             "peer": hex(&self.peer),
             "bar": self.bar.to_json(),
+            "share": opt(self.share.as_ref(), |chip| json!({
+                "id": chip.id.resource(),
+                "words": chip.words.to_json(),
+                "stop": chip.stop.to_json(),
+                "a11y": chip.a11y.to_json(),
+            })),
             "groups": self.groups.iter().map(|g| json!({
                 "id": g.id.resource(),
                 "ours": g.ours,
@@ -1125,6 +1941,22 @@ impl Chat {
                 "text": self.compose.text,
                 "reply": opt(self.compose.reply, |id| hex(&id)),
                 "send": self.compose.send.to_json(),
+                "record": self.compose.record.to_json(),
+                "round": self.compose.round.word(),
+                "buttons": self.compose.buttons.iter().map(|b| json!({
+                    "id": b.id.resource(),
+                    "inside": b.button.inside(),
+                    "action": b.action.to_json(),
+                    "a11y": b.a11y.to_json(),
+                })).collect::<Vec<_>>(),
+                "staged": opt(self.compose.staged.as_ref(), |st| json!({
+                    "id": st.id.resource(),
+                    "format": st.format,
+                    "bytes": st.bytes,
+                    "words": st.words.to_json(),
+                    "remove": st.remove.to_json(),
+                })),
+                "recording": opt(self.compose.recording.as_ref(), RecordingBar::to_json),
                 "a11y": self.compose.a11y.to_json(),
             },
             "a11y": self.a11y.to_json(),
@@ -1158,7 +1990,22 @@ impl Scene {
         map.insert("chat".into(), opt(self.chat.as_ref(), Chat::to_json));
         map.insert(
             "sheet".into(),
-            opt(self.sheet.as_ref(), |s| json!(s.id.resource())),
+            opt(self.sheet.as_ref(), |s| {
+                json!({
+                    "id": s.id.resource(),
+                    "title": s.title.to_json(),
+                    "rows": s.actions.iter().map(|a| json!({
+                        "id": sheet_row(&a.intent).map(|r| NodeId::SheetRow(r).resource()),
+                        "action": a.to_json(),
+                    })).collect::<Vec<_>>(),
+                })
+            }),
+        );
+        map.insert(
+            "whereabouts".into(),
+            opt(self.whereabouts.as_ref(), |w| {
+                json!({ "fix": w.fix.map(|(lat, lon)| [lat, lon]), "words": w.words.to_json() })
+            }),
         );
         map.insert(
             "card".into(),
@@ -1252,6 +2099,209 @@ mod tests {
         assert!(wide.action(NodeId::Pin(peer)).is_none());
     }
 
+    /// 1270: the compose node carries the button set as data, the plus
+    /// turns into Send on typing and with a staged photo, the plus and
+    /// the position button open their sheets as `Sheet` nodes with their
+    /// rows, the position sheet shows the own fix and its age or says
+    /// there is none, and every node's words are the catalogue's.
+    #[test]
+    fn the_compose_bar_has_its_buttons_and_its_sheets() {
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        model.bar.abilities = compose::Abilities::phone(true);
+        let ids = |model: &UiModel<Line>| -> Vec<String> {
+            let scene = model.scene(LayoutClass::Compact);
+            let compose = &scene.chat.as_ref().expect("a chat").compose;
+            compose.buttons.iter().map(|b| b.id.resource()).collect()
+        };
+        assert_eq!(ids(&model), ["emoji", "locate", "camera", "record", "plus"]);
+        let scene = model.scene(LayoutClass::Compact);
+        assert_eq!(
+            scene.action(NodeId::Plus).map(|a| a.intent.clone()),
+            Some(Intent::Attach { peer })
+        );
+        assert_eq!(
+            scene.action(NodeId::Camera).map(|a| &a.intent),
+            Some(&Intent::Camera { peer })
+        );
+        let compose = &scene.chat.as_ref().expect("a chat").compose;
+        let words: Vec<_> = compose
+            .buttons
+            .iter()
+            .map(|b| b.a11y.label.resolve(Lang::De))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "Emoji",
+                "Meine Position",
+                "Foto aufnehmen",
+                "Halten für eine Sprachnachricht",
+                "Anhängen"
+            ]
+        );
+        assert!(scene.sheet.is_none());
+
+        // Typing: Send, and the microphone hides.
+        crate::ui::update(
+            &mut model,
+            UiEvent::Draft {
+                peer,
+                text: "hi".into(),
+                reply: None,
+            },
+        );
+        assert_eq!(ids(&model), ["emoji", "locate", "camera", "send"]);
+        let scene = model.scene(LayoutClass::Compact);
+        assert_eq!(
+            scene.action(NodeId::Send).map(|a| a.intent.clone()),
+            Some(Intent::Send {
+                to: Target::Peer(peer),
+                body: None
+            })
+        );
+        assert!(
+            scene.action(NodeId::Record).is_some(),
+            "held, it still is the record"
+        );
+
+        // A staged photo with an empty field: Send, its node, the caption hint.
+        crate::ui::update(
+            &mut model,
+            UiEvent::Draft {
+                peer,
+                text: String::new(),
+                reply: None,
+            },
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::StagePhoto {
+                peer,
+                format: "jpg".into(),
+                data: Vec::from([7; 1_500]),
+            },
+        );
+        assert_eq!(ids(&model), ["emoji", "locate", "camera", "send"]);
+        let scene = model.scene(LayoutClass::Compact);
+        let compose = &scene.chat.as_ref().expect("a chat").compose;
+        let staged = compose.staged.as_ref().expect("staged");
+        assert_eq!(staged.words.resolve(Lang::En), "Photo to send, 2 KB");
+        assert_eq!(staged.remove.intent, Intent::Unstage { peer });
+        assert_eq!(compose.a11y.label.resolve(Lang::En), "Add a caption");
+        crate::ui::update(&mut model, UiEvent::Unstage { peer });
+
+        // The plus's sheet: Gallery, File, Position.
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Attach { peer }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let sheet = scene.sheet.as_ref().expect("the attachment sheet");
+        assert_eq!(sheet.title.resolve(Lang::En), "Attach");
+        let rows: Vec<_> = sheet
+            .actions
+            .iter()
+            .map(|a| {
+                (
+                    sheet_row(&a.intent).map(|r| NodeId::SheetRow(r).resource()),
+                    Text::key(a.label_key).resolve(Lang::En),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("sheet_gallery".to_string()), "Gallery".to_string()),
+                (Some("sheet_file".to_string()), "File".to_string()),
+                (
+                    Some("sheet_position".to_string()),
+                    "My position".to_string()
+                ),
+            ]
+        );
+        assert!(scene.whereabouts.is_none());
+        assert_eq!(
+            scene
+                .action(NodeId::SheetRow(SheetRow::Position))
+                .map(|a| a.intent.clone()),
+            Some(Intent::Locate { peer })
+        );
+
+        // The position sheet: no fix, then one five minutes old.
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Position { peer }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let there = scene.whereabouts.as_ref().expect("whereabouts");
+        assert_eq!(there.fix, None);
+        assert_eq!(
+            there.words.resolve(Lang::En),
+            "Loquax does not know where you are yet."
+        );
+        assert!(scene
+            .action(NodeId::SheetRow(SheetRow::LocationOn))
+            .is_some());
+        let now = 1_793_351_000;
+        crate::ui::update(
+            &mut model,
+            UiEvent::Clock(WallTime {
+                unix_secs: now,
+                offset_secs: 0,
+            }),
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::OwnFix(Some(leviculum_lxmf::telemetry::Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: now - 300,
+            })),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let there = scene.whereabouts.as_ref().expect("whereabouts");
+        assert_eq!(there.fix, Some((43_773_100, 11_256_000)));
+        assert_eq!(there.words.resolve(Lang::En), "Found 5 min ago");
+        assert_eq!(there.words.resolve(Lang::De), "Ermittelt vor 5 Min.");
+        let sheet = scene.sheet.as_ref().expect("the position sheet");
+        assert_eq!(sheet.title.resolve(Lang::En), "My position");
+        assert_eq!(
+            scene
+                .action(NodeId::SheetRow(SheetRow::ShareNow))
+                .map(|a| a.intent.clone()),
+            Some(Intent::ShareFix { peer })
+        );
+        let json = scene.to_json();
+        assert_eq!(json["sheet"]["rows"][0]["id"], "sheet_share_now");
+        assert_eq!(json["chat"]["compose"]["round"], "plus");
+
+        // Another chat's sheet is not this one's.
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Attach { peer: [0x43; 16] }),
+        );
+        assert!(model.scene(LayoutClass::Compact).sheet.is_none());
+    }
+
+    /// A shell that can do nothing of it (the window today) shows the
+    /// emoji and Send alone, and no plus with nothing in it.
+    #[test]
+    fn a_window_without_camera_or_picker_shows_emoji_and_send() {
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Wide);
+        let compose = &scene.chat.as_ref().expect("a chat").compose;
+        let ids: Vec<_> = compose.buttons.iter().map(|b| b.id.resource()).collect();
+        assert_eq!(ids, ["emoji", "send"]);
+        assert_eq!(compose.round, Round::Send);
+    }
+
     #[test]
     fn the_liveness_words_are_the_cores_in_either_language() {
         let live = Liveness {
@@ -1309,6 +2359,173 @@ mod tests {
             day_words(&at(t - 365 * 86_400), Some(&now)).resolve(Lang::En),
             crate::when::date_label(&at(t - 365 * 86_400), &now)
         );
+    }
+
+    /// The position sheet's five rows (1273), a share's chip with its
+    /// Stop at the top of the chat, the ⌖ on the list's row, and
+    /// Settings, Privacy's list; the stop takes all of them away.
+    #[test]
+    fn a_share_shows_its_chip_its_sign_and_its_privacy_row_until_stopped() {
+        use super::super::share::Span;
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        model.bar.abilities = compose::Abilities::phone(true);
+        let now = 1_793_351_000;
+        crate::ui::update(
+            &mut model,
+            UiEvent::Clock(WallTime {
+                unix_secs: now,
+                offset_secs: 0,
+            }),
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::OwnFix(Some(leviculum_lxmf::telemetry::Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: now,
+            })),
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Position { peer }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let sheet = scene.sheet.as_ref().expect("the position sheet");
+        let rows: Vec<_> = sheet
+            .actions
+            .iter()
+            .map(|a| {
+                (
+                    sheet_row(&a.intent).map(|r| NodeId::SheetRow(r).resource()),
+                    Text::key(a.label_key).resolve(Lang::En),
+                    Text::key(a.label_key).resolve(Lang::De),
+                )
+            })
+            .collect();
+        let row = |id: &str, en: &str, de: &str| (Some(id.to_string()), en.into(), de.into());
+        assert_eq!(
+            rows,
+            [
+                row("sheet_share_now", "Now, once", "Jetzt, einmal"),
+                row("sheet_share_15_min", "For 15 minutes", "Für 15 Minuten"),
+                row("sheet_share_1_h", "For 1 hour", "Für 1 Stunde"),
+                row("sheet_share_8_h", "For 8 hours", "Für 8 Stunden"),
+                row(
+                    "sheet_share_until_stopped",
+                    "Until I stop",
+                    "Bis ich es beende"
+                ),
+            ]
+        );
+        assert!(scene.chat.as_ref().expect("chat").share.is_none());
+        let start = scene
+            .action(NodeId::SheetRow(SheetRow::ShareFor(Span::Hour1)))
+            .map(|a| a.intent.clone());
+        assert_eq!(
+            start,
+            Some(Intent::StartShare {
+                peer,
+                span: Span::Hour1
+            })
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::StartShare {
+                peer,
+                span: Span::Hour1,
+            },
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::Clock(WallTime {
+                unix_secs: now + 18 * 60,
+                offset_secs: 0,
+            }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene.sheet.is_none(), "the row closed the sheet");
+        let chip = scene
+            .chat
+            .as_ref()
+            .and_then(|c| c.share.as_ref())
+            .expect("the chip");
+        assert_eq!(
+            chip.words.resolve(Lang::En),
+            "Sharing your position, 42 min left"
+        );
+        assert_eq!(
+            chip.words.resolve(Lang::De),
+            "Deine Position wird geteilt, noch 42 Min."
+        );
+        assert_eq!(Text::key(chip.stop.label_key).resolve(Lang::En), "Stop");
+        assert_eq!(
+            scene.action(NodeId::ShareStop).map(|a| a.intent.clone()),
+            Some(Intent::StopShare { peer })
+        );
+        let wide = model.scene(LayoutClass::Wide);
+        let listed = wide.list.as_ref().expect("list");
+        assert!(listed
+            .rows
+            .iter()
+            .all(|r| r.sharing == (r.row.peer == peer)));
+        assert_eq!(wide.to_json()["list"]["rows"][0]["sharing"], true);
+        assert_eq!(wide.to_json()["chat"]["share"]["id"], "share_chip");
+        let privacy = share_rows(&model);
+        assert_eq!(privacy.len(), 1);
+        assert_eq!(privacy[0].id.resource(), format!("share_{}", to_hex(&peer)));
+        assert_eq!(privacy[0].stop.intent, Intent::StopShare { peer });
+
+        // Until stopped, and then stopped.
+        crate::ui::update(
+            &mut model,
+            UiEvent::StartShare {
+                peer,
+                span: Span::UntilStopped,
+            },
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let chip = scene
+            .chat
+            .as_ref()
+            .and_then(|c| c.share.as_ref())
+            .expect("chip");
+        assert_eq!(
+            chip.words.resolve(Lang::En),
+            "Sharing your position until you stop"
+        );
+        crate::ui::update(&mut model, UiEvent::StopShare { peer });
+        let scene = model.scene(LayoutClass::Wide);
+        assert!(scene.chat.as_ref().expect("chat").share.is_none());
+        assert!(scene
+            .list
+            .as_ref()
+            .expect("list")
+            .rows
+            .iter()
+            .all(|r| !r.sharing));
+        assert!(share_rows(&model).is_empty());
+    }
+
+    /// The time left, rounded up: under a minute is one, an hour and a
+    /// bit are two hours.
+    #[test]
+    fn the_time_left_rounds_up() {
+        use super::super::share::{Share, Span};
+        let share = Share::start(Span::Hours8, 0);
+        let left = |at| share_left(&share, at).map(|t| t.resolve(Lang::En));
+        assert_eq!(left(0).as_deref(), Some("8 h"));
+        assert_eq!(left(8 * 3600 - 3601).as_deref(), Some("2 h"));
+        assert_eq!(left(8 * 3600 - 3600).as_deref(), Some("1 h"));
+        assert_eq!(left(8 * 3600 - 3599).as_deref(), Some("60 min"));
+        assert_eq!(left(8 * 3600 - 10).as_deref(), Some("1 min"));
+        assert_eq!(left(9 * 3600).as_deref(), Some("1 min"));
+        assert_eq!(share_left(&Share::start(Span::UntilStopped, 0), 5), None);
     }
 
     fn model_with(bodies: &[(bool, i64)]) -> UiModel<Line> {
@@ -1578,5 +2795,627 @@ mod tests {
         assert_eq!(found(""), 1);
         assert_eq!(found(&format!("m0 {}", name.to_uppercase())), 1);
         assert_eq!(found(&format!("{name} nowhere")), 0);
+    }
+
+    /// A photo without words is one bubble (1268): the photo node, the
+    /// mark, and no text run, so no renderer draws an empty row under the
+    /// picture; with words the run is the body, and a body of blanks is
+    /// none. A file or a voice message alone is the same.
+    #[test]
+    fn a_photo_without_words_is_one_bubble_with_media_a_mark_and_no_text() {
+        use crate::ui::files::file_fields;
+        use crate::ui::photos::photo_fields;
+        use crate::ui::voice::{voice_fields, AM_OPUS_OGG};
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(true, t), (true, t + 60), (true, t + 120), (true, t + 180)]);
+        let messages = &mut model.conversations[0].messages;
+        messages[0].body = String::new();
+        messages[0].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        messages[1].body = " \n".into();
+        messages[1].fields = file_fields("report.pdf", alloc::vec![7; 1_400]);
+        messages[2].body = String::new();
+        messages[2].fields = voice_fields(AM_OPUS_OGG, alloc::vec![7; 900]);
+        messages[3].body = "the view".into();
+        messages[3].fields = photo_fields("jpg", alloc::vec![7; 1_000]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        let groups = &scene.chat.as_ref().expect("the chat").groups;
+        let bubbles: Vec<&BubbleNode> = groups.iter().flat_map(|g| &g.bubbles).collect();
+        assert_eq!(bubbles.len(), 4, "one bubble a message: {bubbles:#?}");
+
+        let photo = scene.bubble(NodeId::Bubble(1)).expect("the photo's bubble");
+        assert!(photo.photo.is_some(), "the photo is in the bubble");
+        assert_eq!(photo.text, None, "no text run");
+        assert!(photo.mark.is_some(), "the mark is in the bubble");
+        assert_eq!(photo.to_json()["text"], Value::Null);
+        let file = scene.bubble(NodeId::Bubble(2)).expect("the file's bubble");
+        assert_eq!((file.files.len(), file.text.as_deref()), (1, None));
+        assert_eq!(file.a11y.label, file.files[0].words, "said as the file");
+        let voice = scene.bubble(NodeId::Bubble(3)).expect("the voice's bubble");
+        assert!(voice.voice.is_some() && voice.text.is_none() && voice.mark.is_some());
+        let worded = scene.bubble(NodeId::Bubble(4)).expect("photo and words");
+        assert!(worded.photo.is_some());
+        assert_eq!(worded.text.as_deref(), Some("the view"));
+        assert_eq!(worded.to_json()["text"], "the view");
+        // The last of the group closes it with its time and its mark.
+        assert!(worded.place.meta && worded.mark.is_some());
+    }
+
+    /// A photo is a node of its bubble (1220): its words, a resource the
+    /// walk finds, a tap that asks the shell to show it whole; a text
+    /// without one has none, and the tap on it does nothing.
+    #[test]
+    fn a_photo_has_its_node_its_words_and_a_tap_that_shows_it() {
+        use crate::ui::photos::{photo_fields, PhotoSize};
+        use crate::ui::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t), (false, t + 60)]);
+        let peer = [0x42; 16];
+        model.conversations[0].messages[1].body = String::new();
+        model.conversations[0].messages[1].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene
+            .bubble(NodeId::Bubble(1))
+            .expect("text")
+            .photo
+            .is_none());
+        let node = scene.bubble(NodeId::Bubble(2)).expect("the photo's bubble");
+        let photo = node.photo.as_ref().expect("a photo node");
+        assert_eq!(photo.id.resource(), "photo_2");
+        assert_eq!((photo.format.as_str(), photo.bytes), ("jpg", 312_400));
+        assert_eq!(photo.words.resolve(Lang::En), "Photo, 313 KB");
+        assert_eq!(photo.words.resolve(Lang::De), "Foto, 313 KB");
+        assert_eq!(node.a11y.label, photo.words, "the screen reader says it");
+        let json = node.to_json();
+        assert_eq!(json["photo"]["id"], "photo_2");
+        assert_eq!(json["photo"]["bytes"], 312_400);
+        assert_eq!(
+            scene.action(NodeId::Photo(2)).map(|a| a.intent.clone()),
+            Some(Intent::ViewPhoto { peer, key: 2 })
+        );
+        assert_eq!(scene.action(NodeId::Photo(1)), None);
+        let shown = super::super::update(&mut model, UiEvent::ViewPhoto { peer, key: 2 });
+        assert_eq!(shown, alloc::vec![UiEffect::ShowPhoto { peer, key: 2 }]);
+        assert!(super::super::update(&mut model, UiEvent::ViewPhoto { peer, key: 1 }).is_empty());
+        assert_eq!(chat::preview(&model.conversations[0].messages[1]), "photo");
+        assert_eq!(chat::kind(&model.conversations[0].messages[1]), "photo");
+
+        // Sending one: a message of its own, the image field alone, the
+        // view on it.
+        let sent = super::super::update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer,
+                format: "jpg".into(),
+                data: alloc::vec![0xff, 0xd8, 0xff],
+            },
+        );
+        let fields = photo_fields("jpg", alloc::vec![0xff, 0xd8, 0xff]);
+        // The read-receipt mark rides on every send (1230), after it.
+        assert!(
+            matches!(sent.as_slice(), [UiEffect::Send { to, body, fields: f }] if *to == peer && body.is_empty() && f.starts_with(&fields)),
+            "{sent:?}"
+        );
+        let last = model.conversations[0].messages.len() - 1;
+        assert_eq!(model.message_cursor, last);
+        assert!(model.conversations[0].messages[last].outbound);
+        assert!(super::super::update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer,
+                format: "jpg".into(),
+                data: Vec::new()
+            }
+        )
+        .is_empty());
+
+        // The setting: kept in the model, remembered in the config.
+        assert_eq!(model.photo_size, PhotoSize::Phone);
+        let remembered = super::super::update(&mut model, UiEvent::PhotoSize(PhotoSize::Small));
+        assert_eq!(model.photo_size, PhotoSize::Small);
+        assert_eq!(
+            remembered,
+            alloc::vec![UiEffect::Remember {
+                key: "photo_size",
+                value: "small"
+            }]
+        );
+    }
+
+    /// A file is a row of its bubble (1221): its name, size and words, a
+    /// resource the walk finds, a tap that asks the shell to save and open
+    /// it; a file too large for a receiver is refused before it is a
+    /// message.
+    #[test]
+    fn a_file_has_its_row_its_words_and_a_tap_that_opens_it() {
+        use crate::ui::files::{file_fields, LARGEST};
+        use crate::ui::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t), (false, t + 60)]);
+        let peer = [0x42; 16];
+        model.conversations[0].messages[1].body = String::new();
+        model.conversations[0].messages[1].fields =
+            file_fields("report.pdf", alloc::vec![7; 312_400]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene
+            .bubble(NodeId::Bubble(1))
+            .expect("text")
+            .files
+            .is_empty());
+        let node = scene.bubble(NodeId::Bubble(2)).expect("the file's bubble");
+        let file = node.files.first().expect("a file row");
+        assert_eq!(file.id.resource(), "file_2_0");
+        assert_eq!(
+            (file.name.as_str(), file.bytes, file.size.as_str()),
+            ("report.pdf", 312_400, "313 KB")
+        );
+        assert_eq!(file.words.resolve(Lang::En), "File report.pdf, 313 KB");
+        assert_eq!(file.words.resolve(Lang::De), "Datei report.pdf, 313 KB");
+        assert_eq!(node.a11y.label, file.words, "the screen reader says it");
+        let json = node.to_json();
+        assert_eq!(json["files"][0]["id"], "file_2_0");
+        assert_eq!(json["files"][0]["name"], "report.pdf");
+        assert_eq!(json["files"][0]["bytes"], 312_400);
+        assert_eq!(
+            scene.action(NodeId::File(2, 0)).map(|a| a.intent.clone()),
+            Some(Intent::OpenFile {
+                peer,
+                key: 2,
+                index: 0
+            })
+        );
+        assert_eq!(scene.action(NodeId::File(2, 1)), None);
+        assert_eq!(scene.action(NodeId::File(1, 0)), None);
+        let opened = super::super::update(
+            &mut model,
+            UiEvent::OpenFile {
+                peer,
+                key: 2,
+                index: 0,
+            },
+        );
+        assert_eq!(
+            opened,
+            alloc::vec![UiEffect::OpenFile {
+                peer,
+                key: 2,
+                index: 0
+            }]
+        );
+        assert!(super::super::update(
+            &mut model,
+            UiEvent::OpenFile {
+                peer,
+                key: 2,
+                index: 1
+            }
+        )
+        .is_empty());
+        assert!(super::super::update(
+            &mut model,
+            UiEvent::OpenFile {
+                peer,
+                key: 1,
+                index: 0
+            }
+        )
+        .is_empty());
+        assert_eq!(
+            chat::preview(&model.conversations[0].messages[1]),
+            "report.pdf"
+        );
+        assert_eq!(chat::kind(&model.conversations[0].messages[1]), "file");
+
+        // Sending one: a message of its own, the attachments field alone,
+        // the view on it.
+        let sent = super::super::update(
+            &mut model,
+            UiEvent::SendFile {
+                peer,
+                name: "/sdcard/Download/notes.txt".into(),
+                data: b"hello".to_vec(),
+            },
+        );
+        let fields = file_fields("notes.txt", b"hello".to_vec());
+        assert!(
+            matches!(sent.as_slice(), [UiEffect::Send { to, body, fields: f }] if *to == peer && body.is_empty() && f.starts_with(&fields)),
+            "{sent:?}"
+        );
+        let last = model.conversations[0].messages.len() - 1;
+        assert_eq!(model.message_cursor, last);
+        assert!(model.conversations[0].messages[last].outbound);
+
+        // Too large: nothing goes, nothing is added, the toast says why.
+        let before = model.conversations[0].messages.len();
+        let refused = super::super::update(
+            &mut model,
+            UiEvent::SendFile {
+                peer,
+                name: "big.iso".into(),
+                data: alloc::vec![0; LARGEST + 1],
+            },
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(model.conversations[0].messages.len(), before);
+        let toast = model.current_toast().expect("a toast").text.clone();
+        assert_eq!(
+            toast,
+            "This file is 991 KB. A message carries at most 990 KB."
+        );
+    }
+
+    /// A voice message (1222): its node with length, level bar and words,
+    /// the play tap that turns into pause while it plays and back at its
+    /// end, a mode this build does not play with no tap, the list's words,
+    /// the compose bar's microphone, and a send that carries the audio
+    /// field alone.
+    #[test]
+    fn a_voice_message_has_its_player_its_words_and_the_microphone_sends_one() {
+        use crate::ui::voice::{voice_fields, AM_CODEC2_2400, AM_CODEC2_700C, AM_OPUS_OGG};
+        use crate::ui::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t), (false, t + 60), (false, t + 120)]);
+        let peer = [0x42; 16];
+        // Two seconds of Codec2 2400 as Sideband sends it, and 700C, which
+        // this build does not play.
+        model.conversations[0].messages[1].body = String::new();
+        model.conversations[0].messages[1].fields =
+            voice_fields(AM_CODEC2_2400, alloc::vec![0; 600]);
+        model.conversations[0].messages[2].fields =
+            voice_fields(AM_CODEC2_700C, alloc::vec![0; 200]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene
+            .bubble(NodeId::Bubble(1))
+            .expect("text")
+            .voice
+            .is_none());
+        let node = scene.bubble(NodeId::Bubble(2)).expect("the voice bubble");
+        let voice = node.voice.as_ref().expect("a voice node");
+        assert_eq!(voice.id.resource(), "voice_2");
+        assert_eq!(
+            (
+                voice.mode,
+                voice.bytes,
+                voice.duration_ms,
+                voice.duration.as_str(),
+                voice.playing
+            ),
+            (AM_CODEC2_2400, 600, 2_000, "0:02", false)
+        );
+        assert!(voice.levels.is_empty(), "Codec2 frames are all one size");
+        assert_eq!(voice.words.resolve(Lang::En), "Voice message, 0:02");
+        assert_eq!(voice.words.resolve(Lang::De), "Sprachnachricht, 0:02");
+        assert_eq!(node.a11y.label, voice.words, "the screen reader says it");
+        let json = node.to_json();
+        assert_eq!(json["voice"]["id"], "voice_2");
+        assert_eq!(json["voice"]["duration"], "0:02");
+        assert_eq!(json["voice"]["mode"], 8);
+        let play = Intent::PlayVoice { peer, key: 2 };
+        assert_eq!(
+            scene.action(NodeId::Voice(2)).map(|a| a.intent.clone()),
+            Some(play.clone())
+        );
+        assert_eq!(scene.action(NodeId::Voice(1)), None);
+        let old = scene.bubble(NodeId::Bubble(3)).expect("the 700C bubble");
+        let old = old.voice.as_ref().expect("still a voice node");
+        assert_eq!(old.toggle, None);
+        assert_eq!(
+            old.words.resolve(Lang::En),
+            "Voice message, 0:02, which cannot be played here"
+        );
+        assert_eq!(
+            chat::preview(&model.conversations[0].messages[1]),
+            "voice message 0:02"
+        );
+        assert_eq!(chat::kind(&model.conversations[0].messages[1]), "voice");
+
+        // A tap plays it, the bubble shows pause; pause stops it; the
+        // player's end puts play back; the 700C one does not start.
+        let played = super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 2 });
+        assert_eq!(played, alloc::vec![UiEffect::PlayVoice { peer, key: 2 }]);
+        let scene = model.scene(LayoutClass::Compact);
+        let voice = scene
+            .bubble(NodeId::Bubble(2))
+            .and_then(|n| n.voice.clone())
+            .expect("voice");
+        assert!(voice.playing);
+        assert_eq!(
+            voice.toggle.map(|a| a.intent),
+            Some(Intent::PauseVoice { peer, key: 2 })
+        );
+        let paused = super::super::update(&mut model, UiEvent::PauseVoice { peer, key: 2 });
+        assert_eq!(paused, alloc::vec![UiEffect::PauseVoice { peer, key: 2 }]);
+        assert_eq!(model.playing, None);
+        super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 2 });
+        super::super::update(&mut model, UiEvent::VoiceEnded { peer, key: 2 });
+        assert_eq!(model.playing, None);
+        assert!(super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 3 }).is_empty());
+        assert!(super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 1 }).is_empty());
+
+        // The microphone is the compose bar's, its words the hint to hold.
+        let compose = &model
+            .scene(LayoutClass::Compact)
+            .chat
+            .expect("chat")
+            .compose;
+        assert_eq!(
+            compose.record.intent,
+            Intent::SendVoice {
+                peer,
+                pcm: Vec::new(),
+                rate: 0
+            }
+        );
+        assert_eq!(
+            Intent::SendVoice {
+                peer,
+                pcm: Vec::new(),
+                rate: 0
+            }
+            .label()
+            .text(Lang::En),
+            "Hold to record a voice message"
+        );
+
+        // Sending one: a message of its own, the audio field alone, the
+        // view on it.
+        let sent = super::super::update(
+            &mut model,
+            UiEvent::SendVoice {
+                peer,
+                data: b"OggS".to_vec(),
+            },
+        );
+        let fields = voice_fields(AM_OPUS_OGG, b"OggS".to_vec());
+        assert!(
+            matches!(sent.as_slice(), [UiEffect::Send { to, body, fields: f }] if *to == peer && body.is_empty() && f.starts_with(&fields)),
+            "{sent:?}"
+        );
+        let last = model.conversations[0].messages.len() - 1;
+        assert_eq!(model.message_cursor, last);
+    }
+
+    /// The recording bar (1276): held, the bar with its timer, live
+    /// waveform, cancel hint and open lock chip; locked, the bin, pause
+    /// and Send; paused, the waveform stands and play and resume join;
+    /// nothing heard, the line and the way to the permission; sent, the
+    /// field is back and the bubble's waveform is the recording's track
+    /// through the one resampler.
+    #[test]
+    fn a_recording_shows_as_recording_and_its_track_becomes_the_bubble() {
+        use super::super::recording::{Effect, Input, LIVE_WINDOWS};
+        use super::super::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        // Out of the way of the key the model gives the one it sends.
+        model.conversations[0].messages[0].activity = 1_000;
+        let feed = |model: &mut UiModel<Line>, input| {
+            super::super::update(model, UiEvent::Record { peer, input })
+        };
+        let bar = |model: &UiModel<Line>| {
+            model
+                .scene(LayoutClass::Compact)
+                .chat
+                .expect("chat")
+                .compose
+                .recording
+        };
+        assert_eq!(bar(&model), None, "no recording, no bar");
+        assert_eq!(
+            feed(&mut model, Input::Press { now: 0 }),
+            alloc::vec![
+                UiEffect::Recording {
+                    peer,
+                    effect: Effect::Haptic(recording::Haptic::Start)
+                },
+                UiEffect::Recording {
+                    peer,
+                    effect: Effect::Start
+                },
+            ]
+        );
+        // Three seconds rising and a quiet one.
+        for w in 1..=80u64 {
+            let rms = match w {
+                ..=60 => u16::try_from(w * 200).unwrap_or(0),
+                _ => 40,
+            };
+            feed(&mut model, Input::Level { now: w * 50, rms });
+        }
+        let held = bar(&model).expect("the bar while held");
+        assert_eq!(held.phase.word(), "held");
+        assert!(held.pulsing);
+        assert_eq!(held.timer.words.resolve(Lang::En), "REC 00:04");
+        assert!(!held.timer.amber);
+        assert_eq!(held.wave.levels.len(), LIVE_WINDOWS);
+        assert_eq!(
+            held.wave.levels.as_slice(),
+            model.recording.track.live(LIVE_WINDOWS),
+            "the newest windows, the newest at the right"
+        );
+        assert!(held.wave.moving);
+        let cancel = held.cancel.as_ref().expect("the hint");
+        assert_eq!(cancel.words.resolve(Lang::En), "Slide left to cancel");
+        assert_eq!(
+            held.held.as_ref().map(|h| h.id.resource()),
+            Some("record".into()),
+            "the finger stays on the microphone"
+        );
+        let lock = held.lock.as_ref().expect("the chip");
+        assert!(!lock.closed);
+        assert!(held.buttons.is_empty());
+        let scene = model.scene(LayoutClass::Compact);
+        assert_eq!(
+            scene
+                .action(NodeId::Rec(Verb::Lock))
+                .map(|a| a.intent.clone()),
+            Some(Intent::Recording {
+                peer,
+                verb: Verb::Lock
+            })
+        );
+        let json = scene.to_json();
+        let rec = &json["chat"]["compose"]["recording"];
+        assert_eq!(rec["phase"], "held");
+        assert_eq!(rec["timer"]["words"]["args"][0], "00:04", "{rec}");
+        assert_eq!(rec["lock"]["id"], "rec_lock");
+
+        // Slid past the distance: the hint says release to cancel.
+        feed(&mut model, Input::Slide { dx: -120, dy: 0 });
+        let armed = bar(&model).and_then(|b| b.cancel).expect("hint");
+        assert!(armed.armed);
+        assert_eq!(armed.words.resolve(Lang::De), "Loslassen zum Abbrechen");
+        // Back, then the chip: locked.
+        feed(&mut model, Input::Slide { dx: 0, dy: 0 });
+        feed(&mut model, Input::Verb(Verb::Lock));
+        let locked = bar(&model).expect("the bar locked");
+        assert!(locked
+            .lock
+            .as_ref()
+            .is_some_and(|l| l.closed && l.action.is_none()));
+        assert_eq!(locked.cancel, None);
+        let ids: Vec<String> = locked.buttons.iter().map(|b| b.id.resource()).collect();
+        assert_eq!(ids, ["rec_discard", "rec_pause", "rec_send"]);
+        feed(&mut model, Input::Verb(Verb::Pause));
+        let paused = bar(&model).expect("the bar paused");
+        assert!(!paused.wave.moving && !paused.pulsing);
+        assert_eq!(
+            paused.wave.levels,
+            model.recording.track.bars(LIVE_WINDOWS, Fold::Peak),
+            "the whole recording, standing"
+        );
+        let ids: Vec<String> = paused.buttons.iter().map(|b| b.id.resource()).collect();
+        assert_eq!(ids, ["rec_discard", "rec_play", "rec_resume", "rec_send"]);
+
+        // Send: the platform finishes, hands the recording over, and the
+        // bubble draws the track.
+        assert_eq!(
+            feed(&mut model, Input::Verb(Verb::Send)),
+            alloc::vec![UiEffect::Recording {
+                peer,
+                effect: Effect::Finish
+            }]
+        );
+        assert_eq!(bar(&model), None, "the field is back");
+        let track = model.recording.track.clone();
+        assert_eq!(track.len(), 80);
+        super::super::update(
+            &mut model,
+            UiEvent::SendVoice {
+                peer,
+                data: b"OggS".to_vec(),
+            },
+        );
+        let key = model.conversations[0].messages.last().map(|m| m.activity);
+        let key = key.expect("the sent one");
+        let scene = model.scene(LayoutClass::Compact);
+        let voice = scene
+            .bubble(NodeId::Bubble(key))
+            .and_then(|n| n.voice.clone())
+            .expect("its voice node");
+        assert_eq!(voice.levels, track.bars(BARS, Fold::Peak));
+        assert!(voice.levels.len() == BARS && voice.levels[0] < voice.levels[20]);
+
+        // A received one the shell decoded draws the decoded sound's track.
+        let decoded = recording::LevelTrack::of(alloc::vec![10, 20, 90, 30]);
+        super::super::update(
+            &mut model,
+            UiEvent::VoiceTrack {
+                peer,
+                key: 1_000,
+                track: decoded.clone(),
+            },
+        );
+        assert_eq!(model.voice_track(peer, 1_000), Some(&decoded));
+    }
+
+    /// Nothing heard for two seconds: the line under the waveform, its
+    /// way to the permission, and the dot stands.
+    #[test]
+    fn a_silent_microphone_is_said() {
+        use super::super::recording::{Effect, Input};
+        use super::super::UiEffect;
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        super::super::update(
+            &mut model,
+            UiEvent::Record {
+                peer,
+                input: Input::Press { now: 0 },
+            },
+        );
+        for w in 1..=40u64 {
+            super::super::update(
+                &mut model,
+                UiEvent::Record {
+                    peer,
+                    input: Input::Level {
+                        now: w * 50,
+                        rms: 0,
+                    },
+                },
+            );
+        }
+        let scene = model.scene(LayoutClass::Compact);
+        let bar = scene
+            .chat
+            .as_ref()
+            .and_then(|c| c.compose.recording.clone())
+            .expect("the bar");
+        assert!(!bar.pulsing);
+        let notice = bar.notice.as_ref().expect("the line");
+        assert_eq!(
+            notice.words.resolve(Lang::En),
+            "Nothing heard. Is the microphone allowed?"
+        );
+        let ask = Intent::Recording {
+            peer,
+            verb: Verb::AskMicrophone,
+        };
+        assert_eq!(
+            scene.action(NodeId::RecNotice).map(|a| a.intent.clone()),
+            Some(ask)
+        );
+        assert_eq!(
+            super::super::update(
+                &mut model,
+                UiEvent::Record {
+                    peer,
+                    input: Input::Verb(Verb::AskMicrophone)
+                }
+            ),
+            alloc::vec![UiEffect::Recording {
+                peer,
+                effect: Effect::AskMicrophone
+            }]
+        );
+        // A tap is said as the hint to hold, and nothing goes.
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        model.selected = 0;
+        super::super::update(
+            &mut model,
+            UiEvent::Record {
+                peer,
+                input: Input::Press { now: 0 },
+            },
+        );
+        super::super::update(
+            &mut model,
+            UiEvent::Record {
+                peer,
+                input: Input::Release { now: 200 },
+            },
+        );
+        assert_eq!(model.conversations[0].messages.len(), 1);
+        assert!(model
+            .toasts
+            .iter()
+            .any(|t| t.text.starts_with("Hold the microphone")));
     }
 }

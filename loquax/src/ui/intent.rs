@@ -28,6 +28,14 @@
 //! | `Message::CancelReply` | `CancelReply` |
 //! | `Request::Forward`, `UiEvent::Forward` | `Forward` |
 //! | `Request::SendAgain`, `UiEvent::SendAgain` (1232) | `SendAgain` |
+//! | `Request::Photo`, `UiEvent::SendPhoto` (1220) | `SendPhoto` |
+//! | `Request::PhotoSize`, `UiEvent::PhotoSize` (1220) | `PhotoSize` |
+//! | (new) a tap on a photo, `UiEvent::ViewPhoto` (1220) | `ViewPhoto` |
+//! | `Request::File`, `UiEvent::SendFile` (1221) | `SendFile` |
+//! | (new) a tap on a file, `UiEvent::OpenFile` (1221) | `OpenFile` |
+//! | `Request::Voice`, `UiEvent::SendVoice` (1222) | `SendVoice` |
+//! | `Request::PlayVoice`, `UiEvent::PlayVoice`, `UiEvent::PauseVoice` (1222) | `PlayVoice`, `PauseVoice` |
+//! | (new) the recording bar's buttons, `UiEvent::Record` (1276) | `Recording` |
 //! | `Request::Delete`, `UiEvent::Delete`, `Message::Delete`, `Message::AskDelete`, `Command::DeleteMessage` | `Delete` (`confirmed` tells the asked from the asking) |
 //! | `Request::Used`, `Message::Insert` | `Insert` |
 //! | `Message::ToggleEmoji` | `Emoji` |
@@ -66,6 +74,7 @@
 //! | `Command::LoadMapArea`, `MapDrawing` | the same names |
 //! | `Command::Blocked`, `Archived` | `ShowBlocked`, `ShowArchived` |
 //! | `Command::Import` | `Import` |
+//! | `Command::MyCode` | `MyCode` |
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
@@ -232,6 +241,117 @@ pub enum Intent {
         peer: [u8; 16],
         key: u64,
     },
+    /// Show the photo of the message `key` of `peer`'s conversation whole:
+    /// a tap on its bubble (1220).
+    ViewPhoto {
+        peer: [u8; 16],
+        key: u64,
+    },
+    /// Send the picture the user picked to `peer` (1220): the paperclip's
+    /// "Photo". `data` is the picture as picked; the shell scales it by
+    /// the reader's [`Intent::PhotoSize`] before it goes.
+    SendPhoto {
+        peer: [u8; 16],
+        data: Vec<u8>,
+    },
+    /// The reader's photo size: the settings' row (1220).
+    PhotoSize(super::photos::PhotoSize),
+    /// The compose bar's plus (1270): the attachment sheet opens.
+    Attach {
+        peer: [u8; 16],
+    },
+    /// The compose bar's position button, and the plus sheet's Position
+    /// row (1270): the position sheet opens.
+    Locate {
+        peer: [u8; 16],
+    },
+    /// The compose bar's camera (1270): the platform takes a photo and
+    /// answers with [`Intent::StagePhoto`].
+    Camera {
+        peer: [u8; 16],
+    },
+    /// The photo the camera took for `peer`, as taken (1270): the shell
+    /// scales and strips it as [`Intent::SendPhoto`]'s and stages it in
+    /// the bar, where Send takes it with the caption. Empty in the
+    /// scene's action, which the platform fills.
+    StagePhoto {
+        peer: [u8; 16],
+        data: Vec<u8>,
+    },
+    /// The staged photo's cross.
+    Unstage {
+        peer: [u8; 16],
+    },
+    /// The open sheet goes.
+    CloseSheet,
+    /// The position sheet's "Send my position now" (1270): the own fix
+    /// goes to `peer` as a position report.
+    ShareFix {
+        peer: [u8; 16],
+    },
+    /// One of the position sheet's share rows (1273): a share of `span`
+    /// starts for `peer`'s chat.
+    StartShare {
+        peer: [u8; 16],
+        span: super::share::Span,
+    },
+    /// A running share's Stop: the chat's chip, Settings, Privacy, the
+    /// phone's notification.
+    StopShare {
+        peer: [u8; 16],
+    },
+    /// The position sheet without a fix: the platform turns location on
+    /// (the 1201 permission flow) and answers with [`Intent::OwnFix`].
+    LocationOn,
+    /// The platform's own fix, or none.
+    OwnFix {
+        location: Option<Location>,
+    },
+    /// Send the file the user picked to `peer` (1221): the paperclip's
+    /// "File", its name and bytes as picked. `size` is the whole file's
+    /// bytes where the shell stopped reading one too large to go, else 0.
+    SendFile {
+        peer: [u8; 16],
+        name: String,
+        data: Vec<u8>,
+        size: u64,
+    },
+    /// Save and open the `index`th file of the message `key` of `peer`'s
+    /// conversation: a tap on its row (1221).
+    OpenFile {
+        peer: [u8; 16],
+        key: u64,
+        index: usize,
+    },
+    /// Send the recording the microphone made to `peer` (1222): the
+    /// compose bar's button, held and released. Mono 16-bit PCM at `rate`
+    /// as the platform recorded it; the shell codes it
+    /// ([`crate::voice::encode`]). Empty in the scene's action, which the
+    /// platform fills.
+    SendVoice {
+        peer: [u8; 16],
+        pcm: Vec<i16>,
+        rate: u32,
+    },
+    /// A button of `peer`'s recording bar (1276): lock, pause, resume,
+    /// listen, send, discard, or the way to the microphone's permission.
+    /// The gestures on the microphone are not intents but the platform's
+    /// input ([`super::recording::Input`]).
+    Recording {
+        peer: [u8; 16],
+        verb: super::recording::Verb,
+    },
+    /// Play the voice message `key` of `peer`'s conversation: a tap on its
+    /// play button (1222).
+    PlayVoice {
+        peer: [u8; 16],
+        key: u64,
+    },
+    /// Stop it: a tap on the pause button of the one that plays.
+    PauseVoice {
+        peer: [u8; 16],
+        key: u64,
+    },
     /// Delete messages: `confirmed` once the user said yes, else ask.
     Delete {
         messages: Messages,
@@ -286,6 +406,8 @@ pub enum Intent {
         name: Option<String>,
     },
     NewConversation,
+    /// Show our own contact code and its QR (1279).
+    MyCode,
     /// The name recipients see.
     Name(String),
 
@@ -356,6 +478,10 @@ impl Intent {
             keys::Action::Map(cmd) => Intent::Map(cmd),
             keys::Action::OpenMessage => Intent::OpenMessage,
             keys::Action::PeerOnMap => Intent::OpenMapAt { peer: Target::Open },
+            // The recording's keys are the terminal's (1276): they resolve
+            // in its compose pane alone, where a key is the field's, and a
+            // window or a phone records with the pointer.
+            keys::Action::Record(_) => Intent::Edit,
         }
     }
 
@@ -399,6 +525,31 @@ impl Intent {
             Intent::CancelReply => StrId::CancelReply,
             Intent::Forward { .. } => StrId::ActionForward,
             Intent::SendAgain { .. } => StrId::SendAgain,
+            Intent::ViewPhoto { .. } => StrId::ViewPhoto,
+            Intent::SendPhoto { .. } => StrId::AttachPhoto,
+            Intent::PhotoSize(_) => StrId::PhotoSize,
+            Intent::Attach { .. } => StrId::Attach,
+            Intent::Locate { .. } => StrId::Locate,
+            Intent::Camera { .. } => StrId::Camera,
+            Intent::StagePhoto { .. } => StrId::Camera,
+            Intent::Unstage { .. } => StrId::Unstage,
+            Intent::CloseSheet => StrId::Dismiss,
+            Intent::ShareFix { .. } => StrId::ShareNow,
+            Intent::StartShare { span, .. } => match span {
+                super::share::Span::Minutes15 => StrId::ShareFor15,
+                super::share::Span::Hour1 => StrId::ShareFor1h,
+                super::share::Span::Hours8 => StrId::ShareFor8h,
+                super::share::Span::UntilStopped => StrId::ShareUntilStopped,
+            },
+            Intent::StopShare { .. } => StrId::ShareStop,
+            Intent::LocationOn => StrId::LocationOn,
+            Intent::OwnFix { .. } => StrId::Locate,
+            Intent::SendFile { .. } => StrId::AttachFile,
+            Intent::OpenFile { .. } => StrId::OpenFile,
+            Intent::SendVoice { .. } => StrId::RecordVoice,
+            Intent::PlayVoice { .. } => StrId::PlayVoice,
+            Intent::Recording { verb, .. } => verb.label(),
+            Intent::PauseVoice { .. } => StrId::PauseVoice,
             Intent::Delete { .. } => StrId::ActionDelete,
             Intent::Copy => StrId::ActionCopy,
             Intent::Share { .. } => StrId::Share,
@@ -422,6 +573,7 @@ impl Intent {
             Intent::Forget { .. } => StrId::Forget,
             Intent::AddContact { .. } => StrId::AddContact,
             Intent::NewConversation => StrId::NewConversation,
+            Intent::MyCode => StrId::MyCode,
             Intent::Name(_) => StrId::Name,
             Intent::Scroll(_) => StrId::Scroll,
             Intent::ScrollMessages(_) => StrId::ScrollMessages,
@@ -538,6 +690,13 @@ impl From<Command> for Intent {
             Command::Archived => Intent::ShowArchived,
             Command::Import => Intent::Import,
             Command::ReadReceipts => Intent::ReadReceipts { on: Switch::Toggle },
+            Command::NewConversation => Intent::NewConversation,
+            Command::MyCode => Intent::MyCode,
+            // No code yet: the frontend asks for it.
+            Command::AddContact => Intent::AddContact {
+                lxma: String::new(),
+                name: None,
+            },
         }
     }
 }

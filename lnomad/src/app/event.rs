@@ -20,6 +20,7 @@ use super::input::{
     input_request, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use super::model::*;
+use super::strings::{with, with_args, Arg, Lang, StrId, Text};
 pub(crate) use leviculum_ui::keymap::{self, Ctx, Panes, SCROLL_ROWS};
 
 /// A UI input event, decoupled from crossterm so [`update`] is trivially
@@ -44,6 +45,8 @@ pub enum AppEvent {
     },
     /// A navigation failed with a human-readable message.
     LoadFailed(String),
+    /// A navigation failed, in the catalogue's words (the shell's fetch).
+    LoadFailedText(Text),
     /// A file download completed and was saved to disk.
     DownloadDone {
         /// The filename it was saved as.
@@ -53,8 +56,8 @@ pub enum AppEvent {
         /// The directory it was saved into, for the toast.
         dir: String,
     },
-    /// A file download failed with a human-readable message.
-    DownloadFailed(String),
+    /// A file download failed, with what the reader is told.
+    DownloadFailed(Text),
     /// An inline image's transfer started.
     ImageLoading {
         /// The link index it belongs to.
@@ -95,6 +98,8 @@ pub enum AppEvent {
     NodeDiscovered(DiscoveredNode),
     /// The spinner animation tick, delivered while a fetch is in flight.
     Tick,
+    /// What a tap on a scene node, or a host, asks ([`super::intent`]).
+    Intent(super::intent::Intent),
 }
 
 /// Fold an event into the model, returning any [`Effect`]s for the IO shell.
@@ -112,22 +117,31 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::PageLoaded { doc, title } => apply_loaded(model, doc, title),
+        AppEvent::Intent(intent) => super::intent::apply(model, intent),
         AppEvent::LoadFailed(msg) => {
             model.pending = None;
             model.set_toast(ToastKind::Error, msg);
             Vec::new()
         }
+        AppEvent::LoadFailedText(text) => {
+            model.pending = None;
+            model.say(ToastKind::Error, text);
+            Vec::new()
+        }
         AppEvent::DownloadDone { name, bytes, dir } => {
             model.download = None;
-            model.set_toast(
+            model.say(
                 ToastKind::Info,
-                format!("downloaded {name} ({bytes} bytes) to {dir}"),
+                with_args(
+                    StrId::Downloaded,
+                    vec![Arg::Str(name), Arg::Int(bytes as i64), Arg::Str(dir)],
+                ),
             );
             Vec::new()
         }
         AppEvent::DownloadFailed(msg) => {
             model.download = None;
-            model.set_toast(ToastKind::Error, msg);
+            model.say(ToastKind::Error, msg);
             Vec::new()
         }
         AppEvent::ImageLoading { link } => {
@@ -265,7 +279,7 @@ pub(crate) fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String
                 let vp = model.viewport();
                 model.scroll = line.min(model.max_scroll(vp));
             }
-            None => model.set_toast(ToastKind::Error, format!("anchor #{name} not found")),
+            None => model.say(ToastKind::Error, with(StrId::AnchorNotFound, name)),
         }
     }
     // Cache the freshly loaded page (overwriting any prior entry for this target,
@@ -355,19 +369,22 @@ pub(crate) fn plan_images(model: &mut Model) -> Vec<Effect> {
     }
 }
 
-/// The start screen's micron source: what a reader sees when `lnomad` is
-/// started without a URL. A real micron document rather than hand-drawn chrome,
-/// so it goes through the same parse/layout/render path as a fetched page and
-/// re-wraps on a resize or a theme change for free.
-pub(crate) const START_PAGE: &str = "\
->lnomad
-
-Terminal browser for NomadNet pages.
-
-No page is open. Node discovery runs in the background, so nodes appear in the \
-places panel as their announces arrive.
-
-`!d`! places   `!:`! URL   `!?`! help   `!q`! quit";
+/// The start screen's micron source in `lang`: what a reader sees when
+/// `lnomad` is started without a URL. A real micron document rather than
+/// hand-drawn chrome, so it goes through the same parse/layout/render path as a
+/// fetched page and re-wraps on a resize or a theme change for free.
+pub(crate) fn start_page(lang: Lang) -> String {
+    let w = |id: StrId| id.text(lang);
+    format!(
+        ">lnomad\n\n{}\n\n{}\n\n`!d`! {}   `!:`! {}   `!?`! {}   `!q`! {}",
+        w(StrId::StartTagline),
+        w(StrId::StartNoPage),
+        w(StrId::Places),
+        w(StrId::Url),
+        w(StrId::Help),
+        w(StrId::Quit),
+    )
+}
 
 /// The title shown for the start screen, in place of a page's node name.
 pub(crate) const START_TITLE: &str = "lnomad";
@@ -382,7 +399,7 @@ pub(crate) const START_TITLE: &str = "lnomad";
 pub fn show_start_screen(model: &mut Model) {
     apply_loaded(
         model,
-        leviculum_micron::parse(START_PAGE),
+        leviculum_micron::parse(&start_page(model.lang)),
         START_TITLE.to_string(),
     );
     model.show_places = true;
@@ -640,46 +657,53 @@ pub(crate) fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect
         }
         KeyCode::Enter => {
             let raw = model.input.value().trim().to_string();
-            if is_nururl(&raw) {
-                return match parse_nururl(&raw) {
-                    Ok(nur) => {
-                        model.mode = Mode::Browse;
-                        model.input.reset();
-                        let effects =
-                            begin_navigation(model, nur.target, HistoryAction::Push, None);
-                        // After begin_navigation, whose toast dismissal must not
-                        // clear this one.
-                        if !nur.ignored.is_empty() {
-                            model.set_toast(
-                                ToastKind::Info,
-                                format!("nururl: ignored {}", nur.ignored.join(", ")),
-                            );
-                        }
-                        effects
-                    }
-                    Err(err) => {
-                        model.set_toast(ToastKind::Error, bad_url_note("bad URL", &raw, err));
-                        Vec::new()
-                    }
-                };
-            }
-            match parse_url(&raw, model.current_dest) {
-                Ok(target) => {
-                    model.mode = Mode::Browse;
-                    model.input.reset();
-                    begin_navigation(model, target, HistoryAction::Push, None)
-                }
-                Err(_) if is_name_query(&raw) => search_names(model, &raw),
-                Err(err) => {
-                    model.set_toast(ToastKind::Error, bad_url_note("bad URL", &raw, err));
-                    Vec::new()
-                }
-            }
+            go_to(model, &raw)
         }
         _ => {
             if let Some(req) = input_request(&key) {
                 model.input.handle(req);
             }
+            Vec::new()
+        }
+    }
+}
+
+/// Go where the address field's text `raw` says: a URL, a `nomadnetwork://`
+/// one, or a name to search (1227). What Enter in the address editor and
+/// [`Intent::Go`](super::intent::Intent::Go) do.
+pub(crate) fn go_to(model: &mut Model, raw: &str) -> Vec<Effect> {
+    let raw = raw.to_string();
+    if is_nururl(&raw) {
+        return match parse_nururl(&raw) {
+            Ok(nur) => {
+                model.mode = Mode::Browse;
+                model.input.reset();
+                let effects = begin_navigation(model, nur.target, HistoryAction::Push, None);
+                // After begin_navigation, whose toast dismissal must not
+                // clear this one.
+                if !nur.ignored.is_empty() {
+                    model.say(
+                        ToastKind::Info,
+                        with(StrId::NururlIgnored, nur.ignored.join(", ")),
+                    );
+                }
+                effects
+            }
+            Err(err) => {
+                model.say(ToastKind::Error, bad_url_note(StrId::BadUrl, &raw, err));
+                Vec::new()
+            }
+        };
+    }
+    match parse_url(&raw, model.current_dest) {
+        Ok(target) => {
+            model.mode = Mode::Browse;
+            model.input.reset();
+            begin_navigation(model, target, HistoryAction::Push, None)
+        }
+        Err(_) if is_name_query(&raw) => search_names(model, &raw),
+        Err(err) => {
+            model.say(ToastKind::Error, bad_url_note(StrId::BadUrl, &raw, err));
             Vec::new()
         }
     }
@@ -700,7 +724,7 @@ pub(crate) fn update_browse_key(model: &mut Model, key: KeyEvent, ctrl: bool) ->
     {
         model.pending = None;
         model.download = None;
-        model.set_toast(ToastKind::Info, "cancelled");
+        model.say(ToastKind::Info, Text::key(StrId::Cancelled));
         return vec![Effect::Cancel];
     }
 
@@ -881,7 +905,7 @@ pub(crate) fn commit_search(model: &mut Model, query: &str) {
     model.matches = find_matches(&model.page, query);
     if model.matches.is_empty() {
         model.current_match = None;
-        model.set_toast(ToastKind::Info, format!("no matches for \"{query}\""));
+        model.say(ToastKind::Info, with(StrId::NoMatches, query));
     } else {
         model.current_match = Some(0);
         model.dismiss_toast();
@@ -1235,7 +1259,10 @@ pub(crate) fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
         Place::Bookmark { url, .. } => match parse_url(&url, model.current_dest) {
             Ok(target) => target,
             Err(err) => {
-                model.set_toast(ToastKind::Error, bad_url_note("bad bookmark", &url, err));
+                model.say(
+                    ToastKind::Error,
+                    bad_url_note(StrId::BadBookmark, &url, err),
+                );
                 return Vec::new();
             }
         },
@@ -1274,10 +1301,7 @@ pub(crate) fn is_name_query(raw: &str) -> bool {
 pub(crate) fn search_names(model: &mut Model, raw: &str) -> Vec<Effect> {
     let hits = search(&model.node_registry, &model.pins, raw);
     if hits.is_empty() {
-        model.set_toast(
-            ToastKind::Info,
-            format!("no site named \"{raw}\" seen yet (names come from announces and pins)"),
-        );
+        model.say(ToastKind::Info, with(StrId::NoSiteNamed, raw));
         return Vec::new();
     }
     model.mode = Mode::Browse;
@@ -1418,7 +1442,7 @@ pub(crate) fn delete_bookmark_at(model: &mut Model, idx: usize) -> Vec<Effect> {
     model.places_sel = model.places_sel.min(len.saturating_sub(1));
     clamp_places_scroll(model);
     let label = if title.is_empty() { url } else { title };
-    model.set_toast(ToastKind::Info, format!("removed {label} — u to undo"));
+    model.say(ToastKind::Info, with(StrId::RemovedUndo, label));
     vec![Effect::SaveBookmarks]
 }
 
@@ -1429,7 +1453,7 @@ pub(crate) fn delete_bookmark_at(model: &mut Model, idx: usize) -> Vec<Effect> {
 /// save when the URL was re-bookmarked in the meantime.
 pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
     let Some(del) = model.last_deleted_bookmark.take() else {
-        model.set_toast(ToastKind::Info, "nothing to undo");
+        model.say(ToastKind::Info, Text::key(StrId::NothingToUndo));
         return Vec::new();
     };
     let at = del.index.min(model.bookmarks.len());
@@ -1441,7 +1465,7 @@ pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
         },
     );
     if !restored {
-        model.set_toast(ToastKind::Info, format!("already bookmarked: {}", del.url));
+        model.say(ToastKind::Info, with(StrId::AlreadyBookmarked, del.url));
         return Vec::new();
     }
     model.places_sel = at;
@@ -1451,7 +1475,7 @@ pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
     } else {
         del.title
     };
-    model.set_toast(ToastKind::Info, format!("restored {label}"));
+    model.say(ToastKind::Info, with(StrId::Restored, label));
     vec![Effect::SaveBookmarks]
 }
 
@@ -1460,19 +1484,19 @@ pub(crate) fn undo_delete_bookmark(model: &mut Model) -> Vec<Effect> {
 /// with a toast note when nothing is loaded.
 pub(crate) fn toggle_bookmark_current(model: &mut Model) -> Vec<Effect> {
     let Some(url) = current_url(model) else {
-        model.set_toast(ToastKind::Info, "nothing to bookmark");
+        model.say(ToastKind::Info, Text::key(StrId::NothingToBookmark));
         return Vec::new();
     };
     if model.bookmarks.contains(&url) {
         model.bookmarks.remove(&url);
-        model.set_toast(ToastKind::Info, format!("removed bookmark {url}"));
+        model.say(ToastKind::Info, with(StrId::RemovedBookmark, url));
     } else {
         let title = model.title.trim().to_string();
         model.bookmarks.add(Bookmark {
             url: url.clone(),
             title,
         });
-        model.set_toast(ToastKind::Info, format!("bookmarked {url}"));
+        model.say(ToastKind::Info, with(StrId::Bookmarked, url));
     }
     vec![Effect::SaveBookmarks]
 }
@@ -1484,11 +1508,11 @@ pub(crate) fn yank_url(model: &mut Model) -> Vec<Effect> {
     let url = match focused_link_url(model).or_else(|| current_url(model)) {
         Some(url) => url,
         None => {
-            model.set_toast(ToastKind::Info, "nothing to copy");
+            model.say(ToastKind::Info, Text::key(StrId::NothingToCopy));
             return Vec::new();
         }
     };
-    model.set_toast(ToastKind::Info, format!("copied {url}"));
+    model.say(ToastKind::Info, with(StrId::Copied, url.clone()));
     vec![Effect::Copy(url)]
 }
 
@@ -1649,7 +1673,7 @@ pub(crate) fn load_from_cache(
             Some(line) => model.scroll = line.min(model.max_scroll(vp)),
             None => {
                 model.scroll = 0;
-                model.set_toast(ToastKind::Error, format!("anchor #{name} not found"));
+                model.say(ToastKind::Error, with(StrId::AnchorNotFound, name));
             }
         },
         None => model.scroll = entry.scroll.min(model.max_scroll(vp)),
@@ -1704,12 +1728,12 @@ pub(crate) fn toggle_identify(model: &mut Model) -> Vec<Effect> {
         .collect();
     if on {
         let fp8: String = model.fingerprint.chars().take(8).collect();
-        model.set_toast(
+        model.say(
             ToastKind::Info,
-            format!("Identifying to {dest8} as {fp8}  (i to stop)"),
+            with_args(StrId::IdentifyingTo, vec![Arg::Str(dest8), Arg::Str(fp8)]),
         );
     } else {
-        model.set_toast(ToastKind::Info, format!("Now anonymous to {dest8}"));
+        model.say(ToastKind::Info, with(StrId::AnonymousTo, dest8));
     }
     effects
 }
@@ -1754,7 +1778,7 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
             vec![Effect::OpenExternal(url)]
         }
         LinkKind::Unsafe(scheme) => {
-            model.set_toast(ToastKind::Error, format!("won't open {scheme}: link"));
+            model.say(ToastKind::Error, with(StrId::WontOpen, scheme));
             Vec::new()
         }
         // NomadNet opens a conversation here. We are a page browser with no
@@ -1764,7 +1788,7 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
         // produce, which read as a broken page rather than an unsupported
         // action.
         LinkKind::Lxmf(hash) => {
-            model.set_toast(ToastKind::Info, format!("LXMF address copied: {hash}"));
+            model.say(ToastKind::Info, with(StrId::LxmfCopied, hash.clone()));
             vec![Effect::Copy(hash)]
         }
         LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
@@ -1781,9 +1805,9 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
                 begin_navigation(model, target, HistoryAction::Push, anchor)
             }
             Err(err) => {
-                model.set_toast(
+                model.say(
                     ToastKind::Error,
-                    bad_url_note("bad link", &link.target, err),
+                    bad_url_note(StrId::BadLink, &link.target, err),
                 );
                 Vec::new()
             }
@@ -1819,12 +1843,16 @@ pub(crate) fn saved_image_effect(model: &Model, index: usize, open: bool) -> Opt
     }
 }
 
-pub(crate) fn bad_url_note(what: &str, raw: &str, err: UrlError) -> String {
+pub(crate) fn bad_url_note(what: StrId, raw: &str, err: UrlError) -> Text {
+    let what = Arg::Text(Box::new(Text::key(what)));
     match err {
         UrlError::NoDestination if raw.starts_with('/') => {
-            format!("{what} — try :{raw} (a local URL keeps the \":\")")
+            with_args(StrId::TryLocal, vec![what, Arg::Str(raw.to_string())])
         }
-        other => format!("{what}: {raw} — {other}"),
+        other => with_args(
+            StrId::BadUrlWhy,
+            vec![what, Arg::Str(raw.to_string()), Arg::Str(other.to_string())],
+        ),
     }
 }
 

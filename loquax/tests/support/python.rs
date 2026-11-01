@@ -122,7 +122,10 @@ impl Mesh {
     ) -> Sent {
         let instance = self.instance.clone();
         let config_dir = self.config_dir.path().to_path_buf();
-        let log = home.join(format!("events-{subcommand}-{}.log", args.join("-")));
+        // A path among the arguments (`--photo FILE`) is no directory of
+        // the log's name, and a long one no longer than a name may be.
+        let named: String = args.join("-").replace('/', "_").chars().take(160).collect();
+        let log = home.join(format!("events-{subcommand}-{named}.log"));
         let read_log = log.clone();
         let sent = tokio::task::spawn_blocking(move || {
             let mut command = Command::new(LNMSG);

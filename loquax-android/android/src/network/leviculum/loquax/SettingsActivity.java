@@ -36,6 +36,10 @@ import java.util.Map;
  * phone (1152). Advanced names the Propagation Node, the only place the
  * app does, and ends the service.
  *
+ * Chats holds the photo size (1220): small, phone (the default) or the
+ * original, with the one line that says the photo's place and camera data
+ * never go.
+ *
  * Privacy starts with "Send read receipts" (1233), the core's switch:
  * off, no receipt goes out and none is shown.
  *
@@ -52,13 +56,14 @@ public class SettingsActivity extends Activity implements Events.Listener {
     /** The pages in the list's order, by their title's string. */
     private static final int[] PAGES = {
         R.string.settings_profile, R.string.mailbox, R.string.settings_appearance,
-        R.string.settings_notifications, R.string.settings_privacy, R.string.settings_maps,
-        R.string.settings_backup, R.string.advanced,
+        R.string.settings_chats, R.string.settings_notifications, R.string.settings_privacy,
+        R.string.settings_maps, R.string.settings_backup, R.string.advanced,
     };
     /** What each page holds, one line under its title in the list. */
     private static final int[] SUMMARIES = {
         R.string.settings_profile_summary, R.string.settings_mailbox_summary,
-        R.string.settings_appearance_summary, R.string.settings_notifications_summary,
+        R.string.settings_appearance_summary, R.string.settings_chats_summary,
+        R.string.settings_notifications_summary,
         R.string.settings_privacy_summary, R.string.settings_maps_summary,
         R.string.settings_backup_summary, R.string.settings_advanced_summary,
     };
@@ -146,6 +151,8 @@ public class SettingsActivity extends Activity implements Events.Listener {
             mailbox();
         } else if (page == R.string.settings_appearance) {
             appearance();
+        } else if (page == R.string.settings_chats) {
+            chats();
         } else if (page == R.string.settings_notifications) {
             body.addView(padded(text(getString(R.string.settings_notifications_text), 15,
                     R.color.text_secondary)));
@@ -266,6 +273,59 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }, "loquax-theme").start();
     }
 
+    /**
+     * The photo size (1220), a choice of three, phone the default: the
+     * library keeps it as the config's `photo_size` and scales by it.
+     */
+    private void chats() {
+        TextView header = text(getString(R.string.photo_size), 14, R.color.accent);
+        header.setPadding(dp(16), dp(16), dp(16), dp(4));
+        body.addView(header);
+        final String[] words = {"small", "phone", "original"};
+        int[] labels = {R.string.photo_small, R.string.photo_phone, R.string.photo_original};
+        int[] ids = {R.id.photo_size_small, R.id.photo_size_phone, R.id.photo_size_original};
+        final RadioButton[] choices = new RadioButton[words.length];
+        RadioGroup group = new RadioGroup(this);
+        group.setPadding(dp(16), 0, dp(16), dp(8));
+        for (int i = 0; i < words.length; i++) {
+            final String word = words[i];
+            RadioButton choice = new RadioButton(this);
+            choice.setId(ids[i]);
+            choice.setText(labels[i]);
+            choice.setTextSize(16);
+            choice.setTextColor(getColor(R.color.text));
+            choice.setMinHeight(dp(48));
+            choice.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    photoSize(word, choices, words);
+                }
+            });
+            choices[i] = choice;
+            group.addView(choice);
+        }
+        body.addView(group);
+        body.addView(padded(text(getString(R.string.photo_size_text), 14, R.color.text_secondary)));
+        photoSize(null, choices, words);
+    }
+
+    /** Store `set` as the photo size, or with null only ask; as theme(). */
+    private void photoSize(final String set, final RadioButton[] choices, final String[] words) {
+        Map<String, Object> answer = Core.photoSize(set);
+        if (!Core.bool(answer, "ok")) {
+            android.widget.Toast.makeText(SettingsActivity.this,
+                    Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+            if (set != null) {
+                photoSize(null, choices, words);
+            }
+            return;
+        }
+        String chosen = Core.str(answer, "size");
+        for (int i = 0; i < words.length; i++) {
+            choices[i].setChecked(words[i].equals(chosen));
+        }
+    }
+
     /** The read receipts switch, the blocked contacts, the positions shared. */
     private void privacy() {
         receipts();
@@ -282,7 +342,58 @@ public class SettingsActivity extends Activity implements Events.Listener {
         for (Map<String, Object> row : rows) {
             body.addView(blocked(row));
         }
+        runningShares();
         sharedPositions();
+    }
+
+    /**
+     * "Position sharing" (1273): every running share by the library's
+     * list, with whom and for how long, each with its Stop.
+     */
+    private void runningShares() {
+        Map<String, Object> answer = Core.shares();
+        TextView header = text(Core.str(answer, "title"), 14, R.color.accent);
+        header.setPadding(dp(16), dp(24), dp(16), dp(4));
+        body.addView(header);
+        if (answer.containsKey("error")) {
+            body.addView(padded(text(Core.str(answer, "error"), 15, R.color.text_secondary)));
+            return;
+        }
+        List<Map<String, Object>> rows = Core.list(answer, "shares");
+        if (rows.isEmpty()) {
+            body.addView(padded(text(Core.str(answer, "empty"), 15, R.color.text_secondary)));
+        }
+        for (Map<String, Object> row : rows) {
+            final String peer = Core.str(row, "peer");
+            LinearLayout line = new LinearLayout(this);
+            line.setTag(Core.str(row, "id"));
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(dp(16), dp(8), dp(4), dp(8));
+            LinearLayout words = new LinearLayout(this);
+            words.setOrientation(LinearLayout.VERTICAL);
+            words.addView(text(Core.str(row, "name"), 16, R.color.text));
+            words.addView(text(Core.str(row, "words"), 14, R.color.text_secondary));
+            line.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            Button stop = new Button(this, null, android.R.attr.borderlessButtonStyle);
+            stop.setText(Core.str(answer, "stop"));
+            stop.setTextColor(getColor(R.color.accent));
+            stop.setTag("share_stop_" + peer);
+            stop.setContentDescription(Core.str(answer, "stop") + ", " + Core.str(row, "name"));
+            stop.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String error = Core.stopShare(peer);
+                    if (error != null) {
+                        android.widget.Toast.makeText(SettingsActivity.this, error,
+                                android.widget.Toast.LENGTH_LONG).show();
+                    }
+                    ShareService.look(SettingsActivity.this, false);
+                    recreate();
+                }
+            });
+            line.addView(stop);
+            body.addView(line);
+        }
     }
 
     /**

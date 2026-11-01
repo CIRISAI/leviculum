@@ -40,6 +40,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -59,12 +60,27 @@ TARGET = "x86_64-unknown-linux-musl"
 STEPS = [
     "fixture",
     "install",
+    "join_error_words",
     "first_start",
     "list",
+    "notification_text",
     "open_imported",
     "info",
     "marks",
     "reply_send",
+    "compose_bar",
+    "image",
+    "picture_zoom",
+    "file",
+    "voice",
+    "voice_hold_release",
+    "voice_slide_cancel",
+    "voice_lock_send",
+    "voice_silence_hint",
+    "camera_photo",
+    "share_position_from_bar",
+    "share_for_15_min",
+    "share_until_stopped",
     "receive_wake",
     "receive_report",
     "position_pin",
@@ -75,6 +91,12 @@ STEPS = [
     "settings",
     "receipts",
     "profile",
+    "first_start_qr",
+    "pencil_scan",
+    "share_in_contact",
+    "buildings",
+    "first_start_name",
+    "link_device",
     "teardown",
 ]
 
@@ -82,6 +104,35 @@ STEPS = [
 # runs the phone in English; a German one shows values-de's.
 WHERE_TITLE = "Where should your mailbox be?"
 WHERE_COMPUTER = "On a computer at home"
+WHERE_PHONE = "On this phone"
+USE_THIS_PHONE = "Use this phone"
+DONE = "Done"
+# Link a device (1264, finding 7): the profile's row, the sheet's ids, the
+# line once the other device came, and the name the walk's second device
+# (the host's loquax) brings in its join.
+LINK_ROW = "profile_link_device"
+LINK_QR = "link_qr"
+LINK_CODE = "link_code"
+LINK_STATUS = "link_status"
+LINKED = "Device linked: {}"
+LINKED_NAME = "walk laptop"
+JOIN_CODE_PREFIX = "lqxh1"
+# The first start's name (walk finding 9): the address page's one field,
+# and the name the walk types into it on a phone mailbox.
+WELCOME_NAME = "welcome_name"
+WELCOME_QR = "welcome_qr"
+PHONE_NAME = "Walk Phone"
+# The always-on notification (walk finding 19): its line names the
+# mailbox, never the server it dials.
+SESSION_LINE = re.compile(r"^Connected to your mailbox(?:, \d+ unread)?$")
+NOT_CONNECTED = "Not connected, trying again"
+# A friend's code from another app (walk finding 12): the name dialog, the
+# name the walk gives, and the chat's banner that must not show right
+# after the add (walk finding 15).
+ADD_CONTACT = "Add contact"
+ADD_CONTACT_ASK = "What do you call this contact?"
+FRIEND_NAME = "Walk Friend"
+BOOK_BANNER = "book_banner"
 CONTINUE = "Continue"
 PASTE_CODE = "Paste a code"
 JOIN = "Join"
@@ -105,13 +156,15 @@ TABS = ["tab_chats", "tab_map"]
 NOT_DECODED = "did not decode"
 # The settings' entries in the list's order (1199, SettingsActivity.PAGES).
 SETTINGS_PAGES = [
-    "Profile", "Mailbox", "Appearance", "Notifications", "Privacy", "Maps", "Backup", "Advanced",
+    "Profile", "Mailbox", "Appearance", "Chats", "Notifications", "Privacy", "Maps", "Backup",
+    "Advanced",
 ]
 # Each page's mark that it is that page and not a copy of another (1201):
 # an id or a text only it shows. Pages with no mark of their own say none.
 SETTINGS_PAGE_MARKS = {
     "Profile": ("rid", "profile_qr"),
     "Appearance": ("text", THEME_AUTO),
+    "Chats": ("rid", "photo_size_phone"),
     "Privacy": ("text", "Positions you shared"),
     "Maps": ("rid", "maps_auto"),
 }
@@ -121,6 +174,115 @@ RECEIPTS_ROW = "Send read receipts"
 RECEIPTS_LINE = "Others see when you have read their messages."
 RECEIPTS_SWITCH = "privacy_receipts"
 BLOCKED_HEADER = "Blocked contacts"
+# A photo (1220): the repository's fixture, what the paperclip's entry
+# says, what a bubble's photo is called by a screen reader (the
+# catalogue's scene_photo), and the whole photo's view id.
+FIXTURE_PHOTO = REPO / "loquax" / "tests" / "fixtures" / "photo-portrait.jpg"
+ATTACH_PHOTO = "Gallery"
+PHOTO_WORDS = re.compile(r"^Photo, \d+(?:\.\d)? (?:B|KB|MB)$")
+PHOTO_FULL = "photo_full"
+# The compose bar (1270, after Signal): the buttons inside the field
+# left to right, and the round one outside it, by the scene's ids
+# (scene::NodeId::resource); five with an empty field, four once a letter
+# is typed (the plus is Send, the microphone hides). The plus sheet's and
+# the position sheet's rows, the staged photo's words, the fixtures the
+# debug build takes for the camera (ChatActivity.CAMERA_FIXTURE) and the
+# phone's fix (Locator.FIXTURE), and the walk's seeded fix.
+BAR_EMPTY = ["emoji", "locate", "camera", "record", "plus"]
+BAR_TYPED = ["emoji", "locate", "camera", "send"]
+BAR_IDS = ["emoji", "locate", "camera", "record", "plus", "send"]
+SHEET_GALLERY = "sheet_gallery"
+SHEET_FILE = "sheet_file"
+SHEET_SHARE_NOW = "sheet_share_now"
+SHEET_FIX_WORDS = "sheet_fix_words"
+STAGED_WORDS = re.compile(r"^Photo to send, \d+(?:\.\d)? (?:B|KB|MB)$")
+CAMERA_FIXTURE = "camera-fixture.jpg"
+FIX_FIXTURE = "fix-fixture.txt"
+SEEDED_FIX = "43.7731,11.2560"
+# A share for a while (1273): the sheet's rows, the chat's chip, its
+# Stop, its words; a second seeded fix 44 m north of the first, a move by
+# the share's 25 m; and the end report's mark as the wire carries it, the
+# msgpack of `"ended": true` in the location's eighth element.
+SHEET_SHARE_15_MIN = "sheet_share_15_min"
+SHEET_SHARE_UNTIL = "sheet_share_until_stopped"
+SHARE_CHIP = "share_chip"
+SHARE_WORDS = "share_words"
+SHARE_STOP = "share_stop"
+SHARE_LEFT = re.compile(r"^Sharing your position, \d+ (?:min|h) left$")
+SHARE_UNTIL = "Sharing your position until you stop"
+MOVED_FIX = "43.7735,11.2560"
+SHARE_ENDED = b"\xa5ended\xc3"
+# A file (1221): what the paperclip's entry says, what a bubble's file is
+# called by a screen reader (the catalogue's scene_file), and the line the
+# chat shows where no app on the phone opens the kind.
+ATTACH_FILE = "File"
+FILE_WORDS = re.compile(r"^File (?P<name>.+), \d+(?:\.\d)? (?:B|KB|MB)$")
+FILE_NO_APP = "No app here opens this file."
+# A voice message (1222): what a screen reader says for a bubble's player
+# (the catalogue's scene_voice), its two buttons, and the fixture the
+# debug build records instead of the microphone (Voice.FIXTURE).
+VOICE_WORDS = re.compile(r"^Voice message, (?P<m>\d+):(?P<s>\d\d)$")
+VOICE_PLAY = "Play"
+VOICE_PAUSE = "Pause"
+VOICE_FIXTURE = "voice-fixture.pcm"
+# Recording a voice message (1276): the recording bar's parts by the
+# scene's ids (rec_dot the pulsing dot, selected while it pulses, rec_held
+# the microphone under the finger), its words (the catalogue's rec_*, the
+# hint with RecordingBar's chevron), the timer's form, and the parts each
+# phase shows and does not.
+REC_TIMER = re.compile(r"^REC (?P<m>\d\d):(?P<s>\d\d)$")
+REC_SLIDE = "\u2039 Slide left to cancel"
+REC_RELEASE = "\u2039 Release to cancel"
+REC_HELD = "Release to send"
+REC_LOCK = "Lock the recording"
+REC_LOCKED = "Recording locked"
+REC_SILENT = "Nothing heard. Is the microphone allowed?"
+REC_ALLOW = "Allow the microphone"
+REC_PARTS = {
+    "held": (
+        ["rec_bar", "rec_dot", "rec_timer", "rec_wave", "rec_cancel", "rec_held", "rec_lock"],
+        ["compose", "rec_send", "rec_pause", "rec_discard", "rec_resume"],
+    ),
+    "locked": (
+        ["rec_bar", "rec_dot", "rec_timer", "rec_wave", "rec_lock", "rec_discard", "rec_pause", "rec_send"],
+        ["compose", "rec_held", "rec_cancel", "rec_resume", "rec_play"],
+    ),
+    "paused": (
+        ["rec_bar", "rec_dot", "rec_timer", "rec_wave", "rec_discard", "rec_play", "rec_resume", "rec_send"],
+        ["compose", "rec_held", "rec_cancel", "rec_pause", "rec_lock"],
+    ),
+}
+# RecordingBar.log's line in a debuggable build, under the tag `loquax`,
+# whenever the phase, the dot, the chip, the hint's arming, the buttons or
+# the line change.
+REC_LINE = re.compile(
+    r"REC_BAR phase=(?P<phase>\w+) pulsing=(?P<pulsing>true|false) locked=(?P<locked>true|false) "
+    r"armed=(?P<armed>true|false) buttons=(?P<buttons>[\w,]*) notice=(?P<notice>[^\r\n]*)"
+)
+# One contact code everywhere (1263, finding 1): the first start's
+# address page, opened in the debug APK by `am start` with this extra, and
+# the start of every contact code its QR and the profile's hold.
+WELCOME_ACTIVITY = "network.leviculum.loquax.WelcomeActivity"
+LXMA_PREFIX = "lxma://"
+# The pencil (1263, finding 3): its two rows, top to bottom, the fold
+# that hides the typed address, and the sentence for a text that is no
+# code (the catalogue's code_foreign).
+PENCIL_SCAN = "new_scan"
+PENCIL_PASTE = "new_paste"
+PENCIL_ADVANCED = "new_advanced"
+CODE_FOREIGN = "That is not a Loquax code."
+# Join errors in plain words (1263, finding 8): what a code that is no
+# mailbox's says (the catalogue's join_not_mailbox), the parser's words
+# behind Details, and the ids of Retry and the fold.
+JOIN_NOT_MAILBOX = "That code is not a mailbox code."
+JOIN_DETAILS_SAY = "That is not a mailbox code"
+JOIN_RETRY = "join_retry"
+JOIN_DETAILS_TOGGLE = "join_details_toggle"
+JOIN_DETAILS = "join_details"
+BAD_MAILBOX_CODE = "lqxh1nonsense"
+# Words the 90 % never see on a main row (1263): Reticulum's and the
+# daemon's.
+DAEMON_WORDS = ["LXMF", "hex digit", "lnsd", "TCP", "host:port", "loquax home", "Reticulum"]
 # The region the walk puts on the phone for the Maps page (1207): the
 # repository's Florence fixture, and the middle the page names it by
 # (Ui.place, two decimals, either decimal mark).
@@ -157,6 +319,29 @@ MARK_WORDS = {
 }
 # A mark of ours the walk counts as a tick: anyone confirmed it.
 TICKS = {"state_tick", "state_ticks", "state_ticks_read"}
+# The buildings step (1193): the walk's region of central Frankfurt, z15
+# with its building sections, and the place the map opens on, degrees
+# times a million; the screen the debug APK exports for it.
+FRANKFURT_REGION = REPO / "leviculum-map" / "fixtures" / "frankfurt" / "roemer.lmr"
+FRANKFURT_E6 = (50107750, 8682000)
+MAP_ACTIVITY = "network.leviculum.loquax.MapActivity"
+# The building fill as the phone's frame holds it: the table's colour
+# through RGB565 (leviculum_mapfill::frame::rgb888). tests/map.rs holds
+# these to the renderer, and the shares below to its frame of this view.
+BUILDING_FILL_LIGHT = (222, 215, 206)
+BUILDING_FILL_DARK = (57, 60, 66)
+# Samples across the middle half of the screen, columns by rows.
+BUILDINGS_GRID = (32, 64)
+# At z16 at least this share of the samples is fill; at z15, where the
+# map draws no building, at most this.
+BUILDINGS_LEAST = 0.05
+BUILDINGS_Z15_MOST = 0.005
+# The frame time proxy: the time from the screen asked for to the map at
+# rest on screen, z16 with its buildings at most this many times z15's
+# plus the slack (a screencap's own while is the proxy's grain).
+SETTLE_FACTOR = 1.5
+SETTLE_SLACK_MS = 1000
+SETTLE_TIMEOUT_S = 20
 
 
 # --- Parsers: what the unit tests under scripts/tests/ pin. ---
@@ -175,6 +360,7 @@ class Node:
     long_clickable: bool = False
     scrollable: bool = False
     checked: bool = False
+    selected: bool = False
 
     @property
     def center(self) -> tuple[int, int]:
@@ -207,6 +393,460 @@ def marks_problems(seen: dict[str, str]) -> list[str]:
         if not desc.startswith(MARK_WORDS[rid]):
             problems.append(f"{rid} says {desc!r}, not {' or '.join(MARK_WORDS[rid])!r}")
     return problems
+
+
+def bar_on(nodes: list[Node]) -> list[Node]:
+    """The compose bar's buttons on screen (1270), left to right."""
+    found = [n for n in nodes if any(n.is_id(rid) for rid in BAR_IDS)]
+    return sorted(found, key=lambda n: (n.bounds[0], n.bounds[1]))
+
+
+def bar_id(node: Node) -> str:
+    """The scene's id of a compose bar button node, or ""."""
+    return next((rid for rid in BAR_IDS if node.is_id(rid)), "")
+
+
+def bar_problems(nodes: list[Node], typed: bool) -> list[str]:
+    """What is wrong with the compose bar (1270): not the buttons the
+    scene lists for an empty or a typed field, in their order; a button
+    a screen reader cannot name; the emoji not left of the field, the
+    others not right of it; the round button inside the field's pill."""
+    want = BAR_TYPED if typed else BAR_EMPTY
+    buttons = bar_on(nodes)
+    have = [bar_id(n) for n in buttons]
+    problems = []
+    if have != want:
+        problems.append(f"the bar has {have}, want {want}")
+    for node in buttons:
+        if not node.desc:
+            problems.append(f"{bar_id(node)} has no words for a screen reader")
+    field = find(nodes, rid="compose")
+    if not field:
+        return problems + ["no compose field"]
+    fx1, _, fx2, _ = field[0].bounds
+    for node in buttons:
+        x1, _, x2, _ = node.bounds
+        rid = bar_id(node)
+        if rid == "emoji" and x2 > fx1:
+            problems.append(f"the emoji is not left of the field: {node.bounds} vs {field[0].bounds}")
+        if rid != "emoji" and x1 < fx2:
+            problems.append(f"{rid} is not right of the field: {node.bounds} vs {field[0].bounds}")
+    inside = [n for n in buttons if bar_id(n) in ("locate", "camera", "record")]
+    rounds = [n for n in buttons if bar_id(n) in ("plus", "send")]
+    if rounds and inside and rounds[0].bounds[0] < max(n.bounds[2] for n in inside):
+        problems.append("the round button is not outside the field")
+    return problems
+
+
+def caption_bubble_problems(nodes: list[Node], photo: Node, caption: str) -> list[str]:
+    """What is wrong with the bubble of a photo sent with a caption
+    (1270, 1268's one bubble): the photo in no bubble or more than one,
+    its bubble without the caption as its text row, or without a
+    delivery mark."""
+    around = [b for b in find(nodes, rid="bubble") if inside(photo, b)]
+    if len(around) != 1:
+        return [f"the photo is in {len(around)} bubbles, want one"]
+    bubble = around[0]
+    problems = []
+    words = [n.text for n in find(nodes, rid="body") if inside(n, bubble)]
+    if words != [caption]:
+        problems.append(f"its bubble says {words}, want [{caption!r}]")
+    if not [n for n in marks_on(nodes) if inside(n, bubble)]:
+        problems.append("its bubble has no delivery mark")
+    return problems
+
+
+def accepted_to(log: str, peer: str) -> int:
+    """How many sends the mailbox accepted for `peer` (`HOME send accepted
+    ... to=<peer>`)."""
+    return sum(
+        1
+        for line in log.splitlines()
+        if "HOME send accepted" in line and f"to={peer}" in line
+    )
+
+
+def chip_problems(nodes: list[Node], words) -> list[str]:
+    """What is wrong with the share's chip (1273): not there, its words
+    not `words` (a string, or a pattern), or a Stop without words for a
+    screen reader."""
+    if not find(nodes, rid=SHARE_CHIP):
+        return ["no share chip"]
+    said = [n.text for n in find(nodes, rid=SHARE_WORDS)]
+    problems = []
+    fits = (lambda t: words.match(t)) if hasattr(words, "match") else (lambda t: t == words)
+    if len(said) != 1 or not fits(said[0]):
+        want = words.pattern if hasattr(words, "match") else words
+        problems.append(f"the chip says {said}, want {want!r}")
+    stop = find(nodes, rid=SHARE_STOP)
+    if not stop:
+        problems.append("the chip has no Stop")
+    elif not (stop[0].desc or stop[0].text):
+        problems.append("the Stop has no words for a screen reader")
+    return problems
+
+
+def end_reports(store: Path, peer: str) -> int:
+    """How many messages the mailbox's outbox holds for `peer` that carry
+    a share's end mark (1273): the packed LXMF is plaintext at rest, its
+    telemetry field with it."""
+    import sqlite3
+
+    if not store.exists():
+        return 0
+    conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT packed FROM home_outbox WHERE lower(hex(destination)) = ?",
+            (peer.lower(),),
+        ).fetchall()
+    finally:
+        conn.close()
+    return sum(1 for (packed,) in rows if SHARE_ENDED in bytes(packed))
+
+
+def photos_on(nodes: list[Node]) -> list[Node]:
+    """The bubbles' photos on screen (1220), top first."""
+    return by_top(find(nodes, rid="photo"))
+
+
+def photo_problems(photos: list[Node], before: int) -> list[str]:
+    """What is wrong with the photos on screen after one was sent, when
+    `before` were there: none new, one a screen reader cannot name, or
+    one drawn as a sliver (its thumbnail is at least 48 px a side)."""
+    problems = []
+    if len(photos) <= before:
+        problems.append(f"{len(photos)} photos on screen, {before} before the send")
+    for node in photos:
+        if not PHOTO_WORDS.match(node.desc):
+            problems.append(f"a photo says {node.desc!r}")
+        x1, y1, x2, y2 = node.bounds
+        if min(x2 - x1, y2 - y1) < 48:
+            problems.append(f"a photo is {x2 - x1}x{y2 - y1}")
+    return problems
+
+
+def photo_bubble_problems(nodes: list[Node], photo: Node) -> list[str]:
+    """What is wrong with the bubble of a photo sent without words (1268):
+    it is in no bubble or in more than one, its bubble holds a text row,
+    a bubble on screen holds nothing, or its bubble has no delivery
+    mark."""
+    bubbles = find(nodes, rid="bubble")
+    around = [b for b in bubbles if inside(photo, b)]
+    if len(around) != 1:
+        return [f"the photo is in {len(around)} bubbles, want one"]
+    bubble = around[0]
+    problems = []
+    texts = [n for n in find(nodes, rid="body") if inside(n, bubble)]
+    if texts:
+        problems.append(f"its bubble has a text row {texts[0].text!r}")
+    # Every bubble holds something a screen shows or a reader says: a
+    # text, a photo, a file, a voice message.
+    for other in bubbles:
+        if not any(inside(n, other) for n in nodes if n.text.strip() or n.desc):
+            problems.append(f"an empty bubble at {other.bounds}")
+    if not [n for n in marks_on(nodes) if inside(n, bubble)]:
+        problems.append("its bubble has no mark")
+    return problems
+
+
+def files_on(nodes: list[Node]) -> list[Node]:
+    """The bubbles' file rows on screen (1221), top first: what a screen
+    reader names as a file."""
+    return by_top([n for n in nodes if FILE_WORDS.match(n.desc)])
+
+
+def file_problems(files: list[Node], before: int, name: str) -> list[str]:
+    """What is wrong with the file rows on screen after `name` was sent,
+    when `before` were there: none new, or the newest not named `name`."""
+    if len(files) <= before:
+        return [f"{len(files)} files on screen, {before} before the send"]
+    match = FILE_WORDS.match(files[-1].desc)
+    if match is None or match.group("name") != name:
+        return [f"the newest file says {files[-1].desc!r}, want {name!r}"]
+    return []
+
+
+def voices_on(nodes: list[Node]) -> list[Node]:
+    """The bubbles' voice players on screen (1222), top first: what a
+    screen reader names as a voice message."""
+    return by_top([n for n in nodes if VOICE_WORDS.match(n.desc)])
+
+
+def voice_problems(voices: list[Node], before: int, least_s: int) -> list[str]:
+    """What is wrong with the players on screen after a hold of the
+    microphone, when `before` were there: none new, or the newest shorter
+    than `least_s` seconds."""
+    if len(voices) <= before:
+        return [f"{len(voices)} voice messages on screen, {before} before the hold"]
+    match = VOICE_WORDS.match(voices[-1].desc)
+    if match is None:
+        return [f"the newest says {voices[-1].desc!r}"]
+    secs = int(match.group("m")) * 60 + int(match.group("s"))
+    if secs < least_s:
+        return [f"the newest is {secs} s long, want at least {least_s}"]
+    return []
+
+
+def rec_bar_problems(nodes: list[Node], phase: str) -> list[str]:
+    """What is wrong with the recording bar on screen for `phase` (1276,
+    `held`, `locked` or `paused`): a part it shows missing, one it does
+    not show there, a timer not of the form `REC 00:07`, the hint, the
+    held microphone or the chip with other words, a button without words
+    for a screen reader."""
+    want, gone = REC_PARTS[phase]
+    problems = [f"no {rid}" for rid in want if not find(nodes, rid=rid)]
+    problems += [f"{rid} on screen while {phase}" for rid in gone if find(nodes, rid=rid)]
+    timer = find(nodes, rid="rec_timer")
+    if timer and not REC_TIMER.match(timer[0].text):
+        problems.append(f"the timer says {timer[0].text!r}")
+    lock = find(nodes, rid="rec_lock")
+    if phase == "held":
+        hint = find(nodes, rid="rec_cancel")
+        if hint and hint[0].text not in (REC_SLIDE, REC_RELEASE):
+            problems.append(f"the hint says {hint[0].text!r}")
+        held = find(nodes, rid="rec_held")
+        if held and held[0].desc != REC_HELD:
+            problems.append(f"the held microphone says {held[0].desc!r}")
+        if lock and (lock[0].desc != REC_LOCK or lock[0].selected):
+            problems.append(f"the chip says {lock[0].desc!r}, closed={lock[0].selected}, want open")
+    if phase == "locked" and lock and (lock[0].desc != REC_LOCKED or not lock[0].selected):
+        problems.append(f"the chip says {lock[0].desc!r}, closed={lock[0].selected}, want closed")
+    for rid in ("rec_discard", "rec_pause", "rec_resume", "rec_play", "rec_send"):
+        for button in find(nodes, rid=rid):
+            if not button.desc:
+                problems.append(f"{rid} has no words for a screen reader")
+    return problems
+
+
+def rec_seconds(nodes: list[Node]) -> int | None:
+    """The recording bar's timer in seconds; None without one."""
+    timer = find(nodes, rid="rec_timer")
+    m = REC_TIMER.match(timer[0].text) if timer else None
+    return int(m.group("m")) * 60 + int(m.group("s")) if m else None
+
+
+def rec_pulsing(nodes: list[Node]) -> bool | None:
+    """Whether the bar's dot pulses (selected); None without a dot."""
+    dot = find(nodes, rid="rec_dot")
+    return dot[0].selected if dot else None
+
+
+def rec_notice_problems(nodes: list[Node]) -> list[str]:
+    """What is wrong with the line of a microphone that hears nothing:
+    not there, other words, no way to the permission, a dot that still
+    pulses."""
+    problems = []
+    said = [n.text for n in find(nodes, rid="rec_notice")]
+    if said != [REC_SILENT]:
+        problems.append(f"the line says {said}, want [{REC_SILENT!r}]")
+    allow = find(nodes, rid="rec_allow")
+    if not allow or allow[0].text != REC_ALLOW:
+        problems.append(f"no {REC_ALLOW!r} button: {[n.text for n in allow]}")
+    if rec_pulsing(nodes) is not False:
+        problems.append(f"the dot pulses={rec_pulsing(nodes)}, want False")
+    return problems
+
+
+def parse_rec_lines(logcat: str) -> list[dict]:
+    """RecordingBar's lines in a logcat, oldest first: the phase, the dot,
+    the chip, the hint's arming as booleans, the buttons as a list."""
+    out = []
+    for m in REC_LINE.finditer(logcat):
+        line = m.groupdict()
+        for key in ("pulsing", "locked", "armed"):
+            line[key] = line[key] == "true"
+        line["buttons"] = [b for b in line["buttons"].split(",") if b]
+        line["notice"] = line["notice"].strip()
+        out.append(line)
+    return out
+
+
+def rec_went(lines: list[dict], *path: str) -> list[str]:
+    """What is missing from the phases `lines` went through for them to
+    have gone `path` in that order (`held`, then `cancelled`; a phase
+    word, or `armed` for a held line armed to cancel)."""
+    at = 0
+    for line in lines:
+        if at == len(path):
+            break
+        want = path[at]
+        if want == "armed" and line["phase"] == "held" and line["armed"]:
+            at += 1
+        elif want == line["phase"]:
+            at += 1
+    return [] if at == len(path) else [f"no {path[at]!r} after {list(path[:at])} in {[l['phase'] for l in lines]}"]
+
+
+# --- The photo viewer's zoom (1269). ---
+
+# `PhotoView.logState`'s line, under the tag `loquax`, once a gesture
+# settled.
+PHOTO_ZOOM = re.compile(
+    r"PHOTO_ZOOM scale=(?P<scale>[\d.]+) left=(?P<left>-?[\d.]+) top=(?P<top>-?[\d.]+) "
+    r"width=(?P<width>[\d.]+) height=(?P<height>[\d.]+) view=(?P<vw>\d+)x(?P<vh>\d+)"
+)
+
+
+@dataclass
+class TouchDevice:
+    """A multi-touch screen of `getevent -pl`: its node and the range of
+    its two position axes, and whether it takes a pressure and a touch
+    size, which some drivers want above 0 for a contact."""
+
+    path: str
+    x_min: int
+    x_max: int
+    y_min: int
+    y_max: int
+    pressure: bool = False
+    touch_major: bool = False
+
+
+AXIS = re.compile(r"(ABS_MT_[A-Z_]+)\s*:\s*value -?\d+, min (-?\d+), max (-?\d+)")
+
+
+def parse_touch_device(getevent: str) -> TouchDevice | None:
+    """The first direct (screen, not pad) multi-touch device with slots
+    in `getevent -pl`'s listing; any with slots when none says direct."""
+    found: list[tuple[bool, TouchDevice]] = []
+    for block in re.split(r"(?m)^add device \d+: ", getevent)[1:]:
+        path = block.split("\n", 1)[0].strip()
+        axes = {name: (int(lo), int(hi)) for name, lo, hi in AXIS.findall(block)}
+        if not {"ABS_MT_SLOT", "ABS_MT_POSITION_X", "ABS_MT_POSITION_Y"} <= axes.keys():
+            continue
+        (x_min, x_max), (y_min, y_max) = axes["ABS_MT_POSITION_X"], axes["ABS_MT_POSITION_Y"]
+        device = TouchDevice(
+            path,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            pressure="ABS_MT_PRESSURE" in axes,
+            touch_major="ABS_MT_TOUCH_MAJOR" in axes,
+        )
+        found.append(("INPUT_PROP_DIRECT" in block, device))
+    direct = [d for is_direct, d in found if is_direct]
+    return (direct or [d for _, d in found] or [None])[0]
+
+
+def parse_wm_size(text: str) -> tuple[int, int] | None:
+    """The screen's size of `wm size`: the override when one is set."""
+    sizes = re.findall(r"(Physical|Override) size: (\d+)x(\d+)", text)
+    if not sizes:
+        return None
+    by = {kind: (int(w), int(h)) for kind, w, h in sizes}
+    return by.get("Override", by.get("Physical"))
+
+
+# The input event codes a pinch writes (linux/input-event-codes.h).
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+SYN_REPORT, BTN_TOUCH = 0, 0x14A
+ABS_MT_SLOT, ABS_MT_TOUCH_MAJOR, ABS_MT_POSITION_X = 0x2F, 0x30, 0x35
+ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID, ABS_MT_PRESSURE = 0x36, 0x39, 0x3A
+
+
+def pinch_events(
+    touch: TouchDevice,
+    screen: tuple[int, int],
+    centre: tuple[int, int],
+    radii: tuple[int, int],
+    steps: int = 12,
+) -> list[tuple[int, int, int]]:
+    """Two fingers on a horizontal line through `centre`, `radii[0]`
+    screen pixels either side of it at first and `radii[1]` at last, in
+    `steps` moves: the (type, code, value) events of multi-touch protocol
+    B, the screen's pixels mapped onto the device's axes."""
+    sw, sh = screen
+    cx, cy = centre
+
+    def to_device(x: float, y: float) -> tuple[int, int]:
+        dx = touch.x_min + round(max(0, min(sw - 1, x)) * (touch.x_max - touch.x_min) / max(1, sw - 1))
+        dy = touch.y_min + round(max(0, min(sh - 1, y)) * (touch.y_max - touch.y_min) / max(1, sh - 1))
+        return dx, dy
+
+    events: list[tuple[int, int, int]] = []
+
+    def fingers(r: float, first: bool) -> None:
+        for slot, side in ((0, -1), (1, 1)):
+            x, y = to_device(cx + side * r, cy)
+            events.append((EV_ABS, ABS_MT_SLOT, slot))
+            if first:
+                events.append((EV_ABS, ABS_MT_TRACKING_ID, 1269 + slot))
+                if touch.touch_major:
+                    events.append((EV_ABS, ABS_MT_TOUCH_MAJOR, 6))
+                if touch.pressure:
+                    events.append((EV_ABS, ABS_MT_PRESSURE, 60))
+            events.append((EV_ABS, ABS_MT_POSITION_X, x))
+            events.append((EV_ABS, ABS_MT_POSITION_Y, y))
+        if first:
+            events.append((EV_KEY, BTN_TOUCH, 1))
+        events.append((EV_SYN, SYN_REPORT, 0))
+
+    r0, r1 = radii
+    fingers(r0, True)
+    for i in range(1, steps + 1):
+        fingers(r0 + (r1 - r0) * i / steps, False)
+    for slot in (0, 1):
+        events.append((EV_ABS, ABS_MT_SLOT, slot))
+        events.append((EV_ABS, ABS_MT_TRACKING_ID, -1))
+    events.append((EV_KEY, BTN_TOUCH, 0))
+    events.append((EV_SYN, SYN_REPORT, 0))
+    return events
+
+
+def sendevent_script(path: str, events: list[tuple[int, int, int]]) -> str:
+    """One shell line writing `events` to the device at `path`."""
+    return "; ".join(f"sendevent {path} {t} {c} {v}" for t, c, v in events)
+
+
+def parse_photo_zoom(logcat: str) -> list[dict]:
+    """The viewer's settled states in a logcat, oldest first."""
+    out = []
+    for m in PHOTO_ZOOM.finditer(logcat):
+        out.append({k: float(v) for k, v in m.groupdict().items()})
+    return out
+
+
+def zoom_bounds_problems(state: dict) -> list[str]:
+    """What is wrong with where the viewer put the picture: an axis it is
+    wider than the screen on whose edge has come inside the screen, or one
+    it is narrower on where it is not centred."""
+    problems = []
+    for axis, start, size, screen in (
+        ("x", state["left"], state["width"], state["vw"]),
+        ("y", state["top"], state["height"], state["vh"]),
+    ):
+        if size >= screen - 1:
+            if start > 1 or start + size < screen - 1:
+                problems.append(f"{axis}: {size:.0f} px from {start:.0f} leaves a gap on a {screen:.0f} px screen")
+        elif abs(start - (screen - size) / 2) > 1:
+            problems.append(f"{axis}: {size:.0f} px at {start:.0f} is not centred on {screen:.0f} px")
+    return problems
+
+
+def inside(node: Node, box: Node) -> bool:
+    """Whether `node`'s middle is within `box`."""
+    x, y = node.center
+    x1, y1, x2, y2 = box.bounds
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+
+def speech_pcm(rate: int, ms: int) -> bytes:
+    """Mono 16-bit speech-like sound, as loquax::voice::test_speech makes
+    it for the tests: a voice of moving pitch in syllables with pauses."""
+    out = bytearray()
+    phase = 0.0
+    for i in range(rate * ms // 1000):
+        t = i / rate
+        syllable = int(t / 0.25)
+        within = t / 0.25 - syllable
+        envelope = 0.0 if syllable % 4 == 3 else math.sin(math.pi * within) ** 2
+        pitch = 140.0 + 40.0 * math.sin(t * 2.1)
+        phase += 2 * math.pi * pitch / rate
+        s = envelope * sum(math.sin(phase * h) / h for h in range(1, 8))
+        out += struct.pack("<h", max(-32000, min(32000, int(s * 6000))))
+    return bytes(out)
 
 
 def parse_bounds(text: str) -> tuple[int, int, int, int] | None:
@@ -268,6 +908,7 @@ def parse_dump(xml_text: str) -> list[Node]:
                 long_clickable=el.get("long-clickable") == "true",
                 scrollable=el.get("scrollable") == "true",
                 checked=el.get("checked") == "true",
+                selected=el.get("selected") == "true",
             )
         )
     return nodes
@@ -378,7 +1019,7 @@ RAW_HASH = re.compile(r"[0-9a-f]{32}|<[0-9a-f]{8}…>")
 
 def settings_list_problems(nodes: list[Node]) -> tuple[list[str], list[str]]:
     """The settings list's titles from the top down (1201), and what is
-    wrong: not the eight pages in their order, a title without its one
+    wrong: not the nine pages in their order, a title without its one
     line description, a raw hash on a main row, a line that did not
     decode."""
     titles = [n.text for n in by_top(find(nodes, rid="settings_entry_title"))]
@@ -418,6 +1059,141 @@ def profile_problems(nodes: list[Node], want: str | None) -> tuple[str, list[str
         problems.append("no Share")
     problems += decode_problems(nodes)
     return shown, problems
+
+
+def qr_texts(zbar: str) -> list[str]:
+    """What `zbarimg --quiet --raw` read: one code a line, blank lines
+    dropped."""
+    return [line.strip() for line in zbar.splitlines() if line.strip()]
+
+
+def first_start_qr_problems(welcome: list[str], profile: list[str], address: str | None) -> list[str]:
+    """The first start's QR and the profile's (1263, finding 1): each one
+    code, a contact code, of the mailbox's address when known, and the
+    same."""
+    problems = []
+    for where, read in (("first start", welcome), ("profile", profile)):
+        if len(read) != 1:
+            problems.append(f"the {where} screen holds {len(read)} codes: {read}")
+        elif not read[0].startswith(LXMA_PREFIX):
+            problems.append(f"the {where} QR is {read[0]!r}, no contact code")
+        elif address is not None and not read[0].startswith(f"{LXMA_PREFIX}{address}:"):
+            problems.append(f"the {where} QR is {read[0]!r}, not of {address}")
+    if len(welcome) == 1 and len(profile) == 1 and welcome != profile:
+        problems.append(f"the first start's QR {welcome[0]!r} is not the profile's {profile[0]!r}")
+    return problems
+
+
+def link_code_problems(shown: str, scanned: list[str], server: str) -> list[str]:
+    """The sheet of "Link a device" (1264): the code as text is a join
+    code with the phone mailbox's server list behind it, which the walk
+    set to `server`, and the QR on screen reads as the same code (a join
+    code's QR raises it to capitals for the alphanumeric mode, so the case
+    is not compared)."""
+    problems = []
+    if not shown.startswith(JOIN_CODE_PREFIX):
+        problems.append(f"the code {shown!r} is no join code")
+    elif not shown.endswith(f"@{server}"):
+        problems.append(f"the code {shown!r} does not carry {server}")
+    if len(scanned) != 1:
+        problems.append(f"the sheet holds {len(scanned)} codes: {scanned}")
+    elif scanned[0].lower() != shown.lower():
+        problems.append(f"the QR reads {scanned[0]!r}, the text says {shown!r}")
+    return problems
+
+
+def first_start_name_problems(nodes: list[Node]) -> list[str]:
+    """The address page of a phone mailbox's first start (walk finding 9):
+    the name is its one field, above the QR."""
+    problems = []
+    field = find(nodes, rid=WELCOME_NAME)
+    qr = find(nodes, rid=WELCOME_QR)
+    if not field:
+        problems.append("no name field")
+    elif qr and field[0].bounds[1] >= qr[0].bounds[1]:
+        problems.append("the name field is below the QR")
+    edits = [n for n in nodes if n.cls.endswith("EditText")]
+    if len(edits) != 1:
+        problems.append(f"{len(edits)} fields on the page, not the name alone")
+    return problems
+
+
+def session_line(dumpsys: str, package: str) -> str | None:
+    """The text of `package`'s session notification, the untagged one, in
+    `dumpsys notification --noredact`; None when there is none."""
+    for block in re.split(r"(?=NotificationRecord\()", dumpsys):
+        head = re.match(r"NotificationRecord\([^\n]*", block)
+        if not head or f"pkg={package} " not in head.group(0) + " ":
+            continue
+        tag = re.search(r"\btag=(\S+)", head.group(0))
+        if tag and tag.group(1) != "null":
+            continue
+        text = re.search(r"android\.text=\S+ \((.*)\)\s*$", block, re.M)
+        if text:
+            return text.group(1)
+    return None
+
+
+def session_line_problems(line: str | None, server: str) -> list[str]:
+    """What is wrong with the session notification's line (walk finding
+    19): none, not "Connected to your mailbox" with the unread count, or
+    the server's address on it."""
+    if line is None:
+        return ["no session notification"]
+    problems = []
+    if not SESSION_LINE.fullmatch(line):
+        problems.append(f"the line says {line!r}")
+    host = server.rpartition(":")[0]
+    if server in line or (host and host in line):
+        problems.append(f"the line names the server: {line!r}")
+    return problems
+
+
+def daemon_word_problems(nodes: list[Node]) -> list[str]:
+    """A word of Reticulum or the daemon anywhere on screen."""
+    return [
+        f"on screen: {t!r} says {word!r}"
+        for t in texts(nodes)
+        for word in DAEMON_WORDS
+        if word in t
+    ]
+
+
+def pencil_problems(nodes: list[Node], camera: bool) -> list[str]:
+    """The pencil's screen (1263, finding 3): "Scan a code" first where
+    there is a camera, "Paste a code" next, the typed address folded
+    away under Advanced, no daemon word."""
+    scan = find(nodes, rid=PENCIL_SCAN)
+    paste = find(nodes, rid=PENCIL_PASTE)
+    problems = []
+    if not paste:
+        problems.append("no Paste a code")
+    if camera and not scan:
+        problems.append("a camera and no Scan a code")
+    if scan and paste and scan[0].bounds[1] >= paste[0].bounds[1]:
+        problems.append("Scan a code is not above Paste a code")
+    if not find(nodes, rid=PENCIL_ADVANCED):
+        problems.append("no Advanced")
+    if find(nodes, rid="address"):
+        problems.append("the address field shows before Advanced is opened")
+    return problems + daemon_word_problems(nodes)
+
+
+def join_error_problems(nodes: list[Node], said: str) -> list[str]:
+    """A failed join (1263, finding 8): the one sentence `said`, Retry,
+    the Details fold, no daemon word in the sentence."""
+    error = find(nodes, rid="error")
+    problems = []
+    shown = error[0].text if error else None
+    if shown != said:
+        problems.append(f"the join says {shown!r}, not {said!r}")
+    if not find(nodes, rid=JOIN_RETRY):
+        problems.append("no Retry")
+    if not find(nodes, rid=JOIN_DETAILS_TOGGLE):
+        problems.append("no Details")
+    if shown is not None:
+        problems += [f"the sentence says {word!r}" for word in DAEMON_WORDS if word in shown]
+    return problems
 
 
 def decode_problems(nodes: list[Node]) -> list[str]:
@@ -633,6 +1409,42 @@ def fling_problems(
     return problems
 
 
+def middle_half(width: int, height: int) -> tuple[int, int, int, int]:
+    """The middle half of a screen in each direction: inside the map
+    whatever bars the screen has, away from the attribution."""
+    return (width // 4, height // 4, width * 3 // 4, height * 3 // 4)
+
+
+def colour_share(
+    samples: list[tuple[int, int, int]],
+    colours: list[tuple[int, int, int]],
+    tolerance: int = 3,
+) -> float:
+    """The share of `samples` within `tolerance` of any of `colours`, per channel."""
+    if not samples:
+        return 0.0
+    hits = sum(
+        1
+        for p in samples
+        if any(all(abs(a - b) <= tolerance for a, b in zip(p, c)) for c in colours)
+    )
+    return hits / len(samples)
+
+
+def buildings_problems(z16_share: float, z15_share: float, z16_ms: int, z15_ms: int) -> list[str]:
+    """The buildings step's verdict (1193): the fill on screen at z16 and
+    not at z15, and z16's time to rest within the bound of z15's."""
+    problems = []
+    if z16_share < BUILDINGS_LEAST:
+        problems.append(f"z16 fill {z16_share:.3f} under {BUILDINGS_LEAST}")
+    if z15_share > BUILDINGS_Z15_MOST:
+        problems.append(f"z15 fill {z15_share:.3f} over {BUILDINGS_Z15_MOST}")
+    bound = int(z15_ms * SETTLE_FACTOR) + SETTLE_SLACK_MS
+    if z16_ms > bound:
+        problems.append(f"z16 at rest after {z16_ms} ms, over {bound} ms (z15 {z15_ms} ms)")
+    return problems
+
+
 def mean_luma(samples: list[tuple[int, int, int]]) -> float:
     """The samples' mean brightness, 0 to 255 (Rec. 601 weights)."""
     if not samples:
@@ -842,6 +1654,15 @@ class Device:
     def swipe(self, x1: int, y1: int, x2: int, y2: int, ms: int = 300) -> None:
         self.shell(f"input swipe {x1} {y1} {x2} {y2} {ms}")
 
+    def swipe_async(self, x1: int, y1: int, x2: int, y2: int, ms: int) -> subprocess.Popen:
+        """A swipe that runs while the walk dumps the screen: a hold of the
+        microphone is a swipe that does not move (1276)."""
+        return subprocess.Popen(
+            [self.adb, "-s", self.serial, "shell", f"input swipe {x1} {y1} {x2} {y2} {ms}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
     def double_tap(self, x: int, y: int) -> None:
         # One shell, the two taps back to back: the map zooms on a double
         # tap (MapView.onDoubleTap), the gesture `input` can make; a pinch
@@ -952,6 +1773,8 @@ class Walk:
         self.fixture: Fixture | None = None
         self.installed = False
         self.joined = False
+        # The phone holds the mailbox since first_start_name (1278).
+        self.on_phone = False
         self.ok = 0
         self.failed = 0
         self.nonce = str(int(time.time()))[-6:]
@@ -1209,15 +2032,51 @@ class Walk:
         self.tap_text(JOIN)
         self.joined = True
         tapped = []
-        # The list's title is the app's name; the join leads there.
+        # The join leads to the address page once (walk finding 13), its
+        # Done to the list, whose title is the app's name.
+        address_page = False
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             tapped += self.dismiss_dialogs(1)
             nodes = dev.dump()
-            if find(nodes, rid="list") and find(nodes, rid="write"):
-                return f"joined dialogs={tapped or 'none'}"
+            if find(nodes, rid=WELCOME_QR):
+                address_page = True
+                self.tap_done(nodes)
+            elif find(nodes, rid="list") and find(nodes, rid="write"):
+                if not address_page:
+                    raise StepFailed("the list came without the address page after the join")
+                return f"joined address_page=shown dialogs={tapped or 'none'}"
             time.sleep(0.5)
         raise StepFailed(f"no conversation list 30s after Join; screen: {texts(nodes)[:12]}")
+
+    def tap_done(self, nodes: list[Node]) -> None:
+        """Done on the address page, scrolled to when below the fold."""
+        dev = self.need_device()
+        done = find(nodes, text=DONE)
+        if done:
+            dev.tap_node(done[0])
+            return
+        x1, y1, x2, y2 = find(nodes, rid=WELCOME_QR)[0].bounds
+        x = (x1 + x2) // 2
+        dev.swipe(x, y2, x, y1, 300)
+        time.sleep(0.5)
+
+    def step_notification_text(self) -> str:
+        """The always-on notification (walk finding 19): joined to the
+        host's mailbox, its line says "Connected to your mailbox" (with
+        the unread count) and never the server's address."""
+        dev = self.need_device()
+        seen: list[str | None] = []
+
+        def look():
+            line = session_line(dev.shell("dumpsys notification --noredact"), PACKAGE)
+            seen.append(line)
+            return not session_line_problems(line, self.args.server)
+
+        if not wait_for(look, 30, every=1.0):
+            problems = session_line_problems(seen[-1] if seen else None, self.args.server)
+            raise StepFailed("; ".join(problems) + f"; lines seen: {sorted(set(map(str, seen)))}")
+        return f"line={seen[-1]!r}"
 
     def expected_rows(self) -> list[dict]:
         """The conversations the list shows: neither archived nor blocked."""
@@ -1396,6 +2255,661 @@ class Walk:
         if not accepted:
             raise StepFailed("the mailbox log has no 'HOME send accepted'")
         return f"bubble_ms={ms} mark={mark!r} mailbox=accepted"
+
+    def clear_compose(self) -> None:
+        """Empty the compose field, as the voice step does."""
+        dev = self.need_device()
+        compose = self.wait_id("compose", 5)[0]
+        if compose.text.strip():
+            dev.tap_node(compose)
+            dev.shell("input keyevent KEYCODE_MOVE_END")
+            for _ in range(len(compose.text) + 2):
+                dev.key("KEYCODE_DEL")
+
+    def step_compose_bar(self) -> str:
+        """The compose bar as Signal has it (1270): with an empty field
+        the emoji left of it, the position button, the camera and the
+        microphone right of it and the round plus outside it, five, each
+        named for a screen reader; a typed letter turns the plus into Send
+        and hides the microphone; the letter deleted turns it back."""
+        dev = self.need_device()
+        self.clear_compose()
+        problems: list[str] = []
+
+        def bar_is(typed: bool) -> bool:
+            nonlocal problems
+            problems = bar_problems(dev.dump(), typed)
+            return not problems
+
+        if not wait_for(lambda: bar_is(False), 5, every=0.3):
+            raise StepFailed("empty field: " + "; ".join(problems))
+        empty = [bar_id(n) for n in bar_on(dev.dump())]
+        dev.tap_node(self.wait_id("compose", 5)[0])
+        start = time.monotonic()
+        dev.type_text("x")
+        if not wait_for(lambda: bar_is(True), 5, every=0.2):
+            raise StepFailed("typed: " + "; ".join(problems))
+        swap_ms = int((time.monotonic() - start) * 1000)
+        dev.key("KEYCODE_DEL")
+        if not wait_for(lambda: bar_is(False), 5, every=0.3):
+            raise StepFailed("deleted again: " + "; ".join(problems))
+        return f"empty={','.join(empty)} typed=send swap_ms={swap_ms} back=plus"
+
+    def step_camera_photo(self) -> str:
+        """A photo through the compose bar's camera (1270): the fixture put
+        where the debug build takes its capture from (an emulator has no
+        camera app), the camera tapped; the staged photo shows with its
+        words and the round button is Send; a caption typed and Send make
+        one bubble with the picture, the caption and a mark, the mailbox's
+        send; the bar is the plus again."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not FIXTURE_PHOTO.is_file():
+            raise StepFailed(f"{FIXTURE_PHOTO} missing")
+        dev.run("push", str(FIXTURE_PHOTO), f"/data/local/tmp/{CAMERA_FIXTURE}", timeout=60)
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'cat /data/local/tmp/{CAMERA_FIXTURE} > files/{CAMERA_FIXTURE}'"
+        )
+        caption = f"walk caption {self.nonce}"
+        try:
+            self.clear_compose()
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(photos_on(dev.dump()))
+            dev.tap_node(self.wait_id("camera", 5)[0])
+            staged = self.wait_id("staged_words", 15)[0]
+            if not STAGED_WORDS.match(staged.text):
+                raise StepFailed(f"the staged photo says {staged.text!r}")
+            nodes = dev.dump()
+            if not find(nodes, rid="send") or find(nodes, rid="plus"):
+                raise StepFailed(f"with a staged photo the round button is {[bar_id(n) for n in bar_on(nodes)]}")
+            dev.tap_node(self.wait_id("compose", 5)[0])
+            dev.type_text(caption)
+            start = time.monotonic()
+            dev.tap_node(self.wait_id("send", 5)[0])
+            problems: list[str] = []
+
+            def shown():
+                nonlocal problems
+                nodes = dev.dump()
+                problems = photo_problems(photos_on(nodes), before)
+                if not problems:
+                    problems = caption_bubble_problems(nodes, photos_on(nodes)[-1], caption)
+                return not problems
+
+            if not wait_for(shown, 15, every=0.3):
+                raise StepFailed("; ".join(problems))
+            ms = int((time.monotonic() - start) * 1000)
+            accepted = wait_for(
+                lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+            )
+            if not accepted:
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+            nodes = dev.dump()
+            if find(nodes, rid="staged_words"):
+                raise StepFailed("the staged photo stayed after the send")
+            problems = bar_problems(nodes, typed=False)
+            if problems:
+                raise StepFailed("after the send: " + "; ".join(problems))
+            return f"staged={staged.text!r} sent_ms={ms} bubbles=1 caption=in mark=in mailbox=accepted"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{CAMERA_FIXTURE}", check=False)
+            dev.shell(f"rm -f /data/local/tmp/{CAMERA_FIXTURE}", check=False)
+
+    def step_share_position_from_bar(self) -> str:
+        """The position one tap away (1270, Lew 2026-11-01 13:30): a fix
+        seeded where the debug build reads the phone's from, the bar's
+        position button opens the sheet with the fix's age and "Send my
+        position now"; its tap sends the position report to this chat:
+        the mailbox accepts a send for the open conversation's peer and
+        the sheet closes. The peer's own session is not run by the walk,
+        so the mailbox's acceptance for it is where the walk can see the
+        report go."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        peer = fixture.manifest["sender_peer"]
+        dev.shell(f"run-as {PACKAGE} sh -c 'echo {SEEDED_FIX} > files/{FIX_FIXTURE}'")
+        try:
+            before = accepted_to(fixture.mailbox_log(), peer)
+            dev.tap_node(self.wait_id("locate", 5)[0])
+            words = self.wait_id(SHEET_FIX_WORDS, 10)[0]
+            if not words.text.startswith("Found"):
+                raise StepFailed(f"the sheet says {words.text!r}, not the fix's age")
+            start = time.monotonic()
+            dev.tap_node(self.wait_id(SHEET_SHARE_NOW, 5)[0])
+            if not wait_for(lambda: accepted_to(fixture.mailbox_log(), peer) > before, 30):
+                raise StepFailed(f"the mailbox accepted no send to {peer[:8]}")
+            ms = int((time.monotonic() - start) * 1000)
+            if not wait_for(lambda: not find(dev.dump(), rid="sheet"), 5, every=0.3):
+                raise StepFailed("the sheet stayed open after the share")
+            return f"sheet={words.text!r} accepted_ms={ms} to={peer[:8]} sheet=closed"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{FIX_FIXTURE}", check=False)
+
+    def share_from_sheet(self, row: str, words) -> tuple[Device, Fixture, str, int]:
+        """Seed a fix, open the position sheet, tap `row`: the chip says
+        `words` within 10 s and the mailbox accepts the first report for
+        the open chat's peer within 30 s. The device, the fixture, the
+        peer and the acceptances before."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        peer = fixture.manifest["sender_peer"]
+        dev.shell(f"run-as {PACKAGE} sh -c 'echo {SEEDED_FIX} > files/{FIX_FIXTURE}'")
+        before = accepted_to(fixture.mailbox_log(), peer)
+        dev.tap_node(self.wait_id("locate", 5)[0])
+        dev.tap_node(self.wait_id(row, 10)[0])
+        problems: list[str] = []
+
+        def chip():
+            nonlocal problems
+            problems = chip_problems(dev.dump(), words)
+            return not problems
+
+        if not wait_for(chip, 10, every=0.3):
+            raise StepFailed("; ".join(problems))
+        if not wait_for(lambda: accepted_to(fixture.mailbox_log(), peer) > before, 30):
+            raise StepFailed(f"the share's first report did not reach the mailbox for {peer[:8]}")
+        return dev, fixture, peer, before
+
+    def stop_share(self, dev: Device, fixture: Fixture, peer: str) -> int:
+        """Tap the chip's Stop: the chip goes within 5 s, and the end
+        report, one more acceptance carrying the end mark, reaches the
+        mailbox's outbox for the peer within 30 s. The milliseconds from
+        the tap to the chip's going."""
+        store = fixture.mailbox / "history.sqlite3"
+        ended = end_reports(store, peer)
+        start = time.monotonic()
+        dev.tap_node(self.wait_id(SHARE_STOP, 5)[0])
+        if not wait_for(lambda: not find(dev.dump(), rid=SHARE_CHIP), 5, every=0.3):
+            raise StepFailed("the chip stayed after Stop")
+        ms = int((time.monotonic() - start) * 1000)
+        if not wait_for(lambda: end_reports(store, peer) > ended, 30):
+            raise StepFailed(f"no end report for {peer[:8]} in the mailbox's outbox")
+        return ms
+
+    def step_share_for_15_min(self) -> str:
+        """A share for 15 minutes (1273): the sheet's row starts it, the
+        chip says the time left, the first report goes at once; a second
+        seeded fix 44 m away is a move and goes once the share's minute
+        has passed (the share service reads the seeded fix every 15 s);
+        Stop takes the chip away and sends the end report, which the
+        mailbox's outbox holds for the peer with its end mark. The peer's
+        own session is not run by the walk (1270's gap): its mailbox leg
+        is where the walk sees the end report go."""
+        dev, fixture, peer, before = self.share_from_sheet(SHEET_SHARE_15_MIN, SHARE_LEFT)
+        try:
+            dev.shell(f"run-as {PACKAGE} sh -c 'echo {MOVED_FIX} > files/{FIX_FIXTURE}'")
+            moved = wait_for(lambda: accepted_to(fixture.mailbox_log(), peer) > before + 1, 120)
+            if not moved:
+                raise StepFailed("the move of 44 m sent no second report within 2 min")
+            ms = self.stop_share(dev, fixture, peer)
+            return f"chip=left reports=2 moved=sent stop_to_gone_ms={ms} end=in_outbox to={peer[:8]}"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{FIX_FIXTURE}", check=False)
+
+    def step_share_until_stopped(self) -> str:
+        """A share until stopped (1273): the chip says so, and Stop ends
+        it with the end report as in share_for_15_min."""
+        dev, fixture, peer, _ = self.share_from_sheet(SHEET_SHARE_UNTIL, SHARE_UNTIL)
+        try:
+            ms = self.stop_share(dev, fixture, peer)
+            return f"chip=until reports=1 stop_to_gone_ms={ms} end=in_outbox to={peer[:8]}"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{FIX_FIXTURE}", check=False)
+
+    def step_image(self) -> str:
+        """A photo through the paperclip (1220): the fixture onto the
+        phone's pictures, the system's picker, the bubble's thumbnail
+        with its words and a tick, one bubble with its mark and no text
+        row (1268), the mailbox's send, the whole photo on
+        a tap and Back to the chat."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not FIXTURE_PHOTO.is_file():
+            raise StepFailed(f"{FIXTURE_PHOTO} missing")
+        name = f"walk-photo-{self.nonce}.jpg"
+        dev.run("push", str(FIXTURE_PHOTO), f"/sdcard/Pictures/{name}", timeout=60)
+        dev.shell(
+            "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+            f"-d file:///sdcard/Pictures/{name}",
+            check=False,
+        )
+        sent_before = fixture.mailbox_log().count("HOME send accepted")
+        before = len(photos_on(dev.dump()))
+        dev.tap_node(self.wait_id("plus", 5)[0])
+        dev.tap_node(self.wait_id(SHEET_GALLERY, 5)[0])
+        # The system's picker: the file by its name, in its recent or its
+        # pictures list.
+        start = time.monotonic()
+        dev.tap_node(self.wait_text(name, 20, contains=True)[0])
+        problems: list[str] = []
+
+        def shown():
+            nonlocal problems
+            nodes = dev.dump()
+            problems = photo_problems(photos_on(nodes), before)
+            return not problems
+
+        if not wait_for(shown, 15, every=0.3):
+            raise StepFailed("; ".join(problems))
+        ms = int((time.monotonic() - start) * 1000)
+        accepted = wait_for(
+            lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+        )
+        if not accepted:
+            raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        nodes = dev.dump()
+        photo = photos_on(nodes)[-1]
+        # One bubble, the photo and its mark in it, no empty one (1268).
+        problems = photo_bubble_problems(nodes, photo)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        dev.tap_node(photo)
+        self.wait_id(PHOTO_FULL, 10)
+        dev.key("KEYCODE_BACK")
+        self.wait_id("compose", 10)
+        dev.shell(f"rm -f /sdcard/Pictures/{name}", check=False)
+        return (
+            f"picked_to_bubble_ms={ms} desc={photo.desc!r} bubbles=1 mark=in "
+            "mailbox=accepted full=shown"
+        )
+
+    def step_picture_zoom(self) -> str:
+        """The big picture zooms under two fingers (1269): the image
+        step's photo opened whole, a pinch out about its centre written
+        to the screen's multi-touch device with `sendevent` (`input` has
+        one pointer only), then a pan, a double tap back to 1x and Back
+        to the chat. The zoom's numbers are the viewer's own `PHOTO_ZOOM`
+        line in the log; that the picture moved is read off the screen."""
+        dev = self.need_device()
+        photos = photos_on(dev.dump())
+        if not photos:
+            raise StepFailed("no photo in the open chat: the image step leaves one")
+        touch = parse_touch_device(dev.shell("getevent -pl", timeout=30, check=False))
+        if touch is None:
+            raise StepFailed("getevent -pl lists no multi-touch device to pinch on")
+        size = parse_wm_size(dev.shell("wm size"))
+        if size is None:
+            raise StepFailed("wm size says no screen size")
+        dev.shell("logcat -c", check=False)
+        dev.tap_node(photos[-1])
+        box = self.wait_id(PHOTO_FULL, 10)[0].bounds
+        x1, y1, x2, y2 = box
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        states: list[dict] = []
+
+        def settled(test) -> bool:
+            nonlocal states
+            states = parse_photo_zoom(dev.shell("logcat -d -s loquax:I", check=False))
+            return bool(states) and test(states[-1])
+
+        def expect(what: str, test, timeout: float = 8) -> dict:
+            if not wait_for(lambda: settled(test), timeout, every=0.3):
+                last = states[-1] if states else "no PHOTO_ZOOM line"
+                raise StepFailed(f"{what}: {last}")
+            problems = zoom_bounds_problems(states[-1])
+            if problems:
+                raise StepFailed(f"{what}: {'; '.join(problems)}")
+            return states[-1]
+
+        expect("the viewer shows the photo at 1x", lambda z: z["scale"] == 1.0, 10)
+        time.sleep(0.5)
+        before = sample_grid(dev.screen(), box)
+        width = x2 - x1
+        events = pinch_events(touch, size, (cx, cy), (width // 10, width * 4 // 10))
+        dev.shell(sendevent_script(touch.path, events), timeout=120)
+        pinched = expect("the pinch zoomed", lambda z: z["scale"] > 1.2)
+        time.sleep(0.5)
+        share = changed_fraction(before, sample_grid(dev.screen(), box))
+        if share < 0.05:
+            raise StepFailed(f"the screen did not change with the pinch ({share:.2f})")
+        dev.swipe(cx + width // 6, cy, cx - width // 6, cy, 500)
+        panned = expect(
+            "the pan moved the zoomed picture",
+            lambda z: abs(z["left"] - pinched["left"]) > 10 or abs(z["top"] - pinched["top"]) > 10,
+        )
+        dev.double_tap(cx, cy)
+        expect("the double tap went back to 1x", lambda z: z["scale"] == 1.0)
+        dev.key("KEYCODE_BACK")
+        self.wait_id("compose", 10)
+        return (
+            f"pinch=1.000->{pinched['scale']:.3f} changed={share:.2f} "
+            f"pan_dx={panned['left'] - pinched['left']:.0f} doubletap=1x back=chat "
+            f"touch={touch.path}"
+        )
+
+    def step_file(self) -> str:
+        """A file through the paperclip (1221): a text file onto the
+        phone's downloads, the system's picker, the bubble's file row with
+        its name and size, the mailbox's send; a tap saves it under the
+        app's files, where run-as finds its bytes, and hands it to an app
+        that opens it or says none does; Back to the chat."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        name = f"walk-file-{self.nonce}.txt"
+        content = f"loquax device walk {self.nonce}\n".encode() * 64
+        local = Path(tempfile.mkdtemp(prefix="walk-file-")) / name
+        local.write_bytes(content)
+        dev.run("push", str(local), f"/sdcard/Download/{name}", timeout=60)
+        local.unlink()
+        local.parent.rmdir()
+        dev.shell(
+            "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+            f"-d file:///sdcard/Download/{name}",
+            check=False,
+        )
+        sent_before = fixture.mailbox_log().count("HOME send accepted")
+        before = len(files_on(dev.dump()))
+        dev.tap_node(self.wait_id("plus", 5)[0])
+        dev.tap_node(self.wait_id(SHEET_FILE, 5)[0])
+        start = time.monotonic()
+        dev.tap_node(self.wait_text(name, 20, contains=True)[0])
+        problems: list[str] = []
+
+        def shown():
+            nonlocal problems
+            problems = file_problems(files_on(dev.dump()), before, name)
+            return not problems
+
+        if not wait_for(shown, 15, every=0.3):
+            raise StepFailed("; ".join(problems))
+        ms = int((time.monotonic() - start) * 1000)
+        accepted = wait_for(
+            lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+        )
+        if not accepted:
+            raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        row = files_on(dev.dump())[-1]
+        dev.tap_node(row)
+        saved = ""
+
+        def stored():
+            nonlocal saved
+            saved = dev.shell(
+                f"run-as {PACKAGE} sh -c 'cat files/files/*/{name}' 2>/dev/null", check=False
+            )
+            return saved.encode() == content
+
+        if not wait_for(stored, 10, every=0.5):
+            raise StepFailed(f"files/files/*/{name} holds {len(saved)} bytes, want {len(content)}")
+        time.sleep(2)
+        nodes = dev.dump()
+        if find(nodes, rid="compose") and not any(n.text == FILE_NO_APP for n in nodes):
+            opened = "the chat stayed and said nothing"
+            raise StepFailed(f"a tap on the file opened nothing: {opened}")
+        handed = "no_app" if any(n.text == FILE_NO_APP for n in nodes) else "another_app"
+        if handed == "another_app":
+            dev.key("KEYCODE_BACK")
+            self.wait_id("compose", 10)
+        dev.shell(f"rm -f /sdcard/Download/{name}", check=False)
+        return f"picked_to_bubble_ms={ms} desc={row.desc!r} mailbox=accepted saved=ok open={handed}"
+
+    def step_voice(self) -> str:
+        """A voice message through the microphone (1222): the fixture PCM
+        put where the debug build records it from, the permission granted
+        as the first press would ask for it, the send button held for three
+        seconds while the compose field is empty; the bubble's player with
+        its length, the mailbox's send; its play button turns to pause and
+        back at the end; a hold slid left sends nothing."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        local = Path(tempfile.mkdtemp(prefix="walk-voice-")) / VOICE_FIXTURE
+        local.write_bytes(speech_pcm(16_000, 8_000))
+        dev.run("push", str(local), f"/data/local/tmp/{VOICE_FIXTURE}", timeout=60)
+        local.unlink()
+        local.parent.rmdir()
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'cat /data/local/tmp/{VOICE_FIXTURE} > files/{VOICE_FIXTURE}'"
+        )
+        dev.shell(f"pm grant {PACKAGE} android.permission.RECORD_AUDIO", check=False)
+        try:
+            compose = self.wait_id("compose", 5)[0]
+            if compose.text.strip():
+                dev.tap_node(compose)
+                dev.shell("input keyevent KEYCODE_MOVE_END")
+                for _ in range(len(compose.text) + 2):
+                    dev.key("KEYCODE_DEL")
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(voices_on(dev.dump()))
+            mic = self.wait_id("record", 5)[0]
+            dev.long_press(mic, 3_000)
+            start = time.monotonic()
+            problems: list[str] = []
+
+            def shown():
+                nonlocal problems
+                problems = voice_problems(voices_on(dev.dump()), before, 2)
+                return not problems
+
+            if not wait_for(shown, 15, every=0.3):
+                raise StepFailed("; ".join(problems))
+            ms = int((time.monotonic() - start) * 1000)
+            accepted = wait_for(
+                lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+            )
+            if not accepted:
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+            nodes = dev.dump()
+            player = voices_on(nodes)[-1]
+            play = [n for n in find(nodes, desc=VOICE_PLAY) if inside(n, player)]
+            if not play:
+                raise StepFailed(f"no {VOICE_PLAY!r} button in {player.desc!r}")
+            dev.tap_node(play[0])
+            if not wait_for(lambda: any(inside(n, player) for n in find(dev.dump(), desc=VOICE_PAUSE)), 5, every=0.3):
+                raise StepFailed(f"a tap on {VOICE_PLAY!r} did not turn it to {VOICE_PAUSE!r}")
+            if not wait_for(lambda: any(inside(n, player) for n in find(dev.dump(), desc=VOICE_PLAY)), 15, every=0.5):
+                raise StepFailed(f"the player never came back to {VOICE_PLAY!r} at its end")
+            # Slid left: gone, nothing sent.
+            count = len(voices_on(dev.dump()))
+            x, y = mic.center
+            dev.swipe(x, y, max(0, x - 400), y, 2_000)
+            time.sleep(4)
+            if len(voices_on(dev.dump())) != count:
+                raise StepFailed("a hold slid left sent a voice message")
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{VOICE_FIXTURE}", check=False)
+            dev.shell(f"rm -f /data/local/tmp/{VOICE_FIXTURE}", check=False)
+        return f"held_to_bubble_ms={ms} desc={player.desc!r} mailbox=accepted played=ok cancel=ok"
+
+    # Recording a voice message (1276): the recording bar.
+
+    def seed_voice(self, pcm: bytes) -> None:
+        """`pcm` where the debug build records it from (Voice.FIXTURE),
+        the permission granted, the compose field empty."""
+        dev = self.need_device()
+        local = Path(tempfile.mkdtemp(prefix="walk-voice-")) / VOICE_FIXTURE
+        local.write_bytes(pcm)
+        dev.run("push", str(local), f"/data/local/tmp/{VOICE_FIXTURE}", timeout=60)
+        local.unlink()
+        local.parent.rmdir()
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'cat /data/local/tmp/{VOICE_FIXTURE} > files/{VOICE_FIXTURE}'"
+        )
+        dev.shell(f"pm grant {PACKAGE} android.permission.RECORD_AUDIO", check=False)
+        self.clear_compose()
+
+    def unseed_voice(self) -> None:
+        dev = self.need_device()
+        dev.shell(f"run-as {PACKAGE} rm -f files/{VOICE_FIXTURE}", check=False)
+        dev.shell(f"rm -f /data/local/tmp/{VOICE_FIXTURE}", check=False)
+
+    def bar_gone(self, timeout: float) -> bool:
+        """Whether the recording bar gave way to the compose field."""
+        dev = self.need_device()
+
+        def gone():
+            nodes = dev.dump()
+            return not find(nodes, rid="rec_bar") and bool(find(nodes, rid="compose"))
+
+        return wait_for(gone, timeout, every=0.3)
+
+    def wait_bar(self, phase: str, timeout: float) -> list[Node]:
+        """The recording bar in `phase` on screen within `timeout`."""
+        dev = self.need_device()
+        nodes: list[Node] = []
+        problems: list[str] = []
+
+        def shows():
+            nonlocal nodes, problems
+            nodes = dev.dump()
+            problems = rec_bar_problems(nodes, phase)
+            return not problems
+
+        if not wait_for(shows, timeout, every=0.3):
+            raise StepFailed(f"{phase}: " + "; ".join(problems))
+        return nodes
+
+    def lock_by_swipe(self) -> None:
+        """A swipe up from the microphone, 400 px (past 72 dp at any
+        density up to 5.5), and the finger lifts: locked, it records on."""
+        dev = self.need_device()
+        mic = self.wait_id("record", 5)[0]
+        x, y = mic.center
+        dev.swipe(x, y, x, max(0, y - 400), 900)
+
+    def step_voice_hold_release(self) -> str:
+        """Held, the compose row is the recording bar at once (1276): the
+        dot pulsing, `REC 00:0N`, the wave, "Slide left to cancel", the
+        held microphone saying "Release to send", the open lock chip;
+        released after six seconds, the bar gives way to the field, the
+        bubble is at least five seconds long and the mailbox took it."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(speech_pcm(16_000, 10_000))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(voices_on(dev.dump()))
+            x, y = self.wait_id("record", 5)[0].center
+            hold = dev.swipe_async(x, y, x, y, 6_000)
+            time.sleep(1.5)
+            nodes = dev.dump()
+            problems = rec_bar_problems(nodes, "held")
+            if rec_pulsing(nodes) is not True:
+                problems.append(f"the dot pulses={rec_pulsing(nodes)}, want True")
+            seconds = rec_seconds(nodes)
+            hold.wait(timeout=30)
+            if problems:
+                raise StepFailed("held: " + "; ".join(problems))
+            if not self.bar_gone(10):
+                raise StepFailed("the bar did not give way to the field after the release")
+            shown: list[str] = []
+
+            def bubble():
+                nonlocal shown
+                shown = voice_problems(voices_on(dev.dump()), before, 5)
+                return not shown
+
+            if not wait_for(bubble, 15, every=0.3):
+                raise StepFailed("; ".join(shown))
+            if not wait_for(lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30):
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        finally:
+            self.unseed_voice()
+        return f"held timer={seconds}s bar=ok bubble=ok mailbox=accepted"
+
+    def step_voice_slide_cancel(self) -> str:
+        """Held and slid left 500 px (past 96 dp at any density up to 5),
+        the hint arms ("Release to cancel", RecordingBar's line) and the
+        release discards: the bar goes, no bubble, nothing sent."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(speech_pcm(16_000, 10_000))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            count = len(voices_on(dev.dump()))
+            x, y = self.wait_id("record", 5)[0].center
+            dev.shell("logcat -c", check=False)
+            dev.swipe(x, y, max(0, x - 500), y, 3_000)
+            lines = parse_rec_lines(dev.shell("logcat -d -s loquax:I", check=False))
+            went = rec_went(lines, "held", "armed", "cancelled")
+            if went:
+                raise StepFailed("; ".join(went))
+            if not self.bar_gone(10):
+                raise StepFailed("the bar stayed after the cancelling release")
+            time.sleep(4)
+            if len(voices_on(dev.dump())) != count:
+                raise StepFailed("a hold slid left made a voice message")
+            if fixture.mailbox_log().count("HOME send accepted") != sent_before:
+                raise StepFailed("a hold slid left reached the mailbox")
+        finally:
+            self.unseed_voice()
+        return f"phases={[l['phase'] for l in lines]} armed=ok sent=none"
+
+    def step_voice_lock_send(self) -> str:
+        """Swiped up, it locks: the chip closed ("Recording locked"), the
+        bin, the pause and the big Send, no held microphone, and the
+        finger is free. Pause stands it still (play, resume, the dot
+        steady), resume goes on, Send sends: the bar goes, one bubble at
+        least three seconds long, the mailbox took it."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(speech_pcm(16_000, 12_000))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(voices_on(dev.dump()))
+            self.lock_by_swipe()
+            locked = self.wait_bar("locked", 8)
+            time.sleep(1.5)
+            dev.tap_node(find(locked, rid="rec_pause")[0])
+            paused = self.wait_bar("paused", 8)
+            if rec_pulsing(paused) is not False:
+                raise StepFailed(f"paused, the dot pulses={rec_pulsing(paused)}")
+            dev.tap_node(find(paused, rid="rec_resume")[0])
+            resumed = self.wait_bar("locked", 8)
+            time.sleep(1.5)
+            dev.tap_node(find(resumed, rid="rec_send")[0])
+            if not self.bar_gone(10):
+                raise StepFailed("the bar stayed after Send")
+            shown: list[str] = []
+
+            def bubble():
+                nonlocal shown
+                shown = voice_problems(voices_on(dev.dump()), before, 3)
+                return not shown
+
+            if not wait_for(bubble, 15, every=0.3):
+                raise StepFailed("; ".join(shown))
+            if not wait_for(lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30):
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        finally:
+            self.unseed_voice()
+        return "locked=ok paused=ok resumed=ok sent=ok mailbox=accepted"
+
+    def step_voice_silence_hint(self) -> str:
+        """A microphone that hears nothing (a fixture of digital silence,
+        the blocked microphone's zeros): locked and two seconds in, the
+        line under the wave says "Nothing heard. Is the microphone
+        allowed?" with "Allow the microphone", and the dot stops pulsing;
+        the bin then discards and nothing is sent."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(bytes(16_000 * 2 * 8))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            self.lock_by_swipe()
+            self.wait_bar("locked", 8)
+            problems: list[str] = []
+            nodes: list[Node] = []
+
+            def hint():
+                nonlocal problems, nodes
+                nodes = dev.dump()
+                problems = rec_notice_problems(nodes)
+                return not problems
+
+            if not wait_for(hint, 10, every=0.3):
+                raise StepFailed("; ".join(problems))
+            seconds = rec_seconds(nodes)
+            if seconds is None or seconds < 2:
+                raise StepFailed(f"the line came at {seconds} s, before 2")
+            dev.tap_node(find(nodes, rid="rec_discard")[0])
+            if not self.bar_gone(10):
+                raise StepFailed("the bin left the bar up")
+            time.sleep(3)
+            if fixture.mailbox_log().count("HOME send accepted") != sent_before:
+                raise StepFailed("the discarded silence reached the mailbox")
+        finally:
+            self.unseed_voice()
+        return f"notice_at={seconds}s dot=steady discarded=ok"
 
     def step_receive_wake(self) -> str:
         dev = self.need_device()
@@ -1875,15 +3389,19 @@ class Walk:
     def put_fixture_region(self) -> None:
         """The walk's region into the app's maps directory, through
         run-as (a debug APK), for the Maps page to list (1207)."""
+        self.put_region(FIXTURE_REGION, "firenze.lmr")
+
+    def put_region(self, region: Path, name: str) -> None:
+        """`region` into the app's maps directory as `name`, through run-as."""
         dev = self.need_device()
-        if not FIXTURE_REGION.is_file():
-            raise StepFailed(f"{FIXTURE_REGION} missing")
-        dev.run("push", str(FIXTURE_REGION), "/data/local/tmp/walk-firenze.lmr", timeout=60)
+        if not region.is_file():
+            raise StepFailed(f"{region} missing")
+        dev.run("push", str(region), f"/data/local/tmp/walk-{name}", timeout=60)
         dev.shell(
-            f"cat /data/local/tmp/walk-firenze.lmr | run-as {PACKAGE} sh -c "
-            "'mkdir -p files/maps && cat > files/maps/firenze.lmr'"
+            f"cat /data/local/tmp/walk-{name} | run-as {PACKAGE} sh -c "
+            f"'mkdir -p files/maps && cat > files/maps/{name}'"
         )
-        dev.shell("rm -f /data/local/tmp/walk-firenze.lmr", check=False)
+        dev.shell(f"rm -f /data/local/tmp/walk-{name}", check=False)
 
     def maps_switch(self, on: bool) -> list[Node]:
         """The Maps page's switch once it shows `on`; a line that did not
@@ -1944,6 +3462,244 @@ class Walk:
         self.wait_id("write", 10)
         return f"address={shown} qr=shown share=shown back=chats"
 
+    def screen_codes(self, name: str) -> list[str]:
+        """The QR codes on screen, read by zbarimg from a screenshot kept
+        beside the log as `name`.png."""
+        path = self.out / f"{name}.png"
+        self.need_device().screenshot_png(path)
+        if shutil.which("zbarimg") is None:
+            raise StepFailed("zbarimg missing: apt install zbar-tools")
+        read = subprocess.run(
+            ["zbarimg", "--quiet", "--raw", str(path)], capture_output=True, timeout=30
+        )
+        return qr_texts(read.stdout.decode("utf-8", "replace"))
+
+    def back_to_chats(self) -> None:
+        dev = self.need_device()
+        for _ in range(4):
+            if find(dev.dump(), rid="write"):
+                return
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.wait_id("write", 10)
+
+    def step_join_error_words(self) -> str:
+        """Join errors in plain words (1263, finding 8), before the first
+        start joins: a code that is no mailbox's, typed into the join form,
+        says one sentence with Retry and a Details fold that opens on the
+        parser's words; the app is stopped again, nothing joined."""
+        dev = self.need_device()
+        dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
+        self.wait_text(WHERE_TITLE, 20)
+        self.tap_text(WHERE_COMPUTER)
+        self.tap_text(CONTINUE)
+        self.tap_text(PASTE_CODE)
+        dev.tap_node(self.wait_id("code", 10)[0])
+        dev.type_text(BAD_MAILBOX_CODE)
+        if not find(dev.dump(), text=JOIN):
+            dev.key("KEYCODE_BACK")
+        self.tap_text(JOIN)
+        self.wait_id(JOIN_RETRY, 15)
+        nodes = dev.dump()
+        problems = join_error_problems(nodes, JOIN_NOT_MAILBOX)
+        if find(nodes, rid=JOIN_DETAILS):
+            problems.append("Details open before the tap")
+        toggle = find(nodes, rid=JOIN_DETAILS_TOGGLE)
+        if toggle:
+            dev.tap_node(toggle[0])
+            details = self.wait_id(JOIN_DETAILS, 5)
+            if JOIN_DETAILS_SAY not in details[0].text:
+                problems.append(f"Details say {details[0].text!r}")
+        dev.shell(f"am force-stop {PACKAGE}", check=False)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"said={JOIN_NOT_MAILBOX!r} retry=shown details=folded,opens"
+
+    def step_first_start_qr(self) -> str:
+        """One contact code everywhere (1263, finding 1): the first start's
+        address page, opened on the running session through the debug
+        APK's exported screen, shows a QR that zbarimg reads as a contact
+        code, `lxma://` and the mailbox's address, and the profile's QR
+        reads as the same code."""
+        dev = self.need_device()
+        self.back_to_chats()
+        dev.shell(
+            f"am start -W -n {PACKAGE}/{WELCOME_ACTIVITY} --es show address", timeout=60
+        )
+        self.wait_id("welcome_qr", 20)
+        welcome = self.screen_codes("first_start_qr-welcome")
+        dev.key("KEYCODE_BACK")
+        self.back_to_chats()
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        self.wait_id("profile_qr", 10)
+        profile = self.screen_codes("first_start_qr-profile")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        want = self.fixture.manifest["address"] if self.fixture is not None else None
+        problems = first_start_qr_problems(welcome, profile, want)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"code={welcome[0][:48]}… same=profile"
+
+    def step_pencil_scan(self) -> str:
+        """The pencil (1263, finding 3): "Scan a code" first where the
+        phone has a camera, "Paste a code" next, no daemon word on screen,
+        the address field under a closed Advanced; Scan opens the scanner;
+        a typed text that is no code says so in one sentence."""
+        dev = self.need_device()
+        self.back_to_chats()
+        dev.tap_node(self.wait_id("write", 10)[0])
+        self.wait_id(PENCIL_PASTE, 10)
+        camera = "feature:android.hardware.camera" in dev.shell("pm list features", check=False)
+        nodes = dev.dump()
+        problems = pencil_problems(nodes, camera)
+        scanned = "no camera"
+        if camera and find(nodes, rid=PENCIL_SCAN):
+            dev.tap_node(find(nodes, rid=PENCIL_SCAN)[0])
+            time.sleep(2)
+            self.dismiss_dialogs(1)
+            seen = texts(dev.dump())
+            scanned = "opened" if any("camera" in t for t in seen) else f"screen {seen[:4]}"
+            dev.key("KEYCODE_BACK")
+            self.wait_id(PENCIL_PASTE, 10)
+        dev.tap_node(self.wait_id(PENCIL_ADVANCED, 10)[0])
+        dev.tap_node(self.wait_id("address", 5)[0])
+        dev.type_text("hello")
+        if not find(dev.dump(), rid="open"):
+            dev.key("KEYCODE_BACK")
+        dev.tap_node(self.wait_id("open", 5)[0])
+        # Raises with the screen when the sentence is not there.
+        self.wait_text(CODE_FOREIGN, 5)
+        self.back_to_chats()
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"camera={camera} scan={scanned} refusal={CODE_FOREIGN!r}"
+
+    def step_share_in_contact(self) -> str:
+        """A friend's code from another app (walk finding 12): a text with
+        an lxma:// code shared to Loquax opens "Add contact"; named, the
+        friend's chat opens without the banner that asks to save them to
+        the phone's contacts (walk finding 15). The same code as a tapped
+        lxma:// link opens the dialog again, the name known."""
+        dev = self.need_device()
+        friend = self.need_fixture().manifest["friend"]
+        code = friend["code"]
+        self.back_to_chats()
+        dev.shell(
+            f"am start -W -a android.intent.action.SEND -t text/plain "
+            f"--es android.intent.extra.TEXT 'Add me on Loquax: {code}' "
+            f"-n {PACKAGE}/{ACTIVITY}",
+            timeout=60,
+        )
+        self.wait_text(ADD_CONTACT_ASK, 20)
+        nodes = dev.dump()
+        edits = [n for n in nodes if n.cls.endswith("EditText")]
+        if len(edits) != 1:
+            raise StepFailed(f"the dialog holds {len(edits)} fields: {texts(nodes)[:12]}")
+        dev.tap_node(edits[0])
+        dev.type_text(FRIEND_NAME)
+        add = [n for n in find(dev.dump(), text=ADD_CONTACT) if n.clickable or "Button" in n.cls]
+        if not add:
+            dev.key("KEYCODE_BACK")
+            add = [
+                n for n in find(dev.dump(), text=ADD_CONTACT) if n.clickable or "Button" in n.cls
+            ]
+        if not add:
+            raise StepFailed(f"no {ADD_CONTACT!r} button: {texts(dev.dump())[:12]}")
+        dev.tap_node(add[0])
+        self.wait_text(FRIEND_NAME, 15)
+        problems = []
+        if find(dev.dump(), rid=BOOK_BANNER):
+            problems.append("the chat asks to save the friend right after the add")
+        self.back_to_chats()
+        dev.shell(f"am start -W -a android.intent.action.VIEW -d '{code}'", timeout=60)
+        self.wait_text(ADD_CONTACT_ASK, 20)
+        known = [n.text for n in dev.dump() if n.cls.endswith("EditText")]
+        if known != [FRIEND_NAME]:
+            problems.append(f"the link's dialog holds {known}, not {FRIEND_NAME!r}")
+        dev.key("KEYCODE_BACK")
+        self.back_to_chats()
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"shared=added {FRIEND_NAME!r} banner=none link=dialog address={friend['address']}"
+
+    def step_buildings(self) -> str:
+        """The buildings (1193): the walk's Frankfurt region on the phone
+        and the autoload off, so nothing else lands; the map opened on the
+        Römer at z15, then at z16, each through the debug APK's exported
+        map screen. At z16 the building fill covers at least a share of
+        the middle of the screen, at z15 next to none; the time from the
+        screen asked for to the map at rest at z16 is within the bound of
+        z15's (the frame time proxy)."""
+        dev = self.need_device()
+        self.put_region(FRANKFURT_REGION, "frankfurt-roemer.lmr")
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.tap_text(MORE)
+        self.tap_text(SETTINGS)
+        self.wait_id("settings_entry_title", 10)
+        self.tap_text("Maps")
+        nodes = self.maps_switch(True)
+        dev.tap_node(find(nodes, rid="maps_auto")[0])
+        self.maps_switch(False)
+        for _ in range(2):
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        fills = [BUILDING_FILL_LIGHT, BUILDING_FILL_DARK]
+        seen = {}
+        for zoom in (15, 16):
+            ms, screen = self.map_at_rest(zoom * 1000)
+            nodes = dev.dump()
+            if not find(nodes, rid="map"):
+                raise StepFailed(f"z{zoom}: no map on screen: {texts(nodes)[:12]}")
+            cols, rows = BUILDINGS_GRID
+            samples = sample_grid(screen, middle_half(screen.width, screen.height), cols, rows)
+            seen[zoom] = (ms, colour_share(samples, fills))
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        (z15_ms, z15_share), (z16_ms, z16_share) = seen[15], seen[16]
+        detail = (
+            f"fill z15={z15_share:.3f} z16={z16_share:.3f} "
+            f"at_rest_ms z15={z15_ms} z16={z16_ms} autoload=off"
+        )
+        problems = buildings_problems(z16_share, z15_share, z16_ms, z15_ms)
+        if problems:
+            raise StepFailed("; ".join(problems) + "; " + detail)
+        return detail
+
+    def map_at_rest(self, zoom_milli: int) -> tuple[int, Screen]:
+        """The map screen asked for on the walk's Frankfurt place at
+        `zoom_milli`; the milliseconds until two grabs in a row are the
+        same, the map at rest and not the screen before it, and a grab a
+        second later, which the colours are read from."""
+        dev = self.need_device()
+        before = dev.screen()
+        box = middle_half(before.width, before.height)
+        was = sample_grid(before, box)
+        lat, lon = FRANKFURT_E6
+        started = time.monotonic()
+        dev.shell(
+            f"am start -W -n {PACKAGE}/{MAP_ACTIVITY} "
+            f"--el lat_e6 {lat} --el lon_e6 {lon} --el zoom_milli {zoom_milli}"
+        )
+        last = None
+        while time.monotonic() - started < SETTLE_TIMEOUT_S:
+            now = sample_grid(dev.screen(), box)
+            if (
+                last is not None
+                and changed_fraction(last, now, tolerance=0) == 0
+                and changed_fraction(was, now) > 0.2
+                and not is_uniform(now)
+            ):
+                ms = int((time.monotonic() - started) * 1000)
+                time.sleep(1.0)
+                return ms, dev.screen()
+            last = now
+        raise StepFailed(f"z{zoom_milli / 1000:g}: the map not at rest within {SETTLE_TIMEOUT_S}s")
+
     def map_theme(self, choice: str) -> None:
         """From the Map tab: menu, Settings, Appearance, `choice`, and back
         to the map."""
@@ -1958,6 +3714,115 @@ class Walk:
             time.sleep(0.6)
         if not find(dev.dump(), rid="map"):
             raise StepFailed(f"not back on the map after the theme {choice!r}")
+
+    def start_on_phone(self, name: str | None) -> list[str]:
+        """A first start with the mailbox on this phone, its node dialling
+        the walk's lnsd (the servers file, put in before the first start,
+        stands in for the public rendezvous), to the chats. On the address
+        page `name` is typed into the name field when given; what is wrong
+        with that page (walk finding 9) comes back."""
+        dev = self.need_device()
+        dev.shell(f"am force-stop {PACKAGE}", check=False)
+        dev.shell(f"pm clear {PACKAGE}")
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'mkdir -p files/mailbox && "
+            f"echo {self.args.server} > files/mailbox/servers'"
+        )
+        dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
+        self.wait_text(WHERE_TITLE, 20)
+        self.tap_text(WHERE_PHONE)
+        self.tap_text(USE_THIS_PHONE)
+        problems: list[str] | None = None
+        deadline = time.monotonic() + 90
+        while True:
+            nodes = dev.dump()
+            if find(nodes, rid="write") and find(nodes, rid="avatar"):
+                break
+            if time.monotonic() > deadline:
+                raise StepFailed(f"no chats 90s after Use this phone; screen: {texts(nodes)[:12]}")
+            if find(nodes, rid=WELCOME_QR):
+                if problems is None:
+                    problems = first_start_name_problems(nodes)
+                    field = find(nodes, rid=WELCOME_NAME)
+                    if name is not None and field:
+                        dev.tap_node(field[0])
+                        # Whatever the owner's card put there goes first.
+                        dev.shell("input keyevent KEYCODE_MOVE_END " + "KEYCODE_DEL " * 40)
+                        dev.type_text(name)
+                        # The keyboard closed, so Done is no key under it.
+                        dev.key("KEYCODE_BACK")
+                        nodes = dev.dump()
+                self.tap_done(nodes)
+            elif find(nodes, text=CONTINUE):
+                dev.tap_node(find(nodes, text=CONTINUE)[0])
+            else:
+                self.dismiss_dialogs(1)
+            time.sleep(0.5)
+        self.on_phone = True
+        return ["no address page"] if problems is None else problems
+
+    def step_first_start_name(self) -> str:
+        """The first start's name (walk finding 9): with the mailbox on
+        this phone the address page asks the name as its one field, above
+        the QR; the name typed there is the profile's afterwards."""
+        dev = self.need_device()
+        problems = self.start_on_phone(PHONE_NAME)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        shown = ""
+
+        def named():
+            nonlocal shown
+            field = find(dev.dump(), rid="profile_name")
+            shown = field[0].text.strip() if field else ""
+            return shown == PHONE_NAME
+
+        if not wait_for(named, 15, every=0.5):
+            problems.append(f"the profile's name is {shown!r}, not {PHONE_NAME!r}")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"name field=first, alone profile={PHONE_NAME!r}"
+
+    def step_link_device(self) -> str:
+        """Link a device (1264, finding 7), last before the teardown since
+        the app starts afresh before it: the phone holds the mailbox ("On
+        this phone", from first_start_name, or started here when that step
+        did not run), its node dialling the walk's lnsd; the profile's "Link a device" shows a join code whose QR zbarimg
+        reads as the code's text, the server behind it; the host's loquax
+        joins with that code over lnsd as a second device, under its own
+        name; the sheet then says "Device linked: <that name>"."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not self.on_phone:
+            self.start_on_phone(None)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        dev.tap_node(self.wait_id(LINK_ROW, 10)[0])
+        self.wait_id(LINK_QR, 15)
+        shown = find(dev.dump(), rid=LINK_CODE)
+        code = shown[0].text.strip() if shown else ""
+        problems = link_code_problems(code, self.screen_codes("link_device"), self.args.server)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        second = fixture.root / "linked"
+        second.mkdir(exist_ok=True)
+        joined = subprocess.run(
+            [self.args.loquax, "mailbox", "join", "--config", str(fixture.cfg), code],
+            env={**os.environ, "LNMSG_HOME": str(second), "LNMSG_DISPLAY_NAME": LINKED_NAME},
+            capture_output=True,
+            timeout=120,
+        )
+        if joined.returncode != 0:
+            raise StepFailed(
+                f"loquax mailbox join exit={joined.returncode}: {joined.stderr.decode()[-300:]}"
+            )
+        self.wait_text(LINKED.format(LINKED_NAME), 15)
+        done = find(dev.dump(), text=DONE)
+        if done:
+            dev.tap_node(done[0])
+        else:
+            dev.key("KEYCODE_BACK")
+        return f"code={code[:24]}… server={self.args.server} linked={LINKED_NAME!r}"
 
     def step_teardown(self) -> str:
         done = []

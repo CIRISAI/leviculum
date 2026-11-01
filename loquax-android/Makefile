@@ -105,6 +105,8 @@ KEYSTORE?=$(PROJ)/$(APP_MODULE).keystore
 APK_SUFFIX?=
 AAPT_EXTRA_FLAGS?=
 PACKAGE_NAME?=$(NAMESPACE)
+# Whether the screens the device walk opens directly are exported (1193).
+WALK_EXPORTED?=false
 
 PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).apk
 UNALIGNED_PACKAGE=$(BIN)/$(APP_MODULE)$(APK_SUFFIX).unaligned.apk
@@ -126,6 +128,7 @@ debug: KEYSTORE=$(PROJ)/debug.keystore
 debug: APK_SUFFIX=-debug
 debug: AAPT_EXTRA_FLAGS=--debug-mode
 debug: PACKAGE_NAME=$(NAMESPACE).debug
+debug: WALK_EXPORTED=true
 debug: $(PROJ)/debug.keystore build
 
 # The debug APK with the x86_64 library alone, under its own name so it
@@ -153,6 +156,7 @@ manifest: | $(BIN)
 	    -e 's|{{PACKAGE_NAME}}|$(PACKAGE_NAME)|g' \
 	    -e 's|{{MIN_SDK}}|$(MIN_API)|g' \
 	    -e 's|{{TARGET_SDK}}|$(TARGET_SDK)|g' \
+	    -e 's|{{WALK_EXPORTED}}|$(WALK_EXPORTED)|g' \
 	    $(PROJ)/AndroidManifest.xml > $(GENMANIFEST)
 	$(AAPT) package -f -m --custom-package $(NAMESPACE) -J $(PROJ)/src -M $(GENMANIFEST) -S $(PROJ)/res -I $(ANDJAR)
 

@@ -1,6 +1,8 @@
 package network.leviculum.loquax;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
@@ -38,15 +40,14 @@ import java.util.Map;
  * monospaced, selectable row with Copy; the QR code of the contact code
  * `lxma://<address>:<key>` that Columba and Sideband read, on a white
  * card; Share (the code as text), Share as picture, Copy address; Scan a
- * contact's code, which adds a contact from an `lxma://` code and joins a
- * mailbox from an `lqxh1` one; where the mailbox is, with the way to
- * another; Advanced, collapsed: identity hash, home node, propagation
+ * contact's code, which adds a contact from an `lxma://` code or an
+ * address alone and joins a mailbox from an `lqxh1` one (loquax::code); where the mailbox is, with the way to
+ * another, and where it is on this phone, Link a device (1264), which shows the mailbox's join code
+ * for another device and says when that device came; Advanced, collapsed: identity hash, home node, propagation
  * node, backup, app version.
  */
 public class ProfileActivity extends Activity {
     private static final int SCAN = 1;
-    /** What the scanner takes here: a contact's code or a mailbox's. */
-    static final String SCAN_PREFIXES = "lxma://|lqxh1";
 
     private LinearLayout body;
     private Map<String, Object> profile;
@@ -257,7 +258,7 @@ public class ProfileActivity extends Activity {
             @Override
             public void onClick(View v) {
                 startActivityForResult(new Intent(ProfileActivity.this, ScanActivity.class)
-                        .putExtra(ScanActivity.PREFIX, SCAN_PREFIXES), SCAN);
+                        .putExtra(ScanActivity.PREFIX, ScanActivity.CODES), SCAN);
             }
         });
     }
@@ -279,6 +280,16 @@ public class ProfileActivity extends Activity {
         said.setId(R.id.profile_mailbox);
         said.setPadding(dp(16), dp(24), dp(16), dp(4));
         body.addView(said, matchWrap());
+        if (Core.bool(profile, "here")) {
+            TextView link = row(getString(R.string.profile_link_device), R.id.profile_link_device);
+            link.setTextColor(getColor(R.color.accent));
+            link.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    linkDevice();
+                }
+            });
+        }
         TextView change = row(getString(R.string.profile_mailbox_change), R.id.profile_mailbox_change);
         change.setTextColor(getColor(R.color.accent));
         change.setOnClickListener(new View.OnClickListener() {
@@ -288,6 +299,107 @@ public class ProfileActivity extends Activity {
                         .putExtra(MainActivity.JOIN, true));
             }
         });
+    }
+
+    /**
+     * Link a device (1264): the mailbox's join code for one other device, as a QR on a white card and
+     * as text to share, how long it is good for, and a line that asks the library every second
+     * whether the device came: "Device linked: <its name>" then, or that the code ran out with a new
+     * one a tap away.
+     */
+    private void linkDevice() {
+        final Map<String, Object> code = Core.linkDevice();
+        if (code.containsKey("error")) {
+            Toast.makeText(this, Core.str(code, "error"), Toast.LENGTH_LONG).show();
+            return;
+        }
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setGravity(Gravity.CENTER_HORIZONTAL);
+        sheet.setPadding(dp(16), dp(16), dp(16), dp(8));
+        TextView how = text(getString(R.string.link_text), 15, R.color.text);
+        how.setId(R.id.link_text);
+        sheet.addView(how, matchWrap());
+        LinearLayout card = new LinearLayout(this);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(12), dp(12), dp(12), dp(12));
+        GradientDrawable white = new GradientDrawable();
+        white.setColor(Color.WHITE);
+        white.setCornerRadius(dp(16));
+        card.setBackground(white);
+        ImageView qr = QrCode.view(this, code, dp(240), getString(R.string.link_title));
+        if (qr != null) {
+            qr.setId(R.id.link_qr);
+            card.addView(qr, new LinearLayout.LayoutParams(dp(240), dp(240)));
+        }
+        LinearLayout.LayoutParams centred = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        centred.gravity = Gravity.CENTER_HORIZONTAL;
+        centred.topMargin = dp(12);
+        sheet.addView(card, centred);
+        TextView good = text(getString(R.string.link_good_for, (int) Core.num(code, "hours")), 14,
+                R.color.text_secondary);
+        good.setGravity(Gravity.CENTER);
+        good.setPadding(0, dp(8), 0, 0);
+        sheet.addView(good, matchWrap());
+        // The code as text, for a device that pastes rather than scans; the walk reads it here.
+        TextView text = text(Core.str(code, "code"), 11, R.color.text_secondary);
+        text.setId(R.id.link_code);
+        text.setTypeface(Typeface.MONOSPACE);
+        text.setTextIsSelectable(true);
+        text.setPadding(0, dp(8), 0, 0);
+        sheet.addView(text, matchWrap());
+        final TextView status = text(getString(R.string.link_waiting), 16, R.color.text);
+        status.setId(R.id.link_status);
+        status.setGravity(Gravity.CENTER);
+        status.setPadding(0, dp(12), 0, 0);
+        sheet.addView(status, matchWrap());
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(sheet);
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.link_title)
+                .setView(scroll)
+                .setNegativeButton(R.string.link_share, null)
+                .setPositiveButton(R.string.done, null)
+                .create();
+        final Runnable[] look = new Runnable[1];
+        look[0] = new Runnable() {
+            @Override
+            public void run() {
+                if (!dialog.isShowing()) {
+                    return;
+                }
+                Map<String, Object> linked = Core.linked();
+                String state = Core.str(linked, "state");
+                if ("linked".equals(state)) {
+                    status.setText(getString(R.string.link_linked, Core.str(linked, "name")));
+                    status.setTextColor(getColor(R.color.accent));
+                    return;
+                }
+                if ("over".equals(state)) {
+                    status.setText(R.string.link_over);
+                    return;
+                }
+                status.postDelayed(look[0], 1000);
+            }
+        };
+        dialog.setOnShowListener(new DialogInterface.OnShowListener() {
+            @Override
+            public void onShow(DialogInterface shown) {
+                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(
+                        new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                Intent send = new Intent(Intent.ACTION_SEND)
+                                        .setType("text/plain")
+                                        .putExtra(Intent.EXTRA_TEXT, Core.str(code, "code"));
+                                startActivity(Intent.createChooser(send, getString(R.string.link_share)));
+                            }
+                        });
+                status.postDelayed(look[0], 1000);
+            }
+        });
+        dialog.show();
     }
 
     /** Advanced, collapsed: what needs Reticulum knowledge. */
@@ -353,14 +465,10 @@ public class ProfileActivity extends Activity {
         if (request != SCAN || result != RESULT_OK || data == null) {
             return;
         }
-        String text = String.valueOf(data.getStringExtra(ScanActivity.TEXT));
-        if (AddContact.is(text)) {
-            AddContact.ask(this, text, null);
-        } else {
-            // A mailbox's code: the join the first screen does for one.
-            startActivity(new Intent(this, MainActivity.class)
-                    .putExtra(MainActivity.JOIN, true)
-                    .putExtra(MainActivity.CODE, text));
+        // A friend's code adds them, a mailbox's joins it (1263).
+        String why = AddContact.take(this, String.valueOf(data.getStringExtra(ScanActivity.TEXT)), null);
+        if (why != null) {
+            Toast.makeText(this, why, Toast.LENGTH_LONG).show();
         }
     }
 

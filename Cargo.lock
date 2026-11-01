@@ -847,6 +847,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "codec2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3c8ba70382a99c0b5ebadf6ad50e7d98fb6eb9bcc4c0e30d422f6321798d99"
+
+[[package]]
 name = "codespan-reporting"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2511,11 +2517,22 @@ dependencies = [
  "byteorder-lite",
  "color_quant",
  "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error 2.0.1",
 ]
 
 [[package]]
@@ -3231,6 +3248,7 @@ dependencies = [
  "ratatui",
  "rmpv",
  "serde",
+ "serde_json",
  "tempfile",
  "terminal_size",
  "thiserror 2.0.17",
@@ -3278,12 +3296,14 @@ name = "loquax"
 version = "0.1.1"
 dependencies = [
  "clap",
+ "codec2",
  "cosmic-text",
  "crossterm",
  "embedded-graphics",
  "futures",
  "hex",
  "iced",
+ "image",
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-map",
@@ -3292,8 +3312,10 @@ dependencies = [
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-ratatui",
+ "libm",
  "lnpnd",
  "open",
+ "opus-pure",
  "png",
  "proptest",
  "qrcodegen",
@@ -4109,6 +4131,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "opus-pure"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4de7c2ad44427a636b27bf0b03eb29e713775ba1b45ff31a0618c19ee5adb215"
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4633,6 +4661,12 @@ name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
+
+[[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
@@ -5224,7 +5258,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc6bf79ff24e648f6da1f8d1f011e9cac26491b619e6b9280f2b47f1774e6ee2"
 dependencies = [
  "fnv",
- "quick-error",
+ "quick-error 1.2.3",
  "tempfile",
  "wait-timeout",
 ]

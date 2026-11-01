@@ -30,8 +30,9 @@ use loquax::store::Store;
 use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
-use loquax::ui::strings::Lang;
-use loquax::ui::{chat, scene, update, UiEffect, UiEvent, UiModel};
+use loquax::ui::recording::{Effect, Haptic, Input, LevelTrack, Verb};
+use loquax::ui::strings::{Lang, StrId, Text};
+use loquax::ui::{chat, compose, scene, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::links::{self, Book};
@@ -55,6 +56,9 @@ pub const PUMP: Duration = Duration::from_millis(100);
 /// than its link keepalive does. Before 1176 the pump ran every 100 ms for
 /// the life of the session.
 pub const IDLE_PUMP: Duration = watch::LOOK;
+/// The longest the pump sleeps while a position share runs (1273): its
+/// shortest gap, so a report and the end are at most that late.
+pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_S as u64);
 /// How long a send runner waits for its bubble to be named.
 const SETTLE: Duration = Duration::from_secs(5);
 /// How often the TCP interface is looked at while the pump runs fast.
@@ -69,6 +73,9 @@ pub const SHARED_SHOWN: usize = 100;
 pub struct StartError {
     pub need: Option<&'static str>,
     pub text: String,
+    /// The words behind [`StartError::text`] for the screen's Details
+    /// (1263): the mailbox's or the parser's own.
+    pub details: Option<String>,
 }
 
 impl StartError {
@@ -76,6 +83,17 @@ impl StartError {
         Self {
             need: None,
             text: text.into(),
+            details: None,
+        }
+    }
+
+    /// One plain sentence of the catalogue in `lang`, what went wrong in
+    /// `details` (1263, finding 8).
+    fn said(need: Option<&'static str>, words: StrId, lang: Lang, details: Option<String>) -> Self {
+        Self {
+            need,
+            text: words.text(lang).to_string(),
+            details: details.filter(|details| !details.is_empty()),
         }
     }
 }
@@ -155,8 +173,15 @@ struct Inner {
     fallback: Fallback,
     /// loquax's links to the phone's address book (1139).
     book: Book,
+    /// The peers added by a code while this session runs (walk finding
+    /// 15): their chat does not ask to save them to the phone's contacts,
+    /// the user just named them.
+    just_added: std::collections::BTreeSet<[u8; 16]>,
     /// The contact keys the home node took (1187), for the facade test.
     keys_told: Arc<std::sync::atomic::AtomicUsize>,
+    /// What the recorder is to do (1276, `UiEffect::Recording`), by peer,
+    /// until [`schema::Query::Recording`] hands it out.
+    recorder: Vec<([u8; 16], Effect)>,
 }
 
 /// A running session.
@@ -168,6 +193,8 @@ pub struct Session {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
     /// The mailbox, when it is on this phone.
     here: Mutex<Option<mailbox::Here>>,
+    /// The device "Link a device" waits for (1264), when one was asked.
+    linking: Mutex<Option<mailbox::Linking>>,
     address: [u8; 16],
     server: String,
     /// The list the leaf dials one at a time, [`Session::server`] first.
@@ -193,34 +220,36 @@ impl Session {
             (start.clone(), None)
         };
         let start = &start;
+        let lang = Lang::of_tag(start.lang.as_deref().unwrap_or_default());
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
         let mut carried = Vec::new();
         let code = match (&client, start.code.as_deref().map(str::trim)) {
             (_, Some(code)) if !code.is_empty() => {
                 let (code, list) = loquax::home::code::HomeCode::parse_with_rendezvous(code)
-                    .map_err(|error| StartError {
-                        need: Some("code"),
-                        text: format!("That is not a mailbox code: {error}"),
+                    .map_err(|error| {
+                        StartError::said(
+                            Some("code"),
+                            StrId::JoinNotMailbox,
+                            lang,
+                            Some(format!("That is not a mailbox code: {error}")),
+                        )
                     })?;
                 carried = list;
                 Some(code)
             }
             (Some(_), _) => None,
             (None, _) => {
-                return Err(StartError {
-                    need: Some("code"),
-                    text: "This phone reads no mailbox yet. Paste the code \
-                           `loquax mailbox setup` showed on the computer."
-                        .to_string(),
-                })
+                return Err(StartError::said(
+                    Some("code"),
+                    StrId::JoinNoCode,
+                    lang,
+                    Some("This phone reads no mailbox yet.".to_string()),
+                ))
             }
         };
         if let (Some(key), Some(code)) = (&client, &code) {
             if *key != code.public_key {
-                return Err(StartError {
-                    need: None,
-                    text: "This phone already reads another mailbox.".to_string(),
-                });
+                return Err(StartError::said(None, StrId::JoinOtherMailbox, lang, None));
             }
         }
         // The keepalive of the connection to the mailbox: the same `tcp_*`
@@ -229,14 +258,17 @@ impl Session {
         let config =
             loquax::config::load(&home).map_err(|error| StartError::other(error.to_string()))?;
         let servers =
-            dial_list(start.server.as_deref(), &config, carried, &home).ok_or(StartError {
-                need: Some("server"),
-                text: "Type your mailbox's address, host:port of its lnsd TCP server.".to_string(),
+            dial_list(start.server.as_deref(), &config, carried, &home).ok_or_else(|| {
+                StartError::said(
+                    Some("server"),
+                    StrId::JoinWhere,
+                    lang,
+                    Some("No server: the code carries none and none was typed.".to_string()),
+                )
             })?;
         for server in &servers {
-            loquax::engine::parse_server(server).map_err(|text| StartError {
-                need: Some("server"),
-                text,
+            loquax::engine::parse_server(server).map_err(|text| {
+                StartError::said(Some("server"), StrId::JoinBadWhere, lang, Some(text))
             })?;
         }
         let server = servers.first().cloned().unwrap_or_default();
@@ -294,10 +326,12 @@ impl Session {
                     loquax::home::client::HomeError::Refused(_) => Some("code"),
                     _ => None,
                 };
-                return Err(StartError {
+                return Err(StartError::said(
                     need,
-                    text: join_words(&error, &servers.join(", ")),
-                });
+                    join_words(&error),
+                    lang,
+                    Some(join_details(&error, &servers.join(", "))),
+                ));
             }
             loquax::home::client::save_client(&home, &code.public_key)
                 .map_err(StartError::other)?;
@@ -323,6 +357,7 @@ impl Session {
             client,
             start.offset,
             Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
+            start.camera,
             events_tx,
             runtime.handle().clone(),
             watch_rx,
@@ -360,6 +395,7 @@ impl Session {
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
             here: Mutex::new(here),
+            linking: Mutex::new(None),
             address,
             server,
             servers,
@@ -382,6 +418,7 @@ impl Session {
                 |text| StartError {
                     need: Some("passphrase"),
                     text,
+                    details: None,
                 },
             )?;
         }
@@ -393,8 +430,11 @@ impl Session {
         }
         let public_key = mailbox::choose_here(home).map_err(StartError::other)?;
         if joined.is_some_and(|key| key != public_key) {
-            return Err(StartError::other(
-                "This phone already reads another mailbox.",
+            return Err(StartError::said(
+                None,
+                StrId::JoinOtherMailbox,
+                Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
+                None,
             ));
         }
         let code = match joined {
@@ -424,11 +464,15 @@ impl Session {
     fn me(&self) -> Result<schema::Me, String> {
         let home = self.lock().home.clone();
         let here = self.is_here();
-        let (qr_size, modules) = loquax::home::qr::address_modules(&self.address)?;
+        // One contact code everywhere (1263, finding 1): the profile's, so
+        // a friend's scanner takes the first start's QR as well.
+        let lxma = loquax::lxma::encode(&self.lock().client.public_key)?;
+        let (qr_size, modules) = loquax::home::qr::verbatim_modules(&lxma)?;
         Ok(schema::Me {
             v: VERSION,
             address: loquax::address::to_hex(&self.address),
             fingerprint: fingerprint(&self.address),
+            lxma,
             qr_size,
             qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
             name: if here {
@@ -507,30 +551,38 @@ impl Session {
     /// cannot take the key now is said as a notice: the contact is there,
     /// and the first message waits for its announce.
     fn add_contact(&self, lxma: &str, name: Option<&str>) -> Result<(), String> {
-        let contact = loquax::lxma::parse(lxma).map_err(|error| error.to_string())?;
-        let peer = contact.address;
         let mut inner = self.lock();
+        let code = loquax::code::read(lxma).map_err(|why| why.say(inner.lang).to_string())?;
+        let (peer, key) = match code {
+            loquax::code::Code::Contact(contact) => (contact.address, Some(contact.public_key)),
+            // An old code, the address alone (1263): the contact is there,
+            // the first message waits for its announce.
+            loquax::code::Code::Address(address) => (address, None),
+            loquax::code::Code::Mailbox(_) => {
+                return Err(StrId::CodeIsMailbox.text(inner.lang).to_string())
+            }
+        };
+        inner.just_added.insert(peer);
         if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
             inner.apply(UiEvent::Rename {
                 peer,
                 name: name.to_string(),
             });
         }
+        let Some(contact_key) = key else {
+            inner.apply(UiEvent::Open { peer });
+            inner.dirty = true;
+            return Ok(());
+        };
         let node = inner.client.node.clone();
         let public_key = inner.client.public_key;
         let device = inner.client.device.clone();
         let events = inner.events.clone();
         let keys_told = Arc::clone(&inner.keys_told);
         inner.runtime.spawn(async move {
-            let told = loquax::home::client::key(
-                &node,
-                &public_key,
-                &device,
-                &peer,
-                &contact.public_key,
-                BUDGET,
-            )
-            .await;
+            let told =
+                loquax::home::client::key(&node, &public_key, &device, &peer, &contact_key, BUDGET)
+                    .await;
             if told.is_ok() {
                 keys_told.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -564,6 +616,60 @@ impl Session {
             qr_size,
             qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
         })
+    }
+
+    /// "Link a device" (1264, [`schema::Query::LinkDevice`]): a join code
+    /// of the mailbox on this phone, kept as the one [`Session::linked`]
+    /// watches.
+    fn link_device(&self) -> Result<schema::LinkCode, String> {
+        if !self.is_here() {
+            let lang = self.lock().lang;
+            return Err(StrId::LinkOnComputer.text(lang).to_string());
+        }
+        let home = self.lock().home.clone();
+        let (admission, linking) = mailbox::link_code(&home)?;
+        let code = admission.text();
+        let (qr_size, modules) = loquax::home::qr::modules(&code)?;
+        let hours = linking.expires_at.saturating_sub(admission.issued_at) / 3600;
+        let expires_at = linking.expires_at;
+        *self.linking() = Some(linking);
+        Ok(schema::LinkCode {
+            v: VERSION,
+            code,
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            hours: u32::try_from(hours).unwrap_or(u32::MAX),
+            expires_at,
+        })
+    }
+
+    /// Whether a device came with the newest link code
+    /// ([`schema::Query::Linked`]).
+    fn linked(&self) -> Result<schema::Linked, String> {
+        let Some(linking) = self.linking().clone() else {
+            return Ok(schema::Linked {
+                v: VERSION,
+                state: "none".to_string(),
+                name: String::new(),
+            });
+        };
+        let home = self.lock().home.clone();
+        let (state, name) = match mailbox::linked(&home, &linking)? {
+            mailbox::Linked::Waiting => ("waiting", String::new()),
+            mailbox::Linked::Linked(name) => ("linked", name),
+            mailbox::Linked::Over => ("over", String::new()),
+        };
+        Ok(schema::Linked {
+            v: VERSION,
+            state: state.to_string(),
+            name,
+        })
+    }
+
+    fn linking(&self) -> MutexGuard<'_, Option<mailbox::Linking>> {
+        self.linking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Whether the mailbox is on this phone.
@@ -704,6 +810,57 @@ impl Session {
             } => UiEvent::Reply { peer, target, body },
             Intent::Forward { from, key, to } => UiEvent::Forward { from, key, to },
             Intent::SendAgain { peer, key } => UiEvent::SendAgain { peer, key },
+            // Scaled and stripped off the lock: a 12 MP picture takes a
+            // quarter of a second on a desktop, more on a phone.
+            Intent::SendPhoto { peer, data } => {
+                let size = self.lock().model.photo_size;
+                let prepared = loquax::photo::prepare(&data, size).map_err(|e| e.to_string())?;
+                UiEvent::SendPhoto {
+                    peer,
+                    format: prepared.format.to_string(),
+                    data: prepared.data,
+                }
+            }
+            // A file past what a receiver takes is refused here, in the
+            // phone's words, for Java's status line (1221).
+            Intent::SendFile {
+                peer,
+                name,
+                data,
+                size,
+            } => {
+                let lang = self.lock().lang;
+                let whole = usize::try_from(size).unwrap_or(usize::MAX).max(data.len());
+                if let Some(why) = loquax::ui::files::refusal(whole) {
+                    return Err(why.resolve(lang));
+                }
+                UiEvent::SendFile { peer, name, data }
+            }
+            // Coded off the lock (a minute takes a third of a second on a
+            // desktop, more on a phone); too short or too long is refused
+            // in the phone's words, for Java's status line.
+            Intent::SendVoice { peer, pcm, rate } => {
+                let lang = self.lock().lang;
+                let ms = match rate {
+                    0 => 0,
+                    rate => {
+                        u32::try_from(pcm.len() as u64 * 1000 / u64::from(rate)).unwrap_or(u32::MAX)
+                    }
+                };
+                if let Some(why) = loquax::ui::voice::refusal(ms) {
+                    return Err(why.resolve(lang));
+                }
+                let data = loquax::voice::encode(&pcm, rate)?;
+                UiEvent::SendVoice { peer, data }
+            }
+            Intent::PlayVoice { peer, key } => UiEvent::PlayVoice { peer, key },
+            // A pause and the player's end alike: either way it stops.
+            Intent::PauseVoice { peer, key } => {
+                let mut inner = self.lock();
+                inner.apply(UiEvent::PauseVoice { peer, key });
+                inner.apply(UiEvent::VoiceEnded { peer, key });
+                return Ok(());
+            }
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed: true,
@@ -792,6 +949,38 @@ impl Session {
                 text,
                 reply,
             } => UiEvent::Draft { peer, text, reply },
+            // The camera's photo goes through the same scaling and
+            // stripping as one from the gallery (1270), off the lock.
+            Intent::StagePhoto { peer, data } => {
+                let size = self.lock().model.photo_size;
+                let prepared = loquax::photo::prepare(&data, size).map_err(|e| e.to_string())?;
+                UiEvent::StagePhoto {
+                    peer,
+                    format: prepared.format.to_string(),
+                    data: prepared.data,
+                }
+            }
+            Intent::Unstage { peer } => UiEvent::Unstage { peer },
+            Intent::Attach { peer } => UiEvent::OpenSheet(compose::Sheet::Attach { peer }),
+            Intent::Locate { peer } => UiEvent::OpenSheet(compose::Sheet::Position { peer }),
+            Intent::CloseSheet => UiEvent::CloseSheet,
+            Intent::OwnFix { location } => {
+                // A share judges the fix at the time it came (1273).
+                let mut inner = self.lock();
+                let now = wall_now(inner.offset);
+                inner.apply(UiEvent::Clock(now));
+                drop(inner);
+                UiEvent::OwnFix(location)
+            }
+            Intent::ShareFix { peer } => UiEvent::ShareFix { peer },
+            Intent::StartShare { peer, span } => UiEvent::StartShare { peer, span },
+            Intent::StopShare { peer } => UiEvent::StopShare { peer },
+            // The recording bar's buttons (1276) are the recording's
+            // input like the gestures.
+            Intent::Recording { peer, verb } => UiEvent::Record {
+                peer,
+                input: Input::Verb(verb),
+            },
             other => return Err(format!("not a request of the facade: {other:?}")),
         };
         self.lock().apply(event);
@@ -799,10 +988,15 @@ impl Session {
     }
 
     /// A request that is the phone's own glue, not the user's intent: the
-    /// address book's links.
+    /// address book's links, and the microphone's gestures and levels
+    /// (1276).
     fn platform(&self, request: Platform) -> Result<(), String> {
         match request {
             Platform::Link { peer, contact } => self.lock().link(peer, &contact),
+            Platform::Record { peer, input } => {
+                self.lock().apply(UiEvent::Record { peer, input });
+                Ok(())
+            }
             Platform::Unlink { peer } => self.lock().unlink(peer),
             Platform::NotNow { peer } => {
                 let mut inner = self.lock();
@@ -845,6 +1039,8 @@ impl Session {
         match query {
             schema::Query::Me => return self.me().map(|me| schema::encode(&me)),
             schema::Query::Profile => return self.profile().map(|p| schema::encode(&p)),
+            schema::Query::LinkDevice => return self.link_device().map(|c| schema::encode(&c)),
+            schema::Query::Linked => return self.linked().map(|l| schema::encode(&l)),
             schema::Query::Backup { passphrase } => {
                 return self
                     .backup(&passphrase)
@@ -871,6 +1067,152 @@ impl Session {
             }
             // The Privacy page's switch (1233): the model's, which the
             // config keeps (`UiEffect::Remember`).
+            // The Chats page's photo size (1220), kept as the receipts'
+            // switch is.
+            schema::Query::PhotoSize { set } => {
+                let mut inner = self.lock();
+                if let Some(word) = set {
+                    let size = loquax::ui::photos::PhotoSize::from_word(&word)
+                        .ok_or_else(|| format!("{word:?} is not small, phone or original"))?;
+                    inner.apply(UiEvent::PhotoSize(size));
+                }
+                return Ok(schema::encode(&schema::PhotoSizeChoice {
+                    v: VERSION,
+                    ok: true,
+                    size: inner.model.photo_size.word().to_string(),
+                }));
+            }
+            // A photo's pixels (1220): its bytes copied under the lock,
+            // decoded and scaled off it.
+            schema::Query::Photo { peer, key, edge } => {
+                let peer = parse_peer(&peer)?;
+                let bytes = self
+                    .lock()
+                    .picture(peer, schema::model_key(key))
+                    .ok_or_else(|| "no such photo".to_string())?;
+                let pixels =
+                    loquax::photo::fit(&bytes, edge.clamp(1, 4096)).map_err(|e| e.to_string())?;
+                return Ok(schema::encode(&schema::PhotoPixels {
+                    v: VERSION,
+                    ok: true,
+                    width: pixels.width,
+                    height: pixels.height,
+                    rgba: schema::Blob(pixels.rgba),
+                    full_width: pixels.full.0,
+                    full_height: pixels.full.1,
+                }));
+            }
+            // The staged photo's pixels (1270): its bytes copied under the
+            // lock, decoded and scaled off it.
+            schema::Query::Staged { peer, edge } => {
+                let peer = parse_peer(&peer)?;
+                let bytes = self
+                    .lock()
+                    .model
+                    .bar
+                    .staged
+                    .get(&peer)
+                    .map(|staged| staged.data.clone())
+                    .ok_or_else(|| "no staged photo".to_string())?;
+                let pixels =
+                    loquax::photo::fit(&bytes, edge.clamp(1, 4096)).map_err(|e| e.to_string())?;
+                return Ok(schema::encode(&schema::PhotoPixels {
+                    v: VERSION,
+                    ok: true,
+                    width: pixels.width,
+                    height: pixels.height,
+                    rgba: schema::Blob(pixels.rgba),
+                    full_width: pixels.full.0,
+                    full_height: pixels.full.1,
+                }));
+            }
+            // A file to open or share (1221): its message's fields copied
+            // under the lock, written under the app's files off it.
+            // A voice message's sound (1222): its bytes copied under the
+            // lock, decoded off it.
+            schema::Query::Voice { peer, key } => {
+                let peer = parse_peer(&peer)?;
+                let key = schema::model_key(key);
+                let (mode, data) = {
+                    let inner = self.lock();
+                    inner
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .and_then(|m| loquax::ui::voice::voice_parts(&m.fields))
+                        .map(|(mode, data)| (mode, data.to_vec()))
+                        .ok_or_else(|| "no such voice message".to_string())?
+                };
+                let pcm = loquax::voice::decode(mode, &data)?;
+                // The bubble draws the decoded sound's own track from now
+                // on (1276), where the model has none: a received message,
+                // or ours from before the recording kept one.
+                let mut inner = self.lock();
+                if inner.model.voice_track(peer, key).is_none() {
+                    inner.apply(UiEvent::VoiceTrack {
+                        peer,
+                        key,
+                        track: LevelTrack::from_pcm(&pcm.samples, pcm.rate),
+                    });
+                    inner.dirty = true;
+                }
+                drop(inner);
+                return Ok(schema::encode(&schema::VoicePcm {
+                    v: VERSION,
+                    ok: true,
+                    rate: pcm.rate,
+                    pcm: schema::Blob(pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect()),
+                }));
+            }
+            schema::Query::SaveFile { peer, key, index } => {
+                let peer = parse_peer(&peer)?;
+                let key = schema::model_key(key);
+                let (home, fields) = {
+                    let inner = self.lock();
+                    let fields = inner
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .map(|m| m.fields.clone())
+                        .ok_or_else(|| "no such message".to_string())?;
+                    (inner.home.clone(), fields)
+                };
+                let index = usize::try_from(index).map_err(|e| e.to_string())?;
+                let path = loquax::file_save::save(&home, peer, key, index, &fields)?;
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                return Ok(schema::encode(&schema::SavedFile {
+                    v: VERSION,
+                    ok: true,
+                    path: path.display().to_string(),
+                    name,
+                }));
+            }
+            // The recording bar (1276): the effects are handed out once.
+            schema::Query::Recording { peer } => {
+                let peer = parse_peer(&peer)?;
+                let mut inner = self.lock();
+                let (mine, others) = std::mem::take(&mut inner.recorder)
+                    .into_iter()
+                    .partition::<Vec<_>, _>(|(of, _)| *of == peer);
+                inner.recorder = others;
+                let effects = mine
+                    .into_iter()
+                    .map(|(_, effect)| effect_word(effect).to_string())
+                    .collect();
+                return Ok(schema::encode(&recording(
+                    &inner.model,
+                    peer,
+                    inner.lang,
+                    effects,
+                )));
+            }
             schema::Query::Receipts { set } => {
                 let mut inner = self.lock();
                 if let Some(on) = set {
@@ -890,6 +1232,8 @@ impl Session {
                 schema::encode(&inner.conversations(search.as_deref()))
             }
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
+            schema::Query::Bar { peer } => schema::encode(&inner.bar(parse_peer(&peer)?)),
+            schema::Query::Shares => schema::encode(&inner.shares()),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
                 let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
@@ -939,27 +1283,35 @@ impl Session {
                 |peer| inner.photo(peer),
             )),
             schema::Query::Shared => schema::encode(&inner.shared()?),
-            schema::Query::Lxma { text } => {
-                let contact = loquax::lxma::parse(&text).map_err(|error| error.to_string())?;
-                schema::encode(&schema::Lxma {
-                    v: VERSION,
-                    address: loquax::address::to_hex(&contact.address),
-                    lxma: loquax::lxma::encode_parts(&contact.address, &contact.public_key),
-                    known: inner
+            schema::Query::Lxma { text, lang } => schema::encode(&read_code(
+                &text,
+                lang.as_deref().map_or(inner.lang, Lang::of_tag),
+                |address| {
+                    inner
                         .model
                         .names
-                        .shown(&contact.address)
+                        .shown(address)
                         .unwrap_or_default()
-                        .to_string(),
-                })
-            }
+                        .to_string()
+                },
+            )?),
             schema::Query::Me
             | schema::Query::Profile
+            | schema::Query::LinkDevice
+            | schema::Query::Linked
             | schema::Query::Backup { .. }
             | schema::Query::MapRegions { .. }
             | schema::Query::MapTheme { .. }
             | schema::Query::MapFling { .. }
-            | schema::Query::Receipts { .. } => return Err("answered above".to_string()),
+            | schema::Query::Receipts { .. }
+            | schema::Query::PhotoSize { .. }
+            | schema::Query::Photo { .. }
+            | schema::Query::Staged { .. }
+            | schema::Query::SaveFile { .. }
+            | schema::Query::Recording { .. }
+            | schema::Query::Voice { .. } => return Err("answered above".to_string()),
+            // The viewer's zoom needs no session: `lib.rs` answers it.
+            schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -1059,6 +1411,7 @@ impl Inner {
         client: HomeClient,
         offset: i32,
         lang: Lang,
+        camera: bool,
         events: Sender<Event>,
         runtime: tokio::runtime::Handle,
         watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
@@ -1070,6 +1423,8 @@ impl Inner {
         model.home_client = true;
         model.list_apart = true;
         model.reading.on = config.read_receipts.unwrap_or(true);
+        model.photo_size = config.photo_size.unwrap_or_default();
+        model.bar.abilities = compose::Abilities::phone(camera);
         for (message_id, source, packed) in store.unverified().map_err(|e| e.to_string())? {
             let verify = Command::Verify {
                 message_id,
@@ -1083,6 +1438,9 @@ impl Inner {
         let now = wall_now(offset);
         update(&mut model, UiEvent::Clock(now));
         model.restore(store.restore().map_err(|error| error.to_string())?);
+        // A share runs on across a restart (1273); one whose time ran out
+        // meanwhile ends at the next clock with its end report.
+        model.restore_shares(store.shares().map_err(|error| error.to_string())?);
         // The phone starts on the list, with nothing open: the model's
         // terminal habit of opening the first conversation would read what
         // arrives there before anyone looked.
@@ -1128,7 +1486,9 @@ impl Inner {
             front: false,
             fallback: Fallback::default(),
             book: links::load(home),
+            just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
+            recorder: Vec::new(),
         })
     }
 
@@ -1187,7 +1547,8 @@ impl Inner {
             self.say(say);
         }
         self.watched(elapsed);
-        self.quiet(UiEvent::Clock(wall_now(self.offset)));
+        // Applied, not quiet: a running share sends from the clock (1273).
+        self.apply(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
         if std::mem::take(&mut self.dirty) {
@@ -1219,7 +1580,11 @@ impl Inner {
         let until_sync = sync
             .and_then(|sync| sync.next_ms())
             .map(|next| Duration::from_millis(next.saturating_sub(now)));
-        idle_wait(until_sync)
+        // A running share's cadence and end are on the clock (1273).
+        match self.model.shares.running.is_empty() {
+            true => idle_wait(until_sync),
+            false => idle_wait(until_sync).min(SHARE_PUMP),
+        }
     }
 
     /// What the watching link said: a wake past the cursor pulls, as does
@@ -1390,6 +1755,9 @@ impl Inner {
                     }
                     self.dirty = true;
                 }
+                // The recorder's work (1276), for Java's next
+                // `Query::Recording`.
+                UiEffect::Recording { peer, effect } => self.recorder.push((peer, effect)),
                 // What the terminal does with its screen and its maps has
                 // no place here yet.
                 _ => {}
@@ -1621,6 +1989,7 @@ impl Inner {
             .draft
             .map(|draft| draft.resolve(self.lang))
             .unwrap_or_default();
+        let sharing = row.sharing;
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
@@ -1649,6 +2018,31 @@ impl Inner {
             pin,
             pin_label,
             draft,
+            sharing,
+        }
+    }
+
+    /// The running position shares (1273), Settings, Privacy's list.
+    fn shares(&self) -> schema::Shares {
+        schema::Shares {
+            v: VERSION,
+            title: Text::key(StrId::PositionSharing).resolve(self.lang),
+            empty: Text::key(StrId::NoShares).resolve(self.lang),
+            stop: Text::key(StrId::ShareStop).resolve(self.lang),
+            shares: scene::share_rows(&self.model)
+                .into_iter()
+                .map(|row| schema::ShareRow {
+                    peer: loquax::address::to_hex(&row.peer),
+                    id: row.id.resource(),
+                    name: row.name,
+                    words: row.words.resolve(self.lang),
+                    until: self
+                        .model
+                        .share(&row.peer)
+                        .and_then(|share| share.until)
+                        .unwrap_or(0),
+                })
+                .collect(),
         }
     }
 
@@ -1722,6 +2116,20 @@ impl Inner {
         })
     }
 
+    /// The picture bytes of the message `key` of `peer`'s conversation,
+    /// if it carries a photo.
+    fn picture(&self, peer: [u8; 16], key: u64) -> Option<Vec<u8>> {
+        self.model
+            .conversations
+            .iter()
+            .find(|c| c.peer == peer)?
+            .messages
+            .iter()
+            .find(|m| m.activity == key)
+            .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+            .map(<[u8]>::to_vec)
+    }
+
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
         let index = self.model.conversations.iter().position(|c| c.peer == peer);
         let icon =
@@ -1738,6 +2146,7 @@ impl Inner {
         let liveness = self.model.liveness(&peer);
         // The field opens with the scene's compose (1219).
         let compose = index.map(|c| scene::compose(&self.model, c));
+        let bar = self.bar(peer);
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -1751,7 +2160,10 @@ impl Inner {
             linked: link.is_some(),
             lookup: link.map(|link| link.lookup.clone()),
             contact_id: link.map(|link| link.contact_id),
-            ask_link: link.is_none() && heard && !self.book.not_now.contains(&peer),
+            ask_link: link.is_none()
+                && heard
+                && !self.book.not_now.contains(&peer)
+                && !self.just_added.contains(&peer),
             announced: names.announced(&peer).map(str::to_string),
             petname: names.petname(&peer).map(str::to_string),
             others: names
@@ -1767,10 +2179,93 @@ impl Inner {
             ring: ring(scene::Ring::of(liveness.state)),
             draft: compose.as_ref().map(|c| c.text.clone()).unwrap_or_default(),
             draft_reply: compose
+                .as_ref()
                 .and_then(|c| c.reply)
                 .map(|id| loquax::address::to_hex(&id))
                 .unwrap_or_default(),
+            round: bar.round,
+            buttons: bar.buttons,
+            hint: bar.hint,
+            staged: bar.staged,
+            sheet: bar.sheet,
+            sheet_title: bar.sheet_title,
+            sheet_rows: bar.sheet_rows,
+            has_fix: bar.has_fix,
+            fix_lat_e6: bar.fix_lat_e6,
+            fix_lon_e6: bar.fix_lon_e6,
+            fix_words: bar.fix_words,
+            share: scene::share_chip(&self.model, &peer)
+                .map(|chip| chip.words.resolve(self.lang))
+                .unwrap_or_default(),
+            share_stop: Text::key(StrId::ShareStop).resolve(self.lang),
+            recording: bar.recording,
         }
+    }
+
+    /// `peer`'s compose bar (1270, the scene's compose node and the sheet
+    /// it opened), for [`schema::Messages`] and [`schema::Query::Bar`].
+    fn bar(&self, peer: [u8; 16]) -> schema::Bar {
+        let compose = self
+            .model
+            .conversations
+            .iter()
+            .position(|c| c.peer == peer)
+            .map(|c| scene::compose(&self.model, c));
+        let mut bar = schema::Bar {
+            v: VERSION,
+            ..schema::Bar::default()
+        };
+        if let Some(compose) = compose {
+            bar.recording = compose
+                .recording
+                .as_ref()
+                .map(|r| r.phase.word().to_string())
+                .unwrap_or_default();
+            bar.round = compose.round.word().to_string();
+            bar.buttons = compose
+                .buttons
+                .iter()
+                .map(|b| schema::BarButton {
+                    id: b.id.resource(),
+                    label: b.a11y.label.resolve(self.lang),
+                })
+                .collect();
+            bar.hint = compose.a11y.label.resolve(self.lang);
+            bar.staged = compose
+                .staged
+                .as_ref()
+                .map(|st| st.words.resolve(self.lang))
+                .unwrap_or_default();
+        }
+        let (sheet, whereabouts) = scene::bar_sheet(&self.model, peer);
+        let Some(sheet) = sheet else {
+            return bar;
+        };
+        let fix = whereabouts.as_ref().and_then(|w| w.fix);
+        bar.sheet = self
+            .model
+            .bar
+            .sheet
+            .map(|s| s.word().to_string())
+            .unwrap_or_default();
+        bar.sheet_title = sheet.title.resolve(self.lang);
+        bar.sheet_rows = sheet
+            .actions
+            .iter()
+            .filter_map(|a| {
+                Some(schema::BarButton {
+                    id: scene::NodeId::SheetRow(scene::sheet_row(&a.intent)?).resource(),
+                    label: Text::key(a.label_key).resolve(self.lang),
+                })
+            })
+            .collect();
+        bar.has_fix = fix.is_some();
+        bar.fix_lat_e6 = fix.map_or(0, |f| f.0);
+        bar.fix_lon_e6 = fix.map_or(0, |f| f.1);
+        bar.fix_words = whereabouts
+            .map(|w| w.words.resolve(self.lang))
+            .unwrap_or_default();
+        bar
     }
 
     /// A linked peer's copied thumbnail.
@@ -1901,7 +2396,52 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
     for (g, group) in groups.into_iter().enumerate() {
         let mut day = group.day.map(|day| day.words.resolve(lang));
         for node in group.bubbles {
+            let photo = node.photo.as_ref().map(|photo| {
+                let shown = model.conversations[c]
+                    .messages
+                    .iter()
+                    .find(|m| m.activity == node.bubble.key)
+                    .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+                    .and_then(loquax::photo::dimensions)
+                    .unwrap_or((0, 0));
+                (
+                    photo.format.clone(),
+                    photo.bytes,
+                    shown,
+                    photo.words.resolve(lang),
+                )
+            });
+            let files = node
+                .files
+                .iter()
+                .map(|file| schema::FileRow {
+                    name: file.name.clone(),
+                    bytes: u32::try_from(file.bytes).unwrap_or(u32::MAX),
+                    size: file.size.clone(),
+                    words: file.words.resolve(lang),
+                })
+                .collect();
             let mut row = row(node.bubble);
+            // The scene's words (1268): a body of blanks is none, and the
+            // app draws no text row under a photo without words.
+            row.body = node.text.unwrap_or_default();
+            row.files = files;
+            if let Some(voice) = &node.voice {
+                row.voice_mode = u32::from(voice.mode);
+                row.voice_ms = voice.duration_ms;
+                row.voice_duration = voice.duration.clone();
+                row.voice_levels = schema::Blob(voice.levels.clone());
+                row.voice_playable = voice.toggle.is_some();
+                row.voice_playing = voice.playing;
+                row.voice_words = voice.words.resolve(lang);
+            }
+            if let Some((format, bytes, (w, h), words)) = photo {
+                row.photo = format;
+                row.photo_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+                row.photo_w = w;
+                row.photo_h = h;
+                row.photo_words = words;
+            }
             row.joins_before = node.place.joins_before;
             row.joins_after = node.place.joins_after;
             row.meta = node.place.meta;
@@ -1976,6 +2516,19 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         newest: false,
         day: String::new(),
         live: String::new(),
+        photo: String::new(),
+        photo_bytes: 0,
+        photo_w: 0,
+        photo_h: 0,
+        photo_words: String::new(),
+        files: Vec::new(),
+        voice_mode: 0,
+        voice_ms: 0,
+        voice_duration: String::new(),
+        voice_levels: schema::Blob::default(),
+        voice_playable: false,
+        voice_playing: false,
+        voice_words: String::new(),
     }
 }
 
@@ -2083,6 +2636,12 @@ pub enum Platform {
     Relink {
         rows: Vec<schema::ImRow>,
     },
+    /// The microphone's gesture or the recorder's level (1276): the
+    /// platform's input, not an intent (`loquax::ui::recording::Input`).
+    Record {
+        peer: [u8; 16],
+        input: Input,
+    },
 }
 
 /// `request` as an intent, with its addresses and ids parsed: every
@@ -2121,6 +2680,37 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             peer: parse_peer(&peer)?,
             key: schema::model_key(key),
         },
+        R::Photo { peer, data } => Intent::SendPhoto {
+            peer: parse_peer(&peer)?,
+            data: data.0,
+        },
+        R::File {
+            peer,
+            name,
+            data,
+            size,
+        } => Intent::SendFile {
+            peer: parse_peer(&peer)?,
+            name,
+            data: data.0,
+            size,
+        },
+        R::Voice { peer, pcm, rate } => Intent::SendVoice {
+            peer: parse_peer(&peer)?,
+            pcm: pcm
+                .0
+                .chunks_exact(2)
+                .map(|s| i16::from_le_bytes([s[0], s[1]]))
+                .collect(),
+            rate,
+        },
+        R::PlayVoice { peer, key, on } => {
+            let (peer, key) = (parse_peer(&peer)?, schema::model_key(key));
+            match on {
+                true => Intent::PlayVoice { peer, key },
+                false => Intent::PauseVoice { peer, key },
+            }
+        }
         R::Delete { peer, keys } => Intent::Delete {
             messages: Messages::Keys {
                 peer: parse_peer(&peer)?,
@@ -2206,8 +2796,189 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
                 false => Some(parse_id(&reply)?),
             },
         },
+        R::Stage { peer, data } => Intent::StagePhoto {
+            peer: parse_peer(&peer)?,
+            data: data.0,
+        },
+        R::Unstage { peer } => Intent::Unstage {
+            peer: parse_peer(&peer)?,
+        },
+        R::Sheet { peer, kind } => match kind.as_str() {
+            "" => Intent::CloseSheet,
+            "attach" => Intent::Attach {
+                peer: parse_peer(&peer)?,
+            },
+            "position" => Intent::Locate {
+                peer: parse_peer(&peer)?,
+            },
+            other => return Err(format!("{other:?} is not attach, position or empty")),
+        },
+        R::Fix {
+            lat_e6,
+            lon_e6,
+            alt_e2,
+            accuracy_e2,
+            at,
+        } => Intent::OwnFix {
+            location: Some(share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?),
+        },
+        R::NoFix => Intent::OwnFix { location: None },
+        R::ShareFix { peer } => Intent::ShareFix {
+            peer: parse_peer(&peer)?,
+        },
+        R::StartShare { peer, span } => Intent::StartShare {
+            peer: parse_peer(&peer)?,
+            span: loquax::ui::share::Span::of_word(&span)
+                .ok_or_else(|| format!("{span:?} is not 15_min, 1_h, 8_h or until_stopped"))?,
+        },
+        R::StopShare { peer } => Intent::StopShare {
+            peer: parse_peer(&peer)?,
+        },
+        R::Record {
+            peer,
+            input,
+            now,
+            dx,
+            dy,
+            rms,
+        } => {
+            return Ok(Decoded::Platform(Platform::Record {
+                peer: parse_peer(&peer)?,
+                input: record_input(&input, now, dx, dy, rms)?,
+            }))
+        }
+        R::Recording { peer, verb } => Intent::Recording {
+            peer: parse_peer(&peer)?,
+            verb: verb_of(&verb)
+                .ok_or_else(|| format!("{verb:?} is no button of the recording bar"))?,
+        },
     };
     Ok(Decoded::Intent(intent))
+}
+
+/// The recording bar's verbs (1276), each by its resource id.
+const VERBS: [Verb; 8] = [
+    Verb::Lock,
+    Verb::Pause,
+    Verb::Resume,
+    Verb::Play,
+    Verb::StopPlay,
+    Verb::Send,
+    Verb::Discard,
+    Verb::AskMicrophone,
+];
+
+/// The verb whose resource id is `word` (`rec_lock` …, `rec_allow`).
+pub fn verb_of(word: &str) -> Option<Verb> {
+    VERBS.into_iter().find(|verb| verb.word() == word)
+}
+
+/// [`schema::Request::Record`]'s input: its word and the numbers that
+/// word takes. A time before the phone's clock began is 0, an RMS past
+/// 16 bits full scale.
+pub fn record_input(input: &str, now: i64, dx: i32, dy: i32, rms: u32) -> Result<Input, String> {
+    let now = u64::try_from(now).unwrap_or(0);
+    Ok(match input {
+        "press" => Input::Press { now },
+        "slide" => Input::Slide { dx, dy },
+        "release" => Input::Release { now },
+        "cancel" => Input::Cancel,
+        "level" => Input::Level {
+            now,
+            rms: u16::try_from(rms).unwrap_or(u16::MAX),
+        },
+        "tick" => Input::Tick { now },
+        "played" => Input::Played,
+        other => {
+            return Err(format!(
+                "{other:?} is not press, slide, release, cancel, level, tick or played"
+            ))
+        }
+    })
+}
+
+/// What the recorder is to do as the facade says it ([`schema::Recording::effects`]).
+pub fn effect_word(effect: Effect) -> &'static str {
+    match effect {
+        Effect::Haptic(Haptic::Start) => "haptic_start",
+        Effect::Haptic(Haptic::Lock) => "haptic_lock",
+        Effect::Haptic(Haptic::Cap) => "haptic_cap",
+        Effect::Start => "start",
+        Effect::Pause => "pause",
+        Effect::Resume => "resume",
+        Effect::Stop => "stop",
+        Effect::Finish => "finish",
+        Effect::Discard => "discard",
+        Effect::Play => "play",
+        Effect::StopPlay => "stop_play",
+        Effect::AskMicrophone => "ask_microphone",
+    }
+}
+
+/// `peer`'s recording bar in `lang` (1276, the scene's
+/// [`scene::recording_bar`]), with `effects` for the recorder.
+pub fn recording<B>(
+    model: &UiModel<B>,
+    peer: [u8; 16],
+    lang: Lang,
+    effects: Vec<String>,
+) -> schema::Recording {
+    use loquax::ui::recording as rec;
+    let phase = match model.recording.peer == peer {
+        true => model.recording.phase.word(),
+        false => rec::Phase::Idle.word(),
+    };
+    let mut answer = schema::Recording {
+        v: VERSION,
+        ok: true,
+        phase: phase.to_string(),
+        effects,
+        cancel_dp: rec::CANCEL_DP.unsigned_abs(),
+        lock_dp: rec::LOCK_DP.unsigned_abs(),
+        window_ms: rec::WINDOW_MS,
+        wave_slots: u32::try_from(rec::LIVE_WINDOWS).unwrap_or(u32::MAX),
+        longest_ms: loquax::ui::voice::LONGEST_MS,
+        ..schema::Recording::default()
+    };
+    let Some(bar) = scene::recording_bar(model, peer) else {
+        return answer;
+    };
+    answer.shown = true;
+    answer.pulsing = bar.pulsing;
+    answer.timer = bar.timer.words.resolve(lang);
+    answer.timer_ms = bar.timer.ms;
+    answer.amber = bar.timer.amber;
+    answer.wave = schema::Blob(bar.wave.levels);
+    answer.moving = bar.wave.moving;
+    answer.wave_label = bar.wave.a11y.label.resolve(lang);
+    if let Some(cancel) = &bar.cancel {
+        answer.cancel = cancel.words.resolve(lang);
+        answer.cancel_progress = u32::from(cancel.progress);
+        answer.armed = cancel.armed;
+    }
+    if let Some(held) = &bar.held {
+        answer.held = held.words.resolve(lang);
+    }
+    if let Some(lock) = &bar.lock {
+        answer.lock = lock.a11y.label.resolve(lang);
+        answer.lock_closed = lock.closed;
+        answer.lock_progress = u32::from(lock.progress);
+    }
+    answer.buttons = bar
+        .buttons
+        .iter()
+        .map(|b| schema::BarButton {
+            id: b.id.resource(),
+            label: b.a11y.label.resolve(lang),
+        })
+        .collect();
+    if let Some(notice) = &bar.notice {
+        answer.notice = notice.words.resolve(lang);
+        if notice.action.is_some() {
+            answer.notice_allow = Text::key(Verb::AskMicrophone.label()).resolve(lang);
+        }
+    }
+    answer
 }
 
 pub fn share_location(
@@ -2233,16 +3004,58 @@ pub fn share_location(
     ))
 }
 
-/// A join that failed, in words for the join screen.
-fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
+/// What [`schema::Query::Lxma`] answers for `text` ([`loquax::code::read`],
+/// 1263): its kind, whose, and the code to hand on; a text that is none
+/// refused in one sentence of `lang`. `known` names an address.
+pub fn read_code(
+    text: &str,
+    lang: Lang,
+    known: impl Fn(&[u8; 16]) -> String,
+) -> Result<schema::Lxma, String> {
+    use loquax::code::Code;
+    let code = loquax::code::read(text).map_err(|why| why.say(lang).to_string())?;
+    let address = code.address();
+    Ok(schema::Lxma {
+        v: VERSION,
+        kind: code.kind().to_string(),
+        address: address
+            .as_ref()
+            .map(|address| loquax::address::to_hex(address))
+            .unwrap_or_default(),
+        lxma: match &code {
+            Code::Contact(contact) => {
+                loquax::lxma::encode_parts(&contact.address, &contact.public_key)
+            }
+            Code::Address(address) => loquax::address::to_hex(address),
+            Code::Mailbox(text) => text.clone(),
+        },
+        known: address.as_ref().map(known).unwrap_or_default(),
+    })
+}
+
+/// A join that failed, in one plain sentence for the join screen (1263,
+/// finding 8): no daemon, no server, no TCP on the main path.
+fn join_words(error: &loquax::home::client::HomeError) -> StrId {
+    use loquax::home::client::HomeError;
+    match error {
+        HomeError::NoPath => StrId::JoinNoAnswer,
+        HomeError::Refused(_) => StrId::JoinRefused,
+        HomeError::Timeout => StrId::JoinSlow,
+        _ => StrId::JoinFailed,
+    }
+}
+
+/// The same join failure in the words of the machinery, for the screen's
+/// Details: what someone helping needs.
+fn join_details(error: &loquax::home::client::HomeError, server: &str) -> String {
     use loquax::home::client::HomeError;
     match error {
         HomeError::NoPath => format!(
-            "Your mailbox did not answer through {server}. Check the address, \
+            "No path to the mailbox through {server}: check the address, \
              that its lnsd runs a TCP server there, and that this phone can reach it."
         ),
-        HomeError::Refused(status) => format!("Your mailbox refused the code: {status}."),
-        HomeError::Timeout => "Your mailbox did not answer in time. Try again.".to_string(),
+        HomeError::Refused(status) => format!("The mailbox refused the code: {status}."),
+        HomeError::Timeout => format!("No answer through {server} in time."),
         other => format!("Joining failed: {other}."),
     }
 }
@@ -2368,6 +3181,51 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every join failure is one plain sentence of the catalogue in both
+    /// languages (1263, finding 8), and the machinery's words, the server
+    /// included, go under Details only.
+    #[test]
+    fn a_join_failure_is_one_plain_sentence_and_the_rest_is_details() {
+        use loquax::home::client::HomeError;
+        use loquax::home::wire::Status;
+        let server = "192.168.1.20:4242";
+        let cases = [
+            (
+                HomeError::NoPath,
+                "The mailbox did not answer. Is the computer on?",
+            ),
+            (
+                HomeError::Refused(Status::BadToken),
+                "The mailbox did not take this code. Make a new one on the computer.",
+            ),
+            (
+                HomeError::Timeout,
+                "The mailbox did not answer in time. Try again.",
+            ),
+            (
+                HomeError::NoLink("refused".to_string()),
+                "Joining the mailbox did not work.",
+            ),
+            (HomeError::Malformed, "Joining the mailbox did not work."),
+        ];
+        for (error, english) in cases {
+            assert_eq!(join_words(&error).text(Lang::En), english, "{error:?}");
+            for lang in Lang::ALL {
+                let said = join_words(&error).text(lang);
+                for word in ["lnsd", "TCP", "host:port", "loquax home", server] {
+                    assert!(!said.contains(word), "{lang:?} {error:?}: {said}");
+                }
+            }
+            assert!(!join_details(&error, server).is_empty());
+        }
+        assert!(join_details(&HomeError::NoPath, server).contains(server));
+        assert!(join_details(&HomeError::NoPath, server).contains("lnsd"));
+        assert_eq!(
+            join_words(&HomeError::NoPath).text(Lang::De),
+            "Das Postfach hat nicht geantwortet. Ist der Computer an?"
+        );
+    }
 
     /// The client's own periodic timers while it idles (1176), as the
     /// report lists them. Tokio exposes no list of the timers a runtime

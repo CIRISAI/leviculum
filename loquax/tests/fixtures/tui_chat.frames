@@ -1,6 +1,6 @@
 === 80x24 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: reading ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       09:12 ││                                                    │
 │▌you: on my way         ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:04 ││                                                    │
 │▌ok, bring the T114.    ││                                                    │
 │                        ││                                                    │
@@ -75,7 +75,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
@@ -100,7 +100,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
@@ -125,7 +125,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
-┌  Loquax afbda7b3───────┐┌  them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:06 ││                                                    │
 │▌you: the tripod fits   ││                                                    │
 │                        ││           nothing earlier on this device           │
@@ -150,7 +150,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 7: detail ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:06 ││                                                    │
 │▌you: the tripod fits   ││                                                    │
 │                        ││           nothing earlier on this device           │
@@ -176,8 +176,8 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === 120x40 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌<61ddb79a…>                      ││                                                              no propagation node │
+┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│▌<61ddb79a…>                      ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -217,8 +217,8 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: reading ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 09:12 ││                                                              no propagation node │
+┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│▌them ·61dd                 09:12 ││                                                                                  │
 │▌you: on my way                   ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -258,8 +258,8 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:04 ││                                                              no propagation node │
+┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│▌them ·61dd                 14:04 ││                                                                                  │
 │▌ok, bring the T114.              ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -299,8 +299,8 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:05 ││                                                              no propagation node │
+┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│▌them ·61dd                 14:05 ││                                                                                  │
 │▌and the small tripod             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -340,8 +340,8 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:05 ││                                                              no propagation node │
+┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│▌them ·61dd                 14:05 ││                                                                                  │
 │▌and the small tripod             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -381,8 +381,8 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
-┌  Loquax afbda7b3─────────────────┐┌  them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:06 ││                                                              no propagation node │
+┌  Loquax afbda7b3─────────────────┐┌  them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│▌them ·61dd                 14:06 ││                                                                                  │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -422,8 +422,8 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 7: detail ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:06 ││                                                              no propagation node │
+┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│▌them ·61dd                 14:06 ││                                                                                  │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │

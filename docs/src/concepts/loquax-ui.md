@@ -84,14 +84,14 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:979-1016`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:992-1029`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1006-1016`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1019-1029`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
 **What must not be copied**: `lnomad` quits on `Ctrl-C` from any mode,
-before the mode dispatch (`lnomad/src/app/event.rs:419-422`). In a messenger
+before the mode dispatch (`lnomad/src/app/event.rs:436-439`). In a messenger
 that is a half-written message thrown away by a reflex. `Ctrl-C` in the
 compose pane clears the buffer to a recoverable draft; quitting needs
 `Ctrl-Q` or the palette.
@@ -99,7 +99,7 @@ compose pane clears the buffer to a recoverable draft; quitting needs
 **The keymap must be one table.** `lnomad` applied single-source-of-truth
 discipline to scrolling and nowhere else, and its help overlay's other
 groups are hand-typed strings that can drift
-(`lnomad/src/app/chrome.rs:426-527`). Every binding here is one table read by
+(`lnomad/src/app/chrome.rs:492-535`). Every binding here is one table read by
 the key handler, the help overlay, the palette and the footer hints. That
 table is also the natural place to hang user configuration later, which
 `lnomad` has none of.
@@ -112,7 +112,7 @@ count how often focus is in the compose pane.
 
 **The quiet keyboard, with its one exception** (decided 2026-08-08). The
 `lnomad` rule that single letters are reserved for cheap local actions
-(`lnomad/src/app/event.rs:809-812`) generalises here to: **no single keystroke
+(`lnomad/src/app/event.rs:833-836`) generalises here to: **no single keystroke
 may put bytes on the air — except `Enter` in the compose pane.** The
 exception is principled, not a leak: the deliberate act was typing the
 message into a deliberately focused pane, and `Enter` completes that act.
@@ -359,6 +359,79 @@ nothing in the list. Pinned by `a_draft_stays_with_its_conversation`, the
 terminal's `tui_draft.frames`, the facade's
 `a_draft_survives_another_chat_and_a_new_session` and the device walk's
 `draft` step.
+
+### Built 2026-11-01, the compose bar after Signal
+
+1270 (#232, Lew 2026-11-01): the compose bar is one rounded field with
+the emoji button at its left edge, and inside it at its right edge the
+position button (the crosshair ⌖), the camera and the microphone;
+outside it, right, one round accent button that is a plus while there is
+nothing to send and Send once there is:
+
+```text
+( ☺  Message            ⌖  📷  🎤 )  (+)
+( ☺  on my way          ⌖  📷     )  (➤)
+```
+
+The rule is the core's (`loquax/src/ui/compose.rs`, `Round::of`): text in
+the field (blanks are none) or a staged photo make it Send, and the
+microphone hides with it; a shell whose plus has no row keeps Send. The
+scene's compose node carries the button set as data
+(`Compose::round`, `Compose::buttons`, each a `ComposeButton` with its
+node id, its action and its words; `Compose::staged`), so every target
+draws the same bar from it, and what a shell cannot do is not in it
+(`compose::Abilities`: camera, microphone, picker, location).
+
+| Button | Node id | Intent | Shows |
+|---|---|---|---|
+| emoji | `emoji` | `Emoji` | always, at the field's left edge |
+| position ⌖ | `locate` | `Locate { peer }` | where the shell reads its position |
+| camera | `camera` | `Camera { peer }`, answered with `StagePhoto` | where the shell has a camera |
+| microphone | `record` | `SendVoice` (held, 1222) | where it records, only while the button is the plus |
+| plus | `plus` | `Attach { peer }` | outside, nothing to send and a row to offer |
+| Send | `send` | `Send { peer }` | outside, text or a staged photo |
+
+The plus opens the attachment sheet, a `Sheet` node with its rows
+(`sheet_gallery` Gallery, `sheet_file` File, `sheet_position` My
+position; a Contact row later). The position button opens the position
+sheet straight away, unlike Signal, which buries the position in its
+plus: sharing a position is one tap away. That sheet shows the own fix on
+the map and its age ("Found 5 min ago"; the scene's `Whereabouts`) and
+the row "Now, once" (`ShareFix`, "Send my position now" until 1273),
+which sends the fix to the chat as the position report of 1209 (a state,
+not a message) and closes the sheet, then since 1273 the four shares
+(`StartShare`, [the map](loquax-map.md), "Sharing for a while"); without a fix it says so and offers "Turn location on", the
+permission flow of 1201. Both paths lead to the same sheet.
+
+The camera takes a photo at once and stages it in the bar with its
+size; the field's hint becomes "Add a caption", and Send sends the
+photo and the text as one message (1268's one bubble). The staged photo
+went through the same scaling and stripping as a gallery pick
+(`loquax::photo::prepare`), and lives in memory only: a photo is not a
+draft. Gallery picks still go at once, as in 1220.
+
+Per target:
+
+- **Android** draws the bar from the facade's `Messages`/`Bar` fields
+  (`round`, `buttons`, `hint`, `staged`, `sheet`, `sheet_rows`, the fix);
+  `Query::Bar` is asked on every change of the field, so the plus turns
+  into Send with the first letter. The camera is the platform's capture
+  intent (`ACTION_IMAGE_CAPTURE` into `CaptureProvider`'s one file): the
+  app builds without Gradle and AndroidX, so CameraX is not on the table,
+  and the intent needs no preview code of ours. The sheets are bottom
+  sheets as the map's Friends sheet is.
+- **The window** draws the same buttons from the scene. It has no
+  camera, no recorder, no picker and no position today, so its bar is
+  the emoji and Send; a button appears there once the window can do it.
+- **The terminal** keeps its palette and gains no `photo` command: the
+  hosts it is built and tested on have no camera (`/dev/video*`) and no
+  capture tool (`ffmpeg`, `fswebcam`).
+
+Pinned by `compose::tests` (the plus/send rule, one message of photo and
+caption, the share), `scene::tests::the_compose_bar_has_its_buttons_and_its_sheets`,
+the facade's `the_compose_bar_stages_a_camera_photo_through_the_gallery_path`
+and the device walk's `compose_bar`, `camera_photo` and
+`share_position_from_bar` steps.
 
 ### Pixel screens: the tokens
 

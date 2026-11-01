@@ -1,5 +1,5 @@
 --- two reactions ---
-┌  Loquax (attaching)────┐┌  <4f4f4f4f…>  unknown───────── no propagation node ┐
+┌  Loquax (attaching)────┐┌  <4f4f4f4f…>───────────────────────────────────────┐
 │▌<4f4f4f4f…>      12:01 ││                                                    │
 │▌reacted ❤️              ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- picker ---
-┌  Loquax (attaching)────┐┌● <4f4f4f4f…>  unknown───────── no propagation node ┐
+┌  Loquax (attaching)────┐┌● <4f4f4f4f…>───────────────────────────────────────┐
 │▌<4f4f4f4f…>      12:01 ││                                                    │
 │▌reacted ❤️         ┌ commands ────────────────────────────┐                   │
 │                   │>                                     │                   │
@@ -49,7 +49,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- ours ---
-┌  Loquax (attaching)────┐┌● <4f4f4f4f…>  unknown───────── no propagation node ┐
+┌  Loquax (attaching)────┐┌● <4f4f4f4f…>───────────────────────────── no relay ┐
 │▌<4f4f4f4f…>      12:01 ││                                                    │
 │▌you reacted 👍          ││                                                    │
 │                        ││                                                    │
