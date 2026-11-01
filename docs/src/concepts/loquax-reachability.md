@@ -306,6 +306,100 @@ two devices at once.
   no answer; only a link that comes up is.
   `a_restore_of_an_address_live_elsewhere_warns_first` holds both ways.
 
+## A network change (1298)
+
+The phone-only user has the mailbox on the phone and no server. Their
+measure is to do better than Columba. Columba's Python background service
+chokes when the network changes, and Lew restarts it by hand. Here
+nothing has to be touched: no restart, no user action.
+
+**Before 1298:**
+- After a change, the connection to the rendezvous stayed on a socket
+  whose source address the phone no longer had. It died only when the
+  TCP keepalive of order 1176 gave up on it, 24 s and more.
+- A rotation that had failed meanwhile, while there was no network, then
+  waited out its doubled backoff (up to 5 min) after the network was back.
+
+**The event.** The platform says one thing: `UiEvent::Network { kind,
+changed }`.
+- **Where it comes from:** `NetWatch` in the Android app. It uses the
+  default network callback, `onAvailable` and `onLost` in
+  `loquax-android/android/src/network/leviculum/loquax/NetWatch.java`.
+- **`kind`:** `none`, `wifi`, `mobile` or `other`
+  (`loquax::home::NetworkKind`).
+- **`changed`:** true when the default network is another one than
+  before.
+- **After Doze:** the end of Doze (`ACTION_DEVICE_IDLE_MODE_CHANGED`) says
+  the same network again, with `changed` off. So the first wake re-runs
+  the same evaluation.
+- **The path to the rotations:**
+  1. The model answers with `UiEffect::Network`.
+  2. The shell says it to the session's one
+     `loquax::home::rendezvous::Network` (`Network::say`).
+  3. Every rotation started with that handle hears it: the phone's leaf,
+     or the phone's own mailbox (`DaemonOptions::network`). The leaf of a
+     phone mailbox dials the loopback address, which no network change
+     touches, so it gets a handle of its own that nobody speaks to.
+
+**The evaluation.** It runs in the rotation's loop, `run` in
+`loquax/src/home/rendezvous.rs`, logged as `HOME_NETWORK kind= changed=
+action= entry=`.
+
+First, the settle folds a burst of callbacks into one evaluation
+(`Settle`): the evaluation runs once the changes have been quiet for
+1.5 s, and at the latest 6 s after the first, so a flapping network is
+still evaluated. A phone leaving a WLAN says lost, available and
+capabilities within a second.
+
+Then `evaluate` decides what to do:
+
+| the platform says | the connection | the rotation |
+|---|---|---|
+| no network | any | drops it and dials nothing until a network comes (`pause`); a dial into no network would only grow the backoff |
+| another network | any | drops it and dials the first entry at once, the backoff started over (`redial`) |
+| the same network | down | dials the first entry at once, cutting a running backoff short (`redial`) |
+| the same network | up | keeps it and asks the home path again (`ask`) |
+
+- **Re-announce:** once per destination. The node's own up handling
+  re-announces every destination on the new interface, as on any other
+  up (`handle_interface_up`).
+- **Path request:** the phone side asks for the home path on that up
+  (rule 2).
+- **The backoff wait** is part of the loop, so a change always cuts it
+  short.
+- **When the AutoInterface comes:** once the phone runs a full node, its
+  AutoInterface joins the same path. Its re-evaluation is a reaction to
+  the same `Network` word.
+- **The line:** the session tells the app as `Event::Network`, which says
+  `reconnecting` while a rotation dropped its connection for the change
+  and is not up again, then `back`. The status line says "Reconnecting…"
+  and then is gone.
+- **The keepalive levers of 1176 stay:** they find a dead connection that
+  no callback announced.
+
+**What holds it:**
+- `network_changes_redial_the_first_entry_once_each` and
+  `the_wake_after_doze_cuts_the_backoff_short` in
+  `loquax-android/tests/home_reach.rs`. They drive the five changes
+  against two fake rendezvous, bare TCP listeners that count connections,
+  and assert:
+  - the first entry is dialled first;
+  - a burst is one dial (red with the settle at 0);
+  - no network dials nothing;
+  - the same network with the connection up is kept;
+  - a running backoff is cut short.
+- `a_network_change_reconnects_the_phone_without_a_restart` in
+  `loquax-android/tests/facade.rs` goes from Java's request to the line
+  and on to a send after it.
+- On a device:
+  - the walk's steps `network_wifi_toggle`, `network_mobile_switch` and
+    `flight_mode` ([the walk](loquax-device-walk.md));
+  - `loquax-android/scripts/network-baseline.py`, which measures the five
+    changes for any app that holds an address on the phone, Columba's
+    service or Loquax's phone mailbox. The measure is the time from the
+    network's return to the first proven delivery, plus what the app
+    showed meanwhile.
+
 ## What this page does not decide
 
 - **The rendezvous list beyond `leviculum.network`**: who else is in the
