@@ -106,6 +106,8 @@
     <string name="scene_send_on_enter">Enter sends</string>
     <string name="scene_mouse">Mouse</string>
     <string name="scene_import">Import</string>
+    <string name="read_receipts">Send read receipts</string>
+    <string name="read_receipts_text">Others see when you have read their messages. Off, you do not see it from others either.</string>
     <string name="scene_zoom_in">Zoom in</string>
     <string name="scene_zoom_out">Zoom out</string>
     <string name="scene_pan">Move the map</string>

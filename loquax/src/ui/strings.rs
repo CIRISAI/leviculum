@@ -152,6 +152,9 @@ leviculum_ui::catalogue! {
     SendOnEnter = "scene_send_on_enter", "Enter sends", "Enter sendet";
     Mouse = "scene_mouse", "Mouse", "Maus";
     Import = "scene_import", "Import", "Importieren";
+    // The privacy page's switch (1233, loquax-read-receipts.md, section 4).
+    ReadReceipts = "read_receipts", "Send read receipts", "Lesebestätigungen senden";
+    ReadReceiptsText = "read_receipts_text", "Others see when you have read their messages. Off, you do not see it from others either.", "Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";
     Pan = "scene_pan", "Move the map", "Karte verschieben";

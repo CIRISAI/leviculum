@@ -316,6 +316,22 @@ impl Shell {
                 UiEffect::Log(line) => tracing::warn!("{line}"),
                 UiEffect::LoadMap(want) => self.map_ask(want),
                 UiEffect::Import => answers.extend(self.import()),
+                // A setting changed on screen (1233): the next start reads
+                // it; a file that would not take it is said.
+                UiEffect::Remember { key, value } => {
+                    if let Err(error) = loquax::config::save(&self.context.home, key, value) {
+                        let line = format!(
+                            "{}: {key} not saved: {error}",
+                            self.context
+                                .home
+                                .join(loquax::config::CONFIG_FILE)
+                                .display()
+                        );
+                        tracing::warn!("{line}");
+                        self.afterwards.push(line.clone());
+                        answers.push(UiEvent::Notice(line));
+                    }
+                }
             }
         }
         for answer in answers {

@@ -1,10 +1,10 @@
 # Loquax: read receipts
 
 Status: decided 2026-10-31 (Lew), with the reviewer's decisions of
-2026-11-01 over the study; slices R1 to R3 built (orders 1230 to 1232,
+2026-11-01 over the study; slices R1 to R4 built (orders 1230 to 1233,
 Refs #232): the wire, the mark on every message, the peer's flag, the Read
-state, the read event and its sending, and the tick ladder on every
-target. The
+state, the read event and its sending, the tick ladder on every target,
+and the switch with its reciprocity. The
 study behind it is the reviewer's `2026-10-31-lesebestaetigungen-konzept`
 (German, every claim cited); this page keeps what is decided and points at
 the code as it stands. Groups are parked.
@@ -355,21 +355,42 @@ As built (1232):
   (`state_clock`, `state_tick`, `state_ticks`, `state_ticks_read`,
   `state_failed`) and their words off the phone's screen.
 
-Not yet: the "[name] does not send read receipts" line (R4); the M9 has
-no Loquax screen yet, its renderer will read the same `Mark` and `Shape`;
+Not yet: the M9 has no Loquax screen yet, its renderer will read the same `Mark` and `Shape`;
 an imported read message loses its time in the import's archive entry
 (state code 8 without `read_at`), so it says "Read at" the epoch.
 
-## 7. Settings
+## 7. Settings (built, R4)
 
-- **One switch** under Settings › Privacy, first, above the blocked
-  contacts: "Read receipts", "Others see when you have read their messages.
-  Turned off, you do not see it from others either." On by default.
-- **Terminal and window**: the same value in the config
-  (`read_receipts = on`, the default, or `off`; read since R2), switched by
-  a palette command (R4).
-- **With a home node** the value belongs to the identity and lives on the
-  home node; every device shows and changes it there.
+- **One switch**, "Send read receipts" ("Lesebestätigungen senden"), with
+  one line under it: "Others see when you have read their messages. Off,
+  you do not see it from others either." On by default. The words are the
+  catalogue's `read_receipts` and `read_receipts_text`
+  (`loquax/src/ui/strings.rs`), so every target says the same.
+- **What off means** (`UiModel::set_receipts`,
+  `loquax/src/ui/receipts.rs`): no mark on our messages, no receipt sent
+  (one being gathered is dropped), and none received is shown: a receipt
+  that comes while off is logged (`RECEIPT ignored`) and not kept, and a
+  message read before shows two grey ticks (`shown_delivery`,
+  `loquax/src/ui.rs`), its stored state kept. On again restores all
+  three; a message read before shows read again.
+- **Where it is.** Android: Settings › Privacy, the first row, above the
+  blocked contacts, a switch (`privacy_receipts`); the page asks the core
+  with `{"t": "receipts", "set"?}` and shows what it answers
+  (`ReceiptsChoice`). The window: the gear on the list's top bar opens a
+  settings page with the same row and a toggler. The terminal has no
+  settings page; the palette's `read receipts` turns it off and on and
+  says which. Each writes the config's `read_receipts = on|off`
+  (`UiEffect::Remember`), which the next start reads. The M9 has no
+  settings page yet and keeps the default, on.
+- **A contact without receipts** (a foreign client, or Loquax with the
+  switch off; the wire does not tell them apart): our messages stay at two
+  grey ticks, and the detail view says "[name] sends no read receipts".
+  With our own switch off it says "read receipts are off: you send none
+  and see none". Neither says "unread" or anything that looks like
+  waiting.
+- **With a home node** the value belongs to the identity and will live on
+  the home node (R5); until then each device keeps its own in its config,
+  and a client of a home node sends no receipt anyway.
 - No Reticulum words on the way: "read receipts", "read", "delivered",
   "mailbox". "Propagation node", "proof", "ratchet" at most in the detail
   view's technical part.
@@ -388,7 +409,9 @@ entries are today.
 
 In the cargo run: the vectors and `lev_vectors.rs` (section 1), the
 model's tests in `loquax/src/ui.rs` (a receipt alone is no message, the
-latest message decides the peer's flag, only the destination reads), the
+latest message decides the peer's flag, only the destination reads; the
+switch's round trip, a message sent while off without the mark, a receipt
+received while off changing nothing shown, the detail view's lines), the
 store's round trip and migration of schema 9, and the phone's rows in
 `loquax-android/tests/facade.rs`.
 
@@ -413,7 +436,7 @@ acceptance report.
 | R1 | the wire and the state in the core: codec and vectors, the mark on every send, the peer's flag, `DeliveryState::Read { at }`, the store, the facade's `read`, `read_at` and `receipts` | built, 1230 |
 | R2 | the read event and sending: `Intent::Viewport`, the second, the batch per visit, the piggyback, opportunistic then mailbox; the terminal's visible area and focus; the first two cells | built, 1231, without the cells |
 | R3 | the tick ladder on every target, one table in `delivery.rs`, the terminal's two cells, Android's `Glyph.java` drawn anew, the words en/de | built, 1232 |
-| R4 | the switch and reciprocity: Privacy, config and palette, "does not send read receipts"; Android reports `Viewport` | |
+| R4 | the switch and reciprocity: Privacy, config and palette, "does not send read receipts"; Android reports `Viewport` | built, 1233, without Android's `Viewport`: a client of a home node sends no receipt before R5 |
 | R5 | the home node: `/mark` "seen", the receipt from the home node's outbox, incoming receipts as archive entries, the switch on the home node | |
 | R6 | the PN and mixed cells | |
 

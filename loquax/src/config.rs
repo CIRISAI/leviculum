@@ -21,7 +21,8 @@
 //! lifts. `read_receipts`, `on` (the default) or `off` (1231): whether
 //! this messenger says it takes read receipts and sends them for what the
 //! reader saw (`docs/src/concepts/loquax-read-receipts.md`); off, it does
-//! neither. And one key a terminal context for the map's
+//! neither and shows none received. The settings' switch and the
+//! palette's `read receipts` write it (1233). And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`

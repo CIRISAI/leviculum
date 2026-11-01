@@ -213,7 +213,7 @@ Settings
   Mailbox         where it lives, connected since, join another
   Appearance      app theme; Map: like the phone / light / dark
   Notifications   on/off, sound, per chat muting
-  Privacy         blocked contacts, read receipts, contact suggestions
+  Privacy         read receipts (1233, first), blocked contacts, positions shared
   Maps            regions with sizes, delete, automatic download on/off
   Backup          back up the mailbox, restore
   Advanced        propagation node, the map's fling, stop the service, logs

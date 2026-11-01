@@ -83,7 +83,7 @@ pub const RECEIPT_SEND: usize = usize::MAX;
 #[derive(Clone, Debug)]
 pub struct Reading {
     /// The switch (`read_receipts` in the config, the settings of 1233):
-    /// off, no mark goes out and no receipt.
+    /// off, no mark goes out, no receipt, and none received is shown.
     pub on: bool,
     /// The platform's word on the front: `Some(true)` in front with the
     /// screen on, `Some(false)` behind; `None` while it said nothing.
@@ -180,9 +180,35 @@ impl<B> UiModel<B> {
             self.changed_peers.insert(source);
         }
         match lev.and_then(|lev| lev.receipt.as_ref()) {
+            // Reciprocity (1233): with the switch off none is shown, and
+            // none is kept for the switch turned on again.
+            Some(receipt) if !self.reading.on => alloc::vec![UiEffect::Log(format!(
+                "RECEIPT ignored ids={} from={}: read receipts are off",
+                receipt.ids.len(),
+                to_hex(&source[..8])
+            ))],
             Some(receipt) => self.apply_receipt(index, receipt),
             None => Vec::new(),
         }
+    }
+
+    /// The reader's switch (1233): off, no mark goes out, no receipt, and
+    /// no message is shown read ([`super::shown_delivery`]); on again, all
+    /// three come back. The stored states stay as they are; the config
+    /// keeps the switch for the next start.
+    pub(super) fn set_receipts(&mut self, on: bool) -> Vec<UiEffect> {
+        if self.reading.on == on {
+            return Vec::new();
+        }
+        self.reading.on = on;
+        if !on {
+            self.reading.owed.clear();
+            self.reading.since.clear();
+        }
+        alloc::vec![UiEffect::Remember {
+            key: "read_receipts",
+            value: if on { "on" } else { "off" },
+        }]
     }
 
     fn apply_receipt(&mut self, index: usize, receipt: &Receipt) -> Vec<UiEffect> {

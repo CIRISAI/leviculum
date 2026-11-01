@@ -26,7 +26,7 @@
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::{
     button, column, container, mouse_area, row, scrollable, stack, text, text_editor, text_input,
-    tooltip, Space,
+    toggler, tooltip, Space,
 };
 use iced::{
     border, mouse, Alignment, Background, Border, Color, Element, Length, Point, Rectangle,
@@ -34,7 +34,7 @@ use iced::{
 };
 
 use loquax::ui::chat::{self, size, Colours, Mark};
-use loquax::ui::intent::Intent;
+use loquax::ui::intent::{Intent, Switch};
 use loquax::ui::reactions::SIGNAL_QUICK;
 use loquax::ui::scene::{
     self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, Row, Tab, TabId,
@@ -148,6 +148,8 @@ pub enum Icon {
     Chats,
     /// The map's tab: a pin.
     Map,
+    /// The settings: a gear.
+    Settings,
 }
 
 struct Drawing {
@@ -277,6 +279,20 @@ impl canvas::Program<Message> for Drawing {
                 frame.stroke(&pin, line);
                 frame.stroke(&Path::circle(p(0.5, 0.38), s * 0.22), line);
                 frame.fill(&Path::circle(p(0.5, 0.38), s * 0.07), self.ink);
+            }
+            Icon::Settings => {
+                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.2), line);
+                for i in 0..6 {
+                    let a = i as f32 * std::f32::consts::FRAC_PI_3;
+                    let (sin, cos) = a.sin_cos();
+                    frame.stroke(
+                        &Path::line(
+                            p(0.5 + 0.2 * cos, 0.5 + 0.2 * sin),
+                            p(0.5 + 0.36 * cos, 0.5 + 0.36 * sin),
+                        ),
+                        line,
+                    );
+                }
             }
             Icon::Face => {
                 frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
@@ -414,6 +430,12 @@ impl App {
             Message::Intent(Intent::Theme),
             t,
         ));
+        actions = actions.push(self.icon_action(
+            Icon::Settings,
+            self.word(StrId::Settings),
+            Message::Settings,
+            t,
+        ));
         container(line.push(actions))
             .height(size::BAR)
             .padding([0, 12])
@@ -484,7 +506,7 @@ impl App {
         let tabs = self.scene.tabs.as_ref()?;
         let t = self.tokens();
         let active = match self.screen {
-            super::Screen::Chats => TabId::Chats,
+            super::Screen::Chats | super::Screen::Settings => TabId::Chats,
             super::Screen::Map => TabId::Map,
         };
         let items = tabs
@@ -506,6 +528,73 @@ impl App {
                 .style(ground)
                 .into(),
         })
+    }
+
+    /// The settings page (1233): a bar with its back, and the row the
+    /// phone's Privacy page has first, "Send read receipts" with its line
+    /// and the switch as the model holds it.
+    pub(super) fn settings_pane(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let bar = row![
+            self.icon_action(
+                Icon::Back,
+                self.word(StrId::Back),
+                Message::Intent(Intent::Back),
+                t
+            ),
+            text(self.word(StrId::Settings))
+                .size(22)
+                .color(colour(t.text))
+                .width(Length::Fill),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        let words = column![
+            text(self.word(StrId::ReadReceipts))
+                .size(16)
+                .color(colour(t.text)),
+            text(self.word(StrId::ReadReceiptsText))
+                .size(14)
+                .color(colour(t.text_secondary)),
+        ]
+        .spacing(2)
+        .width(Length::Fill);
+        let switch = toggler(self.seen.receipts)
+            .on_toggle(|on| Message::Intent(Intent::ReadReceipts { on: Switch::of(on) }))
+            // On in the accent, as the phone's switch; off as iced draws it.
+            .style(move |theme: &Theme, status| {
+                let mut style = toggler::default(theme, status);
+                // Every state toggled: before its first event iced calls
+                // it disabled, which a first frame and the golden draw.
+                if let toggler::Status::Active { is_toggled: true }
+                | toggler::Status::Hovered { is_toggled: true }
+                | toggler::Status::Disabled { is_toggled: true } = status
+                {
+                    style.background = Background::Color(colour(t.accent));
+                }
+                style
+            });
+        let receipts = row![words, switch]
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .padding([12, 16]);
+        container(
+            column![
+                container(bar)
+                    .height(size::BAR)
+                    .padding([0, 12])
+                    .align_y(Alignment::Center),
+                receipts
+            ]
+            .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(colour(t.background))),
+            ..container::Style::default()
+        })
+        .into()
     }
 
     /// The list pane: the scene's top bar, the search, the new

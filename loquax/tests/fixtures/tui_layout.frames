@@ -101,13 +101,13 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │ │id     a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2   │ │
 │ │size   96 bytes                                                           │ │
 │ │state  delivered: it arrived on <4f4f4f4f…>'s device                      │ │
+│ │<4f4f4f4f…> sends no read receipts                                        │ │
 │ │                                                                          │ │
 │ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
 │ │14:02:00  queued by the router as a2a2a2a2                                │ │
 │ │14:02:00  delivered: proof received                                       │ │
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
-│                        ││ if it fits in the bag  14:05                       │
 │                        ││                                                    │
 │                        ││                          the tripod fits  14:06 ⠋  │
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤

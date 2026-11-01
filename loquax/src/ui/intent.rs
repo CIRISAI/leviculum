@@ -66,6 +66,7 @@
 //! | `Command::LoadMapArea`, `MapDrawing` | the same names |
 //! | `Command::Blocked`, `Archived` | `ShowBlocked`, `ShowArchived` |
 //! | `Command::Import` | `Import` |
+//! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
 //! | `keys::Action::Newline`, `ClearDraft` | the same names |
@@ -326,6 +327,10 @@ pub enum Intent {
     SendOnEnter,
     Mouse,
     Import,
+    /// The switch "Send read receipts" (1233): set, or toggled.
+    ReadReceipts {
+        on: Switch,
+    },
 }
 
 impl Intent {
@@ -453,6 +458,7 @@ impl Intent {
             Intent::SendOnEnter => StrId::SendOnEnter,
             Intent::Mouse => StrId::Mouse,
             Intent::Import => StrId::Import,
+            Intent::ReadReceipts { .. } => StrId::ReadReceipts,
         }
     }
 }
@@ -531,6 +537,7 @@ impl From<Command> for Intent {
             },
             Command::Archived => Intent::ShowArchived,
             Command::Import => Intent::Import,
+            Command::ReadReceipts => Intent::ReadReceipts { on: Switch::Toggle },
         }
     }
 }

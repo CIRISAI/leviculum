@@ -1217,6 +1217,7 @@ impl<B> UiModel<B> {
                     tokens: self.tokens(),
                     mark: self.query(),
                     home_client: self.home_client,
+                    receipts: self.reading.on,
                 },
             ),
             None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
@@ -1372,6 +1373,9 @@ pub enum UiEvent {
     /// The app is in front with the screen on, or went behind: an
     /// Android activity resumed or paused, a terminal's focus.
     Front(bool),
+    /// The reader's switch "Send read receipts" (1233), set: the settings
+    /// page's row, the palette's command toggles it.
+    ReadReceipts(bool),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1437,6 +1441,13 @@ pub enum UiEffect {
     /// default places (`crate::import`), never the identity, which needs a
     /// typed yes outside the screen; the shell answers with notices.
     Import,
+    /// Write `key = value` to the config ([`crate::config::save`]), its
+    /// other lines kept: a setting the reader changed on screen, which the
+    /// next start reads (1233, `read_receipts`).
+    Remember {
+        key: &'static str,
+        value: &'static str,
+    },
 }
 
 /// Fold one event into the model.
@@ -1534,6 +1545,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.set_front(front);
             Vec::new()
         }
+        UiEvent::ReadReceipts(on) => model.set_receipts(on),
         UiEvent::MailboxChosen { node, by_user } => {
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
@@ -2901,10 +2913,14 @@ fn state_words(state: DeliveryState) -> &'static str {
 /// The state a sent message is shown in (1232): on a client of a home
 /// node the home node is the reader's mailbox, so its `Sent` (the home
 /// took the message, `home::shown_state`) is the mailbox's tick, not the
-/// clock of a send nobody confirmed. Elsewhere the state itself.
-pub fn shown_delivery(state: DeliveryState, home_client: bool) -> DeliveryState {
+/// clock of a send nobody confirmed. With read receipts off (1233,
+/// `receipts` false) a read message is shown delivered: who sends none
+/// sees none, the old ones neither, and the state is kept for the switch
+/// turned on again. Elsewhere the state itself.
+pub fn shown_delivery(state: DeliveryState, home_client: bool, receipts: bool) -> DeliveryState {
     match state {
         DeliveryState::Sent if home_client => DeliveryState::InMailbox,
+        DeliveryState::Read { .. } if !receipts => DeliveryState::Delivered,
         other => other,
     }
 }
@@ -3004,6 +3020,16 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             let hint = keys::compose_hint(model.ctx());
             model.toast(ToastKind::Info, hint);
             Vec::new()
+        }
+        PaletteCommand::ReadReceipts => {
+            let on = !model.reading.on;
+            let effects = model.set_receipts(on);
+            let text = match on {
+                true => "read receipts on: others see what you read, you see what they read",
+                false => "read receipts off: you send none and see none",
+            };
+            model.toast(ToastKind::Info, text.to_string());
+            effects
         }
         PaletteCommand::Mouse => {
             model.mouse = !model.mouse;
@@ -4075,7 +4101,7 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
         format!("size   {} bytes", message.size),
         match (message.delivery, message.signature) {
             (Some(state), _) => {
-                let state = shown_delivery(state, model.home_client);
+                let state = shown_delivery(state, model.home_client, model.reading.on);
                 format!("state  {}", detail_words(state, &who, offset))
             }
             (None, Signature::Verified) => "signature verified".to_string(),
@@ -4083,6 +4109,9 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
             (None, Signature::Invalid) => "signature INVALID".to_string(),
         },
     ];
+    if let Some(why) = no_read_words(model, conversation, message, &who) {
+        rows.push(why);
+    }
     let received = message.at.map(|at| at.unix_secs);
     let sensors = telemetry::detail_rows(&conversation.peer, &message.fields, offset, received);
     if !sensors.is_empty() {
@@ -4102,6 +4131,28 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
         title: "message".to_string(),
         rows,
     })
+}
+
+/// Why a message of ours shown delivered will not turn read (1233,
+/// loquax-read-receipts.md, section 4): the reader's switch is off, or
+/// the peer sends no read receipts (a client without them, or Loquax with
+/// the switch off: the wire does not tell them apart). Never "unread",
+/// nothing that looks like waiting for one.
+fn no_read_words<B>(
+    model: &UiModel<B>,
+    conversation: &Conversation,
+    message: &Message,
+    who: &str,
+) -> Option<String> {
+    let state = shown_delivery(message.delivery?, model.home_client, model.reading.on);
+    if !message.outbound || state != DeliveryState::Delivered {
+        return None;
+    }
+    match (model.reading.on, conversation.flags.receipts) {
+        (false, _) => Some("read receipts are off: you send none and see none".to_string()),
+        (true, false) => Some(format!("{who} sends no read receipts")),
+        (true, true) => None,
+    }
 }
 
 /// The screen.
@@ -5055,6 +5106,187 @@ mod tests {
                 fields: Vec::new(),
             }],
             "the switch off sends no mark"
+        );
+    }
+
+    /// 1233: the switch round trip. The palette's command turns it off
+    /// and on, each change asks the config to keep it, setting it to what
+    /// it is asks nothing; a message written while off carries no mark,
+    /// one written after it is on again does.
+    #[test]
+    fn the_switch_round_trips_and_a_message_sent_while_off_carries_no_mark() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(model.reading.on, "on by default");
+        let write = |model: &mut UiModel<Field>| {
+            update(
+                model,
+                UiEvent::Write {
+                    peer: PEER,
+                    body: "hi".to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            update(&mut model, UiEvent::Run(PaletteCommand::ReadReceipts)),
+            [UiEffect::Remember {
+                key: "read_receipts",
+                value: "off"
+            }]
+        );
+        assert!(!model.reading.on);
+        assert!(model.current_toast().is_some(), "the palette says it");
+        assert!(update(&mut model, UiEvent::ReadReceipts(false)).is_empty());
+        assert_eq!(
+            write(&mut model),
+            [UiEffect::Send {
+                to: PEER,
+                body: "hi".to_string(),
+                fields: Vec::new(),
+            }],
+            "off: no mark"
+        );
+        assert_eq!(
+            update(&mut model, UiEvent::ReadReceipts(true)),
+            [UiEffect::Remember {
+                key: "read_receipts",
+                value: "on"
+            }]
+        );
+        let effects = write(&mut model);
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        let UiEffect::Send { fields, .. } = &effects[0] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(fields, &marked(Vec::new()), "on again: the mark");
+    }
+
+    /// Our message to PEER, proven delivered, the peer's mark known.
+    fn delivered_to_a_marked_peer() -> UiModel<Field> {
+        const T: i64 = 1_800_000_000;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, T);
+        engine(
+            &mut model,
+            with_lev(PEER, [0x30; 32], "hello", &leviculum_lxmf::lev::Lev::mark()),
+        );
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Delivered);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert!(model.conversations[0].flags.receipts);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        model
+    }
+
+    /// The mark our last bubble shows, and its detail view's rows.
+    fn shown_last(model: &UiModel<Field>) -> (Option<chat::Mark>, Vec<String>) {
+        let bubbles = chat::bubbles(model, 0);
+        let last = bubbles.iter().rfind(|b| b.ours).expect("our bubble");
+        let m = model.conversations[0].messages.len() - 1;
+        let rows = detail_view(model, 0, m).expect("a detail view").rows;
+        (last.mark, rows)
+    }
+
+    /// 1233, reciprocity: with the switch off a receipt received changes
+    /// nothing shown and is not kept, and the detail view says the
+    /// switch is off; a message read before is shown delivered while off,
+    /// its state kept, and read again once the switch is on.
+    #[test]
+    fn a_receipt_received_while_off_does_not_change_the_shown_state() {
+        let mut model = delivered_to_a_marked_peer();
+        update(&mut model, UiEvent::ReadReceipts(false));
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(with_lev(
+                PEER,
+                [0x33; 32],
+                "",
+                &receipt(1_800_000_010, &[ID]),
+            )),
+        );
+        assert!(
+            effects.iter().any(
+                |e| matches!(e, UiEffect::Log(line) if line.starts_with("RECEIPT ignored ids=1"))
+            ),
+            "{effects:?}"
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        let (mark, rows) = shown_last(&model);
+        assert_eq!(mark, Some(chat::Mark::Delivered));
+        assert!(
+            rows.iter().any(|r| r.starts_with("read receipts are off")),
+            "{rows:?}"
+        );
+        // On again: the ignored receipt was not kept; the next one reads.
+        update(&mut model, UiEvent::ReadReceipts(true));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        engine(
+            &mut model,
+            with_lev(PEER, [0x34; 32], "", &receipt(1_800_000_020, &[ID])),
+        );
+        assert!(matches!(
+            last_delivery(&model),
+            Some(DeliveryState::Read { .. })
+        ));
+        let (mark, rows) = shown_last(&model);
+        assert_eq!(mark, Some(chat::Mark::Read));
+        assert!(
+            rows.iter().any(|r| r.starts_with("state  read")),
+            "{rows:?}"
+        );
+        // Off: shown delivered, the state kept; on: read again.
+        update(&mut model, UiEvent::ReadReceipts(false));
+        assert!(matches!(
+            last_delivery(&model),
+            Some(DeliveryState::Read { .. })
+        ));
+        let (mark, rows) = shown_last(&model);
+        assert_eq!(mark, Some(chat::Mark::Delivered));
+        assert!(
+            rows.iter().any(|r| r.starts_with("state  delivered")),
+            "{rows:?}"
+        );
+        assert!(chat::list_rows(&model)[0].read_at.is_none());
+        update(&mut model, UiEvent::ReadReceipts(true));
+        assert_eq!(shown_last(&model).0, Some(chat::Mark::Read));
+        assert!(chat::list_rows(&model)[0].read_at.is_some());
+    }
+
+    /// 1233: a peer that sends no read receipts keeps ours at two grey
+    /// ticks, and the detail view says so by name; with the mark it says
+    /// nothing of the kind.
+    #[test]
+    fn a_peer_without_receipts_is_named_in_the_detail_view() {
+        let mut model = delivered_to_a_marked_peer();
+        let (mark, rows) = shown_last(&model);
+        assert_eq!(mark, Some(chat::Mark::Delivered));
+        assert!(
+            !rows.iter().any(|r| r.contains("read receipts")),
+            "{rows:?}"
+        );
+        // The peer's next message comes without the mark.
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: [0x31; 32],
+                source: PEER,
+                title: Vec::new(),
+                body: b"plain".to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+        assert!(!model.conversations[0].flags.receipts);
+        let m = model.conversations[0]
+            .messages
+            .iter()
+            .rposition(|m| m.outbound)
+            .expect("ours");
+        let rows = detail_view(&model, 0, m).expect("a detail view").rows;
+        let who = model.names.label(&PEER);
+        assert!(
+            rows.contains(&format!("{who} sends no read receipts")),
+            "{rows:?}"
         );
     }
 
@@ -6538,6 +6770,8 @@ mod tests {
                 &format!("id     {}", "11".repeat(32)),
                 "size   5 bytes",
                 "state  delivered: it arrived on <abababab…>'s device",
+                // The peer never sent a message with the mark (1233).
+                "<abababab…> sends no read receipts",
                 "",
                 "on this device",
                 "14:02:00  queued",

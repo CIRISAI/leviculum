@@ -72,6 +72,9 @@ pub struct Draw<'a> {
     /// A client of a home node: the home's `Sent` is the mailbox's tick
     /// ([`super::shown_delivery`]).
     pub home_client: bool,
+    /// The reader's read receipts switch (1233): off, read is drawn
+    /// delivered ([`super::shown_delivery`]).
+    pub receipts: bool,
 }
 
 /// A style drawn in a token's colours.
@@ -359,7 +362,11 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw<'_>, selected: bool) -> R
         push(&mut line, &text, time);
     }
     if let Some(state) = message.delivery {
-        let row = glyph(super::shown_delivery(state, draw.home_client));
+        let row = glyph(super::shown_delivery(
+            state,
+            draw.home_client,
+            draw.receipts,
+        ));
         push(
             &mut line,
             if text.is_empty() { "  " } else { " " },
@@ -489,10 +496,14 @@ fn block(
     };
     // The mark closes the last row: its cells are that row's last.
     let mark = message.delivery.and_then(|state| {
-        let len = glyph(super::shown_delivery(state, draw.home_client))
-            .symbol(draw.tick as usize, draw.ascii)
-            .chars()
-            .count();
+        let len = glyph(super::shown_delivery(
+            state,
+            draw.home_client,
+            draw.receipts,
+        ))
+        .symbol(draw.tick as usize, draw.ascii)
+        .chars()
+        .count();
         let row = rows.len().checked_sub(1)?;
         Some((row, x + rows[row].cells.len() - len, len))
     });

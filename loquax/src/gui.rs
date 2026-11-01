@@ -98,6 +98,9 @@ pub struct Seen {
     pub scene: Scene,
     /// The model's wall clock, for the list's times and the date lines.
     pub now: Option<WallTime>,
+    /// The reader's switch "Send read receipts" (1233), the settings'
+    /// row.
+    pub receipts: bool,
 }
 
 impl Seen {
@@ -111,6 +114,7 @@ impl Seen {
             style: Style::PC.in_theme(map_theme(shell.model.map_theme, None)),
             scene: shell.model.scene(LayoutClass::Wide),
             now: shell.model.now,
+            receipts: shell.model.reading.on,
         }
     }
 }
@@ -248,6 +252,8 @@ pub enum Message {
     /// What the user asks (1218): a press on a scene node raises the
     /// node's [`Intent`], a key the keymap's, as on every target.
     Intent(Intent),
+    /// The top bar's gear: the settings page (1233).
+    Settings,
 }
 
 impl Message {
@@ -266,6 +272,7 @@ impl Message {
                 | Message::Painted(_)
                 | Message::WheelRest
                 | Message::Prefetched(_)
+                | Message::Settings
         )
     }
 }
@@ -275,6 +282,8 @@ impl Message {
 pub enum Screen {
     Chats,
     Map,
+    /// The settings (1233): one page, "Send read receipts" on it.
+    Settings,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -491,6 +500,7 @@ impl App {
                 style: Style::PC,
                 scene: empty.clone(),
                 now: None,
+                receipts: true,
             },
             asks,
             fitted_at: None,
@@ -663,7 +673,7 @@ impl App {
                     self.menu = None;
                     self.deleting = None;
                 }
-                (None, Screen::Map) => self.screen = Screen::Chats,
+                (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
                 // A stacked chat goes back to the list, as its bar's back
                 // does; beside the list Back has nothing to leave.
                 (None, Screen::Chats) => {
@@ -674,6 +684,9 @@ impl App {
                 }
             },
             Intent::Theme => self.flipped = !self.flipped,
+            Intent::ReadReceipts { on } => {
+                self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
+            }
             Intent::Search => {
                 self.screen = Screen::Chats;
                 return iced::widget::operation::focus(chat::SEARCH_FIELD);
@@ -889,7 +902,7 @@ impl App {
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
-            (Screen::Chats, _) => Pane::Conversations,
+            (Screen::Chats | Screen::Settings, _) => Pane::Conversations,
         };
         keys::resolve(&key, keys::panes_of(pane), Ctx::ENHANCED).map(Intent::from_action)
     }
@@ -932,6 +945,11 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Intent(intent) => return self.intent(intent),
+            Message::Settings => {
+                self.screen = Screen::Settings;
+                self.menu = None;
+                return Task::none();
+            }
             Message::Key(event) => {
                 return match self.key(&event) {
                     Some(intent) => self.intent(intent),
@@ -1219,6 +1237,7 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
+            (Screen::Settings, _, _) => self.settings_pane(),
             (Screen::Chats, LayoutClass::Wide, _) => {
                 row![self.list_pane(), self.chat_pane()].into()
             }
@@ -1586,6 +1605,7 @@ mod tests {
             style: Style::PC,
             scene: crate::shell::Model::new(&[]).scene(LayoutClass::Wide),
             now: None,
+            receipts: true,
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -1824,6 +1844,7 @@ mod tests {
             style: Style::PC,
             scene: model.scene(LayoutClass::Wide),
             now: model.now,
+            receipts: model.reading.on,
         }
     }
 
@@ -2279,6 +2300,42 @@ mod tests {
         assert_eq!(app.class(), LayoutClass::Wide);
         assert!(app.scene.list.is_some() && app.scene.chat.is_some());
         assert_eq!(app.scene.top.id, NodeId::TopBar);
+    }
+
+    /// The settings page (1233): the gear opens it, its read receipts
+    /// row shows the model's switch, a toggle tells the model the other
+    /// value, the model's answer turns the row, and Back returns to the
+    /// chats. Pixel for pixel the golden, light.
+    #[test]
+    fn the_settings_page_switches_read_receipts_in_the_model() {
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Settings);
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(app.seen.receipts, "on by default");
+        map::tests::same_as("gui-settings-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::ReadReceipts {
+            on: loquax::ui::intent::Switch::Off,
+        }));
+        assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(false)]);
+        let mut model = chat_model();
+        let effects = update(&mut model, UiEvent::ReadReceipts(false));
+        assert!(matches!(
+            effects.as_slice(),
+            [loquax::ui::UiEffect::Remember {
+                key: "read_receipts",
+                value: "off"
+            }]
+        ));
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(!app.seen.receipts);
+        let _ = app.update(Message::Intent(Intent::ReadReceipts {
+            on: loquax::ui::intent::Switch::Toggle,
+        }));
+        assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(true)]);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert_eq!(app.screen, Screen::Chats);
     }
 
     /// The desktop's dark setting turns the window dark, and the toggle

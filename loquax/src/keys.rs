@@ -745,6 +745,13 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("theme"),
+        Row::new(
+            "read receipts off and on (the read_receipts key)",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("read receipts")
+        .note("off, none is sent and none is shown"),
     ]
 };
 

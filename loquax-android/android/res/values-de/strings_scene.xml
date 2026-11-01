@@ -106,6 +106,8 @@
     <string name="scene_send_on_enter">Enter sendet</string>
     <string name="scene_mouse">Maus</string>
     <string name="scene_import">Importieren</string>
+    <string name="read_receipts">Lesebestätigungen senden</string>
+    <string name="read_receipts_text">Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.</string>
     <string name="scene_zoom_in">Vergrößern</string>
     <string name="scene_zoom_out">Verkleinern</string>
     <string name="scene_pan">Karte verschieben</string>

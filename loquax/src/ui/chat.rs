@@ -51,8 +51,8 @@ pub enum Mark {
 }
 
 /// `state` as the screen shows it ([`super::shown_delivery`]).
-fn shown(state: Option<DeliveryState>, home_client: bool) -> Option<DeliveryState> {
-    state.map(|state| super::shown_delivery(state, home_client))
+fn shown<B>(state: Option<DeliveryState>, model: &UiModel<B>) -> Option<DeliveryState> {
+    state.map(|state| super::shown_delivery(state, model.home_client, model.reading.on))
 }
 
 /// Every mark, in the ladder's order.
@@ -418,11 +418,13 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
             .map(|(_, content)| content),
         mark: last
             .filter(|m| m.outbound)
-            .map(|m| Mark::of(shown(m.delivery, model.home_client))),
-        read_at: last.filter(|m| m.outbound).and_then(|m| match m.delivery {
-            Some(DeliveryState::Read { at }) => Some(at),
-            _ => None,
-        }),
+            .map(|m| Mark::of(shown(m.delivery, model))),
+        read_at: last
+            .filter(|m| m.outbound)
+            .and_then(|m| match shown(m.delivery, model) {
+                Some(DeliveryState::Read { at }) => Some(at),
+                _ => None,
+            }),
         pinned: conversation.is_some_and(|c| c.pinned),
         muted: model.muted(peer),
         liveness,
@@ -529,8 +531,8 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 },
                 mark: message
                     .outbound
-                    .then(|| Mark::of(shown(message.delivery, model.home_client))),
-                read_at: match message.delivery {
+                    .then(|| Mark::of(shown(message.delivery, model))),
+                read_at: match shown(message.delivery, model) {
                     Some(DeliveryState::Read { at }) if message.outbound => Some(at),
                     _ => None,
                 },

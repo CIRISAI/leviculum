@@ -160,6 +160,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │ │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   │ │
 │ │size   59 bytes                                                           │ │
 │ │state  delivered: it arrived on them ·61dd's device                       │ │
+│ │them ·61dd sends no read receipts                                         │ │
 │ │                                                                          │ │
 │ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
@@ -168,7 +169,6 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │ │14:02:00  in flight (direct)                                              │ │
 │ │14:02:00  delivered: proof received (direct)                              │ │
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
-│                        ││                                                    │
 │                        ││                          the tripod fits  14:06 ✓✓ │
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
@@ -440,15 +440,15 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                     │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   │                     │
 │                     │size   59 bytes                                                           │                     │
 │                     │state  delivered: it arrived on them ·61dd's device                       │                     │
+│                     │them ·61dd sends no read receipts                                         │                     │
 │                     │                                                                          │                     │
 │                     │on this device                                                            │                     │
 │                     │14:02:00  queued                                                          │                     │
 │                     │14:02:00  trying direct                                                   │                     │
 │                     │14:02:00  queued by the router as xxxxxxxx                                │                     │
-│                     │14:02:00  in flight (direct)                                              │                     │
-│                     │14:02:00  delivered: proof received (direct)                              │g antenna?  14:02 ✓✓ │
+│                     │14:02:00  in flight (direct)                                              │g antenna?  14:02 ✓✓ │
+│                     │14:02:00  delivered: proof received (direct)                              │                     │
 │                     └────────────────────────────────────────────────────────────── Esc closes ┘                     │
-│                                  ││                                   ── Today ──                                    │
 │                                  ││                                                              on my way  09:12 ✓✓ │
 │                                  ││                                                                                  │
 │                                  ││ ──────────────────────────────────── 2 new ───────────────────────────────────── │
