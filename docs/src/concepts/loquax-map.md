@@ -662,6 +662,56 @@ The z15 cold frame at rest, the bar for z16, is 33.1-35.7 ms on 4 workers
 and 78.9-79.7 on 1 here. The frames at z15 and shallower are the same
 pixels with buildings as without (`leviculum-map/tests/golden.rs`).
 
+Measured again 2026-11-01 (1193) on the same host given back its 10
+vCPUs, so with the study's 8 workers: five runs each, interleaved, over
+the same two regions, the load average 3 to 6 from other work on the
+host; medians, ranges in brackets, in ms:
+
+| Row | workers | z15 without | z16 without | z16 with | z17 without | z17 with |
+|---|---|---|---|---|---|---|
+| cold, at rest | 8 | 26.5 (24.9-27.5) | 21.3 (18.6-62.9) | 24.8 (23.6-57.9) | 22.1 (17.3-44.5) | 20.4 (18.5-77.9) |
+| cold, at rest | 1 | 80.5 (78.9-82.5) | 67.0 (64.8-68.2) | 86.0 (83.7-92.6) | 57.9 (57.0-62.2) | 69.1 (68.5-69.7) |
+| tile time, summed | 1 | 56.7 | 39.2 | 58.0 | 35.0 | 46.4 |
+| pan, cache warm | 8 | 3.1 | 5.3 | 4.2 | 5.3 | 3.9 |
+| at rest, cache warm | 8 | 14.5 | 15.1 | 11.5 | 10.6 | 11.0 |
+| pinch, a step either side (median) | 8 | 8.5 | 10.5 | 9.8 | 9.6 | 8.8 |
+| pinch, tiles held (median) | 8 | 8.6 | 9.7 | 10.2 | 12.1 | 9.6 |
+
+Every acceptance number of the study holds: the cold z16 frame at rest
+with buildings (24.8) is under the cold z15 frame at rest (26.5) on 8
+workers; on 1 worker it is 1.28 times z16 without (the bar 1.4, 93.8
+ms); the warm, pinch and held rows are within 1 ms or faster. The single
+runs of 58 to 78 ms on 8 workers are in both columns, the other work on
+the host, so the medians decide. Nothing was tuned in this pass: no row
+missed.
+
+**Region sizes with buildings** (1193), cut 2026-11-01 from the Protomaps
+build of 2026-10-28 with `--locale de`, with and without `--buildings`.
+The autoload's places are its 12 by 12 km boxes at z10 to z15 (the three
+measured under "The autoload", the same bytes fetched), Hessen and Germany the
+boxes of the table in section 4 at z0 to z15, Germany fetched in three
+latitude bands as there. Sections over the cap are drawn as blocks:
+
+| Region | without | with | added | sections | over the cap | most footprints in a section |
+|---|---|---|---|---|---|---|
+| central Frankfurt (place) | 4,041,375 | 5,699,692 | +41.0 % | 255 | 0 | 1,983 |
+| central Berlin (place) | 8,127,178 | 10,221,288 | +25.8 % | 289 | 0 | 1,369 |
+| the Vogelsberg (place) | 1,290,432 | 1,449,420 | +12.3 % | 176 | 0 | 494 |
+| Hessen | 401,045,416 | 489,009,508 | +21.9 % | 48,710 | 12 | 2,542 |
+| Germany | 4,014,983,480 | 4,886,283,750 | +21.7 % | 554,101 | 248 | 4,024 |
+
+A city adds a quarter to two fifths, the countryside an eighth, a state or
+the country a fifth, since most of their tiles are fields. Germany with
+its buildings still fits a card, Hessen at about 0.49 GB too. The
+autoload cuts with buildings, and the phone's Maps page sizes a region by
+its file (`loquax-android/src/map.rs`, `RegionRow::bytes` from the file's
+metadata), so it shows the size with buildings as it is. Cutting Germany
+found `Archive::locate` copying the PMTiles root for every tile, which an
+extract's root of every tile made quadratic (the cut did not end in ten
+minutes); it searches the root in place now and cuts Germany in 77 s
+(`leviculum-mapcut/tests/pmtiles.rs`,
+`a_root_of_every_tile_is_searched_in_place`).
+
 **Names** (1100). The cut keeps the names of places (city, town, district,
 village, suburb, neighbourhood; not localities, hamlets, isolated
 dwellings or farms, which are 1,774 of the 1,933 places of a Frankfurt z13
