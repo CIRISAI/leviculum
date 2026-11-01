@@ -147,7 +147,7 @@ pub fn target_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Targ
         .find(|slot| rect_contains(slot.rect, col, row))
         .map(|slot| slot.item.action);
 
-    if model.help || model.palette.is_some() || model.detail.is_some() {
+    if model.help || model.palette.is_some() || model.detail_open() {
         if let (Some(_), Some(act)) = (&model.palette, button) {
             return Target::Footer(act);
         }
@@ -424,7 +424,7 @@ fn messages_target<B: InputBuffer>(
 pub fn viewport<B: InputBuffer>(model: &UiModel<B>) -> Option<([u8; 16], Vec<u64>)> {
     let conversation = model.conversations.get(model.selected)?;
     let peer = conversation.peer;
-    if model.map.is_some() || model.help || model.detail.is_some() {
+    if model.map.is_some() || model.help || model.detail_open() {
         return Some((peer, Vec::new()));
     }
     let laid = model.laid();

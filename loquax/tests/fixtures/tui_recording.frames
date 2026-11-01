@@ -1,5 +1,5 @@
 === locked 80x24
-┌  Loquax (attaching)────┐┌  Anna Schulz ·abab  unknown─── no propagation node ┐
+┌  Loquax (attaching)────┐┌  Anna Schulz ·abab─────────────────────────────────┐
 │▌Anna Schulz ·abab      ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -24,8 +24,8 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === locked 120x40
-┌  Loquax (attaching)──────────────┐┌  Anna Schulz ·abab  unknown──────────────────── abababababababababababababababab ┐
-│▌Anna Schulz ·abab                ││                                                              no propagation node │
+┌  Loquax (attaching)──────────────┐┌  Anna Schulz ·abab───────────────────────────── abababababababababababababababab ┐
+│▌Anna Schulz ·abab                ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -65,7 +65,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === paused, nothing heard 80x24
-┌  Loquax (attaching)────┐┌  Anna Schulz ·abab  unknown─── no propagation node ┐
+┌  Loquax (attaching)────┐┌  Anna Schulz ·abab─────────────────────────────────┐
 │▌Anna Schulz ·abab      ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -90,8 +90,8 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === paused, nothing heard 120x40
-┌  Loquax (attaching)──────────────┐┌  Anna Schulz ·abab  unknown──────────────────── abababababababababababababababab ┐
-│▌Anna Schulz ·abab                ││                                                              no propagation node │
+┌  Loquax (attaching)──────────────┐┌  Anna Schulz ·abab───────────────────────────── abababababababababababababababab ┐
+│▌Anna Schulz ·abab                ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -131,7 +131,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === preview at the cap 80x24
-┌  Loquax (attaching)────┐┌  Anna Schulz ·abab  unknown─── no propagation node ┐
+┌  Loquax (attaching)────┐┌  Anna Schulz ·abab─────────────────────────────────┐
 │▌Anna Schulz ·abab      ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -156,8 +156,8 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === preview at the cap 120x40
-┌  Loquax (attaching)──────────────┐┌  Anna Schulz ·abab  unknown──────────────────── abababababababababababababababab ┐
-│▌Anna Schulz ·abab                ││                                                              no propagation node │
+┌  Loquax (attaching)──────────────┐┌  Anna Schulz ·abab───────────────────────────── abababababababababababababababab ┐
+│▌Anna Schulz ·abab                ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │

@@ -309,6 +309,9 @@ pub const ROWS: &[Row<Action>] = {
         Row::new("add a contact", CONVERSATIONS, &[])
             .palette("add contact")
             .note("a friend's code, then a name"),
+        Row::new("show your code and its QR", CONVERSATIONS, &[])
+            .palette("my code")
+            .note("for a friend to scan or paste"),
         Row::new("import from another messenger", CONVERSATIONS, &[])
             .palette("import")
             .note("contacts and history; the identity: loquax import"),

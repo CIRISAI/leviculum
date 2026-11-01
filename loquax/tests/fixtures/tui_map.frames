@@ -1,6 +1,6 @@
 === braille ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -125,7 +125,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: opened ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -150,7 +150,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -200,7 +200,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: report closed ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -226,7 +226,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === halfblocks ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -351,7 +351,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: opened ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -376,7 +376,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -426,7 +426,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: report closed ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │

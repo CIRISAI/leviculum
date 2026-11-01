@@ -1140,6 +1140,18 @@ async fn drain(outbox: &mut Watched, context: RunContext) -> Result<usize, Fetch
     .map(|fetched| fetched.new)
 }
 
+/// Our contact code for `my code`, with its QR where the build draws one
+/// (the terminal's; the window shows the code alone). `None` when the key
+/// makes no address, which `my code` then says.
+fn own_code(public_key: &[u8; loquax::lxma::KEY_BYTES]) -> Option<loquax::ui::OwnCode> {
+    let code = loquax::lxma::encode(public_key).ok()?;
+    #[cfg(feature = "qr")]
+    let qr = loquax::home::qr::lines(&code).unwrap_or_default();
+    #[cfg(not(feature = "qr"))]
+    let qr = Vec::new();
+    Some(loquax::ui::OwnCode { code, qr })
+}
+
 /// Everything before the first frame: the log, the identity, the history
 /// and what it restores, the daemon, the contacts and the config, the
 /// mailbox's schedule and the map's regions. The config comes back beside
@@ -1227,6 +1239,12 @@ pub(crate) async fn start(
         mailbox: mailbox_tx,
         files: home.clone(),
     };
+    // The code a friend adds us by: the home node's for a client, as its
+    // address is (1279, `my code`).
+    let own_key = match client {
+        Some(public_key) => public_key,
+        None => identity.public_key_bytes(),
+    };
     let device = identity.clone();
     let role = match client {
         Some(_) => Role::Client { address },
@@ -1256,6 +1274,7 @@ pub(crate) async fn start(
         loquax::names::load_contacts(&home).map_err(|error| crate::usage(error.to_string()))?;
     let mut model = Model::new(&options.to);
     model.home_client = client.is_some();
+    model.own_code = own_code(&own_key);
     model.names = loquax::names::Names::new(contacts);
     let (restored, names, last_key, positions, unverified) = history;
     // The messages an earlier run kept unverified: the engine checks each

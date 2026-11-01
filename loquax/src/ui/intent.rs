@@ -74,6 +74,7 @@
 //! | `Command::LoadMapArea`, `MapDrawing` | the same names |
 //! | `Command::Blocked`, `Archived` | `ShowBlocked`, `ShowArchived` |
 //! | `Command::Import` | `Import` |
+//! | `Command::MyCode` | `MyCode` |
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
@@ -405,6 +406,8 @@ pub enum Intent {
         name: Option<String>,
     },
     NewConversation,
+    /// Show our own contact code and its QR (1279).
+    MyCode,
     /// The name recipients see.
     Name(String),
 
@@ -570,6 +573,7 @@ impl Intent {
             Intent::Forget { .. } => StrId::Forget,
             Intent::AddContact { .. } => StrId::AddContact,
             Intent::NewConversation => StrId::NewConversation,
+            Intent::MyCode => StrId::MyCode,
             Intent::Name(_) => StrId::Name,
             Intent::Scroll(_) => StrId::Scroll,
             Intent::ScrollMessages(_) => StrId::ScrollMessages,
@@ -687,6 +691,7 @@ impl From<Command> for Intent {
             Command::Import => Intent::Import,
             Command::ReadReceipts => Intent::ReadReceipts { on: Switch::Toggle },
             Command::NewConversation => Intent::NewConversation,
+            Command::MyCode => Intent::MyCode,
             // No code yet: the frontend asks for it.
             Command::AddContact => Intent::AddContact {
                 lxma: String::new(),

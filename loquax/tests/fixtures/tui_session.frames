@@ -1,5 +1,5 @@
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -16,7 +16,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: typed ---
-┌  Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -33,7 +33,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: queued ---
-┌  Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: hello from the t… ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 4: delivered ---
-┌  Loquax afbda7b3───────┐┌  them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       12:00 ││                                                    │
 │▌you: hello from the t… ││                                                    │
 │                        ││                                                    │
@@ -67,7 +67,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 5: reply ---
-┌  Loquax afbda7b3───────┐┌  them ·61dd  unknown────────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       12:00 ││                                                    │
 │▌hello back             ││                                                    │
 │                        ││                                                    │

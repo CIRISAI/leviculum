@@ -1002,35 +1002,44 @@ fn first_start_import() {
 /// use, so this is also how a fresh machine learns (and creates) the address
 /// a correspondent should write down.
 fn run_address() -> ExitCode {
+    use std::io::IsTerminal;
     let home = match identity::home_dir() {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
     // A client's address is its home node's.
-    match loquax::home::client::load_client(&home) {
-        Ok(Some(public_key)) => {
-            return match loquax::home::lxmf_address(&public_key) {
-                Ok(address) => {
-                    println!("{}", address::to_hex(&address));
-                    ExitCode::SUCCESS
-                }
-                Err(error) => failure(error, "no-identity"),
-            };
-        }
-        Ok(None) => {}
+    let public_key = match loquax::home::client::load_client(&home) {
+        Ok(Some(public_key)) => public_key,
+        Ok(None) => match identity::load_or_create(&home.join("identity")) {
+            Ok(identity) => identity.public_key_bytes(),
+            Err(error) => return failure(error, "no-identity"),
+        },
         Err(error) => return failure(error, "no-home"),
-    }
-    let identity = match identity::load_or_create(&home.join("identity")) {
-        Ok(identity) => identity,
-        Err(error) => return failure(error, "no-identity"),
     };
-    match loquax::engine::delivery_address(&identity) {
-        Ok(address) => {
-            println!("{}", address::to_hex(&address));
+    match address_lines(&public_key, std::io::stdout().is_terminal()) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => failure(error, "no-identity"),
     }
+}
+
+/// What `loquax address` prints: the address alone for a script, which
+/// reads the one line as before; at a terminal the contact code under it,
+/// the text a friend pastes to add us (1279, walk finding 23).
+fn address_lines(
+    public_key: &[u8; loquax::lxma::KEY_BYTES],
+    terminal: bool,
+) -> Result<Vec<String>, String> {
+    let address = loquax::home::lxmf_address(public_key)?;
+    let mut lines = vec![address::to_hex(&address)];
+    if terminal {
+        lines.push(loquax::lxma::encode(public_key)?);
+    }
+    Ok(lines)
 }
 
 async fn run(args: SendArgs) -> ExitCode {
@@ -2011,6 +2020,28 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1279, walk finding 23: a script still reads the address alone; at a
+    /// terminal the contact code follows, the one that adds us.
+    #[test]
+    fn address_prints_the_code_under_the_hex_at_a_terminal_only() {
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let hex = address::to_hex(&loquax::home::lxmf_address(&key).expect("an address"));
+        // The same address the engine registers, which it printed before.
+        let identity = leviculum_core::Identity::from_private_key_bytes(&private).expect("a key");
+        let registered = loquax::engine::delivery_address(&identity).expect("an address");
+        assert_eq!(hex, address::to_hex(&registered));
+        assert_eq!(
+            address_lines(&key, false).expect("lines"),
+            std::slice::from_ref(&hex)
+        );
+        let code = loquax::lxma::encode(&key).expect("a code");
+        assert!(code.starts_with(&format!("lxma://{hex}:")), "{code}");
+        assert_eq!(address_lines(&key, true).expect("lines"), [hex, code]);
+    }
 
     /// `--position` (1209): degrees to a report's Telemeter, which reads
     /// back as a position report; anything else is refused before a send.

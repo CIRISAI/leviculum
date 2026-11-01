@@ -1,5 +1,5 @@
 --- frame 1: list ---
-┌● Loquax afbda7b3───────┐┌  Jürgen 🚲  ·1d0a  unknown─────── pos 155 d · no pn ┐
+┌● Loquax afbda7b3───────┐┌  Jürgen 🚲  ·1d0a───────────── pos 155 d · no relay ┐
 │▌Jürgen 🚲  ·1d0a 29 May ││                                                    │
 │▌you: ok 👍              ││ Treffen wir uns um 18:00 am Bahnhof?               │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││ 01:46 · unverified                                 │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: bottom ---
-┌● Loquax afbda7b3───────┐┌  Nomadin Ünal ·bffb  known──── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  Nomadin Ünal ·bffb  known─────────────── no relay ┐
 │ Peer 7 ·0d94    29 May ││                                                    │
 │ you: zwei              ││      Grüße aus Köln, die Straße ist nass  01:36 ✔✔ │
 │                        ││                                                    │
@@ -49,7 +49,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: opened ---
-┌  Loquax afbda7b3───────┐┌● Nomadin Ünal ·bffb  known──── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● Nomadin Ünal ·bffb  known─────────────── no relay ┐
 │ Peer 7 ·0d94    29 May ││                                                    │
 │ you: zwei              ││      Grüße aus Köln, die Straße ist nass  01:36 ✔✔ │
 │                        ││                                                    │
@@ -74,7 +74,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: oldest ---
-┌  Loquax afbda7b3───────┐┌● Nomadin Ünal ·bffb  known──── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● Nomadin Ünal ·bffb  known─────────────── no relay ┐
 │ Peer 7 ·0d94    29 May ││            ── Wednesday 28 May 2025 ──             │
 │ you: zwei              ││▌ok 👍   20:26                                       │
 │                        ││                                                    │

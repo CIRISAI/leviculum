@@ -1890,11 +1890,12 @@ mod tests {
         }
     }
 
-    /// A send that failed both ways: at 80x24 the toast wraps to three rows
-    /// and both legs' reasons are on screen, the frame pinned in
+    /// A send that failed both ways: at 80x24 the toast says it in plain
+    /// words and where the why is, no leg (1279, walk finding 22); the legs'
+    /// reasons are the detail view's. The frame pinned in
     /// `tests/fixtures/tui_toast_two_legs.frame`.
     #[test]
-    fn a_two_leg_failure_toast_wraps_and_shows_both_legs() {
+    fn a_two_leg_failure_toasts_plainly() {
         let mut model = Model::new(&[[0xab; 16]]);
         for name in ["tab", "tab", "h", "i", "enter"] {
             update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
@@ -1915,11 +1916,10 @@ mod tests {
             .draw(|frame| draw(frame, &view, None))
             .expect("draw");
         let screen = frame_text(terminal.backend().buffer());
-        assert!(screen.contains("not sent: direct: no route to"), "{screen}");
-        assert!(
-            screen.contains("propagated: no propagation node"),
-            "{screen}"
-        );
+        assert!(screen.contains(ui::NOT_SENT), "{screen}");
+        assert!(!screen.contains("propagated"), "{screen}");
+        // The send needed a relay and there is none: the header says so.
+        assert!(screen.contains("no relay"), "{screen}");
         let expected = include_str!("../tests/fixtures/tui_toast_two_legs.frame");
         if screen != expected {
             let kept = std::env::temp_dir().join("loquax-tui-toast-two-legs.frame");
@@ -2390,6 +2390,59 @@ mod tests {
         }
     }
 
+    /// 1279, walk finding 23: `my code` shows the contact code a friend
+    /// pastes and its QR, which a phone's scanner reads as that code. At
+    /// 80x40 the whole QR is on screen; pinned in
+    /// `tests/fixtures/tui_my_code.frames`.
+    #[test]
+    fn my_code_shows_the_contact_code_and_its_qr() {
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
+        let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key_bytes).expect("a code");
+        let qr = loquax::home::qr::lines(&code).expect("a QR");
+        let mut model = Model::new(&[[0xab; 16]]);
+        model.own_code = Some(ui::OwnCode {
+            code: code.clone(),
+            qr: qr.clone(),
+        });
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 40,
+            },
+        );
+        for name in [":", "m", "y", "space", "c", "o", "d", "e", "enter"] {
+            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+        }
+        let shown = screen(&model, 80, 40);
+        assert!(shown.contains(" your code "), "{shown}");
+        // The code wraps at the box's width; its pieces are all there.
+        let flat: String = shown
+            .lines()
+            .map(|row| row.trim_matches(|c| c == '│' || c == ' '))
+            .collect();
+        assert!(flat.contains(&code), "{shown}");
+        for row in &qr {
+            assert!(shown.contains(row.as_str()), "the QR row {row:?}: {shown}");
+        }
+        update(&mut model, UiEvent::Key(parse_key("esc").expect("key")));
+        assert!(!screen(&model, 80, 40).contains(" your code "));
+
+        let expected = include_str!("../tests/fixtures/tui_my_code.frames");
+        if shown != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-my-code.frames");
+            let _ = std::fs::write(&kept, &shown);
+            panic!(
+                "the frame moved; this run's is in {}, the pinned one in \
+                 loquax/tests/fixtures/tui_my_code.frames\n{shown}",
+                kept.display()
+            );
+        }
+    }
+
     #[test]
     fn the_help_and_the_palette_draw_over_the_panes() {
         let mut model = Model::new(&[[0xab; 16]]);
@@ -2689,11 +2742,13 @@ mod tests {
             frames.push_str(&format!("--- {width} x {height} ---\n{shot}"));
             let rows: Vec<&str> = shot.lines().collect();
             // The list: Alice on top with the reply's time and the bar, Bob
-            // under her; the header with the trust state.
+            // under her; the header without a trust word for the default
+            // state (1279).
             assert!(rows[1].starts_with("│▌<4f4f4f4f…>"), "{shot}");
             assert!(rows[2].starts_with("│▌you: the tripod fits"), "{shot}");
             assert!(rows[4].starts_with("│ <b7b7b7b7…>"), "{shot}");
-            assert!(rows[0].contains("<4f4f4f4f…>  unknown"), "{shot}");
+            assert!(rows[0].contains("<4f4f4f4f…>──"), "{shot}");
+            assert!(!rows[0].contains("unknown"), "{shot}");
             // The rule, the date line, ours right, theirs left.
             assert!(shot.contains("── Today ──"), "{shot}");
             assert!(shot.contains(" 2 new "), "{shot}");
@@ -3067,12 +3122,13 @@ mod tests {
             assert_eq!(under(&shot, &send), "send", "{width}: {shot}");
             assert!(send.iter().all(|&(_, row)| row == send[0].1));
             let mailbox = of(&|t| *t == Target::Mailbox);
-            // At 80 columns the header has room for the node, not how.
-            let said = match width {
-                80 => "propagation node 9c9c9c9c",
-                _ => "propagation node 9c9c9c9c adopted",
-            };
-            assert_eq!(under(&shot, &mailbox), said, "{width}: {shot}");
+            // With no trust word for an unnamed peer (1279) the header has
+            // room for the node and how at both sizes.
+            assert_eq!(
+                under(&shot, &mailbox),
+                "propagation node 9c9c9c9c adopted",
+                "{width}: {shot}"
+            );
             let badge = of(&|t| matches!(t, Target::Badge(_)));
             assert_eq!(under(&shot, &badge), "[1]", "{width}: {shot}");
             let marks = of(&|t| matches!(t, Target::Block { mark: true, .. }));

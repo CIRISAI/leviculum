@@ -145,6 +145,7 @@ leviculum_ui::catalogue! {
     Forget = "scene_forget", "Delete conversation", "Unterhaltung löschen";
     NewConversation = "scene_new_conversation", "New conversation", "Neue Unterhaltung";
     AddContact = "scene_add_contact", "Add contact", "Kontakt hinzufügen";
+    MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";
     Front = "scene_front", "App in front", "App im Vordergrund";

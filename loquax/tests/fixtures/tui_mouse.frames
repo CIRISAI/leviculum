@@ -1,6 +1,6 @@
 === click ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: second conversation ---
-┌● Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────────────────┐
 │ <61ddb79a…>            ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: typed ---
-┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────────────────┐
 │ <61ddb79a…>            ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -75,7 +75,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 4: sent by click ---
-┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -100,7 +100,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 5: message selected ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -125,7 +125,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: detail ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -150,7 +150,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: closed ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -201,7 +201,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────────────────────────────────────────────────────────────┘
 === wheel ===
 --- frame 1: list focused ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                message 1  12:00 ◷  │
 │▌you: message 10        ││                                                    │
 │                        ││                                message 2  12:00 ◷  │
@@ -226,7 +226,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: wheeled up ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││           nothing earlier on this device           │
 │▌you: message 10        ││                    ── Today ──                     │
 │                        ││                                message 1  12:00 ◷  │
@@ -251,7 +251,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: wheeled down ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                message 1  12:00 ◷  │
 │▌you: message 10        ││                                                    │
 │                        ││                                message 2  12:00 ◷  │
@@ -277,7 +277,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === drag ===
 --- frame 1: two sent ---
-┌  Loquax afbda7b3───────┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: second line       ││                                                    │
 │                        ││                                                    │
@@ -303,7 +303,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- osc52 \e]52;c;Zmlyc3QgbGluZQpzZWNvbmQgbGluZQ==\e\ ---
 --- frame 2: dragged ---
-┌  Loquax afbda7b3───────┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: second line       ││                                                    │
 │                        ││                                                    │
@@ -328,7 +328,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: selected ---
-┌  Loquax afbda7b3───────┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+┌  Loquax afbda7b3───────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: second line       ││                                                    │
 │                        ││                                                    │

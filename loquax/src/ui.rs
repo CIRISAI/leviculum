@@ -674,6 +674,12 @@ pub struct UiModel<B> {
     pub help_scroll: usize,
     /// Our own address, once the engine is ready.
     pub address: Option<[u8; 16]>,
+    /// Our own contact code and its QR, which the frontend computes at start
+    /// (the QR needs the `qr` feature, the model does not): what `my code`
+    /// shows (1279).
+    pub own_code: Option<OwnCode>,
+    /// Whether `my code`'s view is up, drawn as a detail view.
+    pub code_shown: bool,
     /// Draw the delivery glyphs' ASCII fallback.
     pub ascii: bool,
     /// The tick counter: spinner frames and toast ages.
@@ -885,6 +891,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             screen: (80, 24),
             scroll_top: None,
             detail: None,
+            own_code: None,
+            code_shown: false,
             detail_scroll: 0,
             mailbox: MailboxShown::default(),
             activity: 0,
@@ -1009,6 +1017,17 @@ impl<B: InputBuffer> UiModel<B> {
 }
 
 impl<B> UiModel<B> {
+    /// Whether a detail view is up: a message's, or `my code`'s.
+    pub fn detail_open(&self) -> bool {
+        self.detail.is_some() || self.code_shown
+    }
+
+    /// Close the detail view up, whichever it is.
+    pub fn close_detail(&mut self) {
+        self.detail = None;
+        self.code_shown = false;
+    }
+
     /// `peer`'s message went out: its draft goes, from the store at once,
     /// and compose empties with the next [`UiModel::sync_compose`].
     pub(crate) fn clear_draft(&mut self, peer: [u8; 16]) {
@@ -1988,7 +2007,7 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
         return Vec::new();
     }
     let ctx = model.ctx();
-    if model.help || model.palette.is_some() || model.detail.is_some() {
+    if model.help || model.palette.is_some() || model.detail_open() {
         // Only `Ctrl-q`, `Ctrl-c` and backing out reach past an overlay.
         match keys::resolve(&key, keys::OVERLAY, ctx) {
             Some(Action::Run(PaletteCommand::Quit)) => return run(model, PaletteCommand::Quit),
@@ -1996,7 +2015,7 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
             Some(Action::Back) => {
                 model.help = false;
                 model.palette = None;
-                model.detail = None;
+                model.close_detail();
                 return Vec::new();
             }
             _ => {}
@@ -2059,9 +2078,9 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
         }
         return Vec::new();
     }
-    if model.detail.is_some() {
+    if model.detail_open() {
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Enter) {
-            model.detail = None;
+            model.close_detail();
         } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
             scroll_overlay(model, cmd);
         }
@@ -2124,7 +2143,7 @@ fn scroll_overlay<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
     if model.help {
         let (viewport, max) = help_bounds(model);
         model.help_scroll = scrolled(model.help_scroll, cmd, viewport, max);
-    } else if model.detail.is_some() {
+    } else if model.detail_open() {
         let (viewport, max) = detail_bounds(model);
         model.detail_scroll = scrolled(model.detail_scroll, cmd, viewport, max);
     }
@@ -2140,7 +2159,7 @@ fn help_bounds<B: InputBuffer>(model: &UiModel<B>) -> (usize, usize) {
 /// The open detail view's rows on screen at once and its largest first row,
 /// from [`detail_layout`] on the model's screen; nothing when none is open.
 fn detail_bounds<B: InputBuffer>(model: &UiModel<B>) -> (usize, usize) {
-    let Some(detail) = model.detail.and_then(|(c, m)| detail_view(model, c, m)) else {
+    let Some(detail) = shown_detail(model) else {
         return (0, 0);
     };
     let (width, height) = model.screen;
@@ -2636,7 +2655,7 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
         Target::OutsideOverlay => {
             model.help = false;
             model.palette = None;
-            model.detail = None;
+            model.close_detail();
         }
         Target::Footer(act) => return footer_click(model, act),
         // On the map a press is a click or a drag, which the release tells
@@ -2932,7 +2951,7 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
     // Over the help or a detail view the wheel scrolls it, wherever the
     // pointer is: the help leaves no outside, and a detail view is the only
     // thing to scroll while it is up.
-    if model.palette.is_none() && (model.help || model.detail.is_some()) {
+    if model.palette.is_none() && (model.help || model.detail_open()) {
         let cmd = match down {
             true => ScrollCmd::LineDown,
             false => ScrollCmd::LineUp,
@@ -2942,7 +2961,7 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
         }
         return Vec::new();
     }
-    if model.help || model.palette.is_some() || model.detail.is_some() {
+    if model.help || model.palette.is_some() || model.detail_open() {
         return Vec::new();
     }
     match hit::pane_at(model, col, row) {
@@ -2992,7 +3011,7 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
 /// the map it pans an eighth of the view, as `h` and `l` do. Nothing else
 /// scrolls sideways, and an overlay takes it for nothing.
 fn tilt<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, right: bool) -> Vec<UiEffect> {
-    if model.help || model.palette.is_some() || model.detail.is_some() {
+    if model.help || model.palette.is_some() || model.detail_open() {
         return Vec::new();
     }
     if hit::pane_at(model, col, row) == Some(Pane::Map) {
@@ -3421,6 +3440,16 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
         }
         PaletteCommand::AddContact => {
             model.ask_code(true);
+            Vec::new()
+        }
+        PaletteCommand::MyCode => {
+            match model.own_code {
+                Some(_) => {
+                    model.code_shown = true;
+                    model.detail_scroll = 0;
+                }
+                None => model.toast(ToastKind::Error, NO_OWN_CODE.to_string()),
+            }
             Vec::new()
         }
         PaletteCommand::Theme => {
@@ -4094,7 +4123,9 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
         message.delivery = Some(DeliveryState::Failed);
         message.note(now, &text);
     }
-    model.toast(ToastKind::Error, text);
+    // The legs are the detail view's (1279, walk finding 22): the toast says
+    // what happened in plain words and where the why is.
+    model.toast(ToastKind::Error, NOT_SENT.to_string());
     vec![UiEffect::Notice(format!("send: {detail}"))]
 }
 
@@ -4159,6 +4190,17 @@ pub struct DetailView {
     pub title: String,
     /// Its lines: who, the peer, the id, the size, the state, the ledger.
     pub rows: Vec<String>,
+    /// Lines drawn as they are under the others, never wrapped: a QR code.
+    pub fixed: Vec<String>,
+}
+
+/// Our own contact code as `my code` shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnCode {
+    /// The `lxma://` code, what a friend pastes.
+    pub code: String,
+    /// Its QR code, as lines of half blocks.
+    pub qr: Vec<String>,
 }
 
 /// What each part of the screen shows.
@@ -4247,6 +4289,12 @@ pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
 /// What the share's chip row says after its words in the terminal (1273).
 pub const SHARE_CLICK: &str = "click to stop";
 
+/// What `my code` says when the frontend has no code to show.
+pub const NO_OWN_CODE: &str = "Your code is not known yet.";
+
+/// The toast of a send that failed: the legs' reasons are in its details.
+pub const NOT_SENT: &str = "Not sent. Its details say why.";
+
 /// The empty conversations pane's line.
 pub const NO_CONVERSATIONS: &str =
     "No conversations yet: :new conversation starts one with a friend's code.";
@@ -4315,11 +4363,19 @@ pub fn short(address: &[u8; 16]) -> String {
 
 /// The header's title: the peer as [`Names::label`] says it, its trust
 /// state in words, then whose name it shares and what it announces beside a
-/// petname.
+/// petname. The default state, a peer the reader has not named, takes no
+/// word (1279, walk finding 21): "unknown" on every new chat read as a
+/// warning about nothing.
 pub fn header_title(names: &Names, peer: &[u8; 16]) -> String {
-    let mut words = vec![names.trust(peer).as_str().to_string()];
+    let mut words = match names.trust(peer) {
+        Trust::Unknown => Vec::new(),
+        trust => vec![trust.as_str().to_string()],
+    };
     words.extend(names.header_notes(peer));
-    format!("{}  {}", names.label(peer), words.join(" · "))
+    match words.is_empty() {
+        true => names.label(peer),
+        false => format!("{}  {}", names.label(peer), words.join(" · ")),
+    }
 }
 
 fn push(line: &mut RLine, text: &str, st: RStyle) {
@@ -4363,7 +4419,13 @@ fn fetch_shown<B>(model: &UiModel<B>) -> bool {
 /// `pn` (1153: "mailbox" now means the user's Loquax Mailbox).
 fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     let Some(node) = model.mailbox.node else {
-        return vec!["no propagation node".to_string(), "no pn".to_string()];
+        // Without a relay nothing is said until a send needs one (1279, walk
+        // finding 21): "no propagation node" in every chat was the default
+        // state worded as a fault.
+        return match relay_needed(model) {
+            true => vec!["no relay".to_string()],
+            false => Vec::new(),
+        };
     };
     let node = to_hex(&node[..4]);
     let how = if model.mailbox.by_user {
@@ -4397,6 +4459,25 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     words.push(format!("pn {node}"));
     words.push("pn".to_string());
     words
+}
+
+/// Whether a send in the open conversation needs a relay: its newest
+/// message of ours is still waiting to be handed on, or was not sent.
+fn relay_needed<B>(model: &UiModel<B>) -> bool {
+    let newest = model
+        .conversations
+        .get(model.selected)
+        .and_then(|c| c.messages.iter().rev().find(|m| m.outbound));
+    matches!(
+        newest.and_then(|m| m.delivery),
+        Some(
+            DeliveryState::Queued
+                | DeliveryState::Stamping
+                | DeliveryState::InFlight
+                | DeliveryState::Rejected
+                | DeliveryState::Failed
+        )
+    )
 }
 
 /// When the schedule's next sync is due, as a time of day, up to the whole
@@ -4477,7 +4558,32 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
     Some(DetailView {
         title: "message".to_string(),
         rows,
+        fixed: Vec::new(),
     })
+}
+
+/// `my code`'s view: the code a friend pastes, then its QR to scan.
+fn code_view(code: &OwnCode) -> DetailView {
+    DetailView {
+        title: "your code".to_string(),
+        rows: vec![
+            "A friend adds you with this code: they scan the QR, or you send \
+             them the text."
+                .to_string(),
+            String::new(),
+            code.code.clone(),
+            String::new(),
+        ],
+        fixed: code.qr.clone(),
+    }
+}
+
+/// The detail view up, `my code`'s or a message's.
+fn shown_detail<B>(model: &UiModel<B>) -> Option<DetailView> {
+    match (&model.own_code, model.code_shown) {
+        (Some(code), true) => Some(code_view(code)),
+        _ => model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+    }
 }
 
 /// Why a message of ours shown delivered will not turn read (1233,
@@ -4727,7 +4833,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         palette,
         help: model.help,
         help_scroll: model.help_scroll,
-        detail: model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+        detail: shown_detail(model),
         detail_scroll: model.detail_scroll,
         tier: model.tier,
         theme: model.theme,
@@ -4845,6 +4951,12 @@ pub fn detail_layout(detail: &DetailView, screen: Rect) -> (Rect, Vec<String>) {
             true => vec![String::new()],
             false => toast_rows(row, usize::from(width - 2)),
         })
+        .chain(
+            detail
+                .fixed
+                .iter()
+                .map(|row| leviculum_ui::text::truncate_to_cols(row, usize::from(width - 2))),
+        )
         .collect();
     let height = (rows.len() as u16 + 2).min(screen.height.saturating_sub(1));
     let area = Rect::new(
@@ -6032,12 +6144,22 @@ mod tests {
         );
         assert_eq!(
             model.current_toast().map(|t| t.text.as_str()),
-            Some("not sent: no route")
+            Some(NOT_SENT)
+        );
+        assert_eq!(
+            model.conversations[0].messages[0]
+                .ledger
+                .last()
+                .map(|e| e.what.as_str()),
+            Some("not sent: no route"),
+            "the reason is the detail view's"
         );
     }
 
+    /// 1279: the toast says it plainly; both legs' reasons are in the
+    /// message's detail view.
     #[test]
-    fn a_toast_quotes_both_legs_of_a_failed_auto_send() {
+    fn a_failed_auto_send_toasts_plainly_and_details_both_legs() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         sent(&mut model, "hi");
         update(
@@ -6048,7 +6170,16 @@ mod tests {
         );
         assert_eq!(
             model.current_toast().map(|t| t.text.as_str()),
-            Some("not sent: direct: no route after 30.0s; propagated: no propagation node")
+            Some(NOT_SENT)
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Details));
+        let detail = view(&model).detail.expect("the detail view");
+        assert!(
+            detail.rows.iter().any(|row| row.ends_with(
+                "not sent: direct: no route after 30.0s; propagated: no propagation node"
+            )),
+            "{:?}",
+            detail.rows
         );
     }
 
@@ -6895,7 +7026,7 @@ mod tests {
     fn the_view_draws_the_glyph_and_says_nothing_is_earlier() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         assert_eq!(shown(&model), [layout::EARLIEST]);
-        assert_eq!(view(&model).messages_title, "<abababab…>  unknown");
+        assert_eq!(view(&model).messages_title, "<abababab…>");
         sent(&mut model, "hi");
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
         assert_eq!(shown(&model), [layout::EARLIEST, "hi  ◷"]);
@@ -7379,7 +7510,7 @@ mod tests {
         assert_eq!(model.detail_scroll, 0);
         update(&mut model, mouse(MouseEventKind::ScrollDown, 40, 5));
         assert_eq!(model.detail_scroll, WHEEL_ROWS.min(max));
-        assert!(model.detail.is_some(), "no scroll key closes it");
+        assert!(model.detail_open(), "no scroll key closes it");
         update(&mut model, key(KeyCode::End));
         update(
             &mut model,
@@ -7502,11 +7633,22 @@ mod tests {
 
     /// The header names the peer, its trust and the propagation node, the
     /// longest form that fits; a wide pane gives the address and a row for
-    /// the propagation node.
+    /// the propagation node. Without one it says nothing until a send needs
+    /// one (1279): then `no relay`.
     #[test]
     fn the_header_says_the_trust_and_the_mailbox_state() {
         let mut model = UiModel::<Field>::new(&[PEER]);
-        assert_eq!(view(&model).messages_title_right, "no propagation node");
+        assert_eq!(view(&model).messages_title_right, "");
+        sent(&mut model, "hi");
+        assert_eq!(view(&model).messages_title_right, "no relay", "it waits");
+        update(&mut model, UiEvent::SendDone(Err("no route".to_string())));
+        assert_eq!(view(&model).messages_title_right, "no relay", "it failed");
+        let mut arrived = UiModel::<Field>::new(&[PEER]);
+        sent(&mut arrived, "hi");
+        engine(&mut arrived, OutboxEvent::Queued { message_id: ID });
+        state(&mut arrived, ID, MessageState::Delivered);
+        assert_eq!(view(&arrived).messages_title_right, "", "it arrived");
+        let mut model = UiModel::<Field>::new(&[PEER]);
         update(
             &mut model,
             UiEvent::MailboxChosen {
@@ -7516,12 +7658,15 @@ mod tests {
         );
         assert_eq!(
             view(&model).messages_title_right,
-            "propagation node 9c9c9c9c"
+            "propagation node 9c9c9c9c adopted"
         );
         clock(&mut model, 26, 14, 3);
         update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
         update(&mut model, UiEvent::FetchDone(Ok(0)));
-        assert_eq!(view(&model).messages_title_right, "pn · synced 14:03");
+        assert_eq!(
+            view(&model).messages_title_right,
+            "propagation node · synced 14:03"
+        );
         update(
             &mut model,
             UiEvent::Resize {
@@ -7567,7 +7712,10 @@ mod tests {
         );
         assert_eq!(effects, [UiEffect::Fetch], "start syncs");
         assert_eq!(model.fetch_reason, Some(Reason::Start));
-        assert_eq!(view(&model).messages_title_right, "pn · fetching");
+        assert_eq!(
+            view(&model).messages_title_right,
+            "propagation node · fetching"
+        );
         update(&mut model, UiEvent::Elapsed(1_000));
         assert!(
             update(&mut model, UiEvent::Run(PaletteCommand::Fetch)).is_empty(),
@@ -7582,7 +7730,10 @@ mod tests {
         );
         // At 80 columns only the next sync fits: it is kept before the
         // last one and the node.
-        assert_eq!(view(&model).messages_title_right, "pn · next 14:20");
+        assert_eq!(
+            view(&model).messages_title_right,
+            "pn · synced 14:05 · next 14:20"
+        );
         update(
             &mut model,
             UiEvent::Resize {
@@ -8597,7 +8748,7 @@ mod tests {
         model.screen = (80, 24);
         announced(&mut model, PEER, "Alice\u{202e}\u{200b}");
         let shown = view(&model);
-        assert_eq!(shown.messages_title, "Alice ·abab  unknown");
+        assert_eq!(shown.messages_title, "Alice ·abab");
         assert_eq!(shown.compose_title, "to Alice ·abab");
         assert_eq!(text(&shown.conversations[0]).trim_end(), "▌Alice ·abab");
         engine(
@@ -8628,7 +8779,7 @@ mod tests {
         announced(&mut model, OTHER, "АLICE");
         assert_eq!(
             view(&model).messages_title,
-            "Alice ·abab ≈  unknown · same name as ·cdcd"
+            "Alice ·abab ≈  same name as ·cdcd"
         );
         let rows: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(
@@ -8658,7 +8809,7 @@ mod tests {
                 "── was Alice, now announces Ally ──"
             ]
         );
-        assert_eq!(view(&model).messages_title, "Ally ·abab  unknown");
+        assert_eq!(view(&model).messages_title, "Ally ·abab");
         // Our own address names nobody.
         model.address = Some(OTHER);
         announced(&mut model, OTHER, "me");
@@ -9173,7 +9324,7 @@ mod tests {
                 "live · 4 min ago  14:00".to_string(),
             ]
         );
-        assert_eq!(view(&model).messages_title_right, "pos 4 min · no pn");
+        assert_eq!(view(&model).messages_title_right, "pos 4 min");
         let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(
             list[1].contains("◎ position · live"),
@@ -9193,7 +9344,11 @@ mod tests {
             row.starts_with(" at 43.77310 N 11.25600 E · ±5 m · 4 min ago "),
             "{row:?}"
         );
-        assert!(row.trim_end().ends_with("no propagation node"), "{row:?}");
+        assert_eq!(
+            row.trim(),
+            "at 43.77310 N 11.25600 E · ±5 m · 4 min ago",
+            "no relay words: {row:?}"
+        );
         // The age counts from the fix, not from when it arrived.
         clock(&mut model, 26, 15, 0);
         assert!(text(&view(&model).messages[0]).contains("· 1 h ago"));
@@ -9469,7 +9624,7 @@ mod tests {
             "",
             report_of(&fix_at(1_000_000, 1_000_000, two_pm() + 7200)),
         );
-        assert_eq!(view(&model).messages_title_right, "pos ahead · no pn");
+        assert_eq!(view(&model).messages_title_right, "pos ahead");
         // Its liveness counts from when it came, not from the claim (1209).
         let rows = shown(&model).join(" ");
         assert!(
@@ -9486,7 +9641,7 @@ mod tests {
             report_of(&fix_at(2_000_000, 1_000_000, two_pm() + 60)),
         );
         assert_eq!(model.positions[&PEER].location.latitude_e6, 2_000_000);
-        assert_eq!(view(&model).messages_title_right, "pos 1 min · no pn");
+        assert_eq!(view(&model).messages_title_right, "pos 1 min");
     }
 
     #[test]
@@ -10391,6 +10546,14 @@ mod tests {
     #[test]
     fn a_click_on_a_report_or_the_header_position_opens_the_map() {
         let mut model = reported();
+        // A relay, so the header has its words to tell from the position.
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
         let older = cell_of(&model, "◎ position 43.77310", 3);
         let effects = press(&mut model, older);
         assert!(effects.is_empty(), "{effects:?}");
@@ -10429,7 +10592,11 @@ mod tests {
         let wide = cells(&model, |t| *t == hit::Target::Position);
         assert_eq!(wide.len(), shown.position_len, "{wide:?}");
         let mailbox = cells(&model, |t| *t == hit::Target::Mailbox);
-        assert_eq!(mailbox.len(), "no propagation node".len(), "{mailbox:?}");
+        assert_eq!(
+            mailbox.len(),
+            "propagation node 9c9c9c9c adopted".len(),
+            "{mailbox:?}"
+        );
         let effects = press(&mut model, wide[wide.len() - 1]);
         assert!(effects.is_empty(), "no fetch: {effects:?}");
         assert_eq!(model.map.expect("open").centre, latest);
@@ -10925,6 +11092,37 @@ mod tests {
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`
     /// sets the typed one, sanitised, and an empty line clears it.
+    /// 1279: `my code` shows the code a friend pastes and its QR, closes as
+    /// a detail view does, and says so when the frontend had none to give.
+    #[test]
+    fn my_code_shows_the_code_and_its_qr_and_closes() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(palette(&mut model, "my code").is_empty());
+        assert!(!model.detail_open());
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some(NO_OWN_CODE)
+        );
+        model.own_code = Some(OwnCode {
+            code: "lxma://00:11".to_string(),
+            qr: vec!["█▀▀█".to_string(), "█▄▄█".to_string()],
+        });
+        palette(&mut model, "my code");
+        let detail = view(&model).detail.expect("the code's view");
+        assert_eq!(detail.title, "your code");
+        assert!(
+            detail.rows.contains(&"lxma://00:11".to_string()),
+            "{detail:?}"
+        );
+        assert_eq!(detail.fixed, ["█▀▀█", "█▄▄█"]);
+        // Drawn as they are, after the text, never wrapped.
+        let (_, rows) = detail_layout(&detail, Rect::new(0, 0, 80, 40));
+        assert_eq!(rows[rows.len() - 2..], ["█▀▀█", "█▄▄█"]);
+        update(&mut model, key(KeyCode::Esc));
+        assert!(!model.detail_open());
+        assert!(view(&model).detail.is_none());
+    }
+
     #[test]
     fn rename_takes_text_in_the_palette_and_empty_clears() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -10986,7 +11184,7 @@ mod tests {
                 blocked: false
             })]
         );
-        assert_eq!(view(&model).messages_title, "Alice ·abab  unknown");
+        assert_eq!(view(&model).messages_title, "Alice ·abab");
         // Nothing visible is refused, not written.
         palette(&mut model, "rename");
         typed(&mut model, "\u{200b}");

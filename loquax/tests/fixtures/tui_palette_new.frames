@@ -1,5 +1,5 @@
 --- empty
-┌● Loquax (attaching)────┐┌  messages───────────────────── no propagation node ┐
+┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation starts││                                                    │
 │one with a friend's     ││                                                    │
@@ -16,24 +16,24 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- palette
-┌● Loquax (attaching)────┐┌  messages───────────────────── no propagation node ┐
+┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation s┌ commands ────────────────────────────┐                   │
 │one with a friend's│>                                     │                   │
 │code.              │▸ send  Enter                         │                   │
 │                   │  new conversation                    │                   │
 │                   │  add contact                         │                   │
+│                   │  my code                             │                   │
 │                   │  fetch  F5                           │                   │
 │                   │  quit  q                             │                   │
 │                   │  help  ?                             │                   │
-│                   │  focus conversations                 │                   │
-│                   │  focus messages  Enter               │s device           │
-│                   │  focus compose  i                    │ Alt-Enter newline ┤
-│                   │  next conversation  Alt-↓            │                   │
-└────────────── / se│  previous conversation  Alt-↑        │───────────────────┘
-Enter run │ Esc clos└  next unread  Alt-Shift-↓────────────┘
+│                   │  focus conversations                 │s device           │
+│                   │  focus messages  Enter               │ Alt-Enter newline ┤
+│                   │  focus compose  i                    │                   │
+└────────────── / se│  next conversation  Alt-↓            │───────────────────┘
+Enter run │ Esc clos└  previous conversation  Alt-↑────────┘
 --- asking
-┌● Loquax (attaching)────┐┌  messages───────────────────── no propagation node ┐
+┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation s┌ commands ────────────────────────────┐                   │
 │one with a friend's│>                                     │                   │
@@ -50,7 +50,7 @@ Enter run │ Esc clos└  next unread  Alt-Shift-↓─────────
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- naming
-┌  Loquax (attaching)────┐┌  <4ca16772…>  unknown───────── no propagation node ┐
+┌  Loquax (attaching)────┐┌  <4ca16772…>───────────────────────────────────────┐
 │ <bebebebe…>            ││                                                    │
 │                   ┌ commands ────────────────────────────┐                   │
 │                   │>                                     │                   │

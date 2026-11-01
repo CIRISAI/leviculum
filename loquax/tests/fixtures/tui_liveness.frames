@@ -1,5 +1,5 @@
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: live ---
-┌● Loquax afbda7b3───────┐┌  them ·61dd  unknown─────────── pos <1 min · no pn ┐
+┌● Loquax afbda7b3───────┐┌  them ·61dd──────────────────────────── pos <1 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -49,7 +49,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: recent ---
-┌● Loquax afbda7b3───────┐┌  them ·61dd  unknown─────────── pos 25 min · no pn ┐
+┌● Loquax afbda7b3───────┐┌  them ·61dd──────────────────────────── pos 25 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · 25 mi… ⌖  ││                                                    │
 │                        ││                                                    │
@@ -74,7 +74,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: stale ---
-┌● Loquax afbda7b3───────┐┌  them ·61dd  unknown────────────── pos 1 d · no pn ┐
+┌● Loquax afbda7b3───────┐┌  them ·61dd─────────────────────────────── pos 1 d ┐
 │▌them ·61dd         Mon ││                                                    │
 │▌◎ position · 25 h ago  ││                                                    │
 │                        ││                                                    │

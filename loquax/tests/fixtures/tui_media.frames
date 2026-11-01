@@ -1,5 +1,5 @@
 --- photo, file, voice alone ---
-┌● Loquax (attaching)────┐┌  <4f4f4f4f…>  unknown───────── no propagation node ┐
+┌● Loquax (attaching)────┐┌  <4f4f4f4f…>───────────────────────────────────────┐
 │▌<4f4f4f4f…>      12:21 ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- ours, then words under a photo ---
-┌● Loquax (attaching)────┐┌  <4f4f4f4f…>  unknown───────── no propagation node ┐
+┌● Loquax (attaching)────┐┌  <4f4f4f4f…>───────────────────────────── no relay ┐
 │▌<4f4f4f4f…>      12:41 ││                                                    │
 │▌the view from the hill ││                                                    │
 │                        ││                                                    │
