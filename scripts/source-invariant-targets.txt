@@ -223,6 +223,7 @@ skip  loquax           send_cli                   # spawns the loquax binary
 skip  loquax           stamp_timing               # tokio runtime around the stamp solver
 skip  loquax           tui_snapshot               # spawns loquax tui against an in-process daemon over sockets
 skip  loquax           scene_golden               # a golden of the scene built from the ugly store; subject is the code; loquax-tui
+skip  loquax           mailbox_receipts           # read receipts through the mailbox, in process with signed LXMF; subject is the code; loquax-tui
 skip  loquax           wire_props                 # property tests of the home wire's codecs; subject is the code; loquax-tui
 skip  loquax-android   device_walk_script         # starts python3 on the device walk's parser tests; subject is the script's code
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
