@@ -1,0 +1,32 @@
+# +ciris NAT lab: punch strategies through simulated NATs in network
+# namespaces (scripts/natlab). Runs on lab branches and on demand only.
+name: natlab
+on:
+  push:
+    branches: ["natlab/**"]
+  workflow_dispatch:
+    inputs:
+      trials:
+        default: "5"
+      only:
+        default: ""
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -yq conntrack iptables iproute2
+      - name: lab
+        run: |
+          sudo python3 scripts/natlab/natlab.py matrix \
+            --trials "${{ inputs.trials || '5' }}" --only "${{ inputs.only }}" \
+            --out natlab-results.json | tee natlab.log
+          sed -n '/^| scenario/,$p' natlab.log >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: natlab
+          path: |
+            natlab-results.json
+            natlab.log
