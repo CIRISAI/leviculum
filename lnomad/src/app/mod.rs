@@ -21,6 +21,7 @@ pub mod event;
 pub mod geometry;
 pub mod input;
 pub mod model;
+pub mod strings;
 
 pub use chrome::*;
 pub use event::*;

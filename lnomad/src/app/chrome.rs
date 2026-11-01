@@ -8,6 +8,7 @@ use super::event::*;
 use super::geometry::Rect;
 use super::input::KeyCode;
 use super::model::*;
+use super::strings::{Arg, StrId, Text};
 
 /// The ` · ` separator drawn between the title and the address on the top bar.
 pub(crate) const TOPBAR_SEP: &str = " · ";
@@ -70,9 +71,10 @@ pub(crate) fn hops_text(model: &Model) -> Option<String> {
     let dest = model.current_dest?;
     Some(
         match model.node_registry.get_by_hash(&dest).and_then(|n| n.hops) {
-            Some(h) => format!("{h} hops"),
-            None => "unknown".to_string(),
-        },
+            Some(h) => Text::Key(StrId::Hops, vec![Arg::Int(h.into())]),
+            None => Text::key(StrId::HopsUnknown),
+        }
+        .resolve(model.lang),
     )
 }
 
@@ -231,7 +233,7 @@ pub(crate) fn top_bar_controls(model: &Model, area: Rect) -> Vec<ControlRect> {
 pub(crate) fn breadcrumb(model: &Model) -> String {
     match model.history.current() {
         Some(target) => format!("{}:{}", short_hex(&target.dest_hash), target.path),
-        None => "press : to enter a URL".to_string(),
+        None => StrId::AddressHint.text(model.lang).to_string(),
     }
 }
 
@@ -291,18 +293,19 @@ impl leviculum_ui::footer::FooterRole for FooterAction {
 /// (`Alt-←`, `Alt-→`, `R`) rather than using glyphs. Their availability tracks
 /// the history so an impossible motion reads muted.
 pub(crate) fn footer_nav(model: &Model) -> [FooterItem; 3] {
+    let w = |id: StrId| id.text(model.lang);
     [
         FooterItem {
             available: model.history.can_back(),
-            ..FooterItem::action("Alt-←", "back", FooterAction::Back)
+            ..FooterItem::action("Alt-←", w(StrId::Back), FooterAction::Back)
         },
         FooterItem {
             available: model.history.can_forward(),
-            ..FooterItem::action("Alt-→", "forward", FooterAction::Forward)
+            ..FooterItem::action("Alt-→", w(StrId::Forward), FooterAction::Forward)
         },
         FooterItem {
             available: model.history.current().is_some(),
-            ..FooterItem::action("R", "reload", FooterAction::Reload)
+            ..FooterItem::action("R", w(StrId::Reload), FooterAction::Reload)
         },
     ]
 }
@@ -312,6 +315,7 @@ pub(crate) fn footer_nav(model: &Model) -> [FooterItem; 3] {
 /// divider before it.
 pub(crate) fn footer_items(model: &Model) -> Vec<FooterItem> {
     let mut items: Vec<FooterItem> = footer_nav(model).to_vec();
+    let w = |id: StrId| id.text(model.lang);
     match model.mode {
         Mode::Browse => {
             // The identify toggle, only when there is a page to identify to. A
@@ -320,50 +324,70 @@ pub(crate) fn footer_items(model: &Model) -> Vec<FooterItem> {
             // never-dropped reload).
             if model.current_dest.is_some() {
                 let label = if model.identifying {
-                    "anonymous"
+                    w(StrId::Anonymous)
                 } else {
-                    "identify"
+                    w(StrId::Identify)
                 };
                 items.push(FooterItem::droppable("i", label, FooterAction::Identify, 6));
             }
             items.extend_from_slice(&[
-                FooterItem::droppable("f", "hint", FooterAction::Hint, 5),
-                FooterItem::droppable("/", "search", FooterAction::Search, 4),
-                FooterItem::droppable("d", "places", FooterAction::Places, 3),
-                FooterItem::droppable("m", "mark", FooterAction::Mark, 2),
-                FooterItem::droppable("y", "copy", FooterAction::Copy, 1),
-                FooterItem::action("?", "help", FooterAction::Help),
-                FooterItem::action("q", "quit", FooterAction::Quit),
+                FooterItem::droppable("f", w(StrId::HintMode), FooterAction::Hint, 5),
+                FooterItem::droppable("/", w(StrId::Search), FooterAction::Search, 4),
+                FooterItem::droppable("d", w(StrId::Places), FooterAction::Places, 3),
+                FooterItem::droppable("m", w(StrId::Mark), FooterAction::Mark, 2),
+                FooterItem::droppable("y", w(StrId::Copy), FooterAction::Copy, 1),
+                FooterItem::action("?", w(StrId::Help), FooterAction::Help),
+                FooterItem::action("q", w(StrId::Quit), FooterAction::Quit),
             ]);
         }
         Mode::Field => items.extend_from_slice(&[
-            FooterItem::action("Esc", "done", FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("Tab", "next field", FooterAction::Key(KeyCode::Tab), 1),
-            FooterItem::droppable("Space", "toggle", FooterAction::Key(KeyCode::Char(' ')), 2),
-            FooterItem::action("?", "help", FooterAction::Help),
+            FooterItem::action("Esc", w(StrId::Done), FooterAction::Key(KeyCode::Esc)),
+            FooterItem::droppable(
+                "Tab",
+                w(StrId::NextField),
+                FooterAction::Key(KeyCode::Tab),
+                1,
+            ),
+            FooterItem::droppable(
+                "Space",
+                w(StrId::Toggle),
+                FooterAction::Key(KeyCode::Char(' ')),
+                2,
+            ),
+            FooterItem::action("?", w(StrId::Help), FooterAction::Help),
         ]),
         Mode::Search => items.extend_from_slice(&[
-            FooterItem::action("Enter", "go", FooterAction::Key(KeyCode::Enter)),
-            FooterItem::droppable("n", "next", FooterAction::Key(KeyCode::Char('n')), 2),
-            FooterItem::droppable("N", "prev", FooterAction::Key(KeyCode::Char('N')), 3),
-            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("?", "help", FooterAction::Help, 1),
+            FooterItem::action("Enter", w(StrId::Go), FooterAction::Key(KeyCode::Enter)),
+            FooterItem::droppable(
+                "n",
+                w(StrId::Next),
+                FooterAction::Key(KeyCode::Char('n')),
+                2,
+            ),
+            FooterItem::droppable(
+                "N",
+                w(StrId::Prev),
+                FooterAction::Key(KeyCode::Char('N')),
+                3,
+            ),
+            FooterItem::action("Esc", w(StrId::Cancel), FooterAction::Key(KeyCode::Esc)),
+            FooterItem::droppable("?", w(StrId::Help), FooterAction::Help, 1),
         ]),
         Mode::Address => items.extend_from_slice(&[
-            FooterItem::action("Enter", "go", FooterAction::Key(KeyCode::Enter)),
-            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
-            FooterItem::droppable("?", "help", FooterAction::Help, 1),
+            FooterItem::action("Enter", w(StrId::Go), FooterAction::Key(KeyCode::Enter)),
+            FooterItem::action("Esc", w(StrId::Cancel), FooterAction::Key(KeyCode::Esc)),
+            FooterItem::droppable("?", w(StrId::Help), FooterAction::Help, 1),
         ]),
         Mode::Hint => items.extend_from_slice(&[
             FooterItem {
                 key: "",
-                label: HINT_SENTENCE,
+                label: w(StrId::HintSentence),
                 key_first: true,
                 action: FooterAction::None,
                 drop_rank: None,
                 available: true,
             },
-            FooterItem::action("Esc", "cancel", FooterAction::Key(KeyCode::Esc)),
+            FooterItem::action("Esc", w(StrId::Cancel), FooterAction::Key(KeyCode::Esc)),
         ]),
     }
     items

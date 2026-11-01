@@ -80,6 +80,7 @@ use crate::theme::{resolve_theme, ThemeFlag};
 use crate::url::Target;
 use leviculum_micron::FieldKind;
 
+use crate::app::strings::{with, with_args, Arg, StrId, Text as StrText};
 use crate::app::*;
 
 /// [`crate::app::geometry::regions`] over ratatui rectangles, for the drawing
@@ -910,7 +911,7 @@ enum LoadResult {
         dir: String,
     },
     /// A file download (or the save to disk) failed.
-    DownloadErr(String),
+    DownloadErr(StrText),
 }
 
 /// Start (or restart) a background fetch for `target`. Aborts any in-flight
@@ -991,16 +992,15 @@ fn spawn_download(
                             bytes: bytes.len(),
                             dir: dir.to_string_lossy().into_owned(),
                         },
-                        Err(err) => {
-                            LoadResult::DownloadErr(format!("could not save {name}: {err}"))
-                        }
+                        Err(err) => LoadResult::DownloadErr(with_args(
+                            StrId::CouldNotSave,
+                            vec![Arg::Str(name), Arg::Str(err.to_string())],
+                        )),
                     },
-                    None => LoadResult::DownloadErr(
-                        "no download directory (neither XDG_DOWNLOAD_DIR nor HOME set)".to_string(),
-                    ),
+                    None => LoadResult::DownloadErr(StrText::key(StrId::NoDownloadDir)),
                 }
             }
-            Err(err) => LoadResult::DownloadErr(err.to_string()),
+            Err(err) => LoadResult::DownloadErr(StrText::Raw(err.to_string())),
         };
         let _ = tx.send(FetchOutcome {
             generation: generation_now,
@@ -1253,17 +1253,20 @@ impl ImageStore {
     /// Write a held picture into the download directory, once. A second save
     /// returns the path it already has, so `s` then `o` does not produce two
     /// files.
-    fn save(&mut self, link: usize) -> Result<(PathBuf, usize), String> {
+    fn save(&mut self, link: usize) -> Result<(PathBuf, usize), StrText> {
         let Some(entry) = self.entries.get_mut(&link) else {
-            return Err("that image has not arrived yet".to_string());
+            return Err(StrText::key(StrId::ImageNotArrived));
         };
         if let Some(path) = &entry.saved {
             return Ok((path.clone(), entry.bytes.len()));
         }
-        let dir = crate::download::download_dir()
-            .ok_or("no download directory (neither XDG_DOWNLOAD_DIR nor HOME set)")?;
-        let path = crate::download::save_to_dir(&dir, &entry.name, &entry.bytes)
-            .map_err(|e| format!("could not save {}: {e}", entry.name))?;
+        let dir = crate::download::download_dir().ok_or(StrText::key(StrId::NoDownloadDir))?;
+        let path = crate::download::save_to_dir(&dir, &entry.name, &entry.bytes).map_err(|e| {
+            with_args(
+                StrId::CouldNotSave,
+                vec![Arg::Str(entry.name.clone()), Arg::Str(e.to_string())],
+            )
+        })?;
         entry.saved = Some(path.clone());
         Ok((path, entry.bytes.len()))
     }
@@ -1413,26 +1416,29 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                 }
             }
             Effect::SaveImage { link } => match images.save(link) {
-                Ok((path, bytes)) => model.set_toast(
+                Ok((path, bytes)) => model.say(
                     ToastKind::Info,
-                    format!("saved {} ({bytes} bytes)", path.display()),
+                    with_args(
+                        StrId::SavedImage,
+                        vec![Arg::Str(path.display().to_string()), Arg::Int(bytes as i64)],
+                    ),
                 ),
-                Err(err) => model.set_toast(ToastKind::Error, err),
+                Err(err) => model.say(ToastKind::Error, err),
             },
             Effect::OpenImage { link } => match images.save(link) {
                 // Saved first, because the platform handler needs a file: the
                 // picture only ever existed in this process's memory.
                 Ok((path, _)) => match open::that(&path) {
-                    Ok(_) => model.set_toast(
+                    Ok(_) => model.say(
                         ToastKind::Info,
-                        format!("opened {} externally", path.display()),
+                        with(StrId::OpenedImage, path.display().to_string()),
                     ),
-                    Err(_) => model.set_toast(
+                    Err(_) => model.say(
                         ToastKind::Error,
-                        format!("failed to open {}", path.display()),
+                        with(StrId::FailedToOpenImage, path.display().to_string()),
                     ),
                 },
-                Err(err) => model.set_toast(ToastKind::Error, err),
+                Err(err) => model.say(ToastKind::Error, err),
             },
             Effect::Download(target) => {
                 spawn_download(inflight, generation, session, tx, timeout, target);
@@ -1448,9 +1454,9 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                 }
                 *generation = generation.wrapping_add(1);
                 if let Err(err) = session.lock().await.set_identify(&dest, on).await {
-                    model.set_toast(
+                    model.say(
                         ToastKind::Error,
-                        format!("could not save identify decision: {err}"),
+                        with(StrId::IdentifyNotSaved, err.to_string()),
                     );
                 }
             }
@@ -1459,8 +1465,8 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                 // Linux). `open::that` launches the handler and returns; a
                 // failure only raises a toast, never takes the UI down.
                 match open::that(&url) {
-                    Ok(_) => model.set_toast(ToastKind::Info, format!("opened externally: {url}")),
-                    Err(_) => model.set_toast(ToastKind::Error, format!("failed to open: {url}")),
+                    Ok(_) => model.say(ToastKind::Info, with(StrId::OpenedExternally, url)),
+                    Err(_) => model.say(ToastKind::Error, with(StrId::FailedToOpen, url)),
                 }
             }
             Effect::Cancel => {
@@ -3822,7 +3828,7 @@ mod tests {
         m.download = Some("manual.pdf".to_string());
         let effects = update(
             &mut m,
-            AppEvent::DownloadFailed("request timed out".to_string()),
+            AppEvent::DownloadFailed(StrText::Raw("request timed out".to_string())),
         );
         assert!(effects.is_empty());
         assert!(m.download.is_none(), "the flight must be cleared");

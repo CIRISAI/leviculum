@@ -26,6 +26,7 @@ use leviculum_ui::tokens::{tokens, Tokens};
 use super::chrome::*;
 use super::event::*;
 use super::geometry::{regions, Rect};
+use super::strings::{Lang, Text};
 
 /// The number of columns reserved on the right for the scrollbar.
 pub(crate) const SCROLLBAR_COLS: u16 = 1;
@@ -64,9 +65,6 @@ pub(crate) const CACHED_GLYPH: &str = "⚡";
 /// session identifies to the current page's node. An ordinary wide emoji (no
 /// VS16), so `UnicodeWidthStr` scores it 2 columns like the terminal draws it.
 pub(crate) const IDENTIFY_GLYPH: &str = "\u{1F511}";
-
-/// The instructional sentence shown in the footer while hint mode is active.
-pub(crate) const HINT_SENTENCE: &str = "type a hint label or link text";
 
 /// The home-row alphabet hint labels are drawn from (vimium-style).
 pub(crate) const HINT_ALPHABET: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
@@ -524,6 +522,13 @@ pub struct Model {
     pub footer_hover: Option<usize>,
     /// The characters typed so far in hint mode, narrowing the visible labels.
     pub hint_input: String,
+    /// The language the browser speaks: its catalogue's
+    /// ([`super::strings`]) English unless the shell names another.
+    pub lang: Lang,
+    /// What the active toast says, as the catalogue's words: the scene's
+    /// toast. [`toast`](Model::toast) holds the same words resolved in
+    /// [`lang`](Model::lang), which is what the terminal draws.
+    pub toast_text: Option<Text>,
     /// The active transient toast (fetch error, "copied", "bookmarked", ...), or
     /// `None`. Rendered as a floating overlay, not in the status bar; auto-expires
     /// and is cleared on the next key event. See [`Model::set_toast`].
@@ -800,16 +805,24 @@ impl Model {
     /// Show a transient toast, stamped with the current tick so it can expire.
     /// Every transient message routes through here instead of the status bar.
     pub fn set_toast(&mut self, kind: ToastKind, text: impl Into<String>) {
+        self.say(kind, Text::Raw(text.into()));
+    }
+
+    /// Show a toast in the catalogue's words, resolved in the model's
+    /// language for the terminal and kept as keys for the scene.
+    pub fn say(&mut self, kind: ToastKind, text: Text) {
         self.toast = Some(Toast {
             kind,
-            text: text.into(),
+            text: text.resolve(self.lang),
             shown_at: self.now_tick,
         });
+        self.toast_text = Some(text);
     }
 
     /// Dismiss any active toast (a navigation or key event clears it early).
     pub fn dismiss_toast(&mut self) {
         self.toast = None;
+        self.toast_text = None;
     }
 
     /// Record whether the session identifies to `dest`: fold it into
@@ -832,7 +845,7 @@ impl Model {
     pub(crate) fn expire_toast(&mut self) {
         if let Some(toast) = &self.toast {
             if self.now_tick.saturating_sub(toast.shown_at) >= TOAST_TICKS {
-                self.toast = None;
+                self.dismiss_toast();
             }
         }
     }
