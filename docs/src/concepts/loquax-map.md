@@ -506,13 +506,15 @@ test.
 whose module comment is the normative layout). All integers little-endian,
 offsets from the start of the file:
 
-- a header: `LMR1`, the version (1, or 2 since 1100 with names), the
-  header length (64, or 96 for version 2), the bounds in
+- a header: `LMR1`, the version (1, 2 since 1100 with names, 3 since
+  1191 with buildings), the header length (64, 96 for version 2, 112 for
+  version 3), the bounds in
   degrees x 10^7 (west, south, east, north; west greater than east means
   across the antimeridian), the zoom range (at most 16, so x and y fit a
   `u16`), the layer profile id, where the attribution and the notice lie,
   the tile count, where the index lies and the file's length; version 2
-  adds where the label index and the string table lie;
+  adds where the label index and the string table lie, version 3 where
+  the building index lies and how many sections it lists;
 - the two texts, UTF-8 and both required: the attribution, one line every
   map view shows ("© OpenStreetMap contributors"), and the notice, the
   ODbL text, the derived-database sentence and the source the region was
@@ -537,9 +539,84 @@ offsets from the start of the file:
   1 reader refuses version 2 with `RegionError::Version`; this reader
   reads both, and a frontend that draws no names never opens the label
   index or the table;
+- version 3 (LMR3, 1191): a building section per z15 tile that has
+  buildings, after the label sections, and a building index like the
+  tile index between the label index and the tile index. The layout is
+  `leviculum-map/src/buildings.rs`'s module comment; the paragraph
+  "Buildings" below says why it is so;
 - the index last, 20 bytes per tile ascending by (z, x, y): z, x, y,
   offset, length. Last, so the cut can stream tiles and learn their count
   at the end.
+
+**Buildings** (1191, the format and the cut; the draw is the next
+step). Protomaps' z15 tiles carry every OSM building. They are not in the
+tile blobs, which stay as profile 1 cuts them, byte for byte, but in a
+section of their own per z15 tile: in the blobs, a view that draws no
+buildings would still pay for them (every blob is checked whole when read,
+and the name placement walks every feature of a tile), a z16 or z17 view
+would project and cull the whole z15 tile, and the M9 would read 3.3 times
+the bytes of every z15 view from its card (the 1191 study, measured with
+buildings in the blobs).
+
+A section is a head of 16 cells, a 4 x 4 grid of 1,024 units square, 16
+bytes each: where the cell's records end (`u32`), how many footprints it
+holds (`u32`) and the box every vertex of them lies in (four `i16`). A
+footprint is stored once, in the cell holding the centre of its box; a
+reader takes every cell whose box meets the part of the tile it draws, so
+a z16 tile reads its four cells and a z17 tile its one, plus a neighbour
+where a footprint reaches over the cell edge, and skips a cell from its
+head entry alone. A footprint is its rings, the outer one first, then its
+holes: a ring's vertex count and a flag for another ring of the same
+footprint in one LEB128 varint (one byte up to 63 vertices), its first
+vertex as two `i16`, then each step to the next vertex as two `i8`, or
+the byte `0x80` and two `i16` where the step is longer (24 m at z15). The
+ring closes on its first vertex. Coordinates are the z15 tile's units at
+extent 4,096 and lie within one extent of the tile, as a blob's do; a
+footprint holds at most 4,096 vertices and 1,024 rings, the M9's
+capacities. A cell counts its footprints in a `u32`, so no tile is too
+full for the format (the study's worst z15 tile holds 2,228). Every
+record is checked as it is read: a truncated or corrupt one is an error,
+never a panic.
+
+A version 2 reader refuses a version 3 file with `RegionError::Version(3)`
+before it reads past the version field, as a version 1 reader refuses
+version 2, so the reader has to ship before regions with buildings reach
+it; Loquax cuts its own regions, so in practice only a file copied by hand
+meets an older reader. A cut without buildings (`leviculum-map-tool cut
+--buildings false`, or no z15 in its zooms) writes version 2, which every
+version 2 reader reads.
+
+The cut (`leviculum-mapcut/src/cut.rs`, `footprints`) takes the
+`buildings` layer of each z15 source tile, the same decode as the tile's
+blob, and keeps every building piece the tile holds, a building across a
+tile edge once in each tile as that tile's piece. Each ring is simplified
+at half a pixel, 8 sub-pixels or about 1.5 m, as profile 1 simplifies
+every other class at z15; buildings are four to six vertices each, so
+coarser tolerances save little (study, section 1). A ring that collapses
+under it goes: a hole on its own, an outer ring with its footprint. A
+footprint over the M9's capacities would be simplified again at doubled
+tolerance up to four pixels; none is in the two boxes below.
+`leviculum-map-tool cut` cuts buildings by default (`--buildings`), and
+so does the autoload; the M9 and the terminal never open the section.
+
+Measured 2026-11-01 on the coder host from the Protomaps build of
+2026-10-28 (Basemap 4.15.2, the build the regions in use were cut from):
+the two boxes extracted with `leviculum-map-tool extract` (Frankfurt
+`8.47,50.01,8.80,50.23`, 27,409,373 bytes; Berlin `13.05,52.32,13.80,52.70`,
+89,323,845 bytes), then cut z0 to z15, profile 1, `--locale de`, with and
+without `--buildings`:
+
+| Region | without | with | added | footprints | vertices | dropped as degenerate | sections | heads and index |
+|---|---|---|---|---|---|---|---|---|
+| Frankfurt | 10,290,565 | 14,601,696 | +41.9 % | 322,436 | 1,494,946 | 2,800 | 881 | 243,156 |
+| Berlin | 36,363,478 | 49,373,566 | +35.8 % | 912,127 | 4,451,470 | 11,254 | 3,217 | 887,892 |
+
+The records alone add 39.5 % and 33.3 %, the study's estimate for the
+encoding (+40 % and +33 %); the 256-byte head per section and the 20-byte
+index entry add the rest. The tile blobs of both cuts are the same bytes.
+The footprint counts are the source's pieces (325,236 and 923,381) less
+the degenerate ones, slivers a tile's buffer cut off and outlines under a
+pixel.
 
 **Names** (1100). The cut keeps the names of places (city, town, district,
 village, suburb, neighbourhood; not localities, hamlets, isolated
@@ -583,7 +660,8 @@ corrupt file is an error, never a panic; `verify` walks the whole index
 once for a file a frontend did not make.
 
 **Layer profile 1** (`leviculum-map/src/profile.rs`): no buildings at any
-zoom (points, `pois` among them, are not in the flat format at all); from
+zoom in the tile blobs (from version 3 they are a section of their own,
+above; points, `pois` among them, are not in the flat format at all); from
 z13 the extent stays 4,096 and the Douglas-Peucker tolerance is half a
 pixel; z12 and shallower, the region zooms, are quantised to an extent of
 512, simplified at one pixel and lose the landuse, natural and landcover

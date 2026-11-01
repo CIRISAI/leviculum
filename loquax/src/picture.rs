@@ -545,6 +545,7 @@ mod tests {
                 notice: "test".to_string(),
                 threads: 1,
                 locale: None,
+                buildings: true,
             };
             let out = File::create(maps.join(format!("{name}.lmr"))).expect("create");
             cut(&archive, &opts, std::io::BufWriter::new(out)).expect("cut");

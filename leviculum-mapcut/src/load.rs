@@ -27,6 +27,8 @@ pub struct Want {
     /// The language names are kept in beside the local ones
     /// ([`CutOptions::locale`]).
     pub locale: Option<String>,
+    /// Cut the buildings too ([`CutOptions::buildings`]).
+    pub buildings: bool,
 }
 
 /// What a load fetched and wrote.
@@ -130,6 +132,7 @@ pub fn load<R: RangeRead, W: Write + Seek>(
         notice: notice(by, want.profile, &source_line(archive)),
         threads,
         locale: want.locale.clone(),
+        buildings: want.buildings,
     };
     let stats = cut(&fetched, &opts, out)?;
     Ok(Loaded {

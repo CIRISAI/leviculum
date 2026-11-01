@@ -356,6 +356,7 @@ fn options(threads: usize) -> CutOptions {
         notice: "test notice, ODbL".to_owned(),
         threads,
         locale: Some("de".to_owned()),
+        buildings: true,
     }
 }
 
@@ -894,4 +895,182 @@ fn a_name_falls_back_to_english_where_the_locale_cannot_read_it() {
         ["Αθήνα", "Moscow", "東京", "München", "Αθήνα"]
     );
     assert_eq!(shown(None), ["Αθήνα", "Москва", "東京", "München", "Αθήνα"]);
+}
+
+/// The region `bytes` with every tile entry's blob, by tile.
+fn blobs(bytes: &[u8]) -> BTreeMap<TileId, Vec<u8>> {
+    let r = Region::from_bytes(bytes).expect("open");
+    (0..r.header().tiles)
+        .map(|n| {
+            let e = r.entry(n).expect("entry");
+            let at = e.offset as usize;
+            (e.id, bytes[at..at + e.len as usize].to_vec())
+        })
+        .collect()
+}
+
+/// Every footprint of tile `id`'s building section, rings of points.
+fn footprints_of(r: &Region<&[u8]>, id: TileId) -> Vec<Vec<Vec<(i16, i16)>>> {
+    let Some(b) = r.buildings(id).expect("section") else {
+        return Vec::new();
+    };
+    b.cells()
+        .flat_map(|c| c.footprints())
+        .map(|f| {
+            f.expect("footprint")
+                .rings()
+                .map(|r| r.points().collect())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn the_cut_writes_the_z15_buildings_and_leaves_the_tiles_as_they_were() {
+    let with = run(&source(false), 2);
+    let mut out = Cursor::new(Vec::new());
+    let opts = CutOptions {
+        buildings: false,
+        ..options(2)
+    };
+    cut(&source(false), &opts, &mut out).expect("cut");
+    let without = out.into_inner();
+
+    let (rw, ro) = (
+        Region::from_bytes(&with).expect("open"),
+        Region::from_bytes(&without).expect("open"),
+    );
+    rw.verify().expect("verify");
+    ro.verify().expect("verify");
+    assert_eq!(rw.header().version_of(), 3);
+    assert_eq!(ro.header().version_of(), 2);
+    assert_eq!(ro.building_sections(), 0);
+    // The base tiles are the same bytes with and without buildings.
+    assert_eq!(blobs(&with), blobs(&without));
+    // One section, for the busy z15 tile with its one building; the z12
+    // busy tile's building is not cut, the sea tile has none.
+    assert_eq!(rw.building_sections(), 1);
+    let id = TileId {
+        z: 15,
+        x: 17408,
+        y: 11943,
+    };
+    assert_eq!(rw.building_entry(0).expect("entry").id, id);
+    let square = vec![(100, 100), (150, 100), (150, 150), (100, 150)];
+    assert_eq!(footprints_of(&rw, id), [vec![square]]);
+}
+
+/// A building the source cut at a tile edge is in each tile as that
+/// tile's piece, once; a collinear outline, under a pixel, is dropped as
+/// degenerate; a courtyard keeps its hole.
+#[test]
+fn a_building_across_a_tile_edge_is_in_each_tile_once() {
+    let t = |z, x, y| TileId { z, x, y };
+    let tile = |buildings: Vec<Vec<Vec<[i32; 2]>>>| -> Vec<u8> {
+        Tile {
+            layers: vec![
+                layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+                layer(
+                    "buildings",
+                    buildings
+                        .iter()
+                        .map(|rings| (POLYGON, "building", polygon(rings)))
+                        .collect(),
+                ),
+            ],
+        }
+        .encode_to_vec()
+    };
+    let mut hole = square(1200, 1200, 100);
+    hole.reverse();
+    let flat = vec![[500, 500], [600, 500], [700, 500]];
+    let mut tiles = BTreeMap::new();
+    // The building over the edge between x 17408 and 17409, each tile
+    // holding its piece out to its buffer.
+    tiles.insert(
+        t(15, 17408, 11943),
+        tile(vec![
+            vec![square(4000, 100, 200)],
+            vec![square(1100, 1100, 300), hole],
+            vec![flat],
+        ]),
+    );
+    tiles.insert(t(15, 17409, 11943), tile(vec![vec![square(-96, 100, 200)]]));
+    let src = Synthetic {
+        tiles,
+        reversed: false,
+    };
+    let mut out = Cursor::new(Vec::new());
+    let stats = cut(&src, &options(1), &mut out).expect("cut");
+    let bytes = out.into_inner();
+    let r = Region::from_bytes(&bytes).expect("open");
+    r.verify().expect("verify");
+    let z15 = stats.zooms[&15];
+    assert_eq!(
+        (
+            z15.buildings_in,
+            z15.buildings_out,
+            z15.buildings_degenerate,
+            z15.building_sections
+        ),
+        (4, 3, 1, 2)
+    );
+    let west = footprints_of(&r, t(15, 17408, 11943));
+    let east = footprints_of(&r, t(15, 17409, 11943));
+    let piece = |x: i16| vec![vec![(x, 100), (x + 200, 100), (x + 200, 300), (x, 300)]];
+    assert_eq!(east, [piece(-96)]);
+    assert_eq!(west.len(), 2);
+    assert!(west.contains(&piece(4000)));
+    assert!(west.iter().any(|f| f.len() == 2), "the courtyard's hole");
+}
+
+#[test]
+fn the_oltrarno_fixture_cuts_its_buildings() {
+    const FIXTURE: &[u8] = include_bytes!("../fixtures/oltrarno.pmtiles");
+    struct InMemory;
+    impl leviculum_mapcut::pmtiles::RangeRead for InMemory {
+        fn read_range(&self, offset: u64, len: u64) -> Res<Vec<u8>> {
+            let at = (offset as usize).min(FIXTURE.len());
+            let end = at.saturating_add(len as usize).min(FIXTURE.len());
+            Ok(FIXTURE[at..end].to_vec())
+        }
+    }
+    let archive = leviculum_mapcut::pmtiles::Archive::from_source(InMemory).expect("open");
+    let opts = |buildings| CutOptions {
+        bounds: Bounds {
+            west: 112_615_000,
+            south: 437_405_000,
+            east: 112_825_000,
+            north: 437_545_000,
+        },
+        zooms: 14..=15,
+        buildings,
+        ..options(2)
+    };
+    let mut with = Cursor::new(Vec::new());
+    let stats = cut(&archive, &opts(true), &mut with).expect("cut");
+    let mut without = Cursor::new(Vec::new());
+    cut(&archive, &opts(false), &mut without).expect("cut");
+    let (with, without) = (with.into_inner(), without.into_inner());
+    let r = Region::from_bytes(&with).expect("open");
+    r.verify().expect("verify");
+    assert_eq!(blobs(&with), blobs(&without));
+    let z15 = stats.zooms[&15];
+    assert_eq!(z15.building_sections, 4, "{z15:?}");
+    assert!(z15.buildings_out > 100, "{z15:?}");
+    assert_eq!(z15.buildings_over_device, 0);
+    assert!(stats.zooms[&14].buildings_in == 0, "z14 is not cut");
+    let n: usize = (0..r.building_sections())
+        .map(|n| footprints_of(&r, r.building_entry(n).expect("entry").id).len())
+        .sum();
+    assert_eq!(n as u64, z15.buildings_out);
+    println!(
+        "oltrarno buildings: pieces {} footprints {} vertices {} bytes {} of region {} (without {})",
+        z15.buildings_in,
+        z15.buildings_out,
+        z15.building_vertices,
+        z15.building_bytes,
+        with.len(),
+        without.len()
+    );
 }

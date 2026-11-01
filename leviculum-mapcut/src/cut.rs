@@ -10,13 +10,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Seek, SeekFrom, Write};
 use std::ops::RangeInclusive;
 
+use leviculum_map::buildings::{self, BUILDING_ZOOM};
 use leviculum_map::labels::{encode_section, encode_strings, LabelKind, LineLabel, PointLabel};
 use leviculum_map::mercator::{x_of_lon, y_of_lat};
 use leviculum_map::profile::{self, ZoomLayers};
 use leviculum_map::region::{
-    Bounds, Entry, Header, LabelTables, TileId, ENTRY_LEN, HEADER_LEN_2, TILE_VIEW,
+    Bounds, BuildingTables, Entry, Header, LabelTables, TileId, ENTRY_LEN, HEADER_LEN_3, TILE_VIEW,
 };
 use leviculum_mapfill::fixture::{write, Kind};
+use leviculum_mapfill::style::Class;
 
 use crate::mvt::{self, Name};
 use crate::simplify::{area2, douglas_peucker, quantise_path, simplify_ring, Pt};
@@ -35,6 +37,12 @@ pub const DEVICE_RINGS: usize = 1024;
 /// The coarsest tolerance a feature over [`DEVICE_POINTS`] is simplified
 /// at, in sub-pixels: four pixels.
 pub const MAX_TOLERANCE: i64 = 64;
+/// The tolerance building footprints are simplified at, in sub-pixels of
+/// a z15 tile: half a pixel, about 1.5 m in Frankfurt, as profile 1
+/// simplifies every other class at z15. A building is four to six
+/// vertices, so a coarser tolerance saves little (the 1191 study: 1.89 M
+/// vertices at source detail, 1.49 M at this one, over Frankfurt's box).
+pub const BUILDING_TOLERANCE: i64 = 8;
 
 /// What to cut.
 pub struct CutOptions {
@@ -50,6 +58,10 @@ pub struct CutOptions {
     /// differ (`de`, `en`); `None` keeps the local names alone. The
     /// caller's own: loquax passes its user's.
     pub locale: Option<String>,
+    /// Cut the building footprints of the z15 tiles into building
+    /// sections (version 3, [`leviculum_map::buildings`]); without them,
+    /// or without z15 in the zooms, the region is version 2.
+    pub buildings: bool,
 }
 
 /// The view zoom from which a street name of `kind` shows: major and
@@ -122,6 +134,20 @@ pub struct ZoomStats {
     pub line_labels: u64,
     /// Label section bytes written for this zoom.
     pub label_bytes: u64,
+    /// Building pieces in the source tiles: a building a tile edge cuts
+    /// counts once per tile.
+    pub buildings_in: u64,
+    /// Footprints, their vertices, and the building sections and their
+    /// bytes written.
+    pub buildings_out: u64,
+    pub building_vertices: u64,
+    pub building_sections: u64,
+    pub building_bytes: u64,
+    /// Footprints whose outer ring simplified to nothing: under a pixel.
+    pub buildings_degenerate: u64,
+    /// Footprints over the device's capacity even at [`MAX_TOLERANCE`],
+    /// left out.
+    pub buildings_over_device: u64,
 }
 
 impl core::ops::AddAssign for ZoomStats {
@@ -141,6 +167,13 @@ impl core::ops::AddAssign for ZoomStats {
         self.point_labels += o.point_labels;
         self.line_labels += o.line_labels;
         self.label_bytes += o.label_bytes;
+        self.buildings_in += o.buildings_in;
+        self.buildings_out += o.buildings_out;
+        self.building_vertices += o.building_vertices;
+        self.building_sections += o.building_sections;
+        self.building_bytes += o.building_bytes;
+        self.buildings_degenerate += o.buildings_degenerate;
+        self.buildings_over_device += o.buildings_over_device;
     }
 }
 
@@ -184,6 +217,18 @@ pub fn cut_tile(raw: &[u8], layers: ZoomLayers) -> Res<(Option<Vec<u8>>, ZoomSta
     Ok((blob, st))
 }
 
+/// What [`cut_tile_full`] makes of one tile.
+#[derive(Debug, Default)]
+pub struct CutTile {
+    /// The geometry blob, `None` when nothing is left under the profile.
+    pub blob: Option<Vec<u8>>,
+    pub labels: TileLabels,
+    /// The building section, `None` when buildings were not asked for or
+    /// the tile has none.
+    pub buildings: Option<Vec<u8>>,
+    pub stats: ZoomStats,
+}
+
 /// One tile's blob under `layers`, `None` when nothing is left, and with
 /// `names` its labels: places of the named classes, waters and parks whose
 /// anchor lies in the tile (a point in the buffer belongs to its
@@ -196,6 +241,87 @@ pub fn cut_tile_named(
     layers: ZoomLayers,
     names: Option<Names<'_>>,
 ) -> Res<(Option<Vec<u8>>, TileLabels, ZoomStats)> {
+    let t = cut_tile_full(raw, layers, names, false)?;
+    Ok((t.blob, t.labels, t.stats))
+}
+
+/// One z15 source tile's building pieces as footprints the building
+/// section holds ([`buildings::encode_section`]): every ring simplified at
+/// [`BUILDING_TOLERANCE`], a ring that collapses dropped (a hole), or its
+/// footprint with it (the outer ring), every vertex clamped to within one
+/// extent of the tile. A footprint over the device's capacity is
+/// simplified at doubled tolerance up to [`MAX_TOLERANCE`], as an area is.
+pub fn footprints(parts: &[Vec<Vec<Pt>>], st: &mut ZoomStats) -> Vec<Vec<Vec<(i16, i16)>>> {
+    let range = buildings::COORDS.start..=buildings::COORDS.end - 1;
+    let at = |part: &[Vec<Pt>], tol: i64| -> Vec<Vec<Pt>> {
+        let mut rings = Vec::new();
+        for (i, ring) in part.iter().enumerate() {
+            let r = quantise_path(&simplify_ring(ring, tol), 0, true);
+            let keep = r.len() >= 3 && area2(&r) != 0;
+            if i == 0 && !keep {
+                break;
+            }
+            if keep {
+                rings.push(r);
+            }
+        }
+        rings
+    };
+    let fits = |rings: &[Vec<Pt>]| {
+        rings.iter().map(Vec::len).sum::<usize>() <= buildings::MAX_VERTICES
+            && rings.len() <= buildings::MAX_RINGS
+    };
+    let mut out = Vec::new();
+    for part in parts {
+        st.buildings_in += 1;
+        let mut t = BUILDING_TOLERANCE;
+        let mut rings = at(part, t);
+        while !fits(&rings) && t < MAX_TOLERANCE {
+            t = (t * 2).min(MAX_TOLERANCE);
+            rings = at(part, t);
+            st.resimplified += 1;
+        }
+        if rings.is_empty() {
+            st.buildings_degenerate += 1;
+            continue;
+        }
+        if !fits(&rings) {
+            st.buildings_over_device += 1;
+            continue;
+        }
+        let rings: Vec<Vec<(i16, i16)>> = rings
+            .into_iter()
+            .map(|r| {
+                r.into_iter()
+                    .map(|[x, y]| {
+                        let c = [
+                            x.clamp(*range.start(), *range.end()),
+                            y.clamp(*range.start(), *range.end()),
+                        ];
+                        if c != [x, y] {
+                            st.clamped += 1;
+                        }
+                        // In range of i16: COORDS is.
+                        (c[0] as i16, c[1] as i16)
+                    })
+                    .collect()
+            })
+            .collect();
+        st.buildings_out += 1;
+        st.building_vertices += rings.iter().map(|r| r.len() as u64).sum::<u64>();
+        out.push(rings);
+    }
+    out
+}
+
+/// [`cut_tile_named`], and with `with_buildings` the tile's building
+/// section ([`footprints`]), cut from the same decode.
+pub fn cut_tile_full(
+    raw: &[u8],
+    layers: ZoomLayers,
+    names: Option<Names<'_>>,
+    with_buildings: bool,
+) -> Res<CutTile> {
     let mut st = ZoomStats {
         tiles: 1,
         ..ZoomStats::default()
@@ -228,6 +354,7 @@ pub fn cut_tile_named(
     let units_per_px = i64::from(extent / i32::from(TILE_VIEW)).max(1);
     let min_area2 = 2 * i64::from(layers.thin_px2) * units_per_px * units_per_px;
     let mut feats: Vec<write::Feature> = Vec::new();
+    let mut building_parts: Vec<Vec<Vec<Pt>>> = Vec::new();
     for f in decoded.features {
         st.features_in += 1;
         let label = f
@@ -247,6 +374,9 @@ pub fn cut_tile_named(
             .flatten()
             .map(|r| r.len() as u64)
             .sum::<u64>();
+        if with_buildings && f.class == Class::Building && f.kind == Kind::Area {
+            building_parts.extend(f.parts.iter().cloned());
+        }
         if !layers.keeps(f.class) {
             continue;
         }
@@ -371,11 +501,29 @@ pub fn cut_tile_named(
             });
         }
     }
+    let section = match with_buildings {
+        true => {
+            let fp = footprints(&building_parts, &mut st);
+            match fp.is_empty() {
+                true => None,
+                false => Some(
+                    buildings::encode_section(&fp)
+                        .map_err(|e| format!("building section: {e:?}"))?,
+                ),
+            }
+        }
+        false => None,
+    };
     if feats.is_empty() {
         // No entry, so no label section either: a reader looks names up
         // by the tiles it draws.
         st.empty = 1;
-        return Ok((None, TileLabels::default(), st));
+        return Ok(CutTile {
+            blob: None,
+            labels: TileLabels::default(),
+            buildings: section,
+            stats: st,
+        });
     }
     // Draw order: by class, stable, so source order holds within a class.
     let mut order: Vec<usize> = (0..feats.len()).collect();
@@ -390,7 +538,12 @@ pub fn cut_tile_named(
     st.point_labels = labels.points.len() as u64;
     st.line_labels = labels.lines.len() as u64;
     let blob = write::fixture(TILE_VIEW, TILE_VIEW, layers.shift(), &[(0, 0)], &feats);
-    Ok((Some(blob), labels, st))
+    Ok(CutTile {
+        blob: Some(blob),
+        labels,
+        buildings: section,
+        stats: st,
+    })
 }
 
 /// One tile's label section, its strings numbered by the region's sorted
@@ -457,8 +610,14 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
     ids.sort_unstable();
     ids.dedup();
 
-    out.write_all(&[0u8; HEADER_LEN_2])?;
-    let mut pos = HEADER_LEN_2 as u64;
+    let with_buildings = opts.buildings && opts.zooms.contains(&BUILDING_ZOOM);
+    // A cut without buildings writes version 2, which older readers read.
+    let header_len = match with_buildings {
+        true => HEADER_LEN_3,
+        false => leviculum_map::region::HEADER_LEN_2,
+    };
+    out.write_all(&vec![0u8; header_len])?;
+    let mut pos = header_len as u64;
     let mut text = |s: &str, pos: &mut u64| -> Res<(u32, u32)> {
         let at = u32::try_from(*pos)?;
         out.write_all(s.as_bytes())?;
@@ -472,12 +631,12 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
     let mut entries: Vec<Entry> = Vec::new();
     let mut shared: HashMap<Vec<u8>, (u64, u32)> = HashMap::new();
     let mut named: Vec<(TileId, TileLabels)> = Vec::new();
+    let mut built: Vec<(TileId, Vec<u8>)> = Vec::new();
     let threads = opts.threads.max(1);
     let locale = opts.locale.as_deref();
-    type Tile = (Option<Vec<u8>>, TileLabels, ZoomStats);
     for round in ids.chunks(ROUND) {
         let per = round.len().div_ceil(threads);
-        let results: Vec<Res<Tile>> = std::thread::scope(|s| {
+        let results: Vec<Res<CutTile>> = std::thread::scope(|s| {
             let handles: Vec<_> = round
                 .chunks(per)
                 .map(|part| {
@@ -491,7 +650,8 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
                                     z: t.z,
                                     deepest: t.z == hi,
                                 };
-                                cut_tile_named(&raw, layers[&t.z], Some(names))
+                                let b = with_buildings && t.z == BUILDING_ZOOM;
+                                cut_tile_full(&raw, layers[&t.z], Some(names), b)
                             })
                             .collect::<Vec<_>>()
                     })
@@ -506,10 +666,17 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
                 .collect()
         });
         for (t, r) in round.iter().zip(results) {
-            let (blob, labels, mut st) =
-                r.map_err(|e| format!("tile {}/{}/{}: {e}", t.z, t.x, t.y))?;
+            let CutTile {
+                blob,
+                labels,
+                buildings: section,
+                stats: mut st,
+            } = r.map_err(|e| format!("tile {}/{}/{}: {e}", t.z, t.x, t.y))?;
             if !labels.is_empty() {
                 named.push((*t, labels));
+            }
+            if let Some(section) = section {
+                built.push((*t, section));
             }
             if let Some(blob) = blob {
                 let len = u32::try_from(blob.len())?;
@@ -570,6 +737,20 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
         pos += bytes.len() as u64;
         stats.zooms.entry(t.z).or_default().label_bytes += bytes.len() as u64;
     }
+    // The building sections after the label sections, before the table.
+    let mut building_entries: Vec<Entry> = Vec::new();
+    for (t, bytes) in &built {
+        out.write_all(bytes)?;
+        building_entries.push(Entry {
+            id: *t,
+            offset: pos,
+            len: u32::try_from(bytes.len())?,
+        });
+        pos += bytes.len() as u64;
+        let z = stats.zooms.entry(t.z).or_default();
+        z.building_sections += 1;
+        z.building_bytes += bytes.len() as u64;
+    }
     let (count, bytes) = encode_strings(table.iter().copied());
     let strings_at = pos;
     out.write_all(&bytes)?;
@@ -581,6 +762,11 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
         out.write_all(&e.encode())?;
     }
     pos += (label_entries.len() * ENTRY_LEN) as u64;
+    let building_index = pos;
+    for e in &building_entries {
+        out.write_all(&e.encode())?;
+    }
+    pos += (building_entries.len() * ENTRY_LEN) as u64;
 
     let index = pos;
     for e in &entries {
@@ -604,7 +790,13 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
             table: strings_at,
             table_len: bytes.len() as u64,
         }),
-        buildings: None,
+        buildings: match with_buildings {
+            true => Some(BuildingTables {
+                index: building_index,
+                sections: u32::try_from(building_entries.len())?,
+            }),
+            false => None,
+        },
     };
     out.seek(SeekFrom::Start(0))?;
     out.write_all(&header.encode())?;
