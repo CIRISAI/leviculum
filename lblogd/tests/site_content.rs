@@ -170,7 +170,7 @@ async fn body_of(router: &Router, path: &str) -> String {
 fn the_site_has_its_pages_and_a_landing_page() {
     assert_eq!(
         page_names(),
-        ["boards", "download", "index", "mailbox", "source"]
+        ["boards", "download", "help", "help-de", "index", "mailbox", "source"]
     );
     let snapshot = snapshot();
     for path in [
@@ -178,6 +178,8 @@ fn the_site_has_its_pages_and_a_landing_page() {
         "/page/blog.mu",
         "/page/boards.mu",
         "/page/download.mu",
+        "/page/help.mu",
+        "/page/help-de.mu",
         "/page/mailbox.mu",
         "/page/source.mu",
     ] {

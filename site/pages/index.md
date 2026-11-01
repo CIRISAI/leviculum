@@ -24,6 +24,7 @@ Active development, nightly builds, no release yet.
 ## Links
 
 - [Download](/download)
+- [Help with the Loquax app](/help)
 - [Documentation](https://leviculum.network/docs/)
 - [Source](/source)
 - [Blog](/blog)
