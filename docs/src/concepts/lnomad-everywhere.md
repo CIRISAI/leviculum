@@ -108,7 +108,7 @@ means only the browser has it. Catalogue keys named `browser_*` are new.
 | Top bar: title, address, star, identity, cache bolt, hops (`topbar_layout`, `lnomad/src/app/chrome.rs:98`) | `TopBar` (`leviculum-ui/src/scene.rs:203`) with `Lead::Back` while history has a past, title, and `actions` (star, identify, reload) | `Back`, `Bookmark{on}`, `Identify{on}`, `Reload` | `browser_bookmark`, `browser_identify`, `browser_reload`, `browser_hops` | shared, moved; the actions browser |
 | Address field (the `Address` arm of `Mode`, `lnomad/src/app/model.rs:96`) | a field node: the platform's text field, the scene names its hint and its go, as `Compose` does (`loquax/src/ui/scene.rs:556`) | `Go` (the URL is the platform's text, as Loquax's `Search` is) | `browser_address_hint` | browser node, shared shape |
 | Page view (`model.page`, laid out by `layout`, `lnomad/src/render.rs:182`) | `Page`: a window of `PageLine`s, each a list of runs (see 2.2) | `Scroll(ScrollCmd)` (exists) | none: page text is `Text::Raw` | browser |
-| Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:911`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:161`); the link node browser |
+| Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:911`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:162`); the link node browser |
 | Form fields (`RenderedField`, `lnomad/src/render.rs:109`) | a run carries its field index; the edited field is a platform text field like the address | `Edit`, `Toggle(field)`, `Submit` | `browser_submit` | browser |
 | Back and forward (`go_back`, `lnomad/src/app/event.rs:1742`; `go_forward`, `lnomad/src/app/event.rs:1752`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
 | History (`History`, `lnomad/src/app/model.rs:298`) | a `Sheet` of rows | `Activate(row)` | `browser_history` | sheet exists, rows browser |
@@ -202,7 +202,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
 | Chip | `Chip` (`leviculum-ui/src/scene.rs:296`) | **reused**: download running, cached view |
 | Accessibility | `A11y` (`leviculum-ui/src/scene.rs:119`) and `Role` (`leviculum-ui/src/scene.rs:69`) | **parametrised**: moved to `leviculum-ui` in slice 0, `Role` gains `Page`, `Link`, `Field`, `Image` in slice 1 |
 | Strings | `Text`, `Lang`, `format`, the `catalogue!` macro (`leviculum-ui/src/strings.rs:180`, `leviculum-ui/src/strings.rs:27`, `leviculum-ui/src/strings.rs:144`, `leviculum-ui/src/strings.rs:80`) | **parametrised**: the machinery moved to `leviculum-ui` in slice 0; each program declares its own `StrId` with the macro, keys prefixed `browser_` so the Android files do not collide |
-| Key bindings | the mechanism `leviculum_ui::keymap`; Loquax's rows `ROWS` (`loquax/src/keys.rs:216`); `Intent::from_action` (`loquax/src/ui/intent.rs:467`) | **adds** its own rows table (browse, address, hint, search, field, places) with the vi, Emacs and arrow spellings, replacing the per-mode `match`es; the help and footer derive from it as Loquax's do. Chords that mean the same keep the same key (`q`, `?`, `:`, `/`, [Loquax: keys, mouse and layout](loquax-keys-and-layout.md)) |
+| Key bindings | the mechanism `leviculum_ui::keymap`; Loquax's rows `ROWS` (`loquax/src/keys.rs:216`); `Intent::from_action` (`loquax/src/ui/intent.rs:474`) | **adds** its own rows table (browse, address, hint, search, field, places) with the vi, Emacs and arrow spellings, replacing the per-mode `match`es; the help and footer derive from it as Loquax's do. Chords that mean the same keep the same key (`q`, `?`, `:`, `/`, [Loquax: keys, mouse and layout](loquax-keys-and-layout.md)) |
 | Android host and renderers | Loquax's tab host (`ConversationsActivity`), node binders from slice 8 of the study | **reused** in the Loquax APK: one `PageBinder` added |
 | iced window | `loquax/src/gui.rs`, `loquax/src/gui/chat.rs` | **extracted**: the top bar, sheet, toast, list item and search field widgets move into a crate `leviculum-ui-iced`, the iced twin of `leviculum-ui-ratatui`; both programs draw through it. Not a second layer: the same extraction #475 did for ratatui |
 | Terminal widgets | `leviculum-ui-ratatui` | **reused**; the scene-node widgets (top bar, sheet, list item) are added there, so the M9's mousefood draws them too |
@@ -245,10 +245,10 @@ The reasons for the tab:
 
 What the network seam needs on the phone (slice 3): the mailbox's node is
 built with transport off and without the application event stream
-(`loquax/src/engine/shell.rs:693`, `loquax/src/engine/shell.rs:732`): it
+(`loquax/src/engine/shell.rs:720`, `loquax/src/engine/shell.rs:759`): it
 is "a destination on the network, not a transport node"
-(`loquax/src/engine/shell.rs:719`), so a leaf on its screens' listener
-(`loquax/src/engine/shell.rs:722`) has no route through it to a NomadNet
+(`loquax/src/engine/shell.rs:746`), so a leaf on its screens' listener
+(`loquax/src/engine/shell.rs:749`) has no route through it to a NomadNet
 node. So the browser on the phone
 fetches through the mailbox's node itself: `fetch::Session` (`Session`,
 `lnomad/src/fetch.rs:120`) gains a constructor over a node the host hands
