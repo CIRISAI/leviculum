@@ -64,6 +64,7 @@ use leviculum_ui_ratatui::images::{self as pictures, Pictures, SlicedProtocol};
 use leviculum_ui_ratatui::spinner::spinner_span;
 use leviculum_ui_ratatui::style::{
     chrome_muted_style, chrome_style, chrome_text_style, downgrade_buffer, paint, rgb,
+    rstyle_to_ratatui,
 };
 use leviculum_ui_ratatui::terminal::install_panic_hook;
 use leviculum_ui_ratatui::{chip, footer, help, toast};
@@ -80,6 +81,7 @@ use crate::theme::{resolve_theme, ThemeFlag};
 use crate::url::Target;
 use leviculum_micron::FieldKind;
 
+use crate::app::scene::{Chip, Page, Row as SceneRow, SceneToast, Sheet};
 use crate::app::strings::{with, with_args, Arg, StrId, Text as StrText};
 use crate::app::*;
 
@@ -89,22 +91,19 @@ fn regions(area: Rect) -> [Rect; 3] {
     crate::app::geometry::regions(from_ratatui(area)).map(to_ratatui)
 }
 
-/// The places panel's placeholder under "Discovered nodes" while the registry
-/// is empty.
-const NO_NODES_YET: &str = "  (listening for announces…)";
-
 /// Draw the whole UI: the top-bar, the scrollable content, and the status bar,
 /// plus the help overlay when active.
 pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
+    let scene = model.scene();
     let [topbar, content, status] = regions(frame.area());
     render_topbar(model, frame, topbar);
-    render_content(model, frame, content);
+    render_content(&scene.page, frame, content);
     // Pictures go over the reserved rows, before every other overlay: a toast,
     // the help or the places panel must be able to cover one.
     render_images(model, images, frame, content);
     // The bottom-left status chip floats over the content, above the footer row,
     // so the footer's clickable buttons below it are never covered.
-    render_status_chip(model, frame, frame.area());
+    render_status_chip(model, scene.status.as_ref(), frame, frame.area());
     render_status(model, frame, status);
     // Overlays drawn on top of the laid-out page: the form-field input boxes, the
     // search-match highlights, the focus highlight, the mouse-hover highlight, and
@@ -116,17 +115,17 @@ pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
     if model.mode == Mode::Hint {
         render_hints(model, frame);
     }
-    if model.show_places {
-        render_places(model, frame, frame.area());
+    if let Some(sheet) = &scene.places {
+        render_places(model, sheet, frame, frame.area());
     }
-    if let Some(results) = &model.names {
-        render_names(model, results, frame, frame.area());
+    if let Some(sheet) = &scene.names {
+        render_names(model, sheet, frame, frame.area());
     }
     if model.show_help {
         render_help(model, frame, frame.area());
     }
     // The toast floats on top of everything so it is always visible.
-    render_toast(model, frame, frame.area());
+    render_toast(model, scene.toast.as_ref(), frame, frame.area());
     // Colour-depth post-pass: on a terminal without true colour, downgrade every
     // 24-bit RGB colour in the finished buffer to its nearest xterm-256 index in
     // one sweep. A single chokepoint over the rendered buffer keeps every colour
@@ -307,8 +306,9 @@ fn render_hints(model: &Model, frame: &mut Frame) {
     }
 }
 
-/// Draw the visible slice of the page and the scrollbar into the content region.
-fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
+/// Draw the scene's window of the page, run by run, and the scrollbar into
+/// the content region.
+fn render_content(page: &Page, frame: &mut Frame, area: Rect) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -319,10 +319,20 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
         width: area.width.saturating_sub(SCROLLBAR_COLS),
         height: area.height,
     };
-    let end = model.scroll.saturating_add(viewport).min(model.page.len());
-    let start = model.scroll.min(end);
-    let text = to_ratatui_text(&model.page[start..end]);
-    frame.render_widget(Paragraph::new(text), body);
+    let lines: Vec<RtLine<'static>> = page
+        .lines
+        .iter()
+        .take(viewport)
+        .map(|line| {
+            RtLine::from(
+                line.runs
+                    .iter()
+                    .map(|run| RtSpan::styled(run.text.clone(), rstyle_to_ratatui(run.style)))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), body);
 
     // Map the scrollbar over the SCROLL POSITIONS, not the line count: content
     // length is `max_scroll` so `position` spans the full `[0, max_scroll]` range
@@ -331,7 +341,8 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
     // `content_length` to `page.len()` with `viewport_content_length` instead left
     // the thumb short of the bottom for pages only a little taller than the
     // viewport (the position denominator over-counted by the viewport height).
-    let mut state = ScrollbarState::new(model.max_scroll(viewport).max(1)).position(model.scroll);
+    let max_scroll = page.total.saturating_sub(viewport);
+    let mut state = ScrollbarState::new(max_scroll.max(1)).position(page.first);
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None);
@@ -555,12 +566,12 @@ fn render_status(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Draw the bottom-left floating status chip: a one-line field on the content's
 /// last row showing the CURRENT pointer/page state, floating over the page just
-/// above the footer so the footer's clickable buttons are never covered. In
-/// priority order it shows, while a fetch is in flight, the spinner and the
-/// loading path; else, when a link is focused (Tab) or hovered (mouse), that
-/// link's target (`→ <address>`); else nothing at all. Transient events use
-/// [`render_toast`] (bottom-right) instead.
-fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
+/// above the footer so the footer's clickable buttons are never covered. It
+/// draws the scene's status chip: while a fetch is in flight, the spinner and
+/// the loading path; else, when a link is focused (Tab) or hovered (mouse),
+/// that link's target (`→ <address>`); else nothing at all. Transient events
+/// use [`render_toast`] (bottom-right) instead.
+fn render_status_chip(model: &Model, shown: Option<&Chip>, frame: &mut Frame, area: Rect) {
     let [_topbar, content, _status] = regions(area);
     if content.width == 0 || content.height == 0 {
         return;
@@ -569,35 +580,28 @@ fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
     if inner_budget == 0 {
         return;
     }
+    // Idle has no chip and leaves the content row untouched.
+    let Some(status) = shown else {
+        return;
+    };
     let text_style = chrome_muted_style(model.no_color, model.theme);
-    // Priority: a fetch in flight wins over a focused/hovered link; idle draws
-    // nothing at all and leaves the content row untouched.
-    let (spans, inner_w): (Vec<RtSpan<'static>>, u16) = if let Some(pending) = &model.pending {
-        let label = truncate_to_cols(
-            &format!(" loading {}", pending.target.path),
-            inner_budget.saturating_sub(1),
-        );
+    let words = status.text.resolve(model.lang);
+    // A load or a download spins; a link's target only names it.
+    let spins = matches!(
+        status.text,
+        StrText::Key(StrId::Loading | StrId::Downloading, _)
+    );
+    let (spans, inner_w): (Vec<RtSpan<'static>>, u16) = if spins {
+        let label = truncate_to_cols(&format!(" {words}"), inner_budget.saturating_sub(1));
         let w = 1 + UnicodeWidthStr::width(label.as_str()) as u16;
         (
             vec![spinner_span(model.spin), RtSpan::styled(label, text_style)],
             w,
         )
-    } else if let Some(name) = &model.download {
-        let label = truncate_to_cols(
-            &format!(" downloading {name}"),
-            inner_budget.saturating_sub(1),
-        );
-        let w = 1 + UnicodeWidthStr::width(label.as_str()) as u16;
-        (
-            vec![spinner_span(model.spin), RtSpan::styled(label, text_style)],
-            w,
-        )
-    } else if let Some(target) = focused_link_target(model) {
-        let body = truncate_to_cols(&format!("→ {target}"), inner_budget);
+    } else {
+        let body = truncate_to_cols(&words, inner_budget);
         let w = UnicodeWidthStr::width(body.as_str()) as u16;
         (vec![RtSpan::styled(body, text_style)], w)
-    } else {
-        return;
     };
     chip::render(frame, content, spans, inner_w, model.no_color, model.theme);
 }
@@ -649,13 +653,12 @@ fn render_search_bar(model: &Model, frame: &mut Frame, area: Rect) {
     frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
 }
 
-/// Draw the centered places panel: a chrome-styled overlay with a "Bookmarks"
-/// section and a "Discovered nodes" section, the selected row reverse-video
-/// highlighted. Both the fill and the border use the theme's chrome colours, so
-/// the panel tracks the light/dark theme.
-fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
-    let entries = places(model);
-    let bm_count = model.bookmarks.len();
+/// Draw the centered places panel from the scene's sheet: a chrome-styled
+/// overlay with a "Bookmarks" section and a "Discovered nodes" section, the
+/// selected row reverse-video highlighted. Both the fill and the border use
+/// the theme's chrome colours, so the panel tracks the light/dark theme.
+fn render_places(model: &Model, sheet: &Sheet, frame: &mut Frame, area: Rect) {
+    let lang = model.lang;
     let text_style = chrome_text_style(model.no_color, model.theme);
     let muted = chrome_muted_style(model.no_color, model.theme);
     let header = text_style.add_modifier(Modifier::BOLD);
@@ -669,52 +672,46 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     let overlay = to_ratatui(places_overlay_rect(model, from_ratatui(area)));
     let inner = overlay.width.saturating_sub(2) as usize;
 
+    // A heading after the first stands under a blank spacer: exactly the
+    // order `places_layout` models, so the entry -> line mapping there (and
+    // the overlay height derived from it) stays exact.
     let mut lines: Vec<RtLine<'static>> = Vec::new();
-    lines.push(RtLine::from(RtSpan::styled("Bookmarks", header)));
-    if bm_count == 0 {
-        lines.push(RtLine::from(RtSpan::styled("  (none)", muted)));
-    } else {
-        for (i, place) in entries.iter().enumerate().take(bm_count) {
-            lines.push(place_line(
-                place,
-                i,
-                model.places_sel,
-                model.places_hover,
+    for row in &sheet.rows {
+        match row {
+            SceneRow::Heading(title) => {
+                if !lines.is_empty() {
+                    lines.push(RtLine::from(""));
+                }
+                lines.push(RtLine::from(RtSpan::styled(title.resolve(lang), header)));
+            }
+            SceneRow::Placeholder(text) => {
+                lines.push(RtLine::from(RtSpan::styled(
+                    format!("  {}", text.resolve(lang)),
+                    muted,
+                )));
+            }
+            SceneRow::Item {
+                item,
+                title,
+                hovered,
+            } => lines.push(place_line(
+                &format!("  {}", title.resolve(lang)),
+                item.selected,
+                *hovered,
+                !item.menu.is_empty(),
                 text_style,
                 selected,
                 inner,
-            ));
-        }
-    }
-    lines.push(RtLine::from(""));
-    lines.push(RtLine::from(RtSpan::styled("Discovered nodes", header)));
-    if entries.len() == bm_count {
-        // Not "(none)": discovery is always running, so an empty list means
-        // nothing has announced YET. Saying so keeps a first run — where this
-        // panel opens by itself and both sections are empty — from reading as a
-        // broken feature rather than a quiet mesh.
-        lines.push(RtLine::from(RtSpan::styled(NO_NODES_YET, muted)));
-    } else {
-        for (i, place) in entries.iter().enumerate().skip(bm_count) {
-            lines.push(place_line(
-                place,
-                i,
-                model.places_sel,
-                model.places_hover,
-                text_style,
-                selected,
-                inner,
-            ));
+            )),
+            SceneRow::Note { text, .. } => {
+                lines.push(RtLine::from(RtSpan::styled(text.resolve(lang), muted)));
+            }
         }
     }
 
-    // The lines built above interleave the two section titles, an "(none)"
-    // placeholder or the entry rows, and one blank spacer — exactly the order
-    // `places_layout` models, so the entry -> line mapping there (and the overlay
-    // height derived from it) stays exact.
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" places ")
+        .title(format!(" {} ", sheet.title.resolve(lang)))
         .style(chrome_style(model.no_color, model.theme));
     frame.render_widget(Clear, overlay);
 
@@ -737,17 +734,27 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// Draw the name-search result list: one row per hit (`name ·hash4`, hops,
-/// last seen, pin mark), the selected row highlighted, and a last line that is
-/// either the key hint or, while asking, the "same name, other key" question.
-fn render_names(model: &Model, results: &NameResults, frame: &mut Frame, area: Rect) {
+/// Draw the name-search result list from the scene's sheet: one row per hit
+/// (`name ·hash4`, hops, last seen, pin mark), the selected row highlighted,
+/// and a last line that is either the key hint or, while asking, the "same
+/// name, other key" question.
+fn render_names(model: &Model, sheet: &Sheet, frame: &mut Frame, area: Rect) {
+    let lang = model.lang;
     let text_style = chrome_text_style(model.no_color, model.theme);
     let muted = chrome_muted_style(model.no_color, model.theme);
     let selected = paint(model.tokens().selection);
-    let now = model.wall_now();
 
+    let items: Vec<(&StrText, bool)> = sheet
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            SceneRow::Item { item, title, .. } => Some((title, item.selected)),
+            _ => None,
+        })
+        .collect();
+    let sel = items.iter().position(|(_, on)| *on).unwrap_or(0);
     let width = 76u16.min(area.width);
-    let rows = names_viewport(model).min(results.hits.len());
+    let rows = names_viewport(model).min(items.len());
     let height = (rows as u16 + 3).min(area.height);
     let overlay = ratatui::layout::Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
@@ -756,50 +763,45 @@ fn render_names(model: &Model, results: &NameResults, frame: &mut Frame, area: R
         height,
     };
     let inner = overlay.width.saturating_sub(2) as usize;
-    let offset = results.sel.saturating_sub(rows.saturating_sub(1));
+    let offset = sel.saturating_sub(rows.saturating_sub(1));
 
-    let mut lines: Vec<RtLine<'static>> = results
-        .hits
+    let mut lines: Vec<RtLine<'static>> = items
         .iter()
-        .enumerate()
         .skip(offset)
         .take(rows)
-        .map(|(i, hit)| {
-            let style = if i == results.sel {
-                selected
-            } else {
-                text_style
-            };
-            let row = format!("  {}", crate::names::result_row(hit, &model.pins, now));
+        .map(|(title, on)| {
+            let style = if *on { selected } else { text_style };
+            let row = format!("  {}", title.resolve(lang));
             RtLine::from(RtSpan::styled(truncate_to_cols(&row, inner), style))
         })
         .collect();
-    let footer = match results.hits.get(results.sel) {
-        Some(hit) if results.confirm => crate::names::conflict_prompt(hit, &model.pins),
-        _ => "Enter open · Esc close · a name is a hint, the hash is the address".to_string(),
-    };
-    let footer_style = if results.confirm { text_style } else { muted };
-    lines.push(RtLine::from(RtSpan::styled(
-        truncate_to_cols(&footer, inner),
-        footer_style,
-    )));
+    for row in &sheet.rows {
+        if let SceneRow::Note { text, ask } = row {
+            let style = if *ask { text_style } else { muted };
+            lines.push(RtLine::from(RtSpan::styled(
+                truncate_to_cols(&text.resolve(lang), inner),
+                style,
+            )));
+        }
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" sites matching \"{}\" ", results.query))
+        .title(format!(" {} ", sheet.title.resolve(lang)))
         .style(chrome_style(model.no_color, model.theme));
     frame.render_widget(Clear, overlay);
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), overlay);
 }
 
 /// One places-panel row: its label, reverse-video highlighted when it is the
-/// selected row. A selected or hovered BOOKMARK row additionally carries a
-/// right-aligned `×` delete marker on the last inner cell ([`marks_x`]).
+/// selected row. A selected or hovered row with a menu (a BOOKMARK row, whose
+/// menu forgets it) additionally carries a right-aligned `×` delete marker on
+/// the last inner cell ([`marks_x`]).
 fn place_line(
-    place: &Place,
-    idx: usize,
-    sel: usize,
-    hover: Option<usize>,
+    label: &str,
+    is_selected: bool,
+    hovered: bool,
+    removable: bool,
     normal: Style,
     selected: Style,
     inner: usize,
@@ -807,21 +809,21 @@ fn place_line(
     // Selection wins over hover, and the two styles differ (reverse video vs the
     // bold + underline the links and footer buttons use on hover), so a hovered
     // row stays distinguishable from the selected row even when they coincide.
-    let style = if idx == sel {
+    let style = if is_selected {
         selected
-    } else if hover == Some(idx) {
+    } else if hovered {
         normal.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         normal
     };
-    let x_col = place_x_col(inner).filter(|_| marks_x(place, idx, sel, hover));
+    let x_col = place_x_col(inner).filter(|_| removable && (is_selected || hovered));
     let Some(x_col) = x_col else {
-        let label = truncate_to_cols(&place_label(place), inner);
+        let label = truncate_to_cols(label, inner);
         return RtLine::from(RtSpan::styled(label, style));
     };
     // The marker's cell plus a one-column gap are reserved: the label truncates
     // before them, so it can never overlap the `×` or spill past the border.
-    let label = truncate_to_cols(&place_label(place), x_col.saturating_sub(1));
+    let label = truncate_to_cols(label, x_col.saturating_sub(1));
     // The pad is measured with ratatui's ADDRESSING width (see `fit_width`'s
     // position-vs-paint note), so the `×` lands exactly on the cell
     // `place_x_screen_col` hit-tests.
@@ -833,43 +835,19 @@ fn place_line(
     ])
 }
 
-/// The one-line label for a place: a bookmark's title and URL, or a node's name,
-/// short hash and hop count.
-fn place_label(place: &Place) -> String {
-    match place {
-        Place::Bookmark { url, title } => {
-            if title.is_empty() {
-                format!("  {url}")
-            } else {
-                format!("  {title}  ·  {url}")
-            }
-        }
-        Place::Node {
-            dest_hash,
-            name,
-            hops,
-            ..
-        } => {
-            let label = name
-                .clone()
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| short_hex(dest_hash));
-            let hop = hops
-                .map(|h| format!("{h} hops"))
-                .unwrap_or_else(|| "? hops".to_string());
-            format!("  {label}  ·  {}  ·  {hop}", short_hex(dest_hash))
-        }
-    }
-}
-
-/// Draw lnomad's transient toast over the content ([`toast::render`]). A no-op
-/// when no toast is up.
-fn render_toast(model: &Model, frame: &mut Frame, area: Rect) {
-    let Some(t) = &model.toast else {
+/// Draw the scene's toast over the content ([`toast::render`]). A no-op when
+/// no toast is up.
+fn render_toast(model: &Model, shown: Option<&SceneToast>, frame: &mut Frame, area: Rect) {
+    let (Some(t), Some(up)) = (shown, &model.toast) else {
         return;
     };
     let [_topbar, content, _status] = regions(area);
-    toast::render(frame, content, t, model.tokens());
+    let toast = Toast {
+        kind: t.kind,
+        text: t.text.resolve(model.lang),
+        shown_at: up.shown_at,
+    };
+    toast::render(frame, content, &toast, model.tokens());
 }
 
 /// Draw lnomad's help overlay ([`help::render`] over its keybinding groups).
