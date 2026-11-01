@@ -97,6 +97,8 @@ pub enum NodeId {
     Bubble(u64),
     /// The delivery mark of one of ours, by its message's key (1232).
     Mark(u64),
+    /// A bubble's photo, by its message's key (1220).
+    Photo(u64),
     Compose,
     Sheet,
     Card,
@@ -120,6 +122,7 @@ impl NodeId {
             NodeId::Group(key) => format!("group_{key}"),
             NodeId::Bubble(key) => format!("bubble_{key}"),
             NodeId::Mark(key) => format!("mark_{key}"),
+            NodeId::Photo(key) => format!("photo_{key}"),
             NodeId::Compose => "compose".to_string(),
             NodeId::Sheet => "sheet".to_string(),
             NodeId::Card => "card".to_string(),
@@ -366,6 +369,9 @@ pub struct BubbleNode {
     /// Ours only: the ladder's mark, what a screen reader says for it,
     /// and for a failed one the tap that sends it again (1232).
     pub mark: Option<MarkNode>,
+    /// The photo it carries (1220): the renderer draws its thumbnail
+    /// (`crate::photo::thumbnail`), a tap shows it whole.
+    pub photo: Option<PhotoNode>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
@@ -380,6 +386,18 @@ pub struct MarkNode {
     pub words: Text,
     /// [`Intent::SendAgain`] on [`chat::Mark::Failed`], else none.
     pub activate: Option<Action>,
+}
+
+/// A bubble's photo: what it is, what a screen reader says, and the tap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhotoNode {
+    pub id: NodeId,
+    pub format: String,
+    pub bytes: usize,
+    /// `Photo, 312 KB`.
+    pub words: Text,
+    /// [`Intent::ViewPhoto`].
+    pub open: Action,
 }
 
 /// The screen reader's words for `mark`; `read_at` is the reader's time
@@ -550,6 +568,10 @@ impl Scene {
             NodeId::Mark(key) => self
                 .bubble(NodeId::Bubble(key))
                 .and_then(|node| node.mark.as_ref()?.activate.as_ref()),
+            NodeId::Photo(key) => self
+                .bubble(NodeId::Bubble(key))
+                .and_then(|node| node.photo.as_ref())
+                .map(|photo| &photo.open),
             _ => None,
         }
     }
@@ -856,8 +878,22 @@ fn bubble_node(
         },
         confirmed: false,
     }));
-    let spoken = match (&live, bubble.body.is_empty()) {
-        (Some(live), true) => live.clone(),
+    let photo = bubble.photo.as_ref().map(|photo| PhotoNode {
+        id: NodeId::Photo(bubble.key),
+        format: photo.format.clone(),
+        bytes: photo.bytes,
+        words: Text::Key(
+            StrId::Photo,
+            Vec::from([Arg::Str(super::photos::size_words(photo.bytes))]),
+        ),
+        open: Action::of(Intent::ViewPhoto {
+            peer,
+            key: bubble.key,
+        }),
+    });
+    let spoken = match (&live, &photo, bubble.body.is_empty()) {
+        (Some(live), _, true) => live.clone(),
+        (_, Some(photo), true) => photo.words.clone(),
         _ => Text::Raw(bubble.body.clone()),
     };
     let mark = bubble.mark.map(|mark| MarkNode {
@@ -877,6 +913,7 @@ fn bubble_node(
         place,
         live,
         mark,
+        photo,
         actions,
     }
 }
@@ -1098,6 +1135,13 @@ impl BubbleNode {
                 "resource": m.mark.resource(),
                 "words": m.words.to_json(),
                 "activate": opt(m.activate.as_ref(), Action::to_json),
+            })),
+            "photo": opt(self.photo.as_ref(), |p| json!({
+                "id": p.id.resource(),
+                "format": p.format,
+                "bytes": p.bytes,
+                "words": p.words.to_json(),
+                "open": p.open.to_json(),
             })),
             "actions": actions(&self.actions),
             "a11y": self.a11y.to_json(),
@@ -1578,5 +1622,87 @@ mod tests {
         assert_eq!(found(""), 1);
         assert_eq!(found(&format!("m0 {}", name.to_uppercase())), 1);
         assert_eq!(found(&format!("{name} nowhere")), 0);
+    }
+
+    /// A photo is a node of its bubble (1220): its words, a resource the
+    /// walk finds, a tap that asks the shell to show it whole; a text
+    /// without one has none, and the tap on it does nothing.
+    #[test]
+    fn a_photo_has_its_node_its_words_and_a_tap_that_shows_it() {
+        use crate::ui::photos::{photo_fields, PhotoSize};
+        use crate::ui::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t), (false, t + 60)]);
+        let peer = [0x42; 16];
+        model.conversations[0].messages[1].body = String::new();
+        model.conversations[0].messages[1].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene
+            .bubble(NodeId::Bubble(1))
+            .expect("text")
+            .photo
+            .is_none());
+        let node = scene.bubble(NodeId::Bubble(2)).expect("the photo's bubble");
+        let photo = node.photo.as_ref().expect("a photo node");
+        assert_eq!(photo.id.resource(), "photo_2");
+        assert_eq!((photo.format.as_str(), photo.bytes), ("jpg", 312_400));
+        assert_eq!(photo.words.resolve(Lang::En), "Photo, 313 KB");
+        assert_eq!(photo.words.resolve(Lang::De), "Foto, 313 KB");
+        assert_eq!(node.a11y.label, photo.words, "the screen reader says it");
+        let json = node.to_json();
+        assert_eq!(json["photo"]["id"], "photo_2");
+        assert_eq!(json["photo"]["bytes"], 312_400);
+        assert_eq!(
+            scene.action(NodeId::Photo(2)).map(|a| a.intent.clone()),
+            Some(Intent::ViewPhoto { peer, key: 2 })
+        );
+        assert_eq!(scene.action(NodeId::Photo(1)), None);
+        let shown = super::super::update(&mut model, UiEvent::ViewPhoto { peer, key: 2 });
+        assert_eq!(shown, alloc::vec![UiEffect::ShowPhoto { peer, key: 2 }]);
+        assert!(super::super::update(&mut model, UiEvent::ViewPhoto { peer, key: 1 }).is_empty());
+        assert_eq!(chat::preview(&model.conversations[0].messages[1]), "photo");
+        assert_eq!(chat::kind(&model.conversations[0].messages[1]), "photo");
+
+        // Sending one: a message of its own, the image field alone, the
+        // view on it.
+        let sent = super::super::update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer,
+                format: "jpg".into(),
+                data: alloc::vec![0xff, 0xd8, 0xff],
+            },
+        );
+        let fields = photo_fields("jpg", alloc::vec![0xff, 0xd8, 0xff]);
+        // The read-receipt mark rides on every send (1230), after it.
+        assert!(
+            matches!(sent.as_slice(), [UiEffect::Send { to, body, fields: f }] if *to == peer && body.is_empty() && f.starts_with(&fields)),
+            "{sent:?}"
+        );
+        let last = model.conversations[0].messages.len() - 1;
+        assert_eq!(model.message_cursor, last);
+        assert!(model.conversations[0].messages[last].outbound);
+        assert!(super::super::update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer,
+                format: "jpg".into(),
+                data: Vec::new()
+            }
+        )
+        .is_empty());
+
+        // The setting: kept in the model, remembered in the config.
+        assert_eq!(model.photo_size, PhotoSize::Phone);
+        let remembered = super::super::update(&mut model, UiEvent::PhotoSize(PhotoSize::Small));
+        assert_eq!(model.photo_size, PhotoSize::Small);
+        assert_eq!(
+            remembered,
+            alloc::vec![UiEffect::Remember {
+                key: "photo_size",
+                value: "small"
+            }]
+        );
     }
 }

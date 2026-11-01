@@ -108,6 +108,15 @@
     <string name="scene_import">Import</string>
     <string name="read_receipts">Send read receipts</string>
     <string name="read_receipts_text">Others see when you have read their messages. Off, you do not see it from others either.</string>
+    <string name="scene_photo">Photo, %1$s</string>
+    <string name="attach_photo">Photo</string>
+    <string name="scene_view_photo">Show photo</string>
+    <string name="photo_size">Photo size</string>
+    <string name="photo_size_text">Photos are made smaller before they go. Their place and camera data never go.</string>
+    <string name="photo_small">Small, for slow connections</string>
+    <string name="photo_phone">Phone (recommended)</string>
+    <string name="photo_original">Original size</string>
+    <string name="photo_unreadable">This photo could not be shown.</string>
     <string name="scene_zoom_in">Zoom in</string>
     <string name="scene_zoom_out">Zoom out</string>
     <string name="scene_pan">Move the map</string>

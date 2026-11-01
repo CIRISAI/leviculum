@@ -451,6 +451,25 @@ fn block(
         }
         _ => body,
     };
+    // A photo (1220) says so under its text, or alone: `Enter` on it
+    // shows it whole in the system's viewer.
+    let body = match super::photos::photo_of(&message.fields) {
+        Some(photo) => {
+            let (glyph, dot) = match draw.ascii {
+                true => ("[#]", "-"),
+                false => ("▣", "·"),
+            };
+            let line = format!(
+                "{glyph} photo {dot} {}",
+                super::photos::size_words(photo.bytes)
+            );
+            match body.trim().is_empty() {
+                true => line,
+                false => format!("{body}\n{line}"),
+            }
+        }
+        None => body,
+    };
     // A reaction drawn as a block, its signature broken: what it claims.
     let body = match (body.trim().is_empty(), message.reaction()) {
         (true, Some((_, content))) => format!("reacted {content}"),

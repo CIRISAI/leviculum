@@ -169,8 +169,15 @@ async fn drive(
     let mut last: Option<Seen> = None;
     loop {
         // The map view asks for no copy, link or mouse capture; what the
-        // model asks of a terminal has no meaning in the window yet.
-        shell.outputs.clear();
+        // model asks of a terminal has no meaning in the window yet, but a
+        // photo's file, which the system's viewer shows (1220).
+        for output in shell.outputs.drain(..) {
+            if let shell::Output::Photo(path) = output {
+                if let Err(error) = open::that(&path) {
+                    tracing::warn!("could not open {}: {error}", path.display());
+                }
+            }
+        }
         let now = Seen::of(&shell);
         if last.as_ref() != Some(&now) {
             if seen.unbounded_send(now.clone()).is_err() {
@@ -806,6 +813,7 @@ impl App {
                 }
             }
             Intent::SendAgain { peer, key } => self.tell(UiEvent::SendAgain { peer, key }),
+            Intent::ViewPhoto { peer, key } => self.tell(UiEvent::ViewPhoto { peer, key }),
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed,

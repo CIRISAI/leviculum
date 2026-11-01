@@ -833,6 +833,16 @@ impl App {
         if !bubble.body.is_empty() {
             inside = inside.push(text(bubble.body.clone()).size(size::BODY).color(ink));
         }
+        // A photo (1220): its words, a press shows it whole in the
+        // system's viewer. The thumbnail in the window is a later slice.
+        if let Some(photo) = &node.photo {
+            inside = inside.push(flat(
+                text(format!("▣ {}", photo.words.resolve(self.lang)))
+                    .size(size::BODY - 2.0)
+                    .color(ink),
+                Message::Intent(photo.open.intent.clone()),
+            ));
+        }
         if let Some(fix) = &bubble.fix {
             let mut words = loquax::telemetry::coordinates(&fix.location);
             if let Some(accuracy) = loquax::telemetry::accuracy(&fix.location) {

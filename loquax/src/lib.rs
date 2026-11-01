@@ -95,6 +95,8 @@ pub mod mapnames;
 pub mod name_match;
 pub mod names;
 pub mod outbox;
+#[cfg(feature = "photos")]
+pub mod photo;
 #[cfg(feature = "picture")]
 pub mod picture;
 #[cfg(feature = "screenmap")]

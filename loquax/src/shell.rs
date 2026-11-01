@@ -262,6 +262,8 @@ pub(crate) enum Output {
     Mouse(bool),
     /// Draw the map the `n`th way the frontend offered (1093).
     MapDrawing(usize),
+    /// Show this photo's file whole in the system's viewer (1220).
+    Photo(std::path::PathBuf),
 }
 
 impl Shell {
@@ -316,6 +318,13 @@ impl Shell {
                 UiEffect::Log(line) => tracing::warn!("{line}"),
                 UiEffect::LoadMap(want) => self.map_ask(want),
                 UiEffect::Import => answers.extend(self.import()),
+                // A photo whole (1220): the terminal has no pixels for it,
+                // so the system's viewer shows it, from a file under the
+                // home as the phone keeps it in its store.
+                UiEffect::ShowPhoto { peer, key } => match self.photo_file(peer, key) {
+                    Ok(path) => self.outputs.push(Output::Photo(path)),
+                    Err(line) => answers.push(UiEvent::Notice(line)),
+                },
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
                 UiEffect::Remember { key, value } => {
@@ -338,6 +347,35 @@ impl Shell {
             self.apply(answer);
         }
         self.start_next();
+    }
+
+    /// The photo of the message `key` of `peer`'s conversation as a file
+    /// under the home's `photos/`, named by the message, written once.
+    fn photo_file(&self, peer: [u8; 16], key: u64) -> Result<std::path::PathBuf, String> {
+        let (format, data) = self
+            .model
+            .conversations
+            .iter()
+            .find(|c| c.peer == peer)
+            .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+            .and_then(|m| {
+                let (format, data) = loquax::ui::photos::photo_parts(&m.fields)?;
+                Some((format, data.to_vec()))
+            })
+            .ok_or_else(|| "that message has no photo".to_string())?;
+        let ext: String = format
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(5)
+            .collect();
+        let dir = self.context.home.join("photos");
+        let path = dir.join(format!("{}-{key}.{ext}", loquax::address::to_hex(&peer)));
+        if !path.exists() {
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, &data))
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        Ok(path)
     }
 
     /// A read receipt among a send's fields: one `tui.log` line, alone or
@@ -1158,6 +1196,7 @@ pub(crate) async fn start(
     model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     model.reading.on = config.read_receipts.unwrap_or(true);
+    model.photo_size = config.photo_size.unwrap_or_default();
     // The mailbox's schedule: the flag, else the config file, else fifteen
     // minutes. A script runs one only when its command line names the flag,
     // as it ticks only when it says so.

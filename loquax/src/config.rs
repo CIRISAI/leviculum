@@ -22,7 +22,10 @@
 //! this messenger says it takes read receipts and sends them for what the
 //! reader saw (`docs/src/concepts/loquax-read-receipts.md`); off, it does
 //! neither and shows none received. The settings' switch and the
-//! palette's `read receipts` write it (1233). And one key a terminal context for the map's
+//! palette's `read receipts` write it (1233). `photo_size`, `small`,
+//! `phone` (the default) or `original` (1220): how far a photo is scaled
+//! before it goes (`crate::photo`), which the settings' Chats page
+//! writes. And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`
@@ -143,6 +146,8 @@ pub struct Config {
     pub map_fling: Option<bool>,
     /// `read_receipts`, when the file sets it; unset is on.
     pub read_receipts: Option<bool>,
+    /// `photo_size`, when the file sets it; unset is `phone`.
+    pub photo_size: Option<crate::ui::photos::PhotoSize>,
     /// `map_drawing.<context>` lines: each context and the drawing
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
@@ -252,6 +257,16 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                     });
                 }
             }
+        }
+        if key.trim() == "photo_size" {
+            let word = value.trim().trim_matches('"');
+            config.photo_size = Some(crate::ui::photos::PhotoSize::from_word(word).ok_or_else(
+                || ConfigError::BadValue {
+                    line: index + 1,
+                    key: "photo_size",
+                    detail: alloc::format!("{word:?} is not small, phone or original"),
+                },
+            )?);
         }
         if key.trim() == "map_autoload" {
             config.map_autoload = Some(match value.trim().trim_matches('"') {
@@ -478,6 +493,24 @@ mod tests {
             Err(ConfigError::BadValue {
                 line: 1,
                 key: "send_on_enter",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn photo_size_parses_and_a_typo_is_an_error() {
+        use crate::ui::photos::PhotoSize;
+        assert_eq!(parse_str("").expect("empty").photo_size, None);
+        let small = parse_str("photo_size = small\n").expect("small");
+        assert_eq!(small.photo_size, Some(PhotoSize::Small));
+        let original = parse_str("photo_size = \"original\"\n").expect("original");
+        assert_eq!(original.photo_size, Some(PhotoSize::Original));
+        assert!(matches!(
+            parse_str("photo_size = huge\n"),
+            Err(ConfigError::BadValue {
+                line: 1,
+                key: "photo_size",
                 ..
             })
         ));

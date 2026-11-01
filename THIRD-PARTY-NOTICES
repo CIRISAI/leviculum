@@ -33,9 +33,9 @@ Linked into lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath,
 lnomad, lblogd, lnpnd, loquax and lnflash. Built for
 x86_64-unknown-linux-musl and aarch64-unknown-linux-musl.
 
-426 third-party crates, by licence:
+428 third-party crates, by licence:
 
-  Apache-2.0                   303
+  Apache-2.0                   305
   BSD-2-Clause                 1
   BSD-3-Clause                 6
   CC0-1.0                      1
@@ -828,6 +828,7 @@ Applies to:
   icy_sixel 0.5.0
   ident_case 1.0.1
   image 0.25.10
+  image-webp 0.2.4
   indoc 2.0.7
   iter-read 1.1.0
   itoa 1.0.17
@@ -976,6 +977,7 @@ Applies to:
   predicates 3.1.4
   predicates-core 1.0.10
   predicates-tree 1.0.13
+  quick-error 2.0.1
   serde_spanned 0.6.9
   terminal_size 0.4.4
   toml 0.8.23

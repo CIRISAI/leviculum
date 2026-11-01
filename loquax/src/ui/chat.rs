@@ -312,6 +312,8 @@ pub fn kind(message: &Message) -> &'static str {
         "reaction"
     } else if message.is_position() {
         "position"
+    } else if super::photos::photo_of(&message.fields).is_some() {
+        "photo"
     } else {
         "text"
     }
@@ -327,6 +329,9 @@ pub fn preview(message: &Message) -> String {
     }
     if message.is_position() {
         return "position shared".to_string();
+    }
+    if message.body.trim().is_empty() && super::photos::photo_of(&message.fields).is_some() {
+        return "photo".to_string();
     }
     message.body.lines().next().unwrap_or_default().to_string()
 }
@@ -496,6 +501,9 @@ pub struct Bubble {
     /// The newest report's row only: whether the peer's position is alive
     /// (1209), which the row says instead of a count.
     pub liveness: Option<Liveness>,
+    /// The photo it carries (1220): the bubble draws its thumbnail, a tap
+    /// shows it whole.
+    pub photo: Option<super::photos::PhotoRef>,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -556,6 +564,7 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 updates,
                 since,
                 liveness: liveness.filter(|_| newest_report == Some(m)),
+                photo: super::photos::photo_of(&message.fields),
             }
         })
         .collect()
@@ -951,6 +960,7 @@ mod tests {
             updates: 0,
             since: None,
             liveness: None,
+            photo: None,
         }
     }
 

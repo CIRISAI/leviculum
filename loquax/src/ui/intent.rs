@@ -28,6 +28,9 @@
 //! | `Message::CancelReply` | `CancelReply` |
 //! | `Request::Forward`, `UiEvent::Forward` | `Forward` |
 //! | `Request::SendAgain`, `UiEvent::SendAgain` (1232) | `SendAgain` |
+//! | `Request::Photo`, `UiEvent::SendPhoto` (1220) | `SendPhoto` |
+//! | `Request::PhotoSize`, `UiEvent::PhotoSize` (1220) | `PhotoSize` |
+//! | (new) a tap on a photo, `UiEvent::ViewPhoto` (1220) | `ViewPhoto` |
 //! | `Request::Delete`, `UiEvent::Delete`, `Message::Delete`, `Message::AskDelete`, `Command::DeleteMessage` | `Delete` (`confirmed` tells the asked from the asking) |
 //! | `Request::Used`, `Message::Insert` | `Insert` |
 //! | `Message::ToggleEmoji` | `Emoji` |
@@ -232,6 +235,21 @@ pub enum Intent {
         peer: [u8; 16],
         key: u64,
     },
+    /// Show the photo of the message `key` of `peer`'s conversation whole:
+    /// a tap on its bubble (1220).
+    ViewPhoto {
+        peer: [u8; 16],
+        key: u64,
+    },
+    /// Send the picture the user picked to `peer` (1220): the paperclip's
+    /// "Photo". `data` is the picture as picked; the shell scales it by
+    /// the reader's [`Intent::PhotoSize`] before it goes.
+    SendPhoto {
+        peer: [u8; 16],
+        data: Vec<u8>,
+    },
+    /// The reader's photo size: the settings' row (1220).
+    PhotoSize(super::photos::PhotoSize),
     /// Delete messages: `confirmed` once the user said yes, else ask.
     Delete {
         messages: Messages,
@@ -399,6 +417,9 @@ impl Intent {
             Intent::CancelReply => StrId::CancelReply,
             Intent::Forward { .. } => StrId::ActionForward,
             Intent::SendAgain { .. } => StrId::SendAgain,
+            Intent::ViewPhoto { .. } => StrId::ViewPhoto,
+            Intent::SendPhoto { .. } => StrId::AttachPhoto,
+            Intent::PhotoSize(_) => StrId::PhotoSize,
             Intent::Delete { .. } => StrId::ActionDelete,
             Intent::Copy => StrId::ActionCopy,
             Intent::Share { .. } => StrId::Share,

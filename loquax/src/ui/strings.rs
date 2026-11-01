@@ -155,6 +155,17 @@ leviculum_ui::catalogue! {
     // The privacy page's switch (1233, loquax-read-receipts.md, section 4).
     ReadReceipts = "read_receipts", "Send read receipts", "Lesebestätigungen senden";
     ReadReceiptsText = "read_receipts_text", "Others see when you have read their messages. Off, you do not see it from others either.", "Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.";
+    // Photos (1220): the bubble's words, the paperclip's entry, the
+    // setting under Settings › Chats with its one line.
+    Photo = "scene_photo", "Photo, %1$s", "Foto, %1$s";
+    AttachPhoto = "attach_photo", "Photo", "Foto";
+    ViewPhoto = "scene_view_photo", "Show photo", "Foto zeigen";
+    PhotoSize = "photo_size", "Photo size", "Fotogröße";
+    PhotoSizeText = "photo_size_text", "Photos are made smaller before they go. Their place and camera data never go.", "Fotos werden vor dem Senden verkleinert. Ort und Kameradaten gehen nie mit.";
+    PhotoSmall = "photo_small", "Small, for slow connections", "Klein, für langsame Verbindungen";
+    PhotoPhone = "photo_phone", "Phone (recommended)", "Handy (empfohlen)";
+    PhotoOriginal = "photo_original", "Original size", "Originalgröße";
+    PhotoUnreadable = "photo_unreadable", "This photo could not be shown.", "Dieses Foto ließ sich nicht zeigen.";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";
     Pan = "scene_pan", "Move the map", "Karte verschieben";

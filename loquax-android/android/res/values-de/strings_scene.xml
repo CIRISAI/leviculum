@@ -108,6 +108,15 @@
     <string name="scene_import">Importieren</string>
     <string name="read_receipts">Lesebestätigungen senden</string>
     <string name="read_receipts_text">Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.</string>
+    <string name="scene_photo">Foto, %1$s</string>
+    <string name="attach_photo">Foto</string>
+    <string name="scene_view_photo">Foto zeigen</string>
+    <string name="photo_size">Fotogröße</string>
+    <string name="photo_size_text">Fotos werden vor dem Senden verkleinert. Ort und Kameradaten gehen nie mit.</string>
+    <string name="photo_small">Klein, für langsame Verbindungen</string>
+    <string name="photo_phone">Handy (empfohlen)</string>
+    <string name="photo_original">Originalgröße</string>
+    <string name="photo_unreadable">Dieses Foto ließ sich nicht zeigen.</string>
     <string name="scene_zoom_in">Vergrößern</string>
     <string name="scene_zoom_out">Verkleinern</string>
     <string name="scene_pan">Karte verschieben</string>

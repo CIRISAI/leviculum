@@ -362,6 +362,21 @@ struct SendArgs {
     #[arg(long, value_name = "LAT,LON", allow_hyphen_values = true)]
     position: Option<String>,
 
+    /// Send this picture with it, as Columba and Sideband send a photo
+    /// (1220): turned upright, scaled by `--photo-size`, its EXIF (the
+    /// place, the camera) removed. Without a body the message is the
+    /// photo alone and stdin is not read.
+    #[cfg(feature = "photos")]
+    #[arg(long, value_name = "FILE")]
+    photo: Option<PathBuf>,
+
+    /// How far `--photo` is scaled: `small` (800 px), `phone` (1600 px,
+    /// the default) or `original`. Without it the config's `photo_size`
+    /// decides.
+    #[cfg(feature = "photos")]
+    #[arg(long, value_name = "SIZE", requires = "photo")]
+    photo_size: Option<String>,
+
     /// The name recipients see as the sender. Defaults to the account name of
     /// the user running loquax; `LNMSG_DISPLAY_NAME` sets it where there is no
     /// command line to edit, and this flag wins over it.
@@ -1025,7 +1040,27 @@ async fn run(args: SendArgs) -> ExitCode {
         Ok(fields) => fields,
         Err(error) => return usage(error),
     };
-    // A report has no body, and reads none from stdin.
+    #[cfg(feature = "photos")]
+    let photo = match args.photo.as_deref() {
+        None => None,
+        Some(path) => match send_photo(path, args.photo_size.as_deref()) {
+            Ok(fields) => Some(fields),
+            Err(error) => return usage(error),
+        },
+    };
+    #[cfg(not(feature = "photos"))]
+    let photo: Option<Vec<leviculum_lxmf::Field>> = None;
+    let fields = match (fields, photo) {
+        (None, None) => None,
+        (position, photo) => Some(
+            position
+                .into_iter()
+                .chain(photo)
+                .flatten()
+                .collect::<Vec<_>>(),
+        ),
+    };
+    // A report or a photo has no body, and reads none from stdin.
     let body = match (&fields, args.body.as_deref()) {
         (Some(_), None) => Vec::new(),
         (_, body) => match body::resolve(body, &mut std::io::stdin().lock()) {
@@ -1292,6 +1327,33 @@ struct ClientMessage {
     title: Vec<u8>,
     body: Vec<u8>,
     fields: Vec<leviculum_lxmf::Field>,
+}
+
+/// `--photo`'s picture prepared at `size`, else at the config's
+/// `photo_size`, else at `phone` ([`loquax::photo::prepare`]), as the
+/// image field.
+#[cfg(feature = "photos")]
+fn send_photo(
+    path: &std::path::Path,
+    size: Option<&str>,
+) -> Result<Vec<leviculum_lxmf::Field>, String> {
+    use loquax::ui::photos::PhotoSize;
+    let size = match size {
+        Some(word) => PhotoSize::from_word(word)
+            .ok_or_else(|| format!("--photo-size {word}: want small, phone or original"))?,
+        None => identity::home_dir()
+            .ok()
+            .and_then(|home| loquax::config::load(&home).ok())
+            .and_then(|config| config.photo_size)
+            .unwrap_or_default(),
+    };
+    let bytes = std::fs::read(path).map_err(|e| format!("--photo {}: {e}", path.display()))?;
+    let prepared = loquax::photo::prepare(&bytes, size)
+        .map_err(|e| format!("--photo {}: {e}", path.display()))?;
+    Ok(loquax::ui::photos::photo_fields(
+        prepared.format,
+        prepared.data,
+    ))
 }
 
 /// `--position`'s `LAT,LON` in degrees as the fields of a position report

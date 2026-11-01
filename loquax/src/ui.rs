@@ -140,6 +140,7 @@ pub mod intent;
 pub mod layout;
 pub mod liveness;
 pub mod map;
+pub mod photos;
 pub mod reactions;
 pub mod receipts;
 pub mod replies;
@@ -805,6 +806,10 @@ pub struct UiModel<B> {
     drafts_due: BTreeMap<[u8; 16], u64>,
     /// What the reader saw, and the read receipts owed (1231).
     pub reading: receipts::Reading,
+    /// How far a photo is scaled before it goes (1220, `photo_size` in
+    /// the config): the shell scales by it before
+    /// [`UiEvent::SendPhoto`].
+    pub photo_size: photos::PhotoSize,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -894,6 +899,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             compose_cleared: false,
             drafts_due: BTreeMap::new(),
             reading: receipts::Reading::default(),
+            photo_size: photos::PhotoSize::default(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1376,6 +1382,20 @@ pub enum UiEvent {
     /// The reader's switch "Send read receipts" (1233), set: the settings
     /// page's row, the palette's command toggles it.
     ReadReceipts(bool),
+    /// Send a photo to `peer` (1220): `data` is the picture the shell
+    /// scaled by [`UiModel::photo_size`] already ([`crate::photo`]), in
+    /// `format` (`jpg`, `png`, `gif`). It goes as one message with the
+    /// image field alone ([`photos::photo_fields`]).
+    SendPhoto {
+        peer: [u8; 16],
+        format: String,
+        data: Vec<u8>,
+    },
+    /// The reader's photo size (1220), set: the settings page's row.
+    PhotoSize(photos::PhotoSize),
+    /// A tap on a photo's bubble: the shell shows it whole
+    /// ([`UiEffect::ShowPhoto`]).
+    ViewPhoto { peer: [u8; 16], key: u64 },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1448,6 +1468,10 @@ pub enum UiEffect {
         key: &'static str,
         value: &'static str,
     },
+    /// Show the photo of the message `key` of `peer`'s conversation whole
+    /// (1220): the phone's viewer, the window's overlay. Its bytes are in
+    /// the message's fields ([`photos::photo_bytes`]).
+    ShowPhoto { peer: [u8; 16], key: u64 },
 }
 
 /// Fold one event into the model.
@@ -1546,6 +1570,15 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::ReadReceipts(on) => model.set_receipts(on),
+        UiEvent::SendPhoto { peer, format, data } => model.send_photo(peer, &format, data),
+        UiEvent::PhotoSize(size) => {
+            model.photo_size = size;
+            vec![UiEffect::Remember {
+                key: "photo_size",
+                value: size.word(),
+            }]
+        }
+        UiEvent::ViewPhoto { peer, key } => model.view_photo(peer, key),
         UiEvent::MailboxChosen { node, by_user } => {
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
@@ -1986,11 +2019,21 @@ fn act<B: InputBuffer + Default>(
 }
 
 /// `Enter` on a message: one that carries a position, a report or a text
-/// with a telemetry field, opens the map at the fix its line names, any
-/// other message (and a report without a position) its detail view, which
-/// `v` opens for every message. A folded run of reports is drawn as its latest, which is
+/// with a telemetry field, opens the map at the fix its line names, one
+/// with a photo shows it whole (1220), any other message (and a report
+/// without a position) its detail view, which `v` opens for every
+/// message. A folded run of reports is drawn as its latest, which is
 /// where the cursor stands, so its line opens the latest fix of the run.
 fn open_message<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let photo = model
+        .conversations
+        .get(model.selected)
+        .and_then(|c| Some((c.peer, c.messages.get(model.message_cursor)?)))
+        .filter(|(_, m)| photos::photo_of(&m.fields).is_some())
+        .map(|(peer, m)| (peer, m.activity));
+    if let Some((peer, key)) = photo {
+        return model.view_photo(peer, key);
+    }
     match model.message_fix(model.selected, model.message_cursor) {
         Some(fix) => {
             open_map_at(model, &fix);
@@ -10974,6 +11017,78 @@ mod tests {
             }
         )
         .is_empty());
+    }
+
+    /// A received photo in the terminal (1220): its line alone where it has
+    /// no text, under the text where it has one, ASCII where the screen is;
+    /// `Enter` on it asks the shell to show it whole, and a forward carries it.
+    #[test]
+    fn the_terminal_says_photo_and_enter_shows_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        let photo = photos::photo_fields("jpg", vec![1; 278_601]);
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: Vec::new(),
+                fields: photo.clone(),
+                verified: true,
+            },
+        );
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"the view".to_vec(),
+                fields: photo,
+                verified: true,
+            },
+        );
+        let shown = |model: &UiModel<Field>| -> Vec<String> {
+            view(model).messages.iter().map(text_of).collect()
+        };
+        let rows = shown(&model);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.contains("▣ photo · 279 KB"))
+                .count(),
+            2,
+            "{rows:#?}"
+        );
+        let text = rows
+            .iter()
+            .position(|r| r.contains("the view"))
+            .expect("the text");
+        assert!(
+            rows[text + 1].contains("▣ photo"),
+            "under its text: {rows:#?}"
+        );
+        model.ascii = true;
+        assert!(shown(&model)
+            .iter()
+            .any(|r| r.contains("[#] photo - 279 KB")));
+        model.focus = Pane::Messages;
+        model.message_cursor = 0;
+        let photo_key = model.conversations[0].messages[0].activity;
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::ShowPhoto {
+                peer: PEER,
+                key: photo_key
+            }]
+        );
     }
 
     /// A forward is the text and the content fields again, in the other
