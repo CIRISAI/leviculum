@@ -31,27 +31,27 @@ shows are derived from those chords:
 Resolution takes the most specific matching chord, the first among equals,
 which for these rows is the first-match scan `lnomad` always had
 (`best`, `leviculum-ui/src/keymap.rs:569`; `key_to_scroll`,
-`lnomad/src/app/event.rs:2115`). The table is read by both the key handler
-and the help overlay (`lnomad/src/app/chrome.rs:406`).
+`lnomad/src/app/event.rs:2133`). The table is read by both the key handler
+and the help overlay (`lnomad/src/app/chrome.rs:430`).
 
 **What is not.** Everything else is a hand-written `if`-chain in
-`update_browse_key` (`lnomad/src/app/event.rs:689-836`): roughly twenty
+`update_browse_key` (`lnomad/src/app/event.rs:703-850`): roughly twenty
 sequential `if key.code == ... { return ...; }` statements. There is no
 binding map, no user-configurable keymap, no keybinding config file. The
 help overlay's non-scroll groups are a second, unlinked static list
-(`lnomad/src/app/chrome.rs:426-527`) that can silently drift from the handler.
+(`lnomad/src/app/chrome.rs:450-551`) that can silently drift from the handler.
 
 **How the conflicts are actually resolved.** Three layers, in this order.
 
 1. *Global escapes*, before any mode dispatch
-   (`update_key`, `lnomad/src/app/event.rs:410-455`): any key dismisses the
+   (`update_key`, `lnomad/src/app/event.rs:417-462`): any key dismisses the
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
 2. *Mode gating*. `Mode::{Browse, Address, Hint, Search, Field}`
-   (`lnomad/src/app/model.rs:98-117`), each with its own handler. Text modes
+   (`lnomad/src/app/model.rs:96-115`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
-   leaks into browse hotkeys" (`lnomad/src/app/event.rs:463`, whitelist at
+   leaks into browse hotkeys" (`lnomad/src/app/event.rs:470`, whitelist at
    `:1643-1652`).
 3. *Modifier discrimination*. Nearly every single-letter binding is guarded
    `&& !ctrl && !alt`, which is what lets `f` (hint mode) and `Ctrl-f`
@@ -59,49 +59,49 @@ help overlay's non-scroll groups are a second, unlinked static list
    `Ctrl-n` (line down), `g` (top) and `Ctrl-g` (cancel) all coexist.
 
 The ordering is load-bearing. In browse mode `key_to_scroll` is consulted
-*last* (`lnomad/src/app/event.rs:830-833`), so single-letter commands claim
+*last* (`lnomad/src/app/event.rs:844-847`), so single-letter commands claim
 their keys first and `j`/`k`/`Space` reach the scroll table only because
 nothing above claims them. In the places panel the order is *inverted*
-(`lnomad/src/app/event.rs:1024`) with a comment explaining why: there `Ctrl-d`
+(`lnomad/src/app/event.rs:1038`) with a comment explaining why: there `Ctrl-d`
 must be a half-page motion, not the `d` that closes the panel.
 
 There is one further principle worth carrying over verbatim. Bare `r` is
 deliberately left unbound, because "a mesh reload is expensive and single
 letters are reserved for cheap local actions"
-(`lnomad/src/app/event.rs:809-812`); reload requires `R`, `Ctrl-R` or `F5`.
+(`lnomad/src/app/event.rs:823-826`); reload requires `R`, `Ctrl-R` or `F5`.
 That is a cost-aware keymap, and a messenger sends over the same radios.
 
 **Architecture.** Elm-style with an explicit effect list. The core sits in
 `lnomad/src/app/` since the #219 cut (2026-10-25): `Model` at
-`lnomad/src/app/model.rs:462-634` (`#[derive(Clone, Debug, Default)]` at
+`lnomad/src/app/model.rs:460-639` (`#[derive(Clone, Debug, Default)]` at
 `:565`), `Effect` at `:478-532`; `AppEvent` at
-`lnomad/src/app/event.rs:28-95` and `update(&mut Model, AppEvent) ->
+`lnomad/src/app/event.rs:29-96` and `update(&mut Model, AppEvent) ->
 Vec<Effect>` at `:98-208`. The terminal frontend is `lnomad/src/tui.rs`:
 `view(&Model, &ImageStore, &mut Frame)` at `:154-193`, and a single effect
 interpreter `run_effects` at `:1855-1960`. `update` mutates rather than
 returning a new model, and effects are plain data, not closures. That
 combination is what makes the 245 in-file unit tests possible: build a
 `Model`, feed a synthetic `AppEvent::Key`, assert on the model and on the
-returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:1785`
+returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:1769`
 onwards; helpers at `:2411-2427`). The view is tested against
 `ratatui::backend::TestBackend` (`:3240`), and the `--print` path has
 byte-identical golden files (`lnomad/tests/render_golden.rs:18-37`).
 
 **Unsolicited inbound events already exist.** This matters more than
 anything else for a messenger, and the answer is yes.
-`AppEvent::NodeDiscovered` (`lnomad/src/app/event.rs:95`) arrives from
+`AppEvent::NodeDiscovered` (`lnomad/src/app/event.rs:96`) arrives from
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
 (`set_announce_sink`, `lnomad/src/fetch.rs:225-227`, wiring comment at
-`lnomad/src/tui.rs:1561-1564`), a non-blocking unbounded send on every
+`lnomad/src/tui.rs:1545-1548`), a non-blocking unbounded send on every
 recorded announce (`note_announce`, `lnomad/src/fetch.rs:369-389`), a
 dedicated background task parked on the shared session in 250 ms lock
-slices (`spawn_discovery`, `lnomad/src/tui.rs:1323-1364`), and a
+slices (`spawn_discovery`, `lnomad/src/tui.rs:1304-1345`), and a
 `tokio::select!` arm that folds the result into the model
-(`lnomad/src/tui.rs:1720-1722`). The main loop has five arms
-(`lnomad/src/tui.rs:1624-1727`), and the timer arm is conditionally enabled
+(`lnomad/src/tui.rs:1704-1706`). The main loop has five arms
+(`lnomad/src/tui.rs:1608-1711`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
-`lnomad/src/app/model.rs:842-845`) so an idle browser does not wake eight
+`lnomad/src/app/model.rs:855-858`) so an idle browser does not wake eight
 times a second.
 
 **Persistence.** Three small files under
@@ -109,7 +109,7 @@ times a second.
 and a binary `identity`. Everything else is RAM. The write path is
 `fs::write` with no atomic rename, no fsync, and errors deliberately
 ignored (`lnomad/src/bookmarks.rs:124-130`, effect handler at
-`lnomad/src/tui.rs:1481-1487`), and load treats corrupt exactly like
+`lnomad/src/tui.rs:1465-1471`), and load treats corrupt exactly like
 missing (`lnomad/src/bookmarks.rs:116-121`). For bookmarks that is a
 defensible trade. For a message store it is data loss.
 
@@ -133,11 +133,12 @@ shared styled text model of `leviculum-ui` since 984, is a vector of
 `StyledChar { ch, st, link, field }`
 (`leviculum-ui/src/style.rs:95-116`): already wrapped, aligned and indented,
 one `RLine` per output row, every cell carrying its resolved style and its
-owning link index. That IR feeds either `to_ratatui_text`
-(`leviculum-ui-ratatui/src/style.rs:148-167`) for the TUI or `emit_ansi`
+owning link index. That IR feeds either the scene's page, a window of
+runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:439`,
+since 1255), or `emit_ansi`
 (`lnomad/src/render.rs:225-231`) for `--print`. Scrolling is a slice, not a
 widget scroll, because the page is pre-wrapped
-(`lnomad/src/tui.rs:320-327`), and there is one scroll rule shared by
+(`lnomad/src/app/scene.rs:415-419`), and there is one scroll rule shared by
 every scrollable window (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`),
 which Loquax's help and detail view scroll by too.
 
@@ -146,7 +147,7 @@ character count rather than display width (`wrap`,
 `lnomad/src/render.rs:773-800`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
-relayout (`lnomad/src/app/model.rs:728-752`), including on every keystroke in a
+relayout (`lnomad/src/app/model.rs:733-757`), including on every keystroke in a
 form field (`:1657-1660`).
 
 **Scriptability, and the absence of settings.** `--print` fetches, renders
@@ -163,13 +164,13 @@ or URL error (`lnomad/src/main.rs:181`, `:188`, `:222`, `:238`).
 `lnomad` has no settings file at all. `--config` points at the *Reticulum*
 config directory; the `lnomad/` directory holds only data. The theme is
 auto-detected via OSC 11 before raw mode is entered
-(`lnomad/src/tui.rs:1513-1520`) and toggled at runtime with `t`; theme
+(`lnomad/src/tui.rs:1497-1504`) and toggled at runtime with `t`; theme
 colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1759-1768`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1773-1782`). The messenger is the natural target of that
 handoff, and wiring the two together is an explicit goal.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
@@ -798,21 +799,21 @@ Three specific things `lnomad` does that must change:
    scrolled up. NomadNet gets this wrong: it resets to the bottom on every
    refresh (NomadNet's `Conversations.py`, line 2287).
 2. **Windowed layout.** `lnomad` re-lays out the whole page on every
-   relayout (`lnomad/src/app/model.rs:728-752`). A ten-thousand-message
+   relayout (`lnomad/src/app/model.rs:733-757`). A ten-thousand-message
    conversation must not do that, and a compose buffer must not trigger it
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.
 3. **The timer must run.** `lnomad` disables its tick when idle
-   (`lnomad/src/tui.rs:1723`). A messenger has relative timestamps, a sync
+   (`lnomad/src/tui.rs:1707`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
    (`leviculum-lxmf/src/router.rs:2216`).
 
 Things to carry over unchanged: the generation counter for stale-result
-rejection (`spawn_fetch`, `lnomad/src/tui.rs:919-960`), the tick-counted
+rejection (`spawn_fetch`, `lnomad/src/tui.rs:898-939`), the tick-counted
 toast whose expiry is a pure function and therefore unit-testable without
 real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
-`lnomad/src/tui.rs:2843`),
+`lnomad/src/tui.rs:2827`),
 the `TerminalGuard` RAII plus panic hook that restores the terminal before
 the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:96-138`), and OSC 52 for the
 clipboard so copy works over SSH with no X11 dependency (`osc52`,

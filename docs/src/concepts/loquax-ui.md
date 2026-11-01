@@ -84,14 +84,14 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:979-1016`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:992-1029`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1006-1016`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1019-1029`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
 **What must not be copied**: `lnomad` quits on `Ctrl-C` from any mode,
-before the mode dispatch (`lnomad/src/app/event.rs:419-422`). In a messenger
+before the mode dispatch (`lnomad/src/app/event.rs:426-429`). In a messenger
 that is a half-written message thrown away by a reflex. `Ctrl-C` in the
 compose pane clears the buffer to a recoverable draft; quitting needs
 `Ctrl-Q` or the palette.
@@ -99,7 +99,7 @@ compose pane clears the buffer to a recoverable draft; quitting needs
 **The keymap must be one table.** `lnomad` applied single-source-of-truth
 discipline to scrolling and nowhere else, and its help overlay's other
 groups are hand-typed strings that can drift
-(`lnomad/src/app/chrome.rs:426-527`). Every binding here is one table read by
+(`lnomad/src/app/chrome.rs:450-551`). Every binding here is one table read by
 the key handler, the help overlay, the palette and the footer hints. That
 table is also the natural place to hang user configuration later, which
 `lnomad` has none of.
@@ -112,7 +112,7 @@ count how often focus is in the compose pane.
 
 **The quiet keyboard, with its one exception** (decided 2026-08-08). The
 `lnomad` rule that single letters are reserved for cheap local actions
-(`lnomad/src/app/event.rs:809-812`) generalises here to: **no single keystroke
+(`lnomad/src/app/event.rs:823-826`) generalises here to: **no single keystroke
 may put bytes on the air — except `Enter` in the compose pane.** The
 exception is principled, not a leak: the deliberate act was typing the
 message into a deliberately focused pane, and `Enter` completes that act.

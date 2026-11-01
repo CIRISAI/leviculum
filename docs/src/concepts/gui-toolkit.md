@@ -226,7 +226,7 @@ M9 through mousefood, sharing the terminal frontend's view code.
 
 - The M9 and the terminal are the same renderer and the same widget
   model. ratatui 0.30.2 is what `lnomad` already uses
-  (`lnomad/Cargo.toml:95`). Only the desktop GUI is a renderer of its
+  (`lnomad/Cargo.toml:97`). Only the desktop GUI is a renderer of its
   own.
 - One interaction model then lives where [Loquax: the user
   interface](loquax-ui.md) already put it: the one keymap table and the
