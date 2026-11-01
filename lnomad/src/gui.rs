@@ -1045,6 +1045,55 @@ mod tests {
         assert!(each < Duration::from_secs(1), "{each:?}");
     }
 
+    /// The name search's results for "marcel" over three sites (the
+    /// scene golden's, `tests/scene_golden.rs`) as the window's sheet:
+    /// each of the three items is a row a click opens, `Activate(Name(n))`.
+    #[test]
+    fn the_name_results_are_a_sheet_of_rows_a_click_opens() {
+        load_mono();
+        let now = 10_000;
+        let mut model = Model::from_document(&parse(""), 79, "", (80, 24));
+        model.clock = Some(now);
+        for (dest, name, hops, seen) in [
+            ([0x9c; 16], "Marcel", 1, now - 30),
+            ([0xfa; 16], "Marcel", 3, now - 7200),
+            ([0x17; 16], "Marcel Solar", 2, now - 600),
+        ] {
+            model
+                .node_registry
+                .upsert(dest, Some(name.to_string()), Some(hops), seen);
+        }
+        update(
+            &mut model,
+            AppEvent::Intent(Intent::FindName {
+                query: "marcel".to_string(),
+            }),
+        );
+        let window = Window::new(model, None);
+        assert!(window.model.scene().names.is_some(), "the list is open");
+        let x = WINDOW.0 - SHEET_WIDTH / 2.0;
+        let mut opened = Vec::new();
+        let mut y = BAR + ADDRESS_ROW;
+        while y < WINDOW.1 - STATUS_ROW {
+            let got = leviculum_ui_iced::headless::click(
+                window.view(),
+                iced::Point::new(x, y),
+                WINDOW.0 as u32,
+                WINDOW.1 as u32,
+            )
+            .expect("the software renderer");
+            for message in got {
+                if let Message::Intent(Intent::Activate(NodeId::Name(n))) = message {
+                    if !opened.contains(&n) {
+                        opened.push(n);
+                    }
+                }
+            }
+            y += 4.0;
+        }
+        assert_eq!(opened.len(), 3, "{opened:?}");
+    }
+
     /// The xterm table: the cube's corners and the grey ramp's ends.
     #[test]
     fn an_index_is_the_xterm_colour() {

@@ -436,6 +436,76 @@ branch close the slice.
   `y` fails the second. `the_help_lists_exactly_the_tables_chords`
   (`lnomad/src/app/keys.rs:879`) holds the help to the table.
 
+**Slice 2, built 2026-11-02 (1286).** Seven commits on this branch; the
+window draws, clicks and is measured. What it does not do yet is listed
+last, and is where a second pass starts.
+
+- **`leviculum-ui-iced`, extracted, not written beside.** Out of
+  `loquax/src/gui/chat.rs` into the crate, generic over the program's
+  message and coloured by a `Palette` each program fills from its own
+  tokens (Loquax's `palette`, `loquax/src/gui/chat.rs:64`): the drawn
+  icons with the compose bar's and the recording bar's (`icon`), the
+  waveform (`wave`, the fold handed in), the bare, link and icon-action
+  buttons (`control`), the avatar and its dot (`avatar`), the top bar,
+  the count badge, a tab and the tabs' rail or bar, the list item, the
+  search field (`chrome`), an iced key as the keymap's (`key`, from
+  `loquax/src/gui.rs`), and a view without a window (`headless`: render
+  to RGB, and a click that returns the published messages; Loquax's
+  goldens now render through it). The mark's glyph data moved to
+  `leviculum_ui::glyph`, so the icon draws a shape without knowing a
+  delivery mark. Loquax keeps its nodes and their composition (bubbles,
+  the compose and recording bars) and draws them through the crate.
+  Loquax's window goldens are byte identical: `just loquax-gui` green
+  (709 and 41 tests); one padding pixel more in the shared list item
+  fails the chat pane and recording bar goldens.
+- **The crate is empty on musl.** iced's window crates link libdl
+  (x11-dl, libloading), which the workspace's musl-static default cannot
+  link, so `cargo test --workspace` failed on the crate's test binary.
+  A window is a gnu-target build, as Loquax's `gui` feature already
+  said; `just loquax-gui` now lints on the host target too, and `just
+  lnomad-gui` lints and tests lnomad's window and the crate there. The
+  order's `cargo test -p leviculum-ui-iced -p lnomad --features gui` is
+  that recipe's line with `--target` the host's.
+- **The transfers left the terminal.** The fetch, the download, the
+  discovery drain and closing the session moved unchanged from `tui.rs`
+  into `lnomad/src/transfer.rs`; the terminal and the window run them.
+- **`lnomad --gui`** (`lnomad/src/gui.rs`, feature `gui`). The view
+  (`lnomad/src/gui.rs:402`) draws `Model::scene`: the shared top bar
+  with back while history has a past and the bar's actions as words, a
+  disabled one grey; the address as the window's own text field, its
+  Enter the field's go; the state chips; the page as the scene's window
+  of lines on a cell grid, one rich text per line and one span per run
+  in Fira Mono (embedded, OFL, `lnomad/fonts/`), a click on a link run
+  `Activate(Link(n))`; the places panel or the name results as a sheet
+  of the shared list items; the status line and the toast. Keys go
+  through the rows table as in the terminal, the wheel through the
+  model's mouse arm. The model's size in cells is what the window's page
+  holds (`cells`), so a resize lays the page out again as a terminal's
+  does. The transfers run on the session's runtime and answer as
+  outcomes the window folds as the terminal does (`fold`,
+  `lnomad/src/gui.rs:320`).
+- **Tests** (`just lnomad-gui`, 465 tests): the README at 1280 by 800
+  pixel for pixel in both themes (`lnomad/tests/golden/gui-page-{light,dark}.png`,
+  `lnomad/src/gui.rs:949`; the link underline dropped moves 1,950
+  bytes); a headless click on the README's first link raises
+  `Activate(Link(n))` and folded starts its load, a click beside it
+  nothing (`lnomad/src/gui.rs:976`; the link index off by one fails
+  it); the three name results for "marcel" are rows a click opens
+  (`lnomad/src/gui.rs:1052`; a row raising another intent fails it);
+  the page laid out on the window's cells (`lnomad/src/gui.rs:1010`).
+- **Measured.** One frame of the README at 1280 by 800 (view, layout,
+  paint and the readback of the software renderer) takes **15.8 ms** in
+  the release profile and 358 ms in the test profile, on the Ryzen 9
+  7950X host, the mean of 10 (`lnomad/src/gui.rs:1035`).
+- **Not yet; pass two.** Inline pictures (a picture link stays a link);
+  bold and italic runs (Fira Mono ships one weight and no italic, and a
+  face asked for that it lacks falls back to the proportional sans and
+  off the grid, so every run is set in the one face); the focus and
+  field boxes the terminal draws over a field; the help overlay; the
+  window's palette as tokens shared with Loquax's (each has its own
+  today); a screenshot of the real window over a live node (the goldens
+  are the headless renders).
+
 ## 6. What not to do
 
 - **No micron renderer per target.** One layout, runs in the scene
