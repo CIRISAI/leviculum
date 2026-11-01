@@ -1,0 +1,23 @@
+[package]
+name = "leviculum-ui-iced"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Iced widgets shared by the Leviculum window programs"
+# A library for the workspace's own programs, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+leviculum-ui = { path = "../leviculum-ui" }
+# iced 0.14 with its software renderer and the canvas the icons are drawn
+# on, the version and renderer Loquax's window measured. x11 and wayland
+# because the software renderer's surface (softbuffer) does not build
+# without a window system; winit opens both with dlopen. The fonts are the
+# program's. thread-pool, Loquax's executor: iced refuses to build without one.
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "x11", "wayland", "thread-pool", "canvas"] }

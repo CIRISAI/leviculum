@@ -36,6 +36,7 @@ pub mod commands;
 pub mod delivery;
 pub mod footer;
 pub mod geometry;
+pub mod glyph;
 pub mod help;
 pub mod input;
 pub mod keymap;

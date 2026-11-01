@@ -3072,6 +3072,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-ui-iced"
+version = "0.10.0-dev.1"
+dependencies = [
+ "iced",
+ "leviculum-ui",
+]
+
+[[package]]
 name = "leviculum-ui-ratatui"
 version = "0.10.0-dev.1"
 dependencies = [
@@ -3311,6 +3319,7 @@ dependencies = [
  "leviculum-mapfill",
  "leviculum-std",
  "leviculum-ui",
+ "leviculum-ui-iced",
  "leviculum-ui-ratatui",
  "libm",
  "lnpnd",

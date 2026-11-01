@@ -117,32 +117,10 @@ impl Mark {
     }
 }
 
-/// The square the marks are drawn on, in units; a screen scales it to the
-/// mark's size (16 dp in a bubble and in the list).
-pub const GRID: f32 = 24.0;
-
-/// A circle on the [`GRID`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Circle {
-    pub x: f32,
-    pub y: f32,
-    pub r: f32,
-}
-
-/// A mark as lines on the [`GRID`], drawn in this order: the disc filled in
-/// the failed ground, the ring and the lines stroked in `width` with round
-/// caps and joins, the dot filled. The ring, the lines and the dot are in
-/// the mark's colour, the failed mark's sign for [`Mark::Failed`]. The
-/// phone's `Glyph.java` draws the same numbers, which a test of the facade
-/// reads out of it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Shape {
-    pub disc: Option<Circle>,
-    pub ring: Option<Circle>,
-    pub lines: &'static [&'static [(f32, f32)]],
-    pub width: f32,
-    pub dot: Option<Circle>,
-}
+// The grid, the circle and the shape a mark is drawn as are the shared
+// glyph vocabulary (`leviculum_ui::glyph`), which the window's widgets in
+// leviculum-ui-iced draw without knowing a mark.
+pub use leviculum_ui::glyph::{Circle, Shape, GRID};
 
 /// The clock: a ring and its hands.
 pub const CLOCK: Shape = Shape {
