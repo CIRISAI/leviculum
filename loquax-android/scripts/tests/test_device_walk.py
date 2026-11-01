@@ -363,6 +363,51 @@ class Marks(unittest.TestCase):
         self.assertEqual(walk.TICKS, {"state_tick", "state_ticks", "state_ticks_read"})
 
 
+def privacy_page(on=True, row_top=200, blocked_top=400):
+    """The Privacy page as SettingsActivity.privacy builds it (1233)."""
+    switch = walk.Node(text="", desc="Send read receipts",
+                       rid="network.leviculum.loquax.debug:id/privacy_receipts",
+                       cls="android.widget.Switch", bounds=(900, row_top, 1000, row_top + 60),
+                       checked=on)
+    return [
+        at("", "Send read receipts", row_top),
+        at("", "Others see when you have read their messages. Off, you do not see it "
+               "from others either.", row_top + 30),
+        switch,
+        at("", "Blocked contacts", blocked_top),
+        at("", "Positions you shared", blocked_top + 200),
+    ]
+
+
+class PrivacyPage(unittest.TestCase):
+    def test_the_page_as_built_has_no_problem(self):
+        self.assertEqual(walk.privacy_page_problems(privacy_page()), (True, []))
+        self.assertEqual(walk.privacy_page_problems(privacy_page(on=False)), (False, []))
+
+    def test_no_switch_no_line_and_the_row_below_the_blocked(self):
+        state, problems = walk.privacy_page_problems(privacy_page()[3:])
+        self.assertIsNone(state)
+        self.assertIn("no read receipts switch", problems)
+        self.assertIn("no 'Send read receipts'", problems)
+        self.assertIn("no line under the read receipts row", problems)
+        _, problems = walk.privacy_page_problems(privacy_page(row_top=600))
+        self.assertEqual(problems, ["the read receipts row is not above the blocked contacts"])
+
+    def test_the_rungs_with_the_switch_on_and_off(self):
+        everything = set(walk.MARK_WORDS)
+        self.assertEqual(walk.receipts_rungs_problems(everything, True), [])
+        self.assertEqual(walk.receipts_rungs_problems(everything - {"state_ticks_read"}, True),
+                         ["on: no read mark"])
+        self.assertEqual(walk.receipts_rungs_problems(everything - {"state_ticks_read"}, False), [])
+        self.assertEqual(walk.receipts_rungs_problems(everything, False),
+                         ["off: a read mark still shows"])
+        self.assertEqual(walk.receipts_rungs_problems({"state_clock"}, False),
+                         ["off: no delivered mark"])
+
+    def test_the_walk_runs_the_step_after_settings(self):
+        self.assertEqual(walk.STEPS.index("receipts"), walk.STEPS.index("settings") + 1)
+
+
 class Code(unittest.TestCase):
     ADMIT = (
         'Admission code for "walk", good for one device, once:\n\n'

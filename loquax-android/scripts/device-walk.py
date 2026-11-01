@@ -73,6 +73,7 @@ STEPS = [
     "fling",
     "friends",
     "settings",
+    "receipts",
     "profile",
     "teardown",
 ]
@@ -114,6 +115,12 @@ SETTINGS_PAGE_MARKS = {
     "Privacy": ("text", "Positions you shared"),
     "Maps": ("rid", "maps_auto"),
 }
+# The Privacy page's first row (1233): "Send read receipts", its line,
+# the switch's id.
+RECEIPTS_ROW = "Send read receipts"
+RECEIPTS_LINE = "Others see when you have read their messages."
+RECEIPTS_SWITCH = "privacy_receipts"
+BLOCKED_HEADER = "Blocked contacts"
 # The region the walk puts on the phone for the Maps page (1207): the
 # repository's Florence fixture, and the middle the page names it by
 # (Ui.place, two decimals, either decimal mark).
@@ -448,6 +455,41 @@ def maps_page_problems(nodes: list[Node]) -> tuple[str, list[str]]:
     problems += decode_problems(nodes)
     state = "none" if not switch else "on" if switch[0].checked else "off"
     return f"auto={state} used={size.group(0) if size else '?'} regions={len(names)}", problems
+
+
+def privacy_page_problems(nodes: list[Node]) -> tuple[bool | None, list[str]]:
+    """The Privacy page's read receipts row (1233): the switch's state,
+    None without one, and what is wrong: no switch, no row title or no
+    line under it, the row not above the blocked contacts, a line that
+    did not decode."""
+    switch = find(nodes, rid=RECEIPTS_SWITCH)
+    shown = texts(nodes)
+    problems = []
+    if not switch:
+        problems.append("no read receipts switch")
+    if RECEIPTS_ROW not in shown:
+        problems.append(f"no {RECEIPTS_ROW!r}")
+    if not any(t.startswith(RECEIPTS_LINE) for t in shown):
+        problems.append("no line under the read receipts row")
+    blocked = find(nodes, text=BLOCKED_HEADER)
+    if switch and blocked and switch[0].bounds[1] > blocked[0].bounds[1]:
+        problems.append("the read receipts row is not above the blocked contacts")
+    problems += decode_problems(nodes)
+    return (switch[0].checked if switch else None), problems
+
+
+def receipts_rungs_problems(seen: set[str], on: bool) -> list[str]:
+    """The imported chat's rungs as seen with read receipts `on` or off
+    (1233): on, the read rung is there; off, it is not, and its message
+    shows two grey ticks instead."""
+    if on:
+        return [] if "state_ticks_read" in seen else ["on: no read mark"]
+    problems = []
+    if "state_ticks_read" in seen:
+        problems.append("off: a read mark still shows")
+    if "state_ticks" not in seen:
+        problems.append("off: no delivered mark")
+    return problems
 
 
 def page_mark_missing(page: str, nodes: list[Node]) -> str | None:
@@ -1754,6 +1796,81 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"entries={len(titles)} walked={','.join(walked)} back=chats"
+
+    def step_receipts(self) -> str:
+        """The read receipts switch (1233): More, Settings, Privacy; the
+        row first on the page, on; switched off, the imported chat shows
+        no read mark, its message two grey ticks; Privacy again shows it
+        off (stored), switched on, the read mark back."""
+        dev = self.need_device()
+        rungs = {}
+        for on in (False, True):
+            self.open_privacy()
+            state = self.privacy_switch(not on)
+            dev.tap_node(find(state, rid=RECEIPTS_SWITCH)[0])
+            self.privacy_switch(on)
+            for _ in range(3):
+                dev.key("KEYCODE_BACK")
+                time.sleep(0.6)
+                if find(dev.dump(), rid="write"):
+                    break
+            self.wait_id("write", 10)
+            seen = self.chat_rungs()
+            self.note(f"receipts {'on' if on else 'off'}: rungs {sorted(seen)}")
+            problems = receipts_rungs_problems(seen, on)
+            if problems:
+                raise StepFailed("; ".join(problems))
+            rungs["on" if on else "off"] = len(seen)
+        return f"switch=on,off,stored,on rungs_off={rungs['off']} rungs_on={rungs['on']}"
+
+    def open_privacy(self) -> None:
+        """From the open chat: More, Settings, Privacy."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.tap_text(MORE)
+        self.tap_text(SETTINGS)
+        self.wait_id("settings_entry_title", 10)
+        self.tap_text("Privacy")
+        self.wait_id(RECEIPTS_SWITCH, 10)
+
+    def privacy_switch(self, on: bool) -> list[Node]:
+        """The Privacy page once its read receipts switch shows `on`, the
+        row as `privacy_page_problems` wants it."""
+        dev = self.need_device()
+        seen: list[Node] = []
+
+        def shows():
+            nonlocal seen
+            seen = dev.dump()
+            state, problems = privacy_page_problems(seen)
+            if problems and state is not None:
+                raise StepFailed("Privacy: " + "; ".join(problems))
+            return seen if state == on else None
+
+        if not wait_for(shows, 10, every=0.3):
+            raise StepFailed(f"Privacy: the switch did not show {'on' if on else 'off'}")
+        return seen
+
+    def chat_rungs(self) -> set[str]:
+        """Every rung the open chat shows: up to its top, then down to its
+        end, collecting the marks on the way."""
+        dev = self.need_device()
+        seen: set[str] = set()
+        for up in (True, False):
+            last: list[str] = []
+            for _ in range(60):
+                nodes = dev.dump()
+                seen.update(mark_rid(n) for n in marks_on(nodes))
+                bodies = [n.text for n in by_top(find(nodes, rid="body"))]
+                if bodies and bodies == last:
+                    break
+                last = bodies
+                self.scroll_list(nodes, "list", up=up)
+        return seen
 
     def put_fixture_region(self) -> None:
         """The walk's region into the app's maps directory, through

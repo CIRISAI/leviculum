@@ -3034,7 +3034,9 @@ fn java_query<T: serde::de::DeserializeOwned>(
 /// the switch off stored and kept across a session's restart, and a new
 /// renderer reads it from the config; Delete removes the file; the map's
 /// theme is asked and set; the Advanced page's map fling (1188) is on
-/// until switched off, and the next frame says so.
+/// until switched off, and the next frame says so; the Privacy page's
+/// "Send read receipts" (1233) is on, switched off, kept off across the
+/// restart, and on again.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
     let instance = instance();
@@ -3144,6 +3146,24 @@ async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
         )
         .expect("the fling on");
         assert!(on.ok && on.fling, "{on:?}");
+
+        // The Privacy page's "Send read receipts" (1233), as
+        // `Core.receipts` asks: on by default, off stored in the config.
+        let receipts: schema::ReceiptsChoice =
+            java_query(&session, &[("t", Java::Str("receipts"))]).expect("Privacy");
+        assert!(receipts.ok && receipts.on, "on by default: {receipts:?}");
+        let off: schema::ReceiptsChoice = java_query(
+            &session,
+            &[("t", Java::Str("receipts")), ("set", Java::Bool(false))],
+        )
+        .expect("receipts off");
+        assert!(off.ok && !off.on, "{off:?}");
+        assert_eq!(
+            loquax::config::load(Path::new(&first.dir))
+                .expect("config")
+                .read_receipts,
+            Some(false)
+        );
         session.stop();
     })
     .await
@@ -3161,6 +3181,20 @@ async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
         let page: schema::MapRegions =
             java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the Maps page");
         assert!(page.ok && !page.autoload, "kept: {page:?}");
+        // The switch read back from the config, and on again.
+        let receipts: schema::ReceiptsChoice =
+            java_query(&session, &[("t", Java::Str("receipts"))]).expect("Privacy");
+        assert!(receipts.ok && !receipts.on, "kept off: {receipts:?}");
+        let on: schema::ReceiptsChoice = java_query(
+            &session,
+            &[("t", Java::Str("receipts")), ("set", Java::Bool(true))],
+        )
+        .expect("receipts on");
+        assert!(on.ok && on.on, "{on:?}");
+        assert_eq!(
+            loquax::config::load(&dir).expect("config").read_receipts,
+            Some(true)
+        );
         let fresh = loquax_android::map::Renderer::new(&dir)
             .regions(None, None)
             .expect("a fresh renderer");

@@ -718,6 +718,9 @@ impl Session {
                 confirmed: true,
             } => UiEvent::DeleteConversation { peer, everywhere },
             Intent::Share { peer, location } => UiEvent::SharePosition { peer, location },
+            Intent::ReadReceipts { on } => {
+                UiEvent::ReadReceipts(on.apply(self.lock().model.reading.on))
+            }
             Intent::Draft {
                 to: Target::Peer(peer),
                 text,
@@ -800,6 +803,19 @@ impl Session {
                 let home = self.lock().home.clone();
                 return crate::map::fling(&home, set).map(|fling| schema::encode(&fling));
             }
+            // The Privacy page's switch (1233): the model's, which the
+            // config keeps (`UiEffect::Remember`).
+            schema::Query::Receipts { set } => {
+                let mut inner = self.lock();
+                if let Some(on) = set {
+                    inner.apply(UiEvent::ReadReceipts(on));
+                }
+                return Ok(schema::encode(&schema::ReceiptsChoice {
+                    v: VERSION,
+                    ok: true,
+                    on: inner.model.reading.on,
+                }));
+            }
             _ => {}
         }
         let inner = self.lock();
@@ -876,7 +892,8 @@ impl Session {
             | schema::Query::Backup { .. }
             | schema::Query::MapRegions { .. }
             | schema::Query::MapTheme { .. }
-            | schema::Query::MapFling { .. } => return Err("answered above".to_string()),
+            | schema::Query::MapFling { .. }
+            | schema::Query::Receipts { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -971,6 +988,7 @@ impl Inner {
         let mut model = known(home, &store)?;
         model.home_client = true;
         model.list_apart = true;
+        model.reading.on = config.read_receipts.unwrap_or(true);
         for (message_id, source, packed) in store.unverified().map_err(|e| e.to_string())? {
             let verify = Command::Verify {
                 message_id,
@@ -1244,6 +1262,18 @@ impl Inner {
                         let _ = self.events.send(Event::Notice {
                             v: VERSION,
                             text: format!("name not saved: {error}"),
+                        });
+                    }
+                    self.dirty = true;
+                }
+                // A setting changed on a page (1233): the config in the
+                // app's directory, which the next start reads; the
+                // screens draw the marks again.
+                UiEffect::Remember { key, value } => {
+                    if let Err(error) = loquax::config::save(&self.home, key, value) {
+                        let _ = self.events.send(Event::Notice {
+                            v: VERSION,
+                            text: format!("{key} not saved: {error}"),
                         });
                     }
                     self.dirty = true;

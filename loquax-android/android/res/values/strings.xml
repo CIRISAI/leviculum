@@ -230,7 +230,7 @@
     <string name="settings_notifications_summary">New messages, muted chats</string>
     <string name="settings_notifications_text">Loquax tells you of every new message. To mute one chat, hold it in the list, then Mute. Sound and vibration are in Android\'s settings for Loquax.</string>
     <string name="settings_privacy">Privacy</string>
-    <string name="settings_privacy_summary">Blocked contacts, positions you shared</string>
+    <string name="settings_privacy_summary">Read receipts, blocked contacts, positions you shared</string>
     <string name="settings_maps">Maps</string>
     <string name="settings_maps_summary">Maps on this phone, automatic download</string>
     <string name="settings_backup">Backup</string>

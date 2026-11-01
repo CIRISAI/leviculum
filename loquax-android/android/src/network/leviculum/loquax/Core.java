@@ -422,6 +422,16 @@ final class Core {
         return answer(Native.query(MsgPack.pack(request)));
     }
 
+    /**
+     * The Privacy page's "Send read receipts" (1233): with `set` stored,
+     * the switch in force as "on" either way.
+     */
+    static Map<String, Object> receipts(Boolean set) {
+        Map<String, Object> request = map("t", "receipts");
+        if (set != null) request.put("set", set);
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
     /** The next event, or null; blocks up to waitMs. */
     static Map<String, Object> nextEvent(int waitMs) {
         byte[] bytes = Native.nextEvent(waitMs);

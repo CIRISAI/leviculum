@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`], [`Lxma`], [`MapRegions`], [`MapThemeChoice`] or [`MapFlingChoice`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`], [`Links`], [`Run`], [`Friends`], [`Shared`], [`Profile`], [`Lxma`], [`MapRegions`], [`MapThemeChoice`], [`MapFlingChoice`] or [`ReceiptsChoice`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
@@ -116,6 +116,9 @@
 //! app that does not know `read` draws its default mark; the app of this
 //! tree draws it as `delivered` until the glyph ladder of
 //! `docs/src/concepts/loquax-read-receipts.md` lands.
+//! The switch (1233) came within version 1 too: [`Query::Receipts`] with
+//! its [`ReceiptsChoice`]. An older app shows no switch, and the phone
+//! sends receipts unless its config says `read_receipts = off`.
 
 use serde::{Deserialize, Serialize};
 
@@ -461,6 +464,12 @@ pub enum Query {
         #[serde(default)]
         set: Option<bool>,
     },
+    /// The Privacy page's "Send read receipts" (1233): `set` stored when
+    /// given, the switch in force answered as [`ReceiptsChoice`].
+    Receipts {
+        #[serde(default)]
+        set: Option<bool>,
+    },
 }
 
 /// What [`Query::MapRegions`] answers: the regions, newest first, their
@@ -492,6 +501,16 @@ pub struct MapFlingChoice {
     pub v: u32,
     pub ok: bool,
     pub fling: bool,
+}
+
+/// What [`Query::Receipts`] answers: whether this phone sends read
+/// receipts and shows them (on unless the config's `read_receipts` says
+/// off, 1233).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptsChoice {
+    pub v: u32,
+    pub ok: bool,
+    pub on: bool,
 }
 
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at
