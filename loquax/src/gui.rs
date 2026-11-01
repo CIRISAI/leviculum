@@ -2475,43 +2475,15 @@ mod tests {
     /// The window's view drawn off screen by iced's own software renderer,
     /// `w` x `h` at a density of one, as RGB.
     fn shoot(app: &App, w: u32, h: u32) -> Vec<u8> {
-        use iced::advanced::renderer::{self, Headless, Renderer as _};
-        use iced::advanced::widget::Tree;
-        use iced::advanced::{layout, Layout};
-        let mut renderer = futures::executor::block_on(<Renderer as Headless>::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.0),
-            None,
-        ))
-        .expect("the software renderer");
-        let size = Size::new(w as f32, h as f32);
-        let mut element = app.view();
-        let mut tree = Tree::new(&element);
-        let node = element.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &layout::Limits::new(Size::ZERO, size),
-        );
-        let viewport = Rectangle::with_size(size);
-        renderer.reset(viewport);
-        let theme = app.theme();
-        element.as_widget().draw(
-            &tree,
-            &mut renderer,
-            &theme,
-            &renderer::Style {
-                text_color: chat::colour(app.tokens().text),
-            },
-            Layout::new(&node),
-            mouse::Cursor::Unavailable,
-            &viewport,
-        );
-        let background = chat::colour(app.tokens().background);
-        renderer
-            .screenshot(iced::Size::new(w, h), 1.0, background)
-            .chunks(4)
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect()
+        leviculum_ui_iced::headless::render(
+            app.view(),
+            &app.theme(),
+            chat::colour(app.tokens().text),
+            chat::colour(app.tokens().background),
+            w,
+            h,
+        )
+        .expect("the software renderer")
     }
 
     /// The chat pane in each theme (1145), pixel for pixel the goldens:

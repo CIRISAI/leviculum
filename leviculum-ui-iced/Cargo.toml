@@ -20,4 +20,5 @@ leviculum-ui = { path = "../leviculum-ui" }
 # because the software renderer's surface (softbuffer) does not build
 # without a window system; winit opens both with dlopen. The fonts are the
 # program's. thread-pool, Loquax's executor: iced refuses to build without one.
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "x11", "wayland", "thread-pool", "canvas"] }
+# advanced: the headless render and click (`headless`).
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "x11", "wayland", "thread-pool", "canvas", "advanced"] }
