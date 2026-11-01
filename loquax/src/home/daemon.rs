@@ -495,12 +495,16 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     }
                 }
                 if let Some(task) = fetch.take_if(|task| task.is_finished()) {
-                    let event = match task.await {
-                        Ok(Some(new)) => SyncEvent::Done { new },
-                        _ => SyncEvent::Failed,
+                    let pulled = task.await.ok().flatten();
+                    let event = match pulled {
+                        Some(new) => SyncEvent::Done { new },
+                        None => SyncEvent::Failed,
                     };
                     if let Some(schedule) = &mut schedule {
                         schedule.on(event, now_ms());
+                        if let Some(n) = pulled {
+                            tracing::info!("{}", pn_pull_line(n, selected_pn, schedule, now_ms()));
+                        }
                     }
                 }
                 wakes.appended(sender.newest);
@@ -1004,6 +1008,18 @@ impl Sender {
     }
 }
 
+/// The line a collection from the propagation node leaves (1293): how many
+/// messages it brought, from which node, and when the next one is due, so
+/// the cadence shows in the log when nothing comes.
+fn pn_pull_line(n: usize, pn: Option<[u8; 16]>, schedule: &Schedule, now_ms: u64) -> String {
+    let pn = pn.map_or_else(|| "-".to_string(), |pn| crate::address::to_hex(&pn[..4]));
+    let next = schedule.next_ms().map_or_else(
+        || "-".to_string(),
+        |next| (next.saturating_sub(now_ms) / 1000).to_string(),
+    );
+    format!("PN_PULL n={n} pn={pn} next_in_s={next}")
+}
+
 fn leg_word(leg: Leg) -> &'static str {
     match leg {
         Leg::Direct => "direct",
@@ -1079,6 +1095,26 @@ mod tests {
         );
         assert_eq!(announce_period(Some(at), at + 86_400), ANNOUNCE_EVERY);
         assert_eq!(announce_period(Some(at), at - 10), ANNOUNCE_EVERY);
+    }
+
+    /// 1293: a collection that found nothing says so, with the node and
+    /// the next one at the bound; one that found mail names the count and
+    /// the activity cadence.
+    #[test]
+    fn a_pull_names_its_count_its_node_and_the_next_one() {
+        let mut schedule = Schedule::new(Some(crate::sync::DEFAULT_BOUND_MS));
+        schedule.begin(1_000);
+        schedule.on(SyncEvent::Done { new: 0 }, 1_000);
+        assert_eq!(
+            pn_pull_line(0, Some([0xab; 16]), &schedule, 1_000),
+            "PN_PULL n=0 pn=abababab next_in_s=900"
+        );
+        schedule.begin(2_000);
+        schedule.on(SyncEvent::Done { new: 3 }, 2_000);
+        assert_eq!(
+            pn_pull_line(3, None, &schedule, 2_000),
+            "PN_PULL n=3 pn=- next_in_s=120"
+        );
     }
 
     const US: [u8; 16] = [0x11; 16];

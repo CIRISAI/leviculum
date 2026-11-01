@@ -557,7 +557,10 @@ beside a running `lnsd`. It takes the
 messenger's `--instance`, `--config`, `--pn`, `--sync-interval` and
 `--timeout`. It logs to stderr (`warn,loquax=info`, `RUST_LOG` replaces
 it), one `HOME` line for each archived message, admission and refusal, and
-never logs a message's text. Without the package, a systemd user unit:
+never logs a message's text. Each collection from the propagation node
+leaves one line, also when it found nothing (1293): `PN_PULL n=<messages>
+pn=<first 8 hex of the node> next_in_s=<seconds to the next>`, so the
+fifteen-minute cadence shows. Without the package, a systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/loquax-home.service
