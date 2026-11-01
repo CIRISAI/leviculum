@@ -61,11 +61,11 @@ pub use harness::port_alloc;
 /// Per-thread arming was necessary and not sufficient. libtest gives each
 /// test its own thread, so no other test's *own* allocations land in this
 /// window — but `tracing` dispatch runs on the thread that emits the event,
-/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2104`)
+/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2148`)
 /// pushes one `String` into the buffer of EVERY capture handle any test has
 /// registered, "regardless of which test emitted it" (that module's own doc).
 /// So the code under test emitting `PKT_TX`
-/// (`leviculum-core/src/transport.rs:4815`) inside the window made THIS
+/// (`leviculum-core/src/transport.rs:4818`) inside the window made THIS
 /// thread pay another test's `Vec<String>` growth step: on 2026-09-25,
 /// `link_failure_recovery_silent_resume.rs:520` held the only handle in this
 /// binary, its buffer crossed 256 -> 512 entries during the calibration

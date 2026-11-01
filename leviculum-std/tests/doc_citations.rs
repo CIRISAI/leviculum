@@ -58,9 +58,9 @@
 //! corpus already writes:
 //!
 //! ```text
-//! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:546`)   -- paren
-//! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:546`)  -- comma
-//! | `fn resolve_lt_alock(&self) -> bool` — `driver/mod.rs:546` -- table
+//! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:701`)   -- paren
+//! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:701`)  -- comma
+//! | `fn resolve_lt_alock(&self) -> bool` — `driver/mod.rs:701` -- table
 //! ```
 //!
 //! In the paren and comma spellings nothing but whitespace may sit between
