@@ -803,6 +803,8 @@ pub struct UiModel<B> {
     /// Drafts the store has not taken yet, by the `elapsed_ms` from which
     /// they are written ([`history::DRAFT_DEBOUNCE_MS`]).
     drafts_due: BTreeMap<[u8; 16], u64>,
+    /// What the reader saw, and the read receipts owed (1231).
+    pub reading: receipts::Reading,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -891,6 +893,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             compose_for: None,
             compose_cleared: false,
             drafts_due: BTreeMap::new(),
+            reading: receipts::Reading::default(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1357,6 +1360,13 @@ pub enum UiEvent {
         text: String,
         reply: Option<[u8; 32]>,
     },
+    /// These bubbles of `peer`'s chat are on screen now, at least half of
+    /// each, by their keys ([`Message::activity`]): a frontend says it on
+    /// every change (1231, [`receipts`]).
+    Viewport { peer: [u8; 16], keys: Vec<u64> },
+    /// The app is in front with the screen on, or went behind: an
+    /// Android activity resumed or paused, a terminal's focus.
+    Front(bool),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1427,8 +1437,6 @@ pub enum UiEffect {
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     let mut effects = fold(model, event);
-    // Every message sent says the sender takes read receipts (1230).
-    receipts::mark_sends(&mut effects);
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
@@ -1444,6 +1452,14 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
         (true, Pane::Messages | Pane::Compose) => model.map = None,
         (false, Pane::Map) => model.focus = Pane::Messages,
         _ => {}
+    }
+    // What the reader saw, and the receipts it owes: on this fold's sends,
+    // or alone once due (1231).
+    model.read_step(&mut effects);
+    // Every message sent says the sender takes read receipts (1230), while
+    // the switch is on.
+    if model.reading.on {
+        receipts::mark_sends(&mut effects);
     }
     effects
 }
@@ -1468,7 +1484,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::Key(key) if key.kind == KeyEventKind::Release => Vec::new(),
-        UiEvent::Key(key) => on_key(model, key),
+        UiEvent::Key(key) => {
+            model.touched();
+            on_key(model, key)
+        }
         UiEvent::Run(command) => run(model, command),
         UiEvent::Tick => {
             model.tick = model.tick.wrapping_add(1);
@@ -1497,7 +1516,19 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.detail_scroll = model.detail_scroll.min(detail_bounds(model).1);
             Vec::new()
         }
-        UiEvent::Mouse(mouse) => on_mouse(model, mouse),
+        UiEvent::Mouse(mouse) => {
+            let effects = on_mouse(model, mouse);
+            model.touched();
+            effects
+        }
+        UiEvent::Viewport { peer, keys } => {
+            model.set_viewport(peer, keys);
+            Vec::new()
+        }
+        UiEvent::Front(front) => {
+            model.set_front(front);
+            Vec::new()
+        }
         UiEvent::MailboxChosen { node, by_user } => {
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
@@ -3630,6 +3661,13 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
     let Some((c, m)) = model.sending.pop_front() else {
         return Vec::new();
     };
+    // A receipt of its own has no bubble: a failure is the log's.
+    if c == receipts::RECEIPT_SEND {
+        return match result {
+            Ok(()) => Vec::new(),
+            Err(detail) => vec![UiEffect::Log(format!("RECEIPT not sent: {detail}"))],
+        };
+    }
     if let Some(message) = model.message_mut(c, m) {
         message.leg = None;
     }
@@ -3657,6 +3695,9 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
     let Some((c, m)) = model.sending.pop_front() else {
         return Vec::new();
     };
+    if c == receipts::RECEIPT_SEND {
+        return Vec::new();
+    }
     let now = model.now;
     if let Some(message) = model.message_mut(c, m) {
         message.leg = None;
@@ -4731,6 +4772,303 @@ mod tests {
             last_delivery(&model),
             Some(DeliveryState::Read { at: T as u32 + 50 })
         );
+    }
+
+    /// 1231: `n` messages from `PEER` with the mark, ids `0x40 + i`, in
+    /// its conversation, open and in front, at the wall time `T` and the
+    /// monotonic clock 0; their keys.
+    fn marked_chat(n: u8, mark: bool) -> (UiModel<Field>, Vec<u64>) {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        let lev = match mark {
+            true => leviculum_lxmf::lev::Lev::mark(),
+            false => leviculum_lxmf::lev::Lev::default(),
+        };
+        for i in 0..n {
+            let event = match mark {
+                true => with_lev(PEER, [0x40 + i; 32], &format!("line {i}"), &lev),
+                false => OutboxEvent::Received {
+                    message_id: [0x40 + i; 32],
+                    source: PEER,
+                    title: Vec::new(),
+                    body: format!("line {i}").into_bytes(),
+                    fields: Vec::new(),
+                    verified: true,
+                },
+            };
+            engine(&mut model, event);
+        }
+        update(&mut model, UiEvent::Open { peer: PEER });
+        update(&mut model, UiEvent::Front(true));
+        let keys = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.activity)
+            .collect();
+        (model, keys)
+    }
+
+    const RT: i64 = 1_800_000_000;
+
+    fn ms_at(model: &mut UiModel<Field>, ms: u64) -> Vec<UiEffect> {
+        update(model, UiEvent::Elapsed(ms))
+    }
+
+    /// The receipts among `effects`: to whom, the body, the ids.
+    fn receipts_in(effects: &[UiEffect]) -> Vec<([u8; 16], String, Vec<[u8; 32]>)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                UiEffect::Send { to, body, fields } => {
+                    leviculum_lxmf::lev::Lev::from_fields(fields)
+                        .and_then(|lev| lev.receipt)
+                        .map(|r| (*to, body.clone(), r.ids))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1231: three bubbles on screen for a second are seen, and five
+    /// seconds after the last one one receipt goes with all three ids,
+    /// alone: no text, the mark beside the receipt, the reader's clock at
+    /// the first seen, no bubble. Not a millisecond early, and never twice.
+    #[test]
+    fn a_viewport_of_three_bubbles_yields_one_receipt_with_three_ids() {
+        let (mut model, keys) = marked_chat(3, true);
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 999);
+        assert!(model.conversations[0].messages[0]
+            .ledger
+            .iter()
+            .all(|e| e.what != receipts::SEEN));
+        assert!(ms_at(&mut model, 1_000).is_empty(), "seen, not sent yet");
+        assert!(model.conversations[0]
+            .messages
+            .iter()
+            .all(|m| m.ledger.iter().any(|e| e.what == receipts::SEEN)));
+        assert!(model.take_writes().iter().any(|w| matches!(w,
+            StoreWrite::Message { message, .. }
+                if message.ledger.iter().any(|e| e.what == receipts::SEEN))));
+        assert!(receipts_in(&ms_at(&mut model, 5_999)).is_empty());
+        let effects = ms_at(&mut model, 6_000);
+        let ids = vec![[0x40; 32], [0x41; 32], [0x42; 32]];
+        assert_eq!(receipts_in(&effects), [(PEER, String::new(), ids.clone())]);
+        let [UiEffect::Send { fields, .. }] = effects.as_slice() else {
+            panic!("one send: {effects:?}");
+        };
+        let lev = leviculum_lxmf::lev::Lev::from_fields(fields).expect("lev");
+        assert!(lev.supports_receipts(), "the mark rides with it");
+        assert_eq!(lev.receipt.map(|r| r.read_at), Some(RT as u32));
+        assert_eq!(model.conversations[0].messages.len(), 3, "no bubble");
+        assert_eq!(model.sending, [(receipts::RECEIPT_SEND, 0)]);
+        // The runner's end and its router id touch no message of ours, and
+        // nothing is said on screen.
+        let toasts = model.toasts.clone();
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        assert!(update(&mut model, UiEvent::SendDone(Ok(()))).is_empty());
+        assert!(model.sending.is_empty());
+        assert_eq!(model.toasts, toasts);
+        assert!(model.conversations[0]
+            .messages
+            .iter()
+            .all(|m| m.id != Some(ID)));
+        // Seen once: the same bubbles again owe nothing.
+        let keys = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.activity)
+            .collect();
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        for ms in [7_000, 9_000, 20_000] {
+            assert!(receipts_in(&ms_at(&mut model, ms)).is_empty());
+        }
+    }
+
+    /// 1231: a bubble that flashed by is not seen: the front lost before
+    /// the second, or the viewport moved on.
+    #[test]
+    fn a_bubble_on_screen_less_than_a_second_is_not_seen() {
+        let (mut model, keys) = marked_chat(2, true);
+        update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: keys.clone(),
+            },
+        );
+        ms_at(&mut model, 500);
+        update(&mut model, UiEvent::Front(false));
+        ms_at(&mut model, 1_500);
+        update(&mut model, UiEvent::Front(true));
+        ms_at(&mut model, 2_000);
+        update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![keys[1]],
+            },
+        );
+        // The second bubble stayed on screen since the front came back,
+        // the first left after half a second: only the second is seen.
+        ms_at(&mut model, 2_499);
+        assert!(model.reading.owed(&PEER).is_none());
+        ms_at(&mut model, 2_500);
+        assert_eq!(model.reading.owed(&PEER), Some(&[[0x41; 32]][..]));
+        ms_at(&mut model, 9_000);
+        assert!(!model.conversations[0].messages[0]
+            .ledger
+            .iter()
+            .any(|e| e.what == receipts::SEEN));
+    }
+
+    /// 1231: a chat left two seconds after its bubbles came on screen sends
+    /// the receipt at once; with a draft in it, the receipt waits up to a
+    /// minute after the last bubble seen for the reply.
+    #[test]
+    fn a_chat_left_after_two_seconds_sends_the_receipt() {
+        let (mut model, keys) = marked_chat(2, true);
+        update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: keys.clone(),
+            },
+        );
+        ms_at(&mut model, 1_000);
+        ms_at(&mut model, 2_000);
+        let effects = update(&mut model, UiEvent::Close);
+        assert_eq!(
+            receipts_in(&effects),
+            [(PEER, String::new(), vec![[0x40; 32], [0x41; 32]])]
+        );
+
+        let (mut model, keys) = marked_chat(1, true);
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 1_000);
+        update(
+            &mut model,
+            UiEvent::Draft {
+                peer: PEER,
+                text: "on my".to_string(),
+                reply: None,
+            },
+        );
+        assert!(receipts_in(&update(&mut model, UiEvent::Close)).is_empty());
+        assert!(receipts_in(&ms_at(&mut model, 60_999)).is_empty());
+        assert_eq!(receipts_in(&ms_at(&mut model, 61_000)).len(), 1);
+
+        // The app going behind is leaving too.
+        let (mut model, keys) = marked_chat(1, true);
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 1_200);
+        assert_eq!(
+            receipts_in(&update(&mut model, UiEvent::Front(false))).len(),
+            1
+        );
+    }
+
+    /// 1231: a peer whose messages carry no mark gets no receipt, however
+    /// long its bubbles stay; the positive control, the same with the
+    /// mark, gets one. The switch off sends none, and no mark either.
+    #[test]
+    fn a_peer_without_the_mark_gets_nothing() {
+        for mark in [false, true] {
+            let (mut model, keys) = marked_chat(2, mark);
+            assert_eq!(model.conversations[0].flags.receipts, mark);
+            update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+            let mut sent = Vec::new();
+            for ms in (0..=12_000).step_by(500) {
+                sent.extend(receipts_in(&ms_at(&mut model, ms)));
+            }
+            sent.extend(receipts_in(&update(&mut model, UiEvent::Close)));
+            assert_eq!(sent.len(), usize::from(mark), "mark={mark}: {sent:?}");
+            let seen = model.conversations[0].messages[0]
+                .ledger
+                .iter()
+                .any(|e| e.what == receipts::SEEN);
+            assert_eq!(seen, mark, "only what owes a receipt is marked seen");
+        }
+
+        let (mut model, keys) = marked_chat(2, true);
+        model.reading.on = false;
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        for ms in (0..=12_000).step_by(500) {
+            assert!(receipts_in(&ms_at(&mut model, ms)).is_empty());
+        }
+        let effects = update(
+            &mut model,
+            UiEvent::Write {
+                peer: PEER,
+                body: "hi".to_string(),
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: PEER,
+                body: "hi".to_string(),
+                fields: Vec::new(),
+            }],
+            "the switch off sends no mark"
+        );
+    }
+
+    /// 1231: a reply sent while the receipt waits carries it in the same
+    /// LXMF message, its text beside it, and nothing goes alone after.
+    #[test]
+    fn the_receipt_rides_on_the_reply() {
+        let (mut model, keys) = marked_chat(2, true);
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 1_000);
+        ms_at(&mut model, 3_000);
+        let effects = update(
+            &mut model,
+            UiEvent::Write {
+                peer: PEER,
+                body: "on my way".to_string(),
+            },
+        );
+        assert_eq!(
+            receipts_in(&effects),
+            [(PEER, "on my way".to_string(), vec![[0x40; 32], [0x41; 32]])]
+        );
+        assert_eq!(effects.len(), 1, "one LXMF message: {effects:?}");
+        let UiEffect::Send { fields, .. } = &effects[0] else {
+            panic!("{effects:?}");
+        };
+        assert!(leviculum_lxmf::lev::Lev::from_fields(fields)
+            .is_some_and(|lev| lev.supports_receipts()));
+        assert_eq!(model.sending.len(), 1);
+        assert_ne!(
+            model.sending[0].0,
+            receipts::RECEIPT_SEND,
+            "the reply's bubble"
+        );
+        for ms in [8_000, 70_000] {
+            assert!(receipts_in(&ms_at(&mut model, ms)).is_empty());
+        }
+        assert!(receipts_in(&update(&mut model, UiEvent::Close)).is_empty());
+    }
+
+    /// 1231: the terminal's viewport is the open chat's bubbles on screen,
+    /// and nothing while the help covers them.
+    #[test]
+    fn the_terminal_viewport_names_the_bubbles_on_screen() {
+        let (mut model, keys) = marked_chat(3, true);
+        assert_eq!(hit::viewport(&model), Some((PEER, keys.clone())));
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 9,
+            },
+        );
+        let shown = hit::viewport(&model).expect("a chat").1;
+        assert!(!shown.is_empty() && shown.len() < 3, "{shown:?}");
+        assert_eq!(shown.last(), keys.last(), "the newest at the bottom");
+        model.help = true;
+        assert_eq!(hit::viewport(&model), Some((PEER, Vec::new())));
     }
 
     /// 1230: a receipt on a text is a message as any, and reads ours too.

@@ -18,7 +18,10 @@
 //! is drawn in where the frontend has one (the terminal) and light where
 //! it has none (the window). `map_fling`, `on` (the default) or `off`
 //! (1188): whether the phone's map coasts on after a finger that panned
-//! lifts. And one key a terminal context for the map's
+//! lifts. `read_receipts`, `on` (the default) or `off` (1231): whether
+//! this messenger says it takes read receipts and sends them for what the
+//! reader saw (`docs/src/concepts/loquax-read-receipts.md`); off, it does
+//! neither. And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`
@@ -137,6 +140,8 @@ pub struct Config {
     pub map_theme: Option<ThemeFlag>,
     /// `map_fling`, when the file sets it; unset is on.
     pub map_fling: Option<bool>,
+    /// `read_receipts`, when the file sets it; unset is on.
+    pub read_receipts: Option<bool>,
     /// `map_drawing.<context>` lines: each context and the drawing
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
@@ -200,6 +205,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             ("send_on_enter", &mut config.send_on_enter),
             ("home_wake", &mut config.home_wake),
             ("map_fling", &mut config.map_fling),
+            ("read_receipts", &mut config.read_receipts),
         ] {
             if key.trim() == name {
                 *slot = Some(match value.trim().trim_matches('"') {
@@ -471,6 +477,23 @@ mod tests {
             Err(ConfigError::BadValue {
                 line: 1,
                 key: "send_on_enter",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn read_receipts_parses_and_a_typo_is_an_error() {
+        assert_eq!(parse_str("").expect("empty").read_receipts, None);
+        let off = parse_str("read_receipts = off\n").expect("off");
+        assert_eq!(off.read_receipts, Some(false));
+        let on = parse_str("read_receipts = true\n").expect("on");
+        assert_eq!(on.read_receipts, Some(true));
+        assert!(matches!(
+            parse_str("read_receipts = sometimes\n"),
+            Err(ConfigError::BadValue {
+                line: 1,
+                key: "read_receipts",
                 ..
             })
         ));

@@ -718,7 +718,7 @@ impl<B> UiModel<B> {
             self.mark_out(MarkFlag::Deleted, ids);
         }
         for (sc, _) in self.sending.iter_mut() {
-            if *sc > c {
+            if *sc > c && *sc != super::receipts::RECEIPT_SEND {
                 *sc -= 1;
             }
         }

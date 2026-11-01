@@ -107,7 +107,7 @@ use loquax::clock::Tokio;
 use loquax::effects::Terminal;
 use loquax::engine::{attach, delivery_address, AttachConfig};
 use loquax::fanout::Fanout;
-use loquax::outbox::{SendRequest, Via};
+use loquax::outbox::{OutboxEvent, SendRequest, Via};
 use loquax::send::{run_send, SendOptions};
 
 mod support;
@@ -1803,6 +1803,22 @@ async fn peer_session(
     prepare: impl FnOnce(&Path),
     messages: impl FnOnce([u8; 16]) -> Vec<(&'static str, Vec<(i64, Vec<u8>)>)>,
 ) -> (String, String) {
+    let (frames, log, _) =
+        peer_session_of(name, size, script_text, extra, prepare, messages, false).await;
+    (frames, log)
+}
+
+/// [`peer_session`]; with `listen`, the peer also reads what loquax sends
+/// it until loquax quits, and returns each message's body and fields.
+async fn peer_session_of(
+    name: &str,
+    size: &str,
+    script_text: &str,
+    extra: &[&str],
+    prepare: impl FnOnce(&Path),
+    messages: impl FnOnce([u8; 16]) -> Vec<(&'static str, Vec<(i64, Vec<u8>)>)>,
+    listen: bool,
+) -> (String, String, Vec<(Vec<u8>, Vec<(i64, Vec<u8>)>)>) {
     let daemon = daemon(&format!("tui-{name}-{size}"), |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     prepare(home.path());
@@ -1899,7 +1915,24 @@ async fn peer_session(
         assert!(sent.is_ok(), "{body:?} did not go out: {sent:?}");
     }
 
-    let output = child.await.expect("the loquax child thread");
+    // The peer listens until loquax quits.
+    let mut heard = Vec::new();
+    let mut child = child;
+    let output = loop {
+        if !listen {
+            break (&mut child).await.expect("the loquax child thread");
+        }
+        tokio::select! {
+            output = &mut child => break output.expect("the loquax child thread"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                for event in fanout.pump(&mut them.outbox).unwrap_or_default() {
+                    if let OutboxEvent::Received { body, fields, .. } = event {
+                        heard.push((body, fields));
+                    }
+                }
+            }
+        }
+    };
     them.stop().await;
     let got = std::fs::read_to_string(&frames).expect("read the frames");
     assert_eq!(
@@ -1909,7 +1942,7 @@ async fn peer_session(
         String::from_utf8_lossy(&output.stderr)
     );
     let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
-    (without_ids(&got), log)
+    (without_ids(&got), log, heard)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1951,6 +1984,92 @@ async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line
             kept.display()
         );
     }
+}
+
+/// Read receipts, slice two (1231): the peer's three messages carry the
+/// `lev` mark; the terminal's focus comes in once they are on screen. A
+/// second later they are seen, five seconds after that one receipt goes,
+/// alone, with the three ids and the script's clock as the read time, and
+/// the peer hears it. No bubble is drawn for it.
+const RECEIPTS_SCRIPT: &str = "\
+until ready 20
+frame attached
+until received 3 60
+focus in
+sleep 1500
+frame seen
+sleep 9000
+frame after
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_terminal_sends_one_receipt_six_seconds_after_the_focus_came() {
+    let messages = |_: [u8; 16]| {
+        let mark = leviculum_lxmf::lev::Lev::mark().fields().to_vec();
+        vec![
+            ("first", mark.clone()),
+            ("second", mark.clone()),
+            ("third", mark),
+        ]
+    };
+    let (frames, log, heard) = peer_session_of(
+        "receipts",
+        "80x24",
+        RECEIPTS_SCRIPT,
+        &[],
+        |_| {},
+        messages,
+        true,
+    )
+    .await;
+    let elapsed = |prefix: &str| -> Vec<u64> {
+        log.lines()
+            .filter(|line| line.contains(prefix))
+            .filter_map(|line| line.split("elapsed_ms=").nth(1))
+            .filter_map(|ms| ms.trim().parse().ok())
+            .collect()
+    };
+    let focus = elapsed("FOCUS front=true");
+    let sent = elapsed("RECEIPT send");
+    assert_eq!(focus.len(), 1, "{log}");
+    assert_eq!(sent.len(), 1, "one receipt for the visit\n{log}");
+    let took = sent[0] - focus[0];
+    // Seen one second after the focus, sent five after that; the script
+    // pumps every 20 ms, a loaded host somewhat later.
+    assert!((6_000..7_000).contains(&took), "{took} ms\n{log}");
+    let line = log
+        .lines()
+        .find(|line| line.contains("RECEIPT send"))
+        .expect("the line");
+    assert!(
+        line.contains("ids=3") && line.contains("alone=true"),
+        "{line}"
+    );
+    let receipts: Vec<_> = heard
+        .iter()
+        .filter_map(|(body, fields)| {
+            leviculum_lxmf::lev::Lev::from_fields(fields)
+                .and_then(|lev| lev.receipt)
+                .map(|r| (body.clone(), r))
+        })
+        .collect();
+    assert_eq!(receipts.len(), 1, "the peer hears one: {heard:?}");
+    let (body, receipt) = &receipts[0];
+    assert!(body.is_empty(), "a receipt alone has no text");
+    assert_eq!(receipt.ids.len(), 3);
+    // The script's clock: 2026-10-26 12:00 UTC.
+    assert_eq!(receipt.read_at, 1_793_016_000);
+    // The list's row and the three bubbles carry the time; a bubble for
+    // the receipt would be a fifth.
+    let after = frame(&frames, "after");
+    assert_eq!(
+        after.matches("12:00").count(),
+        4,
+        "no bubble for it\n{after}"
+    );
+    assert!(after.contains("third  12:00"), "{after}");
+    eprintln!("RECEIPT left {took} ms after the focus came");
 }
 
 /// A position report is a state, not a message (1209): six reports ten

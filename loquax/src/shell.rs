@@ -281,7 +281,10 @@ impl Shell {
         for effect in effects {
             match effect {
                 UiEffect::Store(read) => answers.extend(self.read(read)),
-                UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
+                UiEffect::Send { to, body, fields } => {
+                    self.log_receipt(&to, &body, &fields);
+                    self.sends.push_back((to, body, fields));
+                }
                 UiEffect::Fetch => {
                     let reason = self.model.fetch_reason.map_or("key", |r| r.word());
                     tracing::info!("SYNC reason={reason}");
@@ -319,6 +322,24 @@ impl Shell {
             self.apply(answer);
         }
         self.start_next();
+    }
+
+    /// A read receipt among a send's fields: one `tui.log` line, alone or
+    /// on a message, with the monotonic clock it left at (1231).
+    fn log_receipt(&self, to: &[u8; 16], body: &str, fields: &[Field]) {
+        let Some(receipt) = leviculum_lxmf::lev::Lev::from_fields(fields).and_then(|l| l.receipt)
+        else {
+            return;
+        };
+        let alone = body.is_empty() && fields.len() == 2;
+        tracing::info!(
+            "RECEIPT send to={} ids={} read_at={} alone={} elapsed_ms={}",
+            short(to),
+            receipt.ids.len(),
+            receipt.read_at,
+            alone,
+            self.elapsed_ms()
+        );
     }
 
     /// The palette's `import`: contacts and history from every messenger
@@ -1120,6 +1141,7 @@ pub(crate) async fn start(
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
+    model.reading.on = config.read_receipts.unwrap_or(true);
     // The mailbox's schedule: the flag, else the config file, else fifteen
     // minutes. A script runs one only when its command line names the flag,
     // as it ticks only when it says so.

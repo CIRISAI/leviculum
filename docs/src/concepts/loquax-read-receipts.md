@@ -156,7 +156,7 @@ Reciprocity, as WhatsApp and Signal: who turns receipts off sends no mark
 airtime goes to receipts nobody shows. Loquax with the switch off shows no
 read states, old ones neither.
 
-## 3. Sending a receipt
+## 3. Sending a receipt (built, R2)
 
 - **One batch per chat visit.** It goes when the chat is left, the app
   goes to the background, or 5 s after the last bubble newly seen. With a
@@ -179,6 +179,28 @@ read states, old ones neither.
 
 On air a receipt alone with one id is about 240 bytes plus the proof back,
 just under a second at SF8/BW125. Hence the batch and the piggyback.
+
+As built (1231, `loquax/src/ui/receipts.rs`):
+
+- The batch is one a peer, the ids in the order they were seen, and its
+  read time is the reader's clock when the first of them was seen. Up to
+  seven ids a receipt (`RECEIPT_IDS_MAX`); more go as several.
+- It goes alone `BATCH_MS` (5 s) after the last bubble seen, at once when
+  the chat is left or the app goes behind, and with a draft in that chat
+  `DRAFT_WAIT_MS` (60 s) after the last bubble seen, left or not.
+- The piggyback: the first message the model sends to that peer while the
+  batch waits, a text, a reply, a reaction or a shared position, carries
+  it in its own custom pair (`Lev::mark_with`); the rest of a batch above
+  seven goes alone at once.
+- Alone, it takes a slot of the send queue the bubbles' sends share
+  (`RECEIPT_SEND`), so the runner sends it as any message, direct and then
+  by the mailbox, and its router id, its end and its failure touch no
+  bubble and say nothing on screen; a failure is a `tui.log` line. The
+  terminal writes a `RECEIPT send` line for each one, alone or on a
+  message.
+- None goes to a peer that stopped taking them in the meantime, to a
+  blocked one, with the switch off, or from a client of a home node, which
+  holds no identity to sign it (R5).
 
 ## 4. Taking a receipt (built, R1)
 
@@ -207,7 +229,7 @@ does not, since it sends no receipts. The state is
 keeps it as state 8 with `messages.read_at`, and the peer's flag as
 `conversations.receipts` (schema 9, `loquax/src/store.rs`).
 
-## 5. The read event
+## 5. The read event (built, R2)
 
 A received message counts as **seen** when
 
@@ -236,6 +258,26 @@ the messages its text showed. Marking unread again takes no receipt back.
 visit are core (a `no_std` `loquax/src/ui/receipts.rs`, as `scene.rs`).
 The effect is a command to the engine, on a home-node client a `/mark`
 with the flag "seen".
+
+As built (1231):
+
+- `UiEvent::Viewport { peer, keys }` and `UiEvent::Front(bool)`, the
+  facade's `Request::Viewport` and `Request::Front` (`Intent::Viewport`,
+  `Intent::Front`). A front never said counts as in front once a key or
+  the mouse was used in the open chat.
+- The clock is the model's monotonic one (`UiEvent::Elapsed`), `SEEN_MS`
+  (1 s). A bubble leaving the viewport, or the front going, starts its
+  second again.
+- Seen is the received message's ledger line `seen`, kept in the store, so
+  a restart sends no second receipt and the detail view says when.
+- The terminal reports its own viewport (`ui::hit::viewport`, from the
+  same layout it draws, a third of the pane for a taller bubble), none
+  while the map, the help or a detail view covers the conversation, and
+  asks for focus reports. The script's `focus in` and `focus out` play
+  them.
+- Not yet: the window reports no viewport, so it sends no receipts; the
+  Android app sends no `viewport` request before R4; the reply from a
+  notification.
 
 ## 6. The glyph ladder
 
@@ -273,8 +315,9 @@ gives Read a row of its own (`✔`, green, ASCII `V`), and Android draws
 - **One switch** under Settings › Privacy, first, above the blocked
   contacts: "Read receipts", "Others see when you have read their messages.
   Turned off, you do not see it from others either." On by default.
-- **Terminal and window**: the same value in the config (`receipts = true`),
-  switched by a palette command.
+- **Terminal and window**: the same value in the config
+  (`read_receipts = on`, the default, or `off`; read since R2), switched by
+  a palette command (R4).
 - **With a home node** the value belongs to the identity and lives on the
   home node; every device shows and changes it there.
 - No Reticulum words on the way: "read receipts", "read", "delivered",
@@ -318,7 +361,7 @@ acceptance report.
 | # | Order | Status |
 |---|---|---|
 | R1 | the wire and the state in the core: codec and vectors, the mark on every send, the peer's flag, `DeliveryState::Read { at }`, the store, the facade's `read`, `read_at` and `receipts` | built, 1230 |
-| R2 | the read event and sending: `Intent::Viewport`, the second, the batch per visit, the piggyback, opportunistic then mailbox; the terminal's visible area and focus; the first two cells | |
+| R2 | the read event and sending: `Intent::Viewport`, the second, the batch per visit, the piggyback, opportunistic then mailbox; the terminal's visible area and focus; the first two cells | built, 1231, without the cells |
 | R3 | the tick ladder on every target, one table in `delivery.rs`, the terminal's two cells, Android's `Glyph.java` drawn anew, the words en/de | |
 | R4 | the switch and reciprocity: Privacy, config and palette, "does not send read receipts"; Android reports `Viewport` | |
 | R5 | the home node: `/mark` "seen", the receipt from the home node's outbox, incoming receipts as archive entries, the switch on the home node | |
