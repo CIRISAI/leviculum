@@ -124,11 +124,22 @@ Link requests on `loquax.home`, msgpack on the wire:
 /petname [address: bin16, name: str] -> [status]
 /watch [cursor: uint]              -> [status, newest: uint]
 /key   [address: bin16, public_key: bin64] -> [status]
+/move  [token: bin16, cursor: uint] -> [status, private_key: bin64, ratchets: bin,
+                                       known: bin, name: str, first: uint, more: bool,
+                                       [[seq, kind, id: bin32, at, packed], ...]]
+/moved [token: bin16, cursor: uint] -> [status]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
 admitted, 3 unknown or used token, 4 malformed request, 5 the home node's
-store failed. A `/sync` answer carries the entries after the cursor, oldest
+store failed, 6 behind (a `/moved` whose cursor is older than the
+archive's newest entry).
+
+`/move` and `/moved` (1281) move the mailbox to another device; see
+[how Loquax reaches its mailbox](loquax-reachability.md), "Moving to a new
+phone". They are answered only to an admitted device whose request
+carries the token of the move the owner opened on the mailbox itself
+(`loquax/src/home/handover.rs`), never to an admitted device alone. A `/sync` answer carries the entries after the cursor, oldest
 first, up to 64 KiB of messages (one larger entry still goes, alone), and
 `more` when others follow; the client asks again from the last sequence it
 got, over the same link. An answer too large for one packet goes as a

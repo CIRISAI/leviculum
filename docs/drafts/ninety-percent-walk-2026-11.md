@@ -341,6 +341,12 @@ rest of #21, a nameless peer's form `<61ddb79a…>`, went back to the pool:
 `names::address_form` is shared with the phone, whose device walk matches
 that form as its raw-hash check, and "the way the list does" names no other
 form the list draws today.
+1281 takes #24: "Move to a new phone" on the old phone's profile, "Move
+from my old phone" at the new phone's first start; the identity, its
+ratchets, the contacts' keys, the name and the whole archive travel over
+the rendezvous, the old phone stops and says so until "Use this phone
+again"; a restore of an address that answers elsewhere warns first
+(`docs/src/concepts/loquax-reachability.md`, "Moving to a new phone").
 
 ## 6. The three worst
 

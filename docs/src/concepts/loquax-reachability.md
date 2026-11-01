@@ -244,6 +244,62 @@ mailbox** (walk finding 7, `docs/drafts/ninety-percent-walk-2026-11.md`).
   WiFi still meet at the rendezvous. A device that has no internet and
   no rendezvous cannot link to a phone's mailbox.
 
+## Moving to a new phone (1281)
+
+The old phone's profile has **Move to a new phone** where the mailbox is
+on that phone; the new phone's first start has **Move from my old phone**
+(walk finding 24, `docs/drafts/ninety-percent-walk-2026-11.md`). The
+onboarding draft's section 4 is the model: one identity never answers on
+two devices at once.
+
+- **The code is a link code with a move opened beside it.** The old phone
+  makes the same `lqxh1` code as "Link a device" (`mailbox::move_code`)
+  and writes the move file under its mailbox (`loquax/src/home/handover.rs`,
+  `open`): the token and its end. Only the mailbox's own disk holds that
+  authority, so an admitted device alone never gets the identity.
+- **What travels:** the new phone joins with the token, then pages
+  `/move` until no more follow. Each page carries the identity's private
+  key, the delivery destination's own ratchets (the signed file the node
+  keeps), the node's known identities as it last wrote them (the
+  contacts' keys), the mailbox's name, and the archive after the cursor
+  with each entry's kind, id and time: the history, the read and delete
+  marks, the petnames, the blocks and pins, the names heard. The new
+  phone writes them as its own mailbox (`mailbox::move_in`), marks the
+  identity as moved in (so it announces every 30 minutes for a day), and
+  only then asks `/moved` with the newest sequence it holds.
+- **The hand-over:** the old mailbox answers `/moved` with "behind" while
+  its archive grew past that cursor (the new phone pages the rest and asks
+  again); otherwise it writes the gone file, answers ok, and ends after two
+  seconds. A mailbox with the gone file does not start
+  (`home::daemon::run`), so the old phone sends nothing, and its first
+  screen says "This phone has moved" with **Use this phone again**, which
+  takes it back behind a warning that names the risk. The new phone
+  becomes the mailbox only on that ok; any failure before it removes what
+  it wrote, and the old phone still has everything.
+- **What does not travel:** the old mailbox's outbox (sends still being
+  retried stop with the old phone), the Android address book links (they
+  belong to that phone's contacts), and contact keys the node learned
+  since it last wrote its known identities, which the peer's next announce
+  brings. If the ok is lost on the way, both phones are stopped: the old
+  one took the word, the new one says the move did not work; "Use this
+  phone again" on the old one is the way back.
+- **The paths:** as for linking a device, **B, the rendezvous**, works
+  today: both phones dial the code's list and the move runs over that relay,
+  end to end encrypted. **E, the same WiFi**, does not until the phone
+  full node brings the AutoInterface. `a_new_phone_takes_the_mailbox_over_and_the_old_one_stops`
+  in `loquax-android/tests/facade.rs` runs it with a Rust transport node as
+  the rendezvous and the ugly store in the archive; the device walk's
+  `move_phone` runs it with the walk's lnsd and the host's `walk_move` as
+  the new phone.
+- **The restore's guard:** a restore from a backup ("I already have a
+  Loquax address") first looks whether the backup's mailbox answers right
+  now: a link to its home destination over the phone's code list, within
+  15 s (`mailbox::answers_elsewhere`). If one comes up, the first start
+  warns ("This address is in use on another device right now…") and goes
+  on only on **Restore anyway**. A path the rendezvous still remembers is
+  no answer; only a link that comes up is.
+  `a_restore_of_an_address_live_elsewhere_warns_first` holds both ways.
+
 ## What this page does not decide
 
 - **The rendezvous list beyond `leviculum.network`**: who else is in the
