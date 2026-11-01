@@ -26,6 +26,15 @@
 #                      `ss -xl`, and rust:bookworm has no iproute2, so the
 #                      wait saw an empty table and reported "lnsd never
 #                      bound" for a daemon that had (pipelines 476-488).
+#   openjdk-17-jdk-headless
+#                    — javac and java. loquax-android's fling test compiles
+#                      the phone's Fling.java and its host test and runs
+#                      them (1209); without a JDK it is skipped by name
+#                      (scripts/integ-prerequisites.txt), and the forge
+#                      would never check the Java coast against the Rust
+#                      one. Measured in rust:bookworm on 2026-11-01: 118 MB
+#                      download, 281 MB installed, 12 s, without recommends
+#                      (1256).
 #   rustfmt, clippy  — rust:bookworm ships neither component.
 #   just             — not packaged in Debian bookworm, and the gate is a
 #                      Justfile recipe on purpose (see the recipe's comment).
@@ -67,6 +76,7 @@ if [ -z "${CI:-}${CI_REPO:-}" ] && [ "${LEV_CI_GATE_FORCE:-0}" != "1" ]; then
 fi
 
 apt-get update && apt-get install -y musl-tools socat iproute2
+apt-get install -y --no-install-recommends openjdk-17-jdk-headless
 rustup component add rustfmt clippy
 cargo install --locked just
 

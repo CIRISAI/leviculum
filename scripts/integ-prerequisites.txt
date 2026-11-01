@@ -17,6 +17,10 @@
 # reports `ok`, and scripts/nightly-green-ref.sh would sign a commit whose
 # interop suite measured nothing.
 #
+# A prerequisite written `command:<name>` is a program that must be on PATH
+# (`command -v <name>`), for a test that spawns a tool the clone cannot carry;
+# a missing one is printed as `command:<name> absent`.
+#
 # The path is a file INSIDE the submodule, not its directory: a clone made
 # without submodules has every submodule directory, empty.
 #
@@ -87,3 +91,11 @@ reference/Reticulum/RNS/__init__.py loquax/home_node a_sender_holding_the_old_ap
 reference/LXMF/LXMF/__init__.py loquax/home_node a_sender_holding_the_old_apps_ratchet_reaches_the_mailbox_after_its_announce
 reference/Reticulum/RNS/__init__.py loquax/home_node the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them
 reference/LXMF/LXMF/__init__.py loquax/home_node the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them
+
+# loquax-android fling compiles Fling.java and its host test with javac and
+# runs them with java (1209). rust:bookworm carries no JDK, and the land gate
+# on 582be358 went red in its forge stage on the spawn (1256). scripts/ci-gate.sh
+# now installs one, so the forge runs the test; a developer host without a
+# JDK skips it here.
+command:javac loquax-android/fling the_fling_decides_and_coasts_as_the_phone_does
+command:java loquax-android/fling the_fling_decides_and_coasts_as_the_phone_does
