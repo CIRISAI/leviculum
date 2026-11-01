@@ -27,9 +27,11 @@ use super::{UiEffect, UiModel};
 /// Chats, off the main path. [`PhotoSize::Phone`] is the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhotoSize {
-    /// Strongly reduced, for slow links: 800 px, JPEG quality 70.
+    /// Strongly reduced, for slow links: 800 px, JPEG quality 70, at
+    /// most `photo::SHOWN_BY_COLUMBA` bytes.
     Small,
-    /// Looks good on a phone: 1600 px, JPEG quality 80.
+    /// Looks good on a phone: 1600 px, JPEG quality 80, at most
+    /// `photo::SHOWN_BY_COLUMBA` bytes (250 000), which Columba shows.
     #[default]
     Phone,
     /// As taken; only its metadata goes.
