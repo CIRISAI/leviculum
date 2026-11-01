@@ -369,6 +369,14 @@ and `leviculum-esp/README.md` on that branch.
   `serial_mux = yes` on its `SerialInterface` block, which escapes 0x11 and
   0x13 in every frame and strips the board's flow bytes on read; periculum
   escapes every frame it writes to an LNode.
+- 2026-11-01 (1243, #483): a probe build of the port stops obeying a
+  received XOFF (fork commit f1ebf9dc, a local branch on the rig host, not
+  in the port yet). Software flow control stays on so the UART can still
+  send XOFF when its receive FIFO fills, and `force_xon` is held high so a
+  received 0x13 is deleted without stopping the transmitter. The raw 1238
+  frame is now refused as malformed and the board keeps talking, 9 of 9
+  runs. While the old build was muted, its node loop kept announcing on
+  LoRa with the outgoing serial queue full.
 
 ### GPIO10
 
