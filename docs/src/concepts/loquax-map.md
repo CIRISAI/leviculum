@@ -548,8 +548,8 @@ offsets from the start of the file:
   offset, length. Last, so the cut can stream tiles and learn their count
   at the end.
 
-**Buildings** (1191, the format and the cut; the draw is the next
-step). Protomaps' z15 tiles carry every OSM building. They are not in the
+**Buildings** (1191, the format and the cut; 1192, the draw).
+Protomaps' z15 tiles carry every OSM building. They are not in the
 tile blobs, which stay as profile 1 cuts them, byte for byte, but in a
 section of their own per z15 tile: in the blobs, a view that draws no
 buildings would still pay for them (every blob is checked whole when read,
@@ -617,6 +617,50 @@ index entry add the rest. The tile blobs of both cuts are the same bytes.
 The footprint counts are the source's pieces (325,236 and 923,381) less
 the degenerate ones, slivers a tile's buffer cut off and outlines under a
 pixel.
+
+**Drawing the buildings** (1192). The map core draws a tile's
+footprints at view zoom 16 and deeper (`BUILDINGS_FROM`), where the
+style asks for them: `Style::buildings`, set in `Style::SCREEN`, the
+finish of the phone and the window; `Style::PC` (the terminal's sixel
+and kitty pictures) and `Style::M9` leave it off, and a view that does not
+draw them never reads a byte of the sections (`Region::read_buildings`).
+In `leviculum-map/src/draw.rs` they go after the areas, so over water,
+and before every line, so roads, paths, rails and the names over the
+frame stay on top; placement never looks at them, so they move no name.
+Each cell of the section that meets the tile's part of the view is read,
+each footprint culled by its box before a vertex is projected
+(`Pass::building` in `leviculum-mapfill/src/render.rs`), filled through
+the scanline filler in the building's area colour, then outlined as a
+1 px aliased line in the table's `building_edge`, a step darker: light
+`rgb(221,213,205)` with `rgb(194,184,175)`, dark `rgb(62,62,70)` (a
+step lighter than the study's, whose fill was a step off the ground
+alone) with `rgb(46,46,52)`, between the fill and the ground as CoMaps
+draws it. A tile whose section holds more than `BUILDING_CAP` (2,048)
+footprints is drawn as blocks: filled, no outline, so touching buildings
+merge into their block. The outline is about half a building's cost, so
+the cap bounds the dearest tiles; it counts the whole section, so a tile
+looks the same in the tile cache's 256 pixel tiles as in a view drawn
+whole. Of Frankfurt's 881 sections one is over it (z15/17175/11110, 2,229
+footprints; the 99th percentile is 1,640), of Berlin's 3,217 none (1,427 at
+most).
+
+Measured 2026-11-01 with `map_fps` (`MAPFPS_ZOOM`, `MAPFPS_QUICK`) on the
+coder host (4 cores, so 4 workers, not the study's 8), the phone frame
+over Frankfurt, three runs each over the region cut with and without
+buildings, ranges in ms:
+
+| Row | workers | z16 without | z16 with | z17 without | z17 with |
+|---|---|---|---|---|---|
+| cold, at rest | 4 | 26.1-43.0 | 30.4-41.3 | 20.1-20.6 | 23.3-26.8 |
+| cold, at rest | 1 | 65.3-66.0 | 82.1-82.6 | 55.8-56.5 | 66.8-69.2 |
+| tile time, summed | 1 | 38.0-38.8 | 55.1-55.8 | 33.7-34.3 | 45.1-46.8 |
+| pan, cache warm | 4 | 3.6-5.6 | 3.0-3.5 | 2.9-3.3 | 2.8-2.9 |
+| at rest, cache warm | 4 | 11.5-20.5 | 11.2-16.5 | 9.4-15.0 | 9.5-10.3 |
+| pinch, a step either side (median) | 4 | 12.5-21.3 | 13.0-17.6 | 9.8-11.0 | 9.5-10.4 |
+
+The z15 cold frame at rest, the bar for z16, is 33.1-35.7 ms on 4 workers
+and 78.9-79.7 on 1 here. The frames at z15 and shallower are the same
+pixels with buildings as without (`leviculum-map/tests/golden.rs`).
 
 **Names** (1100). The cut keeps the names of places (city, town, district,
 village, suburb, neighbourhood; not localities, hamlets, isolated

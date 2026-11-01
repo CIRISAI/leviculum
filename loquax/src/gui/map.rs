@@ -320,4 +320,108 @@ pub(super) mod tests {
         let long = measure("bob · 5m and a long name", LABEL);
         assert!(long > short, "{short} {long}");
     }
+
+    /// The window draws the buildings from z16 (1192): over the Florence
+    /// cut with its building sections, its frames at rest at z16 and z17,
+    /// light and dark, in the window's finish ([`Style::SCREEN`], the one
+    /// the phone asks for too) are their goldens pixel for pixel; the
+    /// names it places are the ones and in the places a frame without
+    /// buildings places, and a tenth of the frame is footprint.
+    #[test]
+    fn the_window_draws_the_buildings_and_they_move_no_name() {
+        use leviculum_mapfill::frame::rgb888;
+        use leviculum_mapfill::style::{Class, MapTheme};
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/buildings");
+        let at = project(LatLon::from_degrees(43.7752, 11.2660));
+        for zoom in [16u32, 17] {
+            for (theme, t) in [(MapTheme::Light, "light"), (MapTheme::Dark, "dark")] {
+                let shot = |style: Style| {
+                    let mut frames = Frames::new(Maps::new(Some(dir.clone())));
+                    let shot = frames.frame(&Ask {
+                        view: ExactView::new(at, zoom * MILLI, 480, 320),
+                        margin: (0, 0),
+                        moving: false,
+                        style: style.in_theme(theme),
+                        scale: 1.0,
+                        pins: &[],
+                        selected: None,
+                        zooms: (0, 20),
+                        draw_pins: false,
+                        measure: Some(measure),
+                        now_ms: None,
+                        scaled_while_moving: false,
+                    });
+                    (shot, frames.drawn_names())
+                };
+                let (with, names) = shot(Style::SCREEN);
+                let (without, names_without) = shot(Style::PC);
+                assert!(!names.is_empty(), "z{zoom} {t}");
+                assert_eq!(names, names_without, "z{zoom} {t}: a building moved a name");
+                let fill = rgb888(theme.palette().area(Class::Building));
+                let footprints = with
+                    .rgba
+                    .chunks(4)
+                    .zip(without.rgba.chunks(4))
+                    .filter(|(a, b)| a != b && a[..3] == fill)
+                    .count();
+                assert!(footprints * 10 > 480 * 320, "z{zoom} {t}: {footprints}");
+                let rgb: Vec<u8> = with
+                    .rgba
+                    .chunks(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect();
+                same_as(&format!("gui-buildings-{t}-z{zoom}.png"), &rgb, 480, 320);
+            }
+        }
+    }
+
+    /// With `LOQUAX_BUILDINGS_REGION` set to a region file with building
+    /// sections: the phone's frame (1080 x 2400 at a density of 2.75) over
+    /// Frankfurt at z16 and z17, light and dark, places the same names in
+    /// the same places with buildings as without. A check for the reviewer
+    /// over a region too large to commit: `LOQUAX_BUILDINGS_REGION=
+    /// frankfurt.lmr cargo test -p loquax --features gui --bins
+    /// buildings_move_no_frankfurt_name -- --nocapture`. Without it, the
+    /// test returns at once.
+    #[test]
+    fn buildings_move_no_frankfurt_name() {
+        use leviculum_mapfill::style::MapTheme;
+        let Some(path) = std::env::var_os("LOQUAX_BUILDINGS_REGION") else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("maps dir");
+        let linked = std::fs::canonicalize(PathBuf::from(path)).expect("region");
+        std::os::unix::fs::symlink(&linked, dir.path().join("region.lmr")).expect("link");
+        let at = project(LatLon::from_degrees(50.1109, 8.6821));
+        for zoom in [16u32, 17] {
+            for theme in [MapTheme::Light, MapTheme::Dark] {
+                let names = |style: Style| {
+                    let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+                    let shot = frames.frame(&Ask {
+                        view: ExactView::new(at, zoom * MILLI, 1080, 2400),
+                        margin: (0, 0),
+                        moving: false,
+                        style: style.in_theme(theme),
+                        scale: 2.75,
+                        pins: &[],
+                        selected: None,
+                        zooms: (0, 20),
+                        draw_pins: false,
+                        measure: Some(measure),
+                        now_ms: None,
+                        scaled_while_moving: false,
+                    });
+                    (frames.drawn_names(), shot.rgba)
+                };
+                let (with, drawn) = names(Style::SCREEN);
+                let (without, bare) = names(Style::PC);
+                // The control: the buildings were drawn.
+                assert!(drawn != bare, "z{zoom} {theme:?}: no building drawn");
+                println!("BUILDINGS names z{zoom} {theme:?}: {} placed", with.len());
+                assert!(!with.is_empty(), "z{zoom} {theme:?}");
+                assert_eq!(with, without, "z{zoom} {theme:?}: a building moved a name");
+            }
+        }
+    }
 }

@@ -19,6 +19,18 @@ The picture is a produced work of OpenStreetMap data: © OpenStreetMap
 contributors, <https://www.openstreetmap.org/copyright>, under the Open
 Database License (ODbL) 1.0; see `leviculum-map/fixtures/README.md`.
 
+`gui-buildings-light-z16.png`, `gui-buildings-dark-z16.png`,
+`gui-buildings-light-z17.png`, `gui-buildings-dark-z17.png`: the window's
+map frame at rest with its names over the Florence cut with building
+footprints (1192), drawn by
+`gui::map::tests::the_window_draws_the_buildings_and_they_move_no_name`
+from `../../../leviculum-map/fixtures/buildings/firenze.lmr`, 480 x 320,
+`Style::SCREEN`, no pin. The phone's frame of the same view through its
+facade is held to these same pictures, pixel for pixel
+(`loquax-android/tests/map.rs`,
+`the_phone_draws_the_buildings_as_the_window_does`). OpenStreetMap
+data as above.
+
 `gui-chat-light.png`, `gui-chat-dark.png`: the window's chat pane in each
 theme (1145), drawn off screen by iced's software renderer (tiny-skia) by
 `gui::tests::the_chat_pane_is_the_golden_in_both_themes`, 900 x 560 at a

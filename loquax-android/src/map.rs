@@ -484,7 +484,7 @@ impl Renderer {
         // Unset follows the phone; the config's `map_theme` still wins.
         let flag = self.theme.or(Some(ThemeFlag::Auto));
         let table = map_theme(flag, Some(screen));
-        let style = Style::PC.in_theme(table);
+        let style = Style::SCREEN.in_theme(table);
         let ask = Ask {
             view,
             margin: (mx, my),

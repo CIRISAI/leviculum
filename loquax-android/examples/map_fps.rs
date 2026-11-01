@@ -32,6 +32,12 @@
 //! cut as `loquax/examples/map_bench.rs` says), and a `config` with
 //! `map_autoload = off`. The median of the frames after one warm-up. A
 //! measuring tool for the reviewer and the commit message, not a gate.
+//!
+//! `MAPFPS_ZOOM` sets the zoom of the view at rest (15 unset; the
+//! buildings' rows of 1192 are 16 and 17, over a region cut with and
+//! without them), and the pinch goes from 0.7 below it to 0.7 above.
+//! `MAPFPS_QUICK=1` stops after the rows of each worker count, before the
+//! names pinched out, the facade and the prefetch.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -67,6 +73,12 @@ fn main() {
     };
     let (w, h) = (1080u32, 2400u32);
     let at = project(LatLon::from_degrees(50.1109, 8.6821));
+    let zoom: u32 = std::env::var("MAPFPS_ZOOM")
+        .ok()
+        .and_then(|z| z.parse().ok())
+        .unwrap_or(15);
+    let z0 = zoom * 1000;
+    let quick = std::env::var_os("MAPFPS_QUICK").is_some();
     let now = WallTime {
         unix_secs: 1_790_000_000,
         offset_secs: 0,
@@ -78,7 +90,7 @@ fn main() {
         density_milli: 2750,
         x: Some(at.x),
         y: Some(at.y),
-        zoom_milli: Some(15_000),
+        zoom_milli: Some(z0),
         margin_x: w / 4,
         margin_y: h / 4,
         ..MapRequest::default()
@@ -204,9 +216,10 @@ fn main() {
             row(name, median(ms), drawn, owed);
             println!("| {name}: tile time, workers summed | {threads} | {cpu:.1} | | | |");
         }
-        // A pinch from z14.3 to z15.7, the finger down, then at rest.
+        // A pinch from z14.3 to z15.7 (at z15), the finger down, then at
+        // rest.
         let start = MapRequest {
-            zoom_milli: Some(14_300),
+            zoom_milli: Some(z0 - 700),
             ..base.clone()
         };
         let _ = draw(&start);
@@ -217,7 +230,7 @@ fn main() {
             moving: true,
             ..start.clone()
         };
-        for z in (14_370..=15_700).step_by(70) {
+        for z in (z0 - 630..=z0 + 700).step_by(70) {
             pinch.zoom_milli = Some(z);
             let (t, shown) = timed(&pinch);
             owed += u32::from(shown.pending);
@@ -226,7 +239,12 @@ fn main() {
         let n = ms.len() as f64;
         let drawn = (stats().rendered - before) as f64 / n;
         let mean = ms.iter().sum::<f64>() / n;
-        row("pinch z14.3 to z15.7 (median)", median(ms), drawn, owed);
+        let name = format!(
+            "pinch z{:.1} to z{:.1} (median)",
+            f64::from(z0 - 700) / 1e3,
+            f64::from(z0 + 700) / 1e3
+        );
+        row(&name, median(ms), drawn, owed);
         println!(
             "| pinch, mean | {threads} | {mean:.1} | {:.0} | | |",
             1e3 / mean
@@ -248,7 +266,7 @@ fn main() {
         // The same pinch again, every tile it shows held (the frames at
         // rest at z14 and z15 draw them all): what a frame of the pinch
         // costs itself, no tile drawn or owed.
-        for z in [14_000, 15_000, 14_300] {
+        for z in [z0 - 1000, z0, z0 - 700] {
             let _ = draw(&MapRequest {
                 zoom_milli: Some(z),
                 ..start.clone()
@@ -256,14 +274,19 @@ fn main() {
         }
         let mut ms = Vec::new();
         let mut owed = 0;
-        for z in (14_370..=15_700).step_by(70) {
+        for z in (z0 - 630..=z0 + 700).step_by(70) {
             pinch.zoom_milli = Some(z);
             let (t, shown) = timed(&pinch);
             owed += u32::from(shown.pending);
             ms.push(t);
         }
         row("pinch again, tiles held (median)", median(ms), 0.0, owed);
-        carried(&home, &base, &draw, &timed, &median, threads);
+        if !quick {
+            carried(&home, &base, &draw, &timed, &median, threads);
+        }
+    }
+    if quick {
+        return;
     }
     facade(&home, &base, &draw, now, median, workers);
     clock.set(None);
@@ -298,7 +321,8 @@ fn carried(
             moving: true,
             ..base.clone()
         };
-        for z in (14_000..15_000).rev().step_by(100) {
+        let z0 = base.zoom_milli.unwrap_or(15_000);
+        for z in (z0 - 1000..z0).rev().step_by(100) {
             pinch.zoom_milli = Some(z);
             ms.push(timed(&pinch).0);
             if let Some(cost) = loquax_android::map::place_cost(home) {

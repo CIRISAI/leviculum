@@ -216,6 +216,82 @@ fn a_dark_phone_draws_the_dark_table() {
     assert!(share < 50, "not the light table: {share} %");
 }
 
+/// The phone draws the buildings (1192), and in the window's pixels:
+/// over the Florence cut with its building sections, its frame at z16 and
+/// z17, light and dark, once its names faded in, is the window's golden
+/// of the same view pixel for pixel (`loquax/tests/golden/gui-buildings-*.png`, drawn by
+/// `loquax::mapframe` as the window draws): one library, one picture,
+/// buildings and names. Over the cut without them the frame differs, by
+/// footprints.
+#[test]
+fn the_phone_draws_the_buildings_as_the_window_does() {
+    let home = home();
+    let maps = home.path().join("maps");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../leviculum-map/fixtures/buildings/firenze.lmr");
+    std::fs::copy(fixture, maps.join("firenze.lmr")).expect("the region");
+    let bare = tempfile::tempdir().expect("bare");
+    std::fs::create_dir_all(bare.path().join("maps")).expect("maps");
+    std::fs::copy(
+        home.path().join(loquax::config::CONFIG_FILE),
+        bare.path().join(loquax::config::CONFIG_FILE),
+    )
+    .expect("config");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr"),
+        bare.path().join("maps/firenze.lmr"),
+    )
+    .expect("the region");
+    // The frame once its names faded in (1205): the renderer's clock
+    // held, then held a second further.
+    let settled = |ask: &MapRequest| {
+        let dir = Path::new(&ask.dir);
+        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
+        loquax_android::map::tune_clock(dir, Some(0));
+        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
+        loquax_android::map::tune_clock(dir, Some(5_000));
+        let settled = frame(&loquax_android::map::render(ask, Some(Vec::new()), now()));
+        loquax_android::map::tune_clock(dir, None);
+        settled
+    };
+    for zoom in [16u8, 17] {
+        for (dark, t) in [(false, "light"), (true, "dark")] {
+            let ask = |dir: &Path| MapRequest {
+                zoom: Some(zoom),
+                ..request(dir, dark)
+            };
+            let (shown, rgba) = settled(&ask(home.path()));
+            assert_eq!((shown.w, shown.h), (W, H));
+            let (_, without) = settled(&ask(bare.path()));
+            let share = same_share(&rgba, &without);
+            assert!(
+                share < 95,
+                "z{zoom} {t}: buildings drawn, {share} % the same"
+            );
+            let window = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../loquax/tests/golden/gui-buildings-{t}-z{zoom}.png"
+            ));
+            let bytes = std::fs::read(&window).expect("the window's golden");
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+                .read_info()
+                .expect("png");
+            let mut want = vec![0; reader.output_buffer_size().expect("size")];
+            let info = reader.next_frame(&mut want).expect("frame");
+            want.truncate(info.buffer_size());
+            let rgb: Vec<u8> = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            let differ = want
+                .chunks(3)
+                .zip(rgb.chunks(3))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                differ, 0,
+                "z{zoom} {t}: the phone is not the window's picture"
+            );
+        }
+    }
+}
+
 /// The map's own switch (1133): with the phone dark, a toggle draws the
 /// light table and stores it as the config's `map_theme`, the other keys
 /// kept; the choice wins over the phone from then on, for a renderer that

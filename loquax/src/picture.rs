@@ -33,10 +33,10 @@ use std::vec::Vec;
 use embedded_graphics::prelude::{Dimensions, Point};
 use embedded_graphics::primitives::Rectangle;
 use leviculum_map::choice::{drawn, view_zooms};
-use leviculum_map::draw::{draw_in_scaled, draw_tiles, Ink};
+use leviculum_map::draw::{attach_buildings, draw_in_scaled, draw_tiles, draws_buildings, Ink};
 use leviculum_map::labels::ViewLabel;
 use leviculum_map::outline;
-use leviculum_map::region::{Header, Region};
+use leviculum_map::region::{Header, Region, TileId};
 use leviculum_map::viewport::{ViewTile, Viewport};
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
@@ -204,6 +204,8 @@ pub struct Painter {
     epoch: u64,
     regions: Vec<Installed>,
     read: Vec<(ViewTile, Vec<u8>)>,
+    /// The building sections a view that draws them read (1192).
+    buildings: Vec<(TileId, Vec<u8>)>,
     /// The filler's storage, kept from draw to draw: a tile cache's
     /// painter draws hundreds of tiles, and allocating this for each cost
     /// about a tenth of a cold frame's tile time (the render study of
@@ -246,6 +248,7 @@ impl Painter {
             epoch,
             regions,
             read: Vec::new(),
+            buildings: Vec::new(),
             scratch: FillScratch::new(),
             viewed: HashMap::new(),
         }
@@ -331,6 +334,7 @@ impl Painter {
                     style,
                     percent,
                     &mut self.read,
+                    &mut self.buildings,
                     &mut self.scratch,
                     &mut frame,
                 ) {
@@ -399,8 +403,9 @@ impl Painter {
     }
 }
 
-/// Draw `region`'s tiles of `view` into `area` of `frame`; `false` when a
-/// tile could not be read, and the region is left out.
+/// Draw `region`'s tiles of `view` into `area` of `frame`, with their
+/// building footprints where the view draws them ([`draws_buildings`]);
+/// `false` when a tile could not be read, and the region is left out.
 #[allow(clippy::too_many_arguments)]
 fn region_into(
     region: &Region<File>,
@@ -410,15 +415,26 @@ fn region_into(
     style: Style,
     percent: u32,
     read: &mut Vec<(ViewTile, Vec<u8>)>,
+    buildings: &mut Vec<(TileId, Vec<u8>)>,
     fill: &mut FillScratch,
     frame: &mut Frame<'_>,
 ) -> bool {
     if region.read_view(view, read).is_err() {
         return false;
     }
-    let Ok(tiles) = draw_tiles(read) else {
+    let Ok(mut tiles) = draw_tiles(read) else {
         return false;
     };
+    buildings.clear();
+    if draws_buildings(style, ink, view.zoom()) {
+        // A section that does not read leaves the buildings out, never
+        // the map under them.
+        if region.read_buildings(&tiles, buildings).is_err()
+            || attach_buildings(&mut tiles, buildings).is_err()
+        {
+            tiles.iter_mut().for_each(|t| t.buildings = None);
+        }
+    }
     let (_, h) = view.size();
     // A bucket head a row of the view.
     fill.heads.resize(h as usize, 0);
