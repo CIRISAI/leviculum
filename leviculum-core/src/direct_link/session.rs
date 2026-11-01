@@ -24,7 +24,7 @@
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
-use super::wire::{ProbeProtocol, SessionId, Signal, REJECT_UNSUPPORTED};
+use super::wire::{ProbeProtocol, SessionId, Signal, REJECT_PUNCH_FAILED, REJECT_UNSUPPORTED};
 
 /// How long each waiting phase may last before the session gives up.
 ///
@@ -34,6 +34,10 @@ pub const DISCOVER_TIMEOUT_MS: u64 = 10_000;
 pub const PROPOSE_TIMEOUT_MS: u64 = 10_000;
 pub const READY_TIMEOUT_MS: u64 = 10_000;
 pub const PUNCH_TIMEOUT_MS: u64 = 12_000;
+/// +ciris (leviculum#89): how long a side whose punch succeeded waits for the
+/// peer's verdict. The peer's punch window ends within this, and its COMPLETE
+/// or REJECT travels the relay.
+pub const COMMIT_TIMEOUT_MS: u64 = 12_000;
 
 /// Which end of the upgrade this node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,9 @@ pub enum Phase {
     AwaitingReady,
     /// Both addresses known; the driver is punching.
     Punching,
+    /// +ciris (leviculum#89): this side's punch succeeded and COMPLETE is
+    /// sent; waiting for the peer's COMPLETE before either side moves.
+    Committing,
     /// The punch succeeded.
     Connected,
 }
@@ -134,6 +141,16 @@ pub struct Session {
     /// +ciris: this node's reflexive address, once probed (the initiator
     /// needs it when READY arrives).
     own_public: Option<SocketAddr>,
+    /// +ciris (leviculum#89): both ends agreed to the two-sided commit: a
+    /// side moves the link only once its own punch and the peer's both
+    /// succeeded. Offered by every leviculum REQUEST; an rns-rs peer never
+    /// sends `"c"`, so with one the session keeps the one-sided rule.
+    commit: bool,
+    /// The peer's COMPLETE arrived (while this side was still punching).
+    peer_committed: bool,
+    /// +ciris (leviculum#88): opaque bytes the REQUEST carries for the
+    /// responder's host.
+    host_payload: Option<Vec<u8>>,
 }
 
 impl Session {
@@ -156,6 +173,9 @@ impl Session {
             peer_public: None,
             peer_local: Vec::new(),
             own_public: None,
+            commit: true,
+            peer_committed: false,
+            host_payload: None,
         };
         let steps = alloc::vec![Step::Probe {
             server: facilitator,
@@ -189,6 +209,10 @@ impl Session {
             peer_public: Some(initiator_public),
             peer_local: initiator_local,
             own_public: None,
+            // Agreed only if the REQUEST offered it: see `set_commit`.
+            commit: false,
+            peer_committed: false,
+            host_payload: None,
         };
         let steps = alloc::vec![
             Step::Send(Signal::Accept { session: id }),
@@ -216,6 +240,25 @@ impl Session {
         &self.token
     }
 
+    /// +ciris (leviculum#89): whether the two-sided commit is in force (as
+    /// far as this side knows so far).
+    pub fn commit(&self) -> bool {
+        self.commit
+    }
+
+    /// +ciris (leviculum#89): a responder agrees to the two-sided commit
+    /// when the REQUEST offered it. An initiator offers it by default; it
+    /// turns it off here only to talk to a peer as rns-rs does.
+    pub fn set_commit(&mut self, commit: bool) {
+        self.commit = commit;
+    }
+
+    /// +ciris (leviculum#88): bytes the initiator's REQUEST carries for the
+    /// responder's host. Set before the probe answers.
+    pub fn set_host_payload(&mut self, payload: Option<Vec<u8>>) {
+        self.host_payload = payload;
+    }
+
     /// The peer's reflexive address, once the session has learned it.
     pub fn peer_public(&self) -> Option<SocketAddr> {
         self.peer_public
@@ -228,6 +271,7 @@ impl Session {
             Phase::Proposing => PROPOSE_TIMEOUT_MS,
             Phase::AwaitingReady => READY_TIMEOUT_MS,
             Phase::Punching => PUNCH_TIMEOUT_MS,
+            Phase::Committing => COMMIT_TIMEOUT_MS,
             Phase::Connected => return None,
         };
         Some(self.phase_since_ms.saturating_add(budget))
@@ -264,6 +308,8 @@ impl Session {
                     initiator_public: public,
                     protocol: self.protocol,
                     initiator_local: local,
+                    commit: self.commit,
+                    host_payload: self.host_payload.take(),
                 })]
             }
             Role::Responder => {
@@ -278,6 +324,7 @@ impl Session {
                         session: self.id,
                         responder_public: public,
                         responder_local: local,
+                        commit: self.commit,
                     }),
                     Step::Punch { peer, alternates },
                 ]
@@ -330,9 +377,12 @@ impl Session {
                 Signal::Ready {
                     responder_public,
                     responder_local,
+                    commit,
                     ..
                 },
             ) => {
+                // In force only when the responder agreed too.
+                self.commit = self.commit && *commit;
                 self.peer_public = Some(*responder_public);
                 self.peer_local.clone_from(responder_local);
                 self.enter(Phase::Punching, now_ms);
@@ -345,6 +395,20 @@ impl Session {
                     alternates,
                 }]
             }
+            // +ciris (leviculum#89): the peer's half of the two-sided commit.
+            (_, Phase::Punching, Signal::Complete { .. }) if self.commit => {
+                self.peer_committed = true;
+                Vec::new()
+            }
+            (_, Phase::Committing, Signal::Complete { .. }) => {
+                self.enter(Phase::Connected, now_ms);
+                alloc::vec![Step::Established]
+            }
+            (_, Phase::Punching | Phase::Committing, Signal::Reject { reason, .. })
+                if self.commit =>
+            {
+                alloc::vec![Step::Failed(Failure::Rejected(*reason))]
+            }
             _ => Vec::new(),
         }
     }
@@ -354,11 +418,36 @@ impl Session {
         if self.phase != Phase::Punching {
             return Vec::new();
         }
+        if !self.commit {
+            // One-sided, as rns-rs decides: this side's verdict alone.
+            return if succeeded {
+                self.enter(Phase::Connected, now_ms);
+                alloc::vec![Step::Established]
+            } else {
+                alloc::vec![Step::Failed(Failure::PunchFailed)]
+            };
+        }
+        // +ciris (leviculum#89): two-sided. A punch can succeed on one side
+        // only, and a side that moved alone sent its replies into a socket
+        // the other had already released. So each side tells the other its
+        // verdict, and moves only when both succeeded.
         if succeeded {
-            self.enter(Phase::Connected, now_ms);
-            alloc::vec![Step::Established]
+            let complete = Step::Send(Signal::Complete { session: self.id });
+            if self.peer_committed {
+                self.enter(Phase::Connected, now_ms);
+                alloc::vec![complete, Step::Established]
+            } else {
+                self.enter(Phase::Committing, now_ms);
+                alloc::vec![complete]
+            }
         } else {
-            alloc::vec![Step::Failed(Failure::PunchFailed)]
+            alloc::vec![
+                Step::Send(Signal::Reject {
+                    session: self.id,
+                    reason: REJECT_PUNCH_FAILED,
+                }),
+                Step::Failed(Failure::PunchFailed),
+            ]
         }
     }
 
@@ -370,6 +459,9 @@ impl Session {
                     Failure::ProbeFailed
                 } else if self.phase == Phase::Punching {
                     Failure::PunchFailed
+                } else if self.phase == Phase::Committing {
+                    // The peer never said how its punch went.
+                    Failure::Timeout
                 } else {
                     Failure::Timeout
                 };
@@ -439,6 +531,8 @@ mod tests {
             initiator_public,
             protocol,
             initiator_local,
+            commit: true,
+            host_payload: None,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -516,6 +610,8 @@ mod tests {
             initiator_public,
             protocol,
             initiator_local,
+            commit: true,
+            host_payload: None,
         } = request_from(&steps).clone()
         else {
             unreachable!()
@@ -606,6 +702,7 @@ mod tests {
             session: ID,
             responder_public: b_pub(),
             responder_local: Vec::new(),
+            commit: false,
         };
         assert!(a.signal(&ready, 2).is_empty());
         assert_eq!(a.phase(), Phase::Proposing);

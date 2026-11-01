@@ -49,6 +49,16 @@ pub const REJECT_UNSUPPORTED: u8 = 0x03;
 /// +ciris: the most host candidates a signal carries or a decoder keeps.
 pub const MAX_LOCAL_CANDIDATES: usize = 4;
 
+/// +ciris (leviculum#88): the largest host payload a REQUEST carries. Big
+/// enough for a hybrid-signed CIRIS contact grant (ML-DSA-65, about 6-8 KiB);
+/// the REQUEST must still fit the link's channel MDU.
+pub const MAX_HOST_PAYLOAD: usize = 16 * 1024;
+
+/// +ciris (leviculum#89): REJECT reason after a punch, meaning "my side of
+/// the punch failed, do not move the link". Sent only to a peer that offered
+/// the two-sided commit.
+pub const REJECT_PUNCH_FAILED: u8 = 0x10;
+
 /// HKDF `info` for the punch token. Shared with rns-rs; a different label
 /// would make every punch frame fail the other side's check.
 const PUNCH_TOKEN_INFO: &[u8] = b"rns-holepunch-v1";
@@ -104,6 +114,11 @@ pub enum Signal {
         /// +ciris: the initiator's host candidates ([`MAX_LOCAL_CANDIDATES`]
         /// at most), punched when both ends turn out to share a NAT.
         initiator_local: Vec<SocketAddr>,
+        /// +ciris (leviculum#89): the initiator offers the two-sided commit.
+        commit: bool,
+        /// +ciris (leviculum#88): opaque bytes for the responder's host to
+        /// decide on (CIRIS: the requester's signed contact grant).
+        host_payload: Option<Vec<u8>>,
     },
     Accept {
         session: SessionId,
@@ -117,6 +132,9 @@ pub enum Signal {
         responder_public: SocketAddr,
         /// +ciris: the responder's host candidates.
         responder_local: Vec<SocketAddr>,
+        /// +ciris (leviculum#89): the responder agrees to the two-sided
+        /// commit (it offers it only when the REQUEST did).
+        commit: bool,
     },
     Complete {
         session: SessionId,
@@ -160,10 +178,18 @@ impl Signal {
                 initiator_public,
                 protocol,
                 initiator_local,
+                commit,
+                host_payload,
             } => {
                 let stun = *protocol != ProbeProtocol::Rnsp;
                 let local = !initiator_local.is_empty();
-                msgpack::write_fixmap_header(&mut buf, 3 + u8::from(stun) + u8::from(local));
+                msgpack::write_fixmap_header(
+                    &mut buf,
+                    3 + u8::from(stun)
+                        + u8::from(local)
+                        + u8::from(*commit)
+                        + u8::from(host_payload.is_some()),
+                );
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "f");
                 write_endpoint(&mut buf, facilitator);
@@ -176,6 +202,7 @@ impl Signal {
                 if local {
                     write_local(&mut buf, initiator_local);
                 }
+                write_extras(&mut buf, *commit, host_payload.as_deref());
             }
             Signal::Accept { session } | Signal::Complete { session } => {
                 msgpack::write_fixmap_header(&mut buf, 1);
@@ -191,15 +218,17 @@ impl Signal {
                 session,
                 responder_public,
                 responder_local,
+                commit,
             } => {
                 let local = !responder_local.is_empty();
-                msgpack::write_fixmap_header(&mut buf, 2 + u8::from(local));
+                msgpack::write_fixmap_header(&mut buf, 2 + u8::from(local) + u8::from(*commit));
                 write_session(&mut buf, session);
                 msgpack::write_fixstr(&mut buf, "a");
                 write_endpoint(&mut buf, responder_public);
                 if local {
                     write_local(&mut buf, responder_local);
                 }
+                write_extras(&mut buf, *commit, None);
             }
         }
         buf
@@ -225,6 +254,8 @@ impl Signal {
                     .map(ProbeProtocol::from_wire)
                     .unwrap_or(ProbeProtocol::Rnsp),
                 initiator_local: fields.local,
+                commit: fields.commit,
+                host_payload: fields.host_payload,
             },
             MSG_UPGRADE_ACCEPT => Signal::Accept { session },
             MSG_UPGRADE_REJECT => Signal::Reject {
@@ -238,6 +269,7 @@ impl Signal {
                 session,
                 responder_public: fields.address.ok_or(WireError::Malformed)?,
                 responder_local: fields.local,
+                commit: fields.commit,
             },
             _ => Signal::Complete { session },
         };
@@ -254,6 +286,8 @@ struct Fields {
     protocol: Option<u64>,
     reason: Option<u64>,
     local: Vec<SocketAddr>,
+    commit: bool,
+    host_payload: Option<Vec<u8>>,
 }
 
 impl Fields {
@@ -273,6 +307,14 @@ impl Fields {
                 b"p" => fields.protocol = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"r" => fields.reason = Some(msgpack::read_msgpack_uint(data, &mut pos)?),
                 b"l" => fields.local = read_local(data, &mut pos)?,
+                b"c" => fields.commit = read_bool(data, &mut pos)?,
+                b"h" => {
+                    let bin = msgpack::read_msgpack_bin(data, &mut pos)?;
+                    if bin.len() > MAX_HOST_PAYLOAD {
+                        return None;
+                    }
+                    fields.host_payload = Some(bin.to_vec());
+                }
                 _ => msgpack::skip_msgpack_value(data, &mut pos)?,
             }
         }
@@ -293,6 +335,31 @@ fn write_endpoint(buf: &mut Vec<u8>, addr: &SocketAddr) {
         IpAddr::V6(ip) => msgpack::write_bin(buf, &ip.octets()),
     }
     msgpack::write_uint(buf, u64::from(addr.port()));
+}
+
+/// +ciris: `"c"` (the two-sided commit, leviculum#89) and `"h"` (the host
+/// payload, leviculum#88), each written only when set, so a signal without
+/// them is byte for byte what rns-rs sends; an rns-rs decoder skips both.
+fn write_extras(buf: &mut Vec<u8>, commit: bool, host_payload: Option<&[u8]>) {
+    if commit {
+        msgpack::write_fixstr(buf, "c");
+        msgpack::write_bool(buf, true);
+    }
+    if let Some(payload) = host_payload {
+        msgpack::write_fixstr(buf, "h");
+        msgpack::write_bin(buf, payload);
+    }
+}
+
+fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
+    let byte = *data.get(*pos)?;
+    let value = match byte {
+        0xc3 => true,
+        0xc2 => false,
+        _ => return None,
+    };
+    *pos += 1;
+    Some(value)
 }
 
 /// +ciris: `"l"`, the sender's host candidates, as an array of endpoints.
@@ -660,6 +727,8 @@ mod tests {
             initiator_public: public_v4(),
             protocol: ProbeProtocol::Rnsp,
             initiator_local: Vec::new(),
+            commit: false,
+            host_payload: None,
         };
         let golden = hex(
             "83a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c404c6336417cd9c40",
@@ -676,6 +745,8 @@ mod tests {
             initiator_public: public_v6(),
             protocol: ProbeProtocol::Stun,
             initiator_local: Vec::new(),
+            commit: false,
+            host_payload: None,
         };
         let golden = hex(
             "84a173c41011111111111111111111111111111111a16692c404cb007107cd10f7a16192c41020010db800000000000000000000000105a17001",
@@ -703,6 +774,7 @@ mod tests {
                     session: SESSION,
                     responder_public: public_v4(),
                     responder_local: Vec::new(),
+                    commit: false,
                 },
                 "82a173c41011111111111111111111111111111111a16192c404c6336417cd9c40",
             ),
@@ -743,6 +815,7 @@ mod tests {
                 session: SESSION,
                 responder_public: public_v6(),
                 responder_local: Vec::new(),
+                commit: false,
             })
         );
     }
@@ -758,6 +831,8 @@ mod tests {
             initiator_public: public_v4(),
             protocol: ProbeProtocol::Rnsp,
             initiator_local: alloc::vec![lan(10)],
+            commit: false,
+            host_payload: None,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_REQUEST, &request.encode()),
@@ -768,6 +843,7 @@ mod tests {
             session: SESSION,
             responder_public: public_v6(),
             responder_local: many.clone(),
+            commit: false,
         };
         assert_eq!(
             Signal::decode(MSG_UPGRADE_READY, &ready.encode()),
@@ -775,6 +851,7 @@ mod tests {
                 session: SESSION,
                 responder_public: public_v6(),
                 responder_local: many[..MAX_LOCAL_CANDIDATES].to_vec(),
+                commit: false,
             })
         );
     }

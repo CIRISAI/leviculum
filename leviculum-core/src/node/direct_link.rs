@@ -25,6 +25,7 @@ use core::net::SocketAddr;
 use rand_core::CryptoRngCore;
 
 use crate::constants::TRUNCATED_HASHBYTES;
+use crate::direct_link::session::Phase;
 use crate::direct_link::wire::{self, REJECT_BUSY, REJECT_POLICY};
 use crate::direct_link::{Failure, ProbeProtocol, Role, Session, SessionId, Signal, Step};
 use crate::hex_fmt::HexShort;
@@ -110,6 +111,10 @@ pub enum DirectLinkError {
     NoPendingRequest,
     /// The link is not on a direct interface (+ciris, leviculum#83).
     NotDirect,
+    /// The host payload is over [`wire::MAX_HOST_PAYLOAD`], or the REQUEST
+    /// carrying it would not fit the link's channel MDU (+ciris,
+    /// leviculum#88).
+    PayloadTooLarge,
 }
 
 impl core::fmt::Display for DirectLinkError {
@@ -122,6 +127,7 @@ impl core::fmt::Display for DirectLinkError {
             DirectLinkError::ChannelBusy => "the link's channel is busy",
             DirectLinkError::NoPendingRequest => "no direct-link request awaits an answer",
             DirectLinkError::NotDirect => "the link is not on a direct interface",
+            DirectLinkError::PayloadTooLarge => "the host payload does not fit the proposal",
         })
     }
 }
@@ -168,6 +174,8 @@ struct PendingRequest {
     initiator_local: Vec<SocketAddr>,
     protocol: ProbeProtocol,
     asked_at_ms: u64,
+    /// +ciris (leviculum#89): the REQUEST offered the two-sided commit.
+    commit: bool,
 }
 
 /// A link moved onto a direct interface, and where it was before.
@@ -202,6 +210,10 @@ pub(crate) struct DirectLinks {
     deferred: BTreeMap<LinkId, (SessionId, usize, bool)>,
     /// Peer requests waiting for the host's answer (`AskHost`), by link.
     pending: BTreeMap<LinkId, PendingRequest>,
+    /// +ciris (leviculum#89): punched links whose own punch succeeded,
+    /// waiting for the peer's COMPLETE before they move: (session, direct
+    /// interface, proposed). Nothing is sent on the interface meanwhile.
+    committing: BTreeMap<LinkId, (SessionId, usize, bool)>,
     jobs: VecDeque<DirectLinkJob>,
 }
 
@@ -250,6 +262,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         link_id: &LinkId,
     ) -> Result<crate::transport::TickOutput, DirectLinkError> {
+        self.propose_direct_link_with(link_id, None)
+    }
+
+    /// [`propose_direct_link`](Self::propose_direct_link), with opaque bytes
+    /// for the responder's host (+ciris, leviculum#88; CIRIS: the
+    /// requester's signed contact grant). Under `AskHost` the responder's
+    /// [`NodeEvent::DirectLinkRequested`] carries them; leviculum never reads
+    /// them. At most [`wire::MAX_HOST_PAYLOAD`] bytes, and the REQUEST that
+    /// carries them must fit the link's channel MDU.
+    pub fn propose_direct_link_with(
+        &mut self,
+        link_id: &LinkId,
+        host_payload: Option<Vec<u8>>,
+    ) -> Result<crate::transport::TickOutput, DirectLinkError> {
         let link_id = self.resolve_link_id(link_id);
         let now_ms = self.transport.clock().now_ms();
         let facilitator = self
@@ -257,12 +283,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .config
             .facilitator
             .ok_or(DirectLinkError::NoFacilitator)?;
-        let link_key = match self.links.get(&link_id) {
-            Some(link) if link.state() == LinkState::Active => {
-                *link.link_key().ok_or(DirectLinkError::NoActiveLink)?
-            }
+        let (link_key, link_mdu) = match self.links.get(&link_id) {
+            Some(link) if link.state() == LinkState::Active => (
+                *link.link_key().ok_or(DirectLinkError::NoActiveLink)?,
+                link.mdu(),
+            ),
             _ => return Err(DirectLinkError::NoActiveLink),
         };
+        // The REQUEST's fixed fields take well under 256 bytes; the payload
+        // has to fit beside them in one channel message.
+        if let Some(payload) = &host_payload {
+            if payload.len() > wire::MAX_HOST_PAYLOAD || payload.len() + 256 > link_mdu {
+                return Err(DirectLinkError::PayloadTooLarge);
+            }
+        }
         if self.direct_links.sessions.contains_key(&link_id)
             || self.direct_links.pending.contains_key(&link_id)
             || self.direct_links.interface_of_link(&link_id).is_some()
@@ -278,13 +312,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut session_id = [0u8; 16];
         self.rng.fill_bytes(&mut session_id);
         let token = wire::punch_token(&link_key, &session_id);
-        let (session, steps) = Session::initiate(
+        let (mut session, steps) = Session::initiate(
             session_id,
             token,
             facilitator,
             self.direct_links.config.protocol,
             now_ms,
         );
+        session.set_host_payload(host_payload);
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             session = %HexShort(&session_id),
@@ -381,6 +416,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.attach_direct_link(link_id, *session, index, proposed, now_ms);
                         }
                     }
+                } else if let (Some(index), true) = (
+                    interface_index,
+                    self.direct_links
+                        .sessions
+                        .get(&link_id)
+                        .is_some_and(|s| s.phase() == Phase::Committing),
+                ) {
+                    // +ciris (leviculum#89): this side's punch succeeded; the
+                    // link moves when the peer's COMPLETE says its side did.
+                    let proposed = self
+                        .direct_links
+                        .sessions
+                        .get(&link_id)
+                        .is_some_and(|s| s.role() == Role::Initiator);
+                    self.direct_links
+                        .committing
+                        .insert(link_id, (*session, index, proposed));
                 } else if let Some(index) = interface_index {
                     // The session was no longer punching, so nothing can use
                     // the interface.
@@ -518,6 +570,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             initiator_public,
             protocol,
             initiator_local,
+            commit,
+            host_payload,
         } = signal
         else {
             if let Signal::Complete { session } = &signal {
@@ -599,6 +653,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             initiator_local,
             protocol,
             asked_at_ms: now_ms,
+            commit,
         };
         if ask_host {
             // Held: nothing probed, nothing sent, until the host answers.
@@ -611,6 +666,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.events.push(NodeEvent::DirectLinkRequested {
                 link_id,
                 peer_identity,
+                host_payload,
             });
             return;
         }
@@ -635,7 +691,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
         self.direct_links.last_proposal_ms.insert(link_id, now_ms);
         let token = wire::punch_token(&link_key, &request.session);
-        let (session, steps) = Session::respond(
+        let (mut session, steps) = Session::respond(
             request.session,
             token,
             request.facilitator,
@@ -644,6 +700,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             request.protocol,
             now_ms,
         );
+        session.set_commit(request.commit);
         self.direct_links.sessions.insert(link_id, session);
         self.apply_direct_link_steps(link_id, steps, now_ms);
     }
@@ -785,9 +842,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         token,
                     });
                 }
-                // The attach already happened in `direct_link_punched`; the
-                // session has done its job.
-                Step::Established => self.end_direct_link_session(link_id, None),
+                // The attach already happened in `direct_link_punched`,
+                // unless the two-sided commit waited for the peer: then the
+                // link moves now (leviculum#89). Either way the session has
+                // done its job.
+                Step::Established => {
+                    if let Some((session, index, proposed)) =
+                        self.direct_links.committing.remove(&link_id)
+                    {
+                        if self.resources_in_flight(&link_id) {
+                            self.direct_links
+                                .deferred
+                                .insert(link_id, (session, index, proposed));
+                        } else {
+                            self.attach_direct_link(link_id, session, index, proposed, now_ms);
+                        }
+                    }
+                    self.end_direct_link_session(link_id, None)
+                }
                 Step::Failed(failure) => {
                     self.end_direct_link_session(link_id, Some(failure));
                     return;
@@ -805,13 +877,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // REQUEST sent after the initiator gave up starts the peer on a
         // session nobody holds (Codex review on #74).
         if let Some(queue) = self.direct_links.outbox.get_mut(&link_id) {
-            // A REJECT is the session's last word, not stale initiation: it
-            // stays, so the peer hears the failure instead of timing out.
+            // A REJECT or a COMPLETE is the session's last word, not stale
+            // initiation: it stays, so the peer hears the verdict (and, for
+            // the two-sided commit, can move too) instead of timing out.
             queue.retain(|signal| {
-                signal.session() != session.id() || matches!(signal, Signal::Reject { .. })
+                signal.session() != session.id()
+                    || matches!(signal, Signal::Reject { .. } | Signal::Complete { .. })
             });
             if queue.is_empty() {
                 self.direct_links.outbox.remove(&link_id);
+            }
+        }
+        // A link still waiting on the peer's verdict never moved; its punched
+        // interface goes (leviculum#89).
+        if failure.is_some() {
+            if let Some((_, index, _)) = self.direct_links.committing.remove(&link_id) {
+                self.direct_links
+                    .jobs
+                    .push_back(DirectLinkJob::CloseInterface {
+                        interface_index: index,
+                    });
             }
         }
         // After success the driver's socket now belongs to the interface,
@@ -941,7 +1026,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 return SignalSend::Never;
             }
         };
-        let packet = match link.build_data_packet_with_context(
+        // Active or Stale, as checked above: the stale-tolerant builder, or a
+        // signal on a stale link would take a channel sequence and then not
+        // be sent at all (the fallback nudge, a commit verdict after a punch
+        // on a link that went quiet meanwhile).
+        let packet = match link.build_retransmit_packet_with_context(
             &envelope,
             PacketContext::Channel,
             &mut self.rng,
@@ -1046,6 +1135,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             + hc::btree_map_bytes(&d.last_proposal_ms)
             + hc::btree_map_bytes(&d.attached)
             + hc::btree_map_bytes(&d.deferred)
+            + hc::btree_map_bytes(&d.committing)
             + hc::btree_map_bytes(&d.pending)
             + hc::btree_map_bytes(&d.outbox)
             + outbox
@@ -1054,7 +1144,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// The link is being removed: end its session and retire its interface.
     pub(super) fn direct_link_link_removed(&mut self, link_id: &LinkId) {
-        if let Some((_, index, _)) = self.direct_links.deferred.remove(link_id) {
+        let waiting = self.direct_links.deferred.remove(link_id);
+        let committing = self.direct_links.committing.remove(link_id);
+        for (_, index, _) in waiting.into_iter().chain(committing) {
             self.direct_links
                 .jobs
                 .push_back(DirectLinkJob::CloseInterface {
@@ -1089,6 +1181,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// before. With no fallback left the link has no route at all, so it is
     /// closed (as `Stale`) rather than pinned to a dead interface.
     pub(super) fn direct_link_interface_down(&mut self, index: usize) {
+        // A link waiting on the peer's verdict (leviculum#89) loses the path
+        // it would have moved to: its session ends, and the link stays.
+        let committing = self
+            .direct_links
+            .committing
+            .iter()
+            .find(|(_, (_, i, _))| *i == index)
+            .map(|(link_id, _)| *link_id);
+        if let Some(link_id) = committing {
+            self.direct_links.committing.remove(&link_id);
+            self.end_direct_link_session(link_id, Some(Failure::Timeout));
+        }
         // A punched link still waiting to move never got its direct path.
         let waiting = self
             .direct_links
@@ -1216,7 +1320,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// fallback, packets legitimately arrive on the other one.
     pub(super) fn direct_link_binds(&self, link_id: &LinkId, iface: usize) -> bool {
         let d = &self.direct_links;
-        if d.attached.is_empty() && d.deferred.is_empty() {
+        if d.attached.is_empty() && d.deferred.is_empty() && d.committing.is_empty() {
             return false;
         }
         if let Some(attachment) = d.attached.get(&iface) {
@@ -1234,6 +1338,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         d.deferred
             .get(link_id)
+            .or_else(|| d.committing.get(link_id))
             .is_some_and(|(_, index, _)| *index == iface)
     }
 
@@ -1351,6 +1456,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // fallback and fails links still deferred.
         let mut gone: Vec<usize> = self.direct_links.attached.keys().copied().collect();
         gone.extend(self.direct_links.deferred.values().map(|d| d.1));
+        gone.extend(self.direct_links.committing.values().map(|d| d.1));
         for index in gone {
             let out = self.handle_interface_down(crate::transport::InterfaceId(index));
             self.events.extend(out.events);

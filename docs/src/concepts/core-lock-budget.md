@@ -247,7 +247,7 @@ reach the bounded channel at all, because `PacketSender::send`
 block and releases it *before* its `.await`. It deadlocks one line
 earlier, on the mutex.
 
-And no `block_on` is needed. The number is **71** in this fork (58 upstream), and it is a number
+And no `block_on` is needed. The number is **72** in this fork (58 upstream), and it is a number
 rather than a phrase on purpose: `scripts/check-core-lock-census.py`
 rebuilds the list of public methods that lock the core out of the
 sources on every `just fast` and pins it, name by name, in a

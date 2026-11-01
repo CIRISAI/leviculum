@@ -192,6 +192,9 @@ pub enum NodeEvent {
         link_id: LinkId,
         /// The peer's identity hash, when it identified itself on the link
         peer_identity: Option<[u8; crate::constants::IDENTITY_HASHBYTES]>,
+        /// +ciris (leviculum#88): opaque bytes the proposer sent for this
+        /// node's host to decide on (CIRIS: its signed contact grant).
+        host_payload: Option<alloc::vec::Vec<u8>>,
     },
 
     /// +ciris (leviculum#70): a direct-link upgrade ended without a direct

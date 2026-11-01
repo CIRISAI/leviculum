@@ -4138,6 +4138,19 @@ impl ReticulumNode {
     /// rns-rs). A Python RNS peer cannot skip the request, and every later
     /// channel message on the link stalls behind it.
     pub async fn propose_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
+        self.propose_direct_link_with(link_id, None).await
+    }
+
+    /// [`propose_direct_link`](Self::propose_direct_link) carrying opaque
+    /// bytes for the peer's host (+ciris, leviculum#88; CIRIS: the
+    /// requester's signed contact grant). A peer whose policy is `AskHost`
+    /// sees them in `NodeEvent::DirectLinkRequested::host_payload`; leviculum
+    /// never reads them.
+    pub async fn propose_direct_link_with(
+        &self,
+        link_id: &LinkId,
+        host_payload: Option<Vec<u8>>,
+    ) -> Result<(), Error> {
         let addr = self
             .direct_link
             .facilitator
@@ -4151,7 +4164,7 @@ impl ReticulumNode {
             let mut config = core.direct_link_config();
             config.facilitator = Some(facilitator);
             core.set_direct_link_config(config);
-            core.propose_direct_link(link_id)?
+            core.propose_direct_link_with(link_id, host_payload)?
         };
         self.action_dispatch_tx()
             .send(output)
