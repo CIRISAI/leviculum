@@ -386,9 +386,55 @@ branch close the slice.
   selection, the key hint. Swapping two rows or changing one row's words
   fails it. The README goldens did not move.
 
-Left for slice 1b, by the plan's own row: the footer. Its buttons are chords
-(`Alt-←`, `d`, `?`) with drop ranks, and 1b derives the footer and the help's
-key column from the key table. Its words already come from the catalogue.
+**Slice 1b, built 2026-11-01 (1285).** The per-mode `match`es are gone.
+
+- **The table.** `lnomad/src/app/keys.rs` holds lnomad's rows
+  (`ROWS`, `lnomad/src/app/keys.rs:148`) over `leviculum_ui::keymap`,
+  beside the shared `SCROLL_ROWS`, the way Loquax holds its own
+  (`loquax/src/keys.rs:216`). A mode is a pane: browse, address, search,
+  field, hint, and the overlays that own the keys while open (help,
+  places, the name list, and the name list while it asks). Two contexts:
+  a fetch in flight (`Esc` and `Ctrl-g` cancel it) and a checkbox or radio
+  focused (`Space` toggles it rather than typing). `resolve`
+  (`lnomad/src/app/keys.rs:384`) is Loquax's rule: the most specific chord,
+  lnomad's rows first among equals. A key's `Action` becomes a
+  `lnomad::Intent` through `Intent::of_key`
+  (`lnomad/src/app/intent.rs:143`), which reads what it acts on (the
+  focused link, the selection, the bookmark), and `update_key`
+  (`lnomad/src/app/event.rs:432`) folds it with `apply`, as a tap does.
+  What a table cannot hold stays with the handler: the text the editors
+  take, hint labels, and the "no" any key but `y` gives the pin question.
+- **Size per mode**, chords in force over both tables: browse 47, address
+  4, search 4, field 6, hint 3, help 25, places 28, names 24, ask 3
+  (`the_tables_size_per_mode`).
+- **The intents** grew from 22 to 28 arms for what the keys did that no
+  intent named: `Cancel`, `Find` (open the search field), `Answer { yes }`
+  (the pin question), `OpenImage`, `Theme`, `Redraw`. `Dismiss` now also
+  leaves the address editor and a field, `Scroll` scrolls what is in
+  front (the help, the places selection, the name list, else the page),
+  `Toggle(n)` toggles without moving the focus, as `Space` did, and a tap
+  on a name pinned to another key asks first, as `Enter` did.
+- **Help and footer derived.** The help's key column is each row's keys,
+  derived from its chords; the mouse spelling moved into the row's words
+  ("enter a URL, or click the URL"). The footer is each mode's buttons
+  whose action has a live chord there, showing that chord. Two
+  consequences: the help lists every chord (cancel, redraw, the places
+  keys, the pin answer), so it needs 50 rows where it fit 40, and a footer
+  no longer offers a key its mode does not honour: `?` is a letter in an
+  editor, so `F1` opens the help there (and from browsing), as in Loquax,
+  and a text field's footer drops `Space toggle`. The search footer's
+  `n`/`N` are gone too; that footer is never drawn.
+- **Acceptance.** `every_old_chord_resolves_to_the_same_action`
+  (`lnomad/src/app/keys.rs:816`) transcribes the old `match`es and
+  compares them with the table for every printable ASCII key, `ä` and
+  every special key under every mix of Shift, Ctrl and Alt, in 9 panes and
+  4 settings; the only key the table adds is `F1`.
+  `no_chord_resolves_to_two_actions_in_one_pane`
+  (`lnomad/src/app/keys.rs:600`) resolves each chord's own key in every
+  pane and setting it is in force. Positive controls: `m` made
+  `Mods::Any` fails the first (`Ctrl-m` reached Mark), a second action on
+  `y` fails the second. `the_help_lists_exactly_the_tables_chords`
+  (`lnomad/src/app/keys.rs:879`) holds the help to the table.
 
 ## 6. What not to do
 
