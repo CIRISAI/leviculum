@@ -167,14 +167,18 @@ async fn body_of(router: &Router, path: &str) -> String {
 }
 
 #[test]
-fn the_site_has_the_four_pages_and_a_landing_page() {
-    assert_eq!(page_names(), ["boards", "download", "index", "source"]);
+fn the_site_has_its_pages_and_a_landing_page() {
+    assert_eq!(
+        page_names(),
+        ["boards", "download", "index", "mailbox", "source"]
+    );
     let snapshot = snapshot();
     for path in [
         INDEX_PATH,
         "/page/blog.mu",
         "/page/boards.mu",
         "/page/download.mu",
+        "/page/mailbox.mu",
         "/page/source.mu",
     ] {
         assert!(

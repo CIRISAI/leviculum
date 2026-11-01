@@ -34,7 +34,7 @@ The app is only here, not on Codeberg. To check a download on a computer: `sha25
 
 ## Messenger: `loquax`
 
-`loquax send` for scripts, `loquax tui` for people.
+`loquax send` for scripts, `loquax tui` for people. To make a computer your mailbox, see [the mailbox page](/mailbox).
 
 - [loquax-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/loquax-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-amd64.deb.sha256))
 - [loquax-nightly-arm64.deb](https://leviculum.network/releases/nightly/latest/loquax-nightly-arm64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-arm64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-arm64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-arm64.deb.sha256))
