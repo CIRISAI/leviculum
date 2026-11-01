@@ -853,6 +853,18 @@ impl App {
                 Message::Intent(file.open.intent.clone()),
             ));
         }
+        // A voice message (1222): its length, a press plays it in the
+        // system's player.
+        if let Some(voice) = &node.voice {
+            let line = text(format!("♪ voice message · {}", voice.duration))
+                .size(size::BODY - 2.0)
+                .color(ink);
+            let line: Element<'_, Message> = match &voice.toggle {
+                Some(toggle) => flat(line, Message::Intent(toggle.intent.clone())).into(),
+                None => line.into(),
+            };
+            inside = inside.push(line);
+        }
         if let Some(fix) = &bubble.fix {
             let mut words = loquax::telemetry::coordinates(&fix.location);
             if let Some(accuracy) = loquax::telemetry::accuracy(&fix.location) {

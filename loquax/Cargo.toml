@@ -130,6 +130,7 @@ tui = [
     "dep:open",
     "qr",
     "photos",
+    "voice",
 ]
 # QR codes (`loquax::home::qr`): the admission code in the terminal, and an
 # address for the phone's contact screen to show (1146).
@@ -138,6 +139,10 @@ qr = ["dep:qrcodegen"]
 # before it goes, a received one decoded for its thumbnail and its full
 # view. In the terminal, the window and the phone; not in the core.
 photos = ["std", "dep:image"]
+# Voice messages (`loquax::voice`, 1222): a recording coded as Opus in Ogg
+# before it goes, a received one (Opus, or Sideband's Codec2) decoded for
+# the player. In the terminal, the window and the phone; not in the core.
+voice = ["std", "dep:opus-pure", "dep:codec2"]
 # `loquax gui`: the window (docs/src/concepts/gui-toolkit.md, option B,
 # iced on the desktop), over the same shell and model as the terminal. Off
 # by default and off in `tui`, so iced is in no graph that does not ask for
@@ -156,6 +161,7 @@ gui = [
     "dep:iced",
     "dep:open",
     "photos",
+    "voice",
 ]
 
 [dependencies]
@@ -227,6 +233,14 @@ qrcodegen = { version = "1.8.0", optional = true }
 # they carry, the scaling and the JPEG encoder; the version lnomad's
 # pictures already put in the lock, without its default formats or rayon.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
+# Voice messages (`voice`, 1222): Opus and its Ogg container in Rust, no C
+# and no build script, so the NDK builds it as it builds the rest; the
+# encoder and decoder of libopus, checked against opusdec and opusenc in
+# loquax-android's facade test. BSD-3-Clause.
+opus-pure = { version = "0.2.2", optional = true }
+# Codec2, the modes Sideband sends on slow links (receive only): a port of
+# the codec to Rust, LGPL-2.1, so the APK's license (AGPL-3.0) carries it.
+codec2 = { version = "0.3.1", optional = true }
 # The history (`history`): bundled, so the musl-static binary carries its
 # SQLite and FTS5 (the build probe of loquax-storage.md, "Options", C), at
 # the version leviculum-cli already ships.
@@ -342,3 +356,9 @@ required-features = ["screenmap"]
 [[example]]
 name = "photo_cost"
 required-features = ["photos"]
+
+# What a voice message costs (1222): bytes a minute and the time to code
+# and decode it, for the reviewer. Never in a package.
+[[example]]
+name = "voice_cost"
+required-features = ["voice"]

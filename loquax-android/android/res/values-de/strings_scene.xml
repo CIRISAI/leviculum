@@ -123,6 +123,15 @@
     <string name="file_too_large">Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.</string>
     <string name="file_unreadable">Diese Datei ließ sich nicht lesen.</string>
     <string name="file_no_app">Keine App hier öffnet diese Datei.</string>
+    <string name="scene_voice">Sprachnachricht, %1$s</string>
+    <string name="scene_voice_unplayable">Sprachnachricht, %1$s, hier nicht abspielbar</string>
+    <string name="scene_play_voice">Abspielen</string>
+    <string name="scene_pause_voice">Pause</string>
+    <string name="record_voice">Halten für eine Sprachnachricht</string>
+    <string name="voice_hold">Mikrofon halten zum Aufnehmen, loslassen zum Senden.</string>
+    <string name="voice_cancel">Zum Abbrechen nach links wischen</string>
+    <string name="voice_too_long">Eine Sprachnachricht dauert höchstens %1$s.</string>
+    <string name="voice_no_microphone">Loquax braucht das Mikrofon für Sprachnachrichten.</string>
     <string name="scene_zoom_in">Vergrößern</string>
     <string name="scene_zoom_out">Verkleinern</string>
     <string name="scene_pan">Karte verschieben</string>

@@ -174,6 +174,18 @@ leviculum_ui::catalogue! {
     FileTooLarge = "file_too_large", "This file is %1$s. A message carries at most %2$s.", "Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.";
     FileUnreadable = "file_unreadable", "This file could not be read.", "Diese Datei ließ sich nicht lesen.";
     FileNoApp = "file_no_app", "No app here opens this file.", "Keine App hier öffnet diese Datei.";
+    // Voice messages (1222): the bubble's words, its buttons, the
+    // microphone's hint, the slide that cancels, the refusals, and what
+    // the phone says without the microphone.
+    Voice = "scene_voice", "Voice message, %1$s", "Sprachnachricht, %1$s";
+    VoiceUnplayable = "scene_voice_unplayable", "Voice message, %1$s, which cannot be played here", "Sprachnachricht, %1$s, hier nicht abspielbar";
+    PlayVoice = "scene_play_voice", "Play", "Abspielen";
+    PauseVoice = "scene_pause_voice", "Pause", "Pause";
+    RecordVoice = "record_voice", "Hold to record a voice message", "Halten für eine Sprachnachricht";
+    VoiceHold = "voice_hold", "Hold the microphone to record, release to send.", "Mikrofon halten zum Aufnehmen, loslassen zum Senden.";
+    VoiceCancel = "voice_cancel", "Slide left to cancel", "Zum Abbrechen nach links wischen";
+    VoiceTooLong = "voice_too_long", "A voice message lasts at most %1$s.", "Eine Sprachnachricht dauert höchstens %1$s.";
+    VoiceNoMicrophone = "voice_no_microphone", "Loquax needs the microphone to record a voice message.", "Loquax braucht das Mikrofon für Sprachnachrichten.";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";
     Pan = "scene_pan", "Move the map", "Karte verschieben";

@@ -917,7 +917,7 @@ first rung it is.
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:231`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:276`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);
@@ -926,7 +926,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:746`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:3186`).
+  (`loquax/src/ui.rs:3225`).
 
 #### 3. What colour carries and what it must not carry alone
 

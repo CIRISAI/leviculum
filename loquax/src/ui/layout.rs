@@ -489,6 +489,25 @@ fn block(
                 false => format!("{body}\n{line}"),
             }
         });
+    // A voice message (1222) says its length under its text, or alone:
+    // `Enter` on it plays it.
+    let body = match super::voice::voice_of(&message.fields) {
+        Some(voice) => {
+            let (glyph, dot) = match draw.ascii {
+                true => ("[v]", "-"),
+                false => ("♪", "·"),
+            };
+            let line = format!(
+                "{glyph} voice message {dot} {}",
+                super::voice::duration_words(voice.duration_ms)
+            );
+            match body.trim().is_empty() {
+                true => line,
+                false => format!("{body}\n{line}"),
+            }
+        }
+        None => body,
+    };
     // A reaction drawn as a block, its signature broken: what it claims.
     let body = match (body.trim().is_empty(), message.reaction()) {
         (true, Some((_, content))) => format!("reacted {content}"),

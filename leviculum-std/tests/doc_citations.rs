@@ -152,6 +152,10 @@ const EXTERNAL_PREFIXES: &[&str] = &[
     "periculum/",
     "ble-reticulum/",
     "columba/",
+    // Sideband, the other LXMF messenger whose voice messages we play
+    // (1222): cited from a clone of github.com/markqvist/Sideband at
+    // ef572b5 (2026-10-01), which no host keeps beside this tree.
+    "Sideband/",
     // A crates.io dependency, cited by the nRF gate scripts. Its source is
     // under `~/.cargo`, never in this tree, so it can only be counted.
     "nrf-softdevice/",

@@ -102,7 +102,11 @@ pub enum NodeId {
     /// A bubble's file, by its message's key and its place among the
     /// message's files (1221).
     File(u64, usize),
+    /// A bubble's voice message, by its message's key (1222).
+    Voice(u64),
     Compose,
+    /// The compose bar's microphone (1222).
+    Record,
     Sheet,
     Card,
     Chip(u32),
@@ -127,7 +131,9 @@ impl NodeId {
             NodeId::Mark(key) => format!("mark_{key}"),
             NodeId::Photo(key) => format!("photo_{key}"),
             NodeId::File(key, index) => format!("file_{key}_{index}"),
+            NodeId::Voice(key) => format!("voice_{key}"),
             NodeId::Compose => "compose".to_string(),
+            NodeId::Record => "record".to_string(),
             NodeId::Sheet => "sheet".to_string(),
             NodeId::Card => "card".to_string(),
             NodeId::Chip(n) => format!("chip_{n}"),
@@ -379,6 +385,9 @@ pub struct BubbleNode {
     /// The files it carries (1221): a row each, its name, size and the
     /// tap that saves and opens it.
     pub files: Vec<FileNode>,
+    /// The voice message it carries (1222): its play or pause button,
+    /// length and level bar.
+    pub voice: Option<VoiceNode>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
@@ -423,6 +432,28 @@ pub struct FileNode {
     pub words: Text,
     /// [`Intent::OpenFile`].
     pub open: Action,
+}
+
+/// A bubble's voice message (1222): what the player shows and the tap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceNode {
+    pub id: NodeId,
+    /// The sender's audio mode (`crate::ui::voice::AM_OPUS_OGG`, ...).
+    pub mode: u8,
+    pub bytes: usize,
+    pub duration_ms: u32,
+    /// `0:07`.
+    pub duration: String,
+    /// The level bar: [`super::voice::BARS`] heights from 0 to 100, empty
+    /// where the stream does not tell; a renderer draws an even bar then.
+    pub levels: Vec<u8>,
+    /// Whether it plays right now: the button shows pause.
+    pub playing: bool,
+    /// [`Intent::PlayVoice`], or [`Intent::PauseVoice`] while it plays;
+    /// none for a mode this build does not play.
+    pub toggle: Option<Action>,
+    /// `Voice message, 0:07`.
+    pub words: Text,
 }
 
 /// The screen reader's words for `mark`; `read_at` is the reader's time
@@ -471,6 +502,10 @@ pub struct Compose {
     /// The message a reply being written answers.
     pub reply: Option<[u8; 32]>,
     pub send: Action,
+    /// The microphone (1222): held, it records; released, the platform
+    /// fills [`Intent::SendVoice`] with what it recorded; slid away, it
+    /// cancels. Its words are the hint to hold it.
+    pub record: Action,
     pub a11y: A11y,
 }
 
@@ -601,6 +636,11 @@ impl Scene {
                 .bubble(NodeId::Bubble(key))
                 .and_then(|node| node.files.get(index))
                 .map(|file| &file.open),
+            NodeId::Voice(key) => self
+                .bubble(NodeId::Bubble(key))
+                .and_then(|node| node.voice.as_ref())
+                .and_then(|voice| voice.toggle.as_ref()),
+            NodeId::Record => self.chat.as_ref().map(|chat| &chat.compose.record),
             _ => None,
         }
     }
@@ -816,7 +856,12 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
     let now = model.now;
     let mut groups: Vec<Group> = Vec::new();
     for (bubble, place) in bubbles.into_iter().zip(places) {
-        let node = bubble_node(peer, bubble, place, now);
+        let playing = model.playing
+            == Some(super::voice::Playing {
+                peer,
+                key: bubble.key,
+            });
+        let node = bubble_node(peer, bubble, place, now, playing);
         match groups.last_mut() {
             Some(group) if place.joins_before => group.bubbles.push(node),
             _ => {
@@ -868,6 +913,11 @@ pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
             to: Target::Peer(peer),
             body: None,
         }),
+        record: Action::of(Intent::SendVoice {
+            peer,
+            pcm: Vec::new(),
+            rate: 0,
+        }),
         a11y: A11y::of(
             NodeId::Compose,
             Role::TextField,
@@ -881,6 +931,7 @@ fn bubble_node(
     bubble: Bubble,
     place: Placement,
     now: Option<WallTime>,
+    playing: bool,
 ) -> BubbleNode {
     let id = NodeId::Bubble(bubble.key);
     let now_secs = now.map(|now| now.unix_secs);
@@ -937,10 +988,28 @@ fn bubble_node(
             }),
         })
         .collect();
-    let spoken = match (&live, &photo, files.first(), bubble.body.is_empty()) {
-        (Some(live), _, _, true) => live.clone(),
-        (_, Some(photo), _, true) => photo.words.clone(),
-        (_, _, Some(file), true) => file.words.clone(),
+    let voice = bubble.voice.as_ref().map(|voice| VoiceNode {
+        id: NodeId::Voice(bubble.key),
+        mode: voice.mode,
+        bytes: voice.bytes,
+        duration_ms: voice.duration_ms,
+        duration: super::voice::duration_words(voice.duration_ms),
+        levels: voice.levels.clone(),
+        playing,
+        toggle: voice.playable().then(|| {
+            let key = bubble.key;
+            Action::of(match playing {
+                true => Intent::PauseVoice { peer, key },
+                false => Intent::PlayVoice { peer, key },
+            })
+        }),
+        words: super::voice::voice_words(voice),
+    });
+    let spoken = match (&live, &photo, files.first(), &voice, bubble.body.is_empty()) {
+        (Some(live), _, _, _, true) => live.clone(),
+        (_, Some(photo), _, _, true) => photo.words.clone(),
+        (_, _, Some(file), _, true) => file.words.clone(),
+        (_, _, _, Some(voice), true) => voice.words.clone(),
         _ => Text::Raw(bubble.body.clone()),
     };
     let mark = bubble.mark.map(|mark| MarkNode {
@@ -962,6 +1031,7 @@ fn bubble_node(
         mark,
         photo,
         files,
+        voice,
         actions,
     }
 }
@@ -1199,6 +1269,17 @@ impl BubbleNode {
                 "words": f.words.to_json(),
                 "open": f.open.to_json(),
             })).collect::<Vec<_>>(),
+            "voice": opt(self.voice.as_ref(), |v| json!({
+                "id": v.id.resource(),
+                "mode": v.mode,
+                "bytes": v.bytes,
+                "duration_ms": v.duration_ms,
+                "duration": v.duration,
+                "levels": v.levels,
+                "playing": v.playing,
+                "toggle": opt(v.toggle.as_ref(), Action::to_json),
+                "words": v.words.to_json(),
+            })),
             "actions": actions(&self.actions),
             "a11y": self.a11y.to_json(),
         })
@@ -1225,6 +1306,7 @@ impl Chat {
                 "text": self.compose.text,
                 "reply": opt(self.compose.reply, |id| hex(&id)),
                 "send": self.compose.send.to_json(),
+                "record": self.compose.record.to_json(),
                 "a11y": self.compose.a11y.to_json(),
             },
             "a11y": self.a11y.to_json(),
@@ -1883,5 +1965,137 @@ mod tests {
             toast,
             "This file is 991 KB. A message carries at most 990 KB."
         );
+    }
+
+    /// A voice message (1222): its node with length, level bar and words,
+    /// the play tap that turns into pause while it plays and back at its
+    /// end, a mode this build does not play with no tap, the list's words,
+    /// the compose bar's microphone, and a send that carries the audio
+    /// field alone.
+    #[test]
+    fn a_voice_message_has_its_player_its_words_and_the_microphone_sends_one() {
+        use crate::ui::voice::{voice_fields, AM_CODEC2_2400, AM_CODEC2_700C, AM_OPUS_OGG};
+        use crate::ui::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t), (false, t + 60), (false, t + 120)]);
+        let peer = [0x42; 16];
+        // Two seconds of Codec2 2400 as Sideband sends it, and 700C, which
+        // this build does not play.
+        model.conversations[0].messages[1].body = String::new();
+        model.conversations[0].messages[1].fields =
+            voice_fields(AM_CODEC2_2400, alloc::vec![0; 600]);
+        model.conversations[0].messages[2].fields =
+            voice_fields(AM_CODEC2_700C, alloc::vec![0; 200]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene
+            .bubble(NodeId::Bubble(1))
+            .expect("text")
+            .voice
+            .is_none());
+        let node = scene.bubble(NodeId::Bubble(2)).expect("the voice bubble");
+        let voice = node.voice.as_ref().expect("a voice node");
+        assert_eq!(voice.id.resource(), "voice_2");
+        assert_eq!(
+            (
+                voice.mode,
+                voice.bytes,
+                voice.duration_ms,
+                voice.duration.as_str(),
+                voice.playing
+            ),
+            (AM_CODEC2_2400, 600, 2_000, "0:02", false)
+        );
+        assert!(voice.levels.is_empty(), "Codec2 frames are all one size");
+        assert_eq!(voice.words.resolve(Lang::En), "Voice message, 0:02");
+        assert_eq!(voice.words.resolve(Lang::De), "Sprachnachricht, 0:02");
+        assert_eq!(node.a11y.label, voice.words, "the screen reader says it");
+        let json = node.to_json();
+        assert_eq!(json["voice"]["id"], "voice_2");
+        assert_eq!(json["voice"]["duration"], "0:02");
+        assert_eq!(json["voice"]["mode"], 8);
+        let play = Intent::PlayVoice { peer, key: 2 };
+        assert_eq!(
+            scene.action(NodeId::Voice(2)).map(|a| a.intent.clone()),
+            Some(play.clone())
+        );
+        assert_eq!(scene.action(NodeId::Voice(1)), None);
+        let old = scene.bubble(NodeId::Bubble(3)).expect("the 700C bubble");
+        let old = old.voice.as_ref().expect("still a voice node");
+        assert_eq!(old.toggle, None);
+        assert_eq!(
+            old.words.resolve(Lang::En),
+            "Voice message, 0:02, which cannot be played here"
+        );
+        assert_eq!(
+            chat::preview(&model.conversations[0].messages[1]),
+            "voice message 0:02"
+        );
+        assert_eq!(chat::kind(&model.conversations[0].messages[1]), "voice");
+
+        // A tap plays it, the bubble shows pause; pause stops it; the
+        // player's end puts play back; the 700C one does not start.
+        let played = super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 2 });
+        assert_eq!(played, alloc::vec![UiEffect::PlayVoice { peer, key: 2 }]);
+        let scene = model.scene(LayoutClass::Compact);
+        let voice = scene
+            .bubble(NodeId::Bubble(2))
+            .and_then(|n| n.voice.clone())
+            .expect("voice");
+        assert!(voice.playing);
+        assert_eq!(
+            voice.toggle.map(|a| a.intent),
+            Some(Intent::PauseVoice { peer, key: 2 })
+        );
+        let paused = super::super::update(&mut model, UiEvent::PauseVoice { peer, key: 2 });
+        assert_eq!(paused, alloc::vec![UiEffect::PauseVoice { peer, key: 2 }]);
+        assert_eq!(model.playing, None);
+        super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 2 });
+        super::super::update(&mut model, UiEvent::VoiceEnded { peer, key: 2 });
+        assert_eq!(model.playing, None);
+        assert!(super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 3 }).is_empty());
+        assert!(super::super::update(&mut model, UiEvent::PlayVoice { peer, key: 1 }).is_empty());
+
+        // The microphone is the compose bar's, its words the hint to hold.
+        let compose = &model
+            .scene(LayoutClass::Compact)
+            .chat
+            .expect("chat")
+            .compose;
+        assert_eq!(
+            compose.record.intent,
+            Intent::SendVoice {
+                peer,
+                pcm: Vec::new(),
+                rate: 0
+            }
+        );
+        assert_eq!(
+            Intent::SendVoice {
+                peer,
+                pcm: Vec::new(),
+                rate: 0
+            }
+            .label()
+            .text(Lang::En),
+            "Hold to record a voice message"
+        );
+
+        // Sending one: a message of its own, the audio field alone, the
+        // view on it.
+        let sent = super::super::update(
+            &mut model,
+            UiEvent::SendVoice {
+                peer,
+                data: b"OggS".to_vec(),
+            },
+        );
+        let fields = voice_fields(AM_OPUS_OGG, b"OggS".to_vec());
+        assert!(
+            matches!(sent.as_slice(), [UiEffect::Send { to, body, fields: f }] if *to == peer && body.is_empty() && f.starts_with(&fields)),
+            "{sent:?}"
+        );
+        let last = model.conversations[0].messages.len() - 1;
+        assert_eq!(model.message_cursor, last);
     }
 }

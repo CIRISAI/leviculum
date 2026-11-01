@@ -149,6 +149,7 @@ pub mod scene;
 pub mod search;
 pub mod state;
 pub mod strings;
+pub mod voice;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
 /// seconds.
@@ -811,6 +812,9 @@ pub struct UiModel<B> {
     /// the config): the shell scales by it before
     /// [`UiEvent::SendPhoto`].
     pub photo_size: photos::PhotoSize,
+    /// The voice message that plays (1222): its bubble shows the pause
+    /// button, every other the play button.
+    pub playing: Option<voice::Playing>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -901,6 +905,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             drafts_due: BTreeMap::new(),
             reading: receipts::Reading::default(),
             photo_size: photos::PhotoSize::default(),
+            playing: None,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1413,6 +1418,18 @@ pub enum UiEvent {
         key: u64,
         index: usize,
     },
+    /// Send a recording to `peer` (1222): Opus in Ogg as
+    /// [`crate::voice::encode`] made it; it goes as one message with the
+    /// audio field alone ([`voice::voice_fields`]).
+    SendVoice { peer: [u8; 16], data: Vec<u8> },
+    /// A tap on a voice message's play button: the shell plays it
+    /// ([`UiEffect::PlayVoice`]), the bubble shows pause.
+    PlayVoice { peer: [u8; 16], key: u64 },
+    /// A tap on the pause button of the one that plays
+    /// ([`UiEffect::PauseVoice`]).
+    PauseVoice { peer: [u8; 16], key: u64 },
+    /// The shell's player came to the end of a voice message.
+    VoiceEnded { peer: [u8; 16], key: u64 },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1498,6 +1515,12 @@ pub enum UiEffect {
         key: u64,
         index: usize,
     },
+    /// Play the voice message `key` of `peer`'s conversation (1222): the
+    /// phone's player, the desktop's WAV file in the system's player. Its
+    /// bytes are in the message's fields ([`voice::voice_parts`]).
+    PlayVoice { peer: [u8; 16], key: u64 },
+    /// Stop the one that plays.
+    PauseVoice { peer: [u8; 16], key: u64 },
 }
 
 /// Fold one event into the model.
@@ -1607,6 +1630,13 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::ViewPhoto { peer, key } => model.view_photo(peer, key),
         UiEvent::SendFile { peer, name, data } => model.send_file(peer, &name, data),
         UiEvent::OpenFile { peer, key, index } => model.open_file(peer, key, index),
+        UiEvent::SendVoice { peer, data } => model.send_voice(peer, data),
+        UiEvent::PlayVoice { peer, key } => model.play_voice(peer, key),
+        UiEvent::PauseVoice { peer, key } => model.pause_voice(peer, key),
+        UiEvent::VoiceEnded { peer, key } => {
+            model.voice_ended(peer, key);
+            Vec::new()
+        }
         UiEvent::MailboxChosen { node, by_user } => {
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
@@ -2049,7 +2079,7 @@ fn act<B: InputBuffer + Default>(
 /// `Enter` on a message: one that carries a position, a report or a text
 /// with a telemetry field, opens the map at the fix its line names, one
 /// with a photo shows it whole (1220), one with a file opens its first
-/// (1221), any other message (and a report
+/// (1221), one with a voice message plays it (1222), any other message (and a report
 /// without a position) its detail view, which `v` opens for every
 /// message. A folded run of reports is drawn as its latest, which is
 /// where the cursor stands, so its line opens the latest fix of the run.
@@ -2071,6 +2101,15 @@ fn open_message<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         .map(|(peer, m)| (peer, m.activity));
     if let Some((peer, key)) = file {
         return model.open_file(peer, key, 0);
+    }
+    let voice = model
+        .conversations
+        .get(model.selected)
+        .and_then(|c| Some((c.peer, c.messages.get(model.message_cursor)?)))
+        .filter(|(_, m)| voice::voice_of(&m.fields).is_some())
+        .map(|(peer, m)| (peer, m.activity));
+    if let Some((peer, key)) = voice {
+        return model.play_voice(peer, key);
     }
     match model.message_fix(model.selected, model.message_cursor) {
         Some(fix) => {
@@ -11198,6 +11237,57 @@ mod tests {
                 peer: PEER,
                 key: file_key,
                 index: 0
+            }]
+        );
+    }
+
+    /// A voice message in the terminal (1222): its length under its text
+    /// or alone, ASCII where the screen is; `Enter` on it asks the shell
+    /// to play it.
+    #[test]
+    fn the_terminal_says_a_voice_message_and_enter_plays_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: Vec::new(),
+                fields: voice::voice_fields(voice::AM_CODEC2_2400, vec![0; 2_100]),
+                verified: true,
+            },
+        );
+        let shown = |model: &UiModel<Field>| -> Vec<String> {
+            view(model).messages.iter().map(text_of).collect()
+        };
+        assert!(
+            shown(&model)
+                .iter()
+                .any(|r| r.contains("♪ voice message · 0:07")),
+            "{:#?}",
+            shown(&model)
+        );
+        model.ascii = true;
+        assert!(shown(&model)
+            .iter()
+            .any(|r| r.contains("[v] voice message - 0:07")));
+        model.focus = Pane::Messages;
+        model.message_cursor = 0;
+        let voice_key = model.conversations[0].messages[0].activity;
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::PlayVoice {
+                peer: PEER,
+                key: voice_key
             }]
         );
     }

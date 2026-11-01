@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:5902`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5904`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -357,7 +357,7 @@ The emission can. Until #418 the event-log layer wrote each line with
 a blocking `write(2)`, flushed, under a process-global mutex, on the
 thread that emitted it — and the event loop emits while it holds the
 core mutex (`apply_inbound`,
-`leviculum-std/src/driver/mod.rs:4694`). A `write(2)` to a USB disk
+`leviculum-std/src/driver/mod.rs:4695`). A `write(2)` to a USB disk
 under writeback throttling blocks for seconds, so the loop stopped,
 and everything that wanted the core queued behind it. That is why the
 symptom was total silence rather than a missing log line.
@@ -385,8 +385,8 @@ informatively:
 | event | where | says |
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6892`) | announce handling itself took ≥ 100 ms |
-| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4495`) | an outside thread waited ≥ 250 ms for the core lock |
-| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1815`) | one batch write to the log file took ≥ 50 ms |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4496`) | an outside thread waited ≥ 250 ms for the core lock |
+| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1826`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by
 something other than announce handling; `EVENT_LOG_WRITE_SLOW`

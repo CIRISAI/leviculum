@@ -63,6 +63,11 @@
         "key": "compose_hint"
       },
       "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
       "reply": null,
       "send": {
         "enabled": true,
@@ -136,7 +141,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": {
@@ -235,7 +241,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -310,7 +317,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -397,7 +405,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -472,7 +481,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -555,7 +565,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -630,7 +641,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -717,7 +729,8 @@
               "to": "10ae77bbb2192e66f0f6df339a93c8909c27c136de20d5779a6eb47bbfb02b65"
             },
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -792,7 +805,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -881,7 +895,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -956,7 +971,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1030,7 +1046,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1113,7 +1130,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1191,7 +1209,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1274,7 +1293,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1349,7 +1369,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1432,7 +1453,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1542,7 +1564,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1629,7 +1652,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1704,7 +1728,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1791,7 +1816,8 @@
               "to": "90e3ba799e8404e69f110e5781f4b849921ffb450d30bc0441aa2661de4a5968"
             },
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -1872,7 +1898,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": {
@@ -1961,7 +1988,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2045,7 +2073,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2120,7 +2149,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2207,7 +2237,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2282,7 +2313,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2365,7 +2397,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2440,7 +2473,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2523,7 +2557,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2598,7 +2633,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2681,7 +2717,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2760,7 +2797,8 @@
               "to": "ede53cd369e05a45977035bdfcb33856f0707a8266d88f01e5fa522654e28802"
             },
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2847,7 +2885,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -2922,7 +2961,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -3005,7 +3045,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -3080,7 +3121,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,
@@ -3163,7 +3205,8 @@
             },
             "quote": null,
             "since": null,
-            "updates": 0
+            "updates": 0,
+            "voice": null
           }
         ],
         "day": null,

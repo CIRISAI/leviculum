@@ -33,6 +33,8 @@
 //! | (new) a tap on a photo, `UiEvent::ViewPhoto` (1220) | `ViewPhoto` |
 //! | `Request::File`, `UiEvent::SendFile` (1221) | `SendFile` |
 //! | (new) a tap on a file, `UiEvent::OpenFile` (1221) | `OpenFile` |
+//! | `Request::Voice`, `UiEvent::SendVoice` (1222) | `SendVoice` |
+//! | `Request::PlayVoice`, `UiEvent::PlayVoice`, `UiEvent::PauseVoice` (1222) | `PlayVoice`, `PauseVoice` |
 //! | `Request::Delete`, `UiEvent::Delete`, `Message::Delete`, `Message::AskDelete`, `Command::DeleteMessage` | `Delete` (`confirmed` tells the asked from the asking) |
 //! | `Request::Used`, `Message::Insert` | `Insert` |
 //! | `Message::ToggleEmoji` | `Emoji` |
@@ -268,6 +270,27 @@ pub enum Intent {
         key: u64,
         index: usize,
     },
+    /// Send the recording the microphone made to `peer` (1222): the
+    /// compose bar's button, held and released. Mono 16-bit PCM at `rate`
+    /// as the platform recorded it; the shell codes it
+    /// ([`crate::voice::encode`]). Empty in the scene's action, which the
+    /// platform fills.
+    SendVoice {
+        peer: [u8; 16],
+        pcm: Vec<i16>,
+        rate: u32,
+    },
+    /// Play the voice message `key` of `peer`'s conversation: a tap on its
+    /// play button (1222).
+    PlayVoice {
+        peer: [u8; 16],
+        key: u64,
+    },
+    /// Stop it: a tap on the pause button of the one that plays.
+    PauseVoice {
+        peer: [u8; 16],
+        key: u64,
+    },
     /// Delete messages: `confirmed` once the user said yes, else ask.
     Delete {
         messages: Messages,
@@ -440,6 +463,9 @@ impl Intent {
             Intent::PhotoSize(_) => StrId::PhotoSize,
             Intent::SendFile { .. } => StrId::AttachFile,
             Intent::OpenFile { .. } => StrId::OpenFile,
+            Intent::SendVoice { .. } => StrId::RecordVoice,
+            Intent::PlayVoice { .. } => StrId::PlayVoice,
+            Intent::PauseVoice { .. } => StrId::PauseVoice,
             Intent::Delete { .. } => StrId::ActionDelete,
             Intent::Copy => StrId::ActionCopy,
             Intent::Share { .. } => StrId::Share,

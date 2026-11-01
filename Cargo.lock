@@ -847,6 +847,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "codec2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3c8ba70382a99c0b5ebadf6ad50e7d98fb6eb9bcc4c0e30d422f6321798d99"
+
+[[package]]
 name = "codespan-reporting"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3289,6 +3295,7 @@ name = "loquax"
 version = "0.1.1"
 dependencies = [
  "clap",
+ "codec2",
  "cosmic-text",
  "crossterm",
  "embedded-graphics",
@@ -3306,6 +3313,7 @@ dependencies = [
  "leviculum-ui-ratatui",
  "lnpnd",
  "open",
+ "opus-pure",
  "png",
  "proptest",
  "qrcodegen",
@@ -4119,6 +4127,12 @@ dependencies = [
  "is-wsl",
  "libc",
 ]
+
+[[package]]
+name = "opus-pure"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4de7c2ad44427a636b27bf0b03eb29e713775ba1b45ff31a0618c19ee5adb215"
 
 [[package]]
 name = "orbclient"

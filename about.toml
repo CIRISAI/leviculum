@@ -67,6 +67,11 @@ accepted = [
     "Unlicense",
     "OpenSSL",
     "AGPL-3.0",
+    # codec2 (1222, receiving Sideband's low bandwidth voice messages in
+    # Loquax) is LGPL-2.1-only AND MIT. The LGPL lets a work that links it
+    # go under the GPL (its section 3), so it rides in the AGPL-3.0 binaries
+    # (GPL-3.0 section 13); its text travels in the notices like the rest.
+    "LGPL-2.1-only",
 ]
 
 # Our own crates carry the AGPL text in LICENSE, which every artifact

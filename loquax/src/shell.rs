@@ -347,6 +347,31 @@ impl Shell {
                         Err(line) => answers.push(UiEvent::Notice(line)),
                     }
                 }
+                // A voice message (1222): decoded into a WAV file under the
+                // home's voice/, which the system's player plays; the model
+                // hears of no end, so the bubble's button goes back at once.
+                UiEffect::PlayVoice { peer, key } => {
+                    #[cfg(feature = "voice")]
+                    let saved = self
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .ok_or_else(|| "that message is gone".to_string())
+                        .and_then(|m| {
+                            loquax::voice::save_wav(&self.context.home, peer, key, &m.fields)
+                        });
+                    #[cfg(not(feature = "voice"))]
+                    let saved: Result<std::path::PathBuf, String> =
+                        Err("this build plays no voice messages".to_string());
+                    answers.push(UiEvent::VoiceEnded { peer, key });
+                    match saved {
+                        Ok(path) => self.outputs.push(Output::File(path)),
+                        Err(line) => answers.push(UiEvent::Notice(line)),
+                    }
+                }
+                UiEffect::PauseVoice { .. } => {}
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
                 UiEffect::Remember { key, value } => {

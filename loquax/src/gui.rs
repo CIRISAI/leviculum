@@ -817,6 +817,8 @@ impl App {
             Intent::OpenFile { peer, key, index } => {
                 self.tell(UiEvent::OpenFile { peer, key, index })
             }
+            Intent::PlayVoice { peer, key } => self.tell(UiEvent::PlayVoice { peer, key }),
+            Intent::PauseVoice { peer, key } => self.tell(UiEvent::PauseVoice { peer, key }),
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed,
