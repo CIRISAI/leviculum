@@ -424,6 +424,15 @@ impl Intent {
     }
 }
 
+/// An intent's label for the shared scene's [`super::scene::Action`].
+impl leviculum_ui::scene::Labelled for Intent {
+    type Key = StrId;
+
+    fn label(&self) -> StrId {
+        Intent::label(self)
+    }
+}
+
 impl From<Command> for Intent {
     /// The palette's command as an intent: on what is open, or under the
     /// cursor.

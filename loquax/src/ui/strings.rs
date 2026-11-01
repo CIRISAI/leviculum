@@ -13,72 +13,30 @@
 //! The texts keep Android's positional format (`%1$s`, `%1$d`), which
 //! [`format()`] fills, so one text serves both the phone's `getString` and
 //! the core.
+//!
+//! The machinery is `leviculum_ui::strings` (1240, slice 0 of
+//! `docs/src/concepts/lnomad-everywhere.md`): [`Lang`], the
+//! `leviculum_ui::catalogue!` macro, [`Text`] and [`Arg`] over a key type,
+//! [`format()`] and [`android_xml`]'s writer. What is Loquax's is the
+//! catalogue below, its [`StrId`], and the names this module gives the
+//! shared types over it.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
+// The tests below name `to_string` as they did when the machinery was here.
+#[cfg(test)]
+use alloc::string::ToString;
 
-/// A language the catalogue speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Lang {
-    En,
-    De,
-}
+pub use leviculum_ui::strings::{android_escape, Lang, JOIN};
 
-impl Lang {
-    /// Both, in the order the generated files are written.
-    pub const ALL: [Lang; 2] = [Lang::En, Lang::De];
+/// A value for a text's `%n$s` or `%n$d`, of Loquax's catalogue.
+pub type Arg = leviculum_ui::strings::Arg<StrId>;
 
-    /// The language a BCP 47 tag or a locale names (`de`, `de-AT`,
-    /// `de_DE`): German for German, English for any other.
-    pub fn of_tag(tag: &str) -> Self {
-        let primary = tag.split(['-', '_']).next().unwrap_or_default();
-        match primary.eq_ignore_ascii_case("de") {
-            true => Lang::De,
-            false => Lang::En,
-        }
-    }
+/// What a scene node says, in Loquax's catalogue.
+pub type Text = leviculum_ui::strings::Text<StrId>;
 
-    /// The Android resource directory of the language.
-    pub fn values_dir(self) -> &'static str {
-        match self {
-            Lang::En => "values",
-            Lang::De => "values-de",
-        }
-    }
-}
-
-macro_rules! catalogue {
-    ($($id:ident = $key:literal, $en:literal, $de:literal;)*) => {
-        /// A string of the catalogue.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub enum StrId {
-            $($id,)*
-        }
-
-        /// Every string, key, English and German, in the table's order.
-        pub const CATALOGUE: &[(StrId, &str, &str, &str)] = &[
-            $((StrId::$id, $key, $en, $de),)*
-        ];
-
-        impl StrId {
-            /// The key: the Android resource name.
-            pub fn key(self) -> &'static str {
-                match self {
-                    $(StrId::$id => $key,)*
-                }
-            }
-
-            /// The text in `lang`, unformatted.
-            pub fn text(self, lang: Lang) -> &'static str {
-                match (self, lang) {
-                    $((StrId::$id, Lang::En) => $en,
-                      (StrId::$id, Lang::De) => $de,)*
-                }
-            }
-        }
-    };
-}
-
-catalogue! {
+leviculum_ui::catalogue! {
+    enum StrId;
+    const CATALOGUE;
     // The tabs and the top bar.
     TabChats = "tab_chats", "Chats", "Chats";
     TabChatsUnread = "tab_chats_unread", "Chats, %1$d with unread messages", "Chats, %1$d mit ungelesenen Nachrichten";
@@ -217,135 +175,20 @@ catalogue! {
     December = "scene_december", "December", "Dezember";
 }
 
-/// A value for a text's `%n$s` or `%n$d`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Arg {
-    Str(String),
-    Int(i64),
-    /// Words of the catalogue themselves, resolved in the same language.
-    Text(alloc::boxed::Box<Text>),
-}
-
-impl Arg {
-    fn render(&self, lang: Lang) -> String {
-        match self {
-            Arg::Str(text) => text.clone(),
-            Arg::Int(n) => n.to_string(),
-            Arg::Text(text) => text.resolve(lang),
-        }
-    }
-}
-
-/// `text` with each `%n$s` and `%n$d` replaced by the `n`th of `args`
-/// (counted from one), and `%%` by `%`. A place without its argument stays
-/// as written, so a missing one shows rather than vanishes.
+/// [`leviculum_ui::strings::format`] over Loquax's catalogue.
 pub fn format(text: &str, args: &[Arg], lang: Lang) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find('%') {
-        out.push_str(&rest[..at]);
-        let tail = &rest[at + 1..];
-        if let Some(after) = tail.strip_prefix('%') {
-            out.push('%');
-            rest = after;
-            continue;
-        }
-        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
-        let place = tail[..digits].parse::<usize>().ok();
-        let spec = tail[digits..]
-            .strip_prefix('$')
-            .and_then(|s| s.chars().next())
-            .filter(|c| *c == 's' || *c == 'd');
-        match (place, spec) {
-            (Some(n), Some(_)) if n >= 1 && n <= args.len() => {
-                out.push_str(&args[n - 1].render(lang));
-                rest = &tail[digits + 2..];
-            }
-            _ => {
-                out.push('%');
-                rest = tail;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// What a scene node says: a catalogue key with its arguments, resolved by
-/// the renderer in the reader's language, or words that are no string of
-/// the catalogue (a name, a message's text).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Text {
-    Key(StrId, alloc::vec::Vec<Arg>),
-    Raw(String),
-    /// Parts said one after the other, ` · ` between them: `live · every
-    /// 10 min · 2 min ago`.
-    Join(alloc::vec::Vec<Text>),
-}
-
-/// What stands between the parts of a [`Text::Join`].
-pub const JOIN: &str = " · ";
-
-impl Text {
-    /// A key without arguments.
-    pub fn key(id: StrId) -> Self {
-        Text::Key(id, alloc::vec::Vec::new())
-    }
-
-    /// The words in `lang`.
-    pub fn resolve(&self, lang: Lang) -> String {
-        match self {
-            Text::Key(id, args) => format(id.text(lang), args, lang),
-            Text::Raw(text) => text.clone(),
-            Text::Join(parts) => {
-                let parts: alloc::vec::Vec<String> =
-                    parts.iter().map(|p| p.resolve(lang)).collect();
-                parts.join(JOIN)
-            }
-        }
-    }
-}
-
-/// An Android string resource's text escaped as aapt reads it: `\`, `'`,
-/// `"`, `@` and `?` at the start, `&`, `<` and `>`.
-pub fn android_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for (i, c) in text.chars().enumerate() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '"' => out.push_str("\\\""),
-            '@' | '?' if i == 0 => {
-                out.push('\\');
-                out.push(c);
-            }
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '\n' => out.push_str("\\n"),
-            _ => out.push(c),
-        }
-    }
-    out
+    leviculum_ui::strings::format(text, args, lang)
 }
 
 /// The phone's `strings_scene.xml` for `lang`: every catalogue string, in
 /// the table's order.
 pub fn android_xml(lang: Lang) -> String {
-    let mut xml = String::from(
-        "<?xml version='1.0' encoding='utf-8'?>\n\
-         <!-- Generated from loquax/src/ui/strings.rs by `just loquax-strings`. Do not edit. -->\n\
-         <resources>\n",
-    );
-    for (id, key, _, _) in CATALOGUE {
-        xml.push_str("    <string name=\"");
-        xml.push_str(key);
-        xml.push_str("\">");
-        xml.push_str(&android_escape(id.text(lang)));
-        xml.push_str("</string>\n");
-    }
-    xml.push_str("</resources>\n");
-    xml
+    leviculum_ui::strings::android_xml(
+        lang,
+        CATALOGUE,
+        "loquax/src/ui/strings.rs",
+        "just loquax-strings",
+    )
 }
 
 #[cfg(test)]

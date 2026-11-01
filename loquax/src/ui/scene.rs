@@ -55,6 +55,8 @@ use super::strings::{Arg, StrId, Text};
 use super::UiModel;
 use crate::address::to_hex;
 use crate::when::WallTime;
+pub use leviculum_ui::scene::Role;
+use leviculum_ui::scene::{actions_json as actions, Contract, Node, ToJson};
 
 /// The two layout classes (decision 3): no third.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,87 +122,58 @@ impl NodeId {
     }
 }
 
-/// What a node is to a screen reader.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Role {
-    Bar,
-    TabBar,
-    Tab,
-    List,
-    Row,
-    Chat,
-    Group,
-    Bubble,
-    Button,
-    TextField,
-    Sheet,
-    Card,
-    Chip,
+impl Node for NodeId {
+    fn resource(&self) -> String {
+        NodeId::resource(self)
+    }
 }
 
-impl Role {
-    pub fn word(self) -> &'static str {
-        match self {
-            Role::Bar => "bar",
-            Role::TabBar => "tab_bar",
-            Role::Tab => "tab",
-            Role::List => "list",
-            Role::Row => "row",
-            Role::Chat => "chat",
-            Role::Group => "group",
-            Role::Bubble => "bubble",
-            Role::Button => "button",
-            Role::TextField => "text_field",
-            Role::Sheet => "sheet",
-            Role::Card => "card",
-            Role::Chip => "chip",
-        }
-    }
+/// Loquax's names in the shared scene vocabulary
+/// (`leviculum_ui::scene`, 1240): its catalogue, its intents, its nodes,
+/// its tabs, its avatar, and its conversation's row in a sheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Loquax;
+
+impl Contract for Loquax {
+    type Key = StrId;
+    type Intent = Intent;
+    type Node = NodeId;
+    type Tab = TabId;
+    type Avatar = Avatar;
+    type Row = Row;
 }
 
 /// What TalkBack and `uiautomator` need of a node.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct A11y {
-    pub role: Role,
-    pub label: Text,
-    pub selected: bool,
-    pub enabled: bool,
-    /// The stable resource id ([`NodeId::resource`]).
-    pub resource: String,
-}
-
-impl A11y {
-    fn of(id: NodeId, role: Role, label: Text) -> Self {
-        Self {
-            role,
-            label,
-            selected: false,
-            enabled: true,
-            resource: id.resource(),
-        }
-    }
-}
+pub type A11y = leviculum_ui::scene::A11y<StrId>;
 
 /// Something a node does: the intent a tap on it raises, whether it may
 /// now, and its label.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Action {
-    pub intent: Intent,
-    pub enabled: bool,
-    pub label_key: StrId,
-}
+pub type Action = leviculum_ui::scene::Action<Intent>;
 
-impl Action {
-    /// `intent`, enabled, with its own label.
-    pub fn of(intent: Intent) -> Self {
-        let label_key = intent.label();
-        Self {
-            intent,
-            enabled: true,
-            label_key,
-        }
-    }
-}
+/// What leads the top bar: the reader's avatar ([`Lead::Me`], with the
+/// mailbox link's dot when the shell knows it; none in slice one, the link
+/// is the facade's, not the model's), or back and the peer's avatar.
+pub type Lead = leviculum_ui::scene::Lead<Loquax>;
+
+/// The bar at the top of a screen.
+pub type TopBar = leviculum_ui::scene::TopBar<Loquax>;
+
+/// A tab of the bar.
+pub type Tab = leviculum_ui::scene::Tab<Loquax>;
+
+/// The tab bar: none on a sub view ("two levels only").
+pub type Tabs = leviculum_ui::scene::Tabs<Loquax>;
+
+/// A row's generic part: its id, whether its conversation is the open
+/// one, its tap and its menu, its accessibility.
+pub type ListItem = leviculum_ui::scene::ListItem<Loquax>;
+
+/// A sheet over the screen: the friends, a long press's actions, a
+/// question. Empty in slice one.
+pub type Sheet = leviculum_ui::scene::Sheet<Loquax>;
+
+/// A transient state, never a status line. Empty in slice one.
+pub type Chip = leviculum_ui::scene::Chip<Loquax>;
 
 /// The avatar's ring: the peer's position is live, or stopped lately
 /// (1209, [`chat::ring`] gives its colour on a pixel screen).
@@ -262,51 +235,11 @@ impl Avatar {
     }
 }
 
-/// What leads the top bar.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Lead {
-    /// The reader's own avatar, which opens the profile, with the mailbox
-    /// link's dot when the shell knows it (none in slice one: the link is
-    /// the facade's, not the model's).
-    Me { avatar: Avatar, link: Option<bool> },
-    /// A sub view: back, and the peer's avatar.
-    Back { back: Action, avatar: Avatar },
-}
-
-/// The bar at the top of a screen.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TopBar {
-    pub id: NodeId,
-    pub lead: Lead,
-    pub title: Text,
-    pub actions: Vec<Action>,
-    pub a11y: A11y,
-}
-
-/// A tab of the bar.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tab {
-    pub id: TabId,
-    pub label: Text,
-    /// The count on it: chats with unread messages.
-    pub badge: Option<u32>,
-    pub action: Action,
-    pub a11y: A11y,
-}
-
-/// The tab bar: none on a sub view ("two levels only").
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tabs {
-    pub id: NodeId,
-    pub items: Vec<Tab>,
-    pub active: TabId,
-    pub a11y: A11y,
-}
-
-/// A conversation's row.
+/// A conversation's row: the shared [`ListItem`] (id, selected, tap,
+/// menu, accessibility) and the conversation's own content beside it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
-    pub id: NodeId,
+    pub item: ListItem,
     /// The row's content as the model words it (name, last line, time,
     /// unread, liveness, pinned, muted, mark): the facade's
     /// `ConversationRow` is made of it.
@@ -315,13 +248,16 @@ pub struct Row {
     /// The last line in the catalogue's words when it is a report's
     /// (`live`, `3 h ago`); none for a text, whose line is [`ListRow::last`].
     pub live: Option<Text>,
-    /// Whether its conversation is the open one.
-    pub selected: bool,
-    /// A tap opens the conversation.
-    pub activate: Action,
-    /// A long press or a right click.
-    pub menu: Vec<Action>,
-    pub a11y: A11y,
+}
+
+/// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
+/// read the shared part as they read the row's own fields before 1240.
+impl core::ops::Deref for Row {
+    type Target = ListItem;
+
+    fn deref(&self) -> &ListItem {
+        &self.item
+    }
 }
 
 /// The conversation list.
@@ -392,17 +328,6 @@ pub struct Chat {
     pub a11y: A11y,
 }
 
-/// A sheet over the screen: the friends, a long press's actions, a
-/// question. Empty in slice one.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Sheet {
-    pub id: NodeId,
-    pub title: Text,
-    pub rows: Vec<Row>,
-    pub actions: Vec<Action>,
-    pub a11y: A11y,
-}
-
 /// A card over the map: a pin's peer. Empty in slice one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Card {
@@ -410,14 +335,6 @@ pub struct Card {
     pub title: Text,
     pub body: Text,
     pub actions: Vec<Action>,
-    pub a11y: A11y,
-}
-
-/// A transient state, never a status line. Empty in slice one.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Chip {
-    pub id: NodeId,
-    pub text: Text,
     pub a11y: A11y,
 }
 
@@ -500,8 +417,8 @@ impl Scene {
             NodeId::Row(_) => self
                 .list
                 .as_ref()
-                .and_then(|list| list.rows.iter().find(|row| row.id == id))
-                .map(|row| &row.activate),
+                .and_then(|list| list.rows.iter().find(|row| row.item.id == id))
+                .map(|row| &row.item.activate),
             NodeId::Tab(tab) => self
                 .tabs
                 .as_ref()
@@ -674,13 +591,15 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
     let mut a11y = A11y::of(id, Role::Row, Text::Raw(spoken));
     a11y.selected = selected;
     Row {
-        id,
-        activate: Action::of(Intent::OpenChat { peer: *peer }),
+        item: ListItem {
+            id,
+            selected,
+            activate: Action::of(Intent::OpenChat { peer: *peer }),
+            menu,
+            a11y,
+        },
         avatar,
         live,
-        selected,
-        menu,
-        a11y,
         row,
     }
 }
@@ -933,78 +852,13 @@ fn opt<T>(value: Option<T>, f: impl FnOnce(T) -> Value) -> Value {
     value.map_or(Value::Null, f)
 }
 
-impl Text {
-    pub fn to_json(&self) -> Value {
-        match self {
-            Text::Key(id, args) => json!({
-                "key": id.key(),
-                "args": args.iter().map(|arg| match arg {
-                    Arg::Str(s) => Value::String(s.clone()),
-                    Arg::Int(n) => json!(n),
-                    Arg::Text(text) => text.to_json(),
-                }).collect::<Vec<_>>(),
-            }),
-            Text::Raw(text) => json!({ "raw": text }),
-            Text::Join(parts) => {
-                json!({ "join": parts.iter().map(Text::to_json).collect::<Vec<_>>() })
-            }
-        }
-    }
-}
-
-impl A11y {
-    pub fn to_json(&self) -> Value {
-        json!({
-            "role": self.role.word(),
-            "label": self.label.to_json(),
-            "selected": self.selected,
-            "enabled": self.enabled,
-            "resource": self.resource,
-        })
-    }
-}
-
-impl Action {
-    pub fn to_json(&self) -> Value {
-        json!({
-            "intent": format!("{:?}", self.intent),
-            "enabled": self.enabled,
-            "label_key": self.label_key.key(),
-        })
-    }
-}
-
-fn actions(list: &[Action]) -> Value {
-    Value::Array(list.iter().map(Action::to_json).collect())
-}
-
-impl Avatar {
-    pub fn to_json(&self) -> Value {
+impl ToJson for Avatar {
+    fn to_json(&self) -> Value {
         json!({
             "initials": self.initials,
             "fg": format!("{:06x}", self.fg),
             "bg": format!("{:06x}", self.bg),
             "ring": opt(self.ring, |r| json!(format!("{r:?}"))),
-        })
-    }
-}
-
-impl TopBar {
-    pub fn to_json(&self) -> Value {
-        let lead = match &self.lead {
-            Lead::Me { avatar, link } => {
-                json!({ "me": { "avatar": avatar.to_json(), "link": link } })
-            }
-            Lead::Back { back, avatar } => {
-                json!({ "back": { "action": back.to_json(), "avatar": avatar.to_json() } })
-            }
-        };
-        json!({
-            "id": self.id.resource(),
-            "lead": lead,
-            "title": self.title.to_json(),
-            "actions": actions(&self.actions),
-            "a11y": self.a11y.to_json(),
         })
     }
 }
@@ -1025,7 +879,7 @@ impl Row {
     pub fn to_json(&self) -> Value {
         let r = &self.row;
         json!({
-            "id": self.id.resource(),
+            "id": self.item.id.resource(),
             "name": r.name,
             "last": r.last,
             "ours": r.ours,
@@ -1040,10 +894,10 @@ impl Row {
             "liveness": liveness_json(&r.liveness),
             "avatar": self.avatar.to_json(),
             "live": opt(self.live.as_ref(), Text::to_json),
-            "selected": self.selected,
-            "activate": self.activate.to_json(),
-            "menu": actions(&self.menu),
-            "a11y": self.a11y.to_json(),
+            "selected": self.item.selected,
+            "activate": self.item.activate.to_json(),
+            "menu": actions(&self.item.menu),
+            "a11y": self.item.a11y.to_json(),
         })
     }
 }
@@ -1115,23 +969,7 @@ impl Scene {
         };
         map.insert("screen".into(), screen);
         map.insert("top".into(), self.top.to_json());
-        map.insert(
-            "tabs".into(),
-            opt(self.tabs.as_ref(), |t| {
-                json!({
-                    "id": t.id.resource(),
-                    "active": format!("{:?}", t.active),
-                    "items": t.items.iter().map(|tab| json!({
-                        "id": format!("{:?}", tab.id),
-                        "label": tab.label.to_json(),
-                        "badge": tab.badge,
-                        "action": tab.action.to_json(),
-                        "a11y": tab.a11y.to_json(),
-                    })).collect::<Vec<_>>(),
-                    "a11y": t.a11y.to_json(),
-                })
-            }),
-        );
+        map.insert("tabs".into(), opt(self.tabs.as_ref(), Tabs::to_json));
         map.insert(
             "list".into(),
             opt(self.list.as_ref(), |l| {
