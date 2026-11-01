@@ -3341,6 +3341,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-map",
+ "leviculum-mapcut",
  "leviculum-mapfill",
  "leviculum-std",
  "leviculum-ui",

@@ -724,6 +724,7 @@ impl Canvas {
         let Drawn {
             mut fb,
             attribution,
+            ..
         } = self.painter.draw(view, self.ink(), ask.style, 100);
         let picture = match self.graphics {
             Graphics::Kitty | Graphics::Sixel => self.encode(&mut fb, w, h, ask.cells),

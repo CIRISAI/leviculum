@@ -877,10 +877,24 @@ config, #471) says the map works without a step. Decided 2026-10-27
   zoom is lowered, down to the view's own, and an area too large even
   there is refused with "zoom in" instead of a question. An area a region
   holds at the view's zoom loads nothing.
-- *Showing it.* The region is written beside the others under a name no
-  painter reads, checked whole, renamed into the maps directory, and the
-  directory's epoch bumped; each painter reads the directory again before
-  its next paint. Every region that reaches into a view is drawn, each
+- *Showing it.* The region is written in place under its own name as it
+  arrives (1291, Lew 2026-11-01: "watch the map fill in"): version 4,
+  fetched and cut a round at a time, coarse to fine, each zoom of z0 to
+  z12 a round of its own. A painter draws every tile there and stands the
+  nearest coarser tile in for one not there yet; a round bumps the maps'
+  progress (`Maps::arrived`, at most every 250 ms), a painter that sees it
+  reads the directory again, and the tile cache draws again only the
+  tiles it drew with stand-ins. A frame that shows such tiles says
+  `filling`, and the phone asks for the next one in a quarter second.
+  The names and the buildings come with the last round. Once complete
+  the file is checked whole and the directory's epoch bumped; each
+  painter reads the directory again before its next paint. A load that
+  fails removes its file. Measured with `leviculum-mapcut`'s example
+  `arrive` on the 1191 Berlin extract (89 MB, z0 to z15) behind the
+  loopback server throttled to 2 MB/s and 50 ms: the first tile after
+  0.27 s, every z13 tile after 10.7 s, the whole region after 58.2 s,
+  where fetching everything first took 53.6 s with nothing to draw
+  before the end. Every region that reaches into a view is drawn, each
   into its own box (1077's clip), the deepest last, so loaded patches
   join up (this replaces "one region or the outline" of section 7). A
   place's map is fitted again to the region when it lands, unless the

@@ -47,7 +47,10 @@
 //! then for those next to it in the pan's direction, and the loader puts
 //! what is on screen now first. A frame says when a load runs, and when
 //! it runs for the screen (`loading_here`, the chip's), and Java asks
-//! again until it landed.
+//! again until it landed. A region writes itself into the maps directory
+//! as it arrives (1291), and a frame showing tiles of it says `filling`:
+//! Java asks again in a quarter second, so the map fills in under the
+//! user's eyes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -587,6 +590,7 @@ impl Renderer {
             tapped_name: tapped.and_then(name),
             loading: self.loader.busy(),
             loading_here: self.loader.loading_here(),
+            filling: shot.filling > 0,
             notice,
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,

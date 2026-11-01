@@ -2375,3 +2375,70 @@ fn a_pan_into_the_empty_loads_what_is_on_screen_at_once() {
     }
     assert!(late.is_empty(), "late or never: {late:?}");
 }
+
+/// A region shows itself while it downloads (1291): the autoload writes it
+/// in place, coarse to fine, and every frame on its area shows what has
+/// arrived, the z14 tiles standing in for the z15 ones not there yet, and
+/// says `filling`, so Java asks again in a quarter second. The source is
+/// the loopback server throttled to 8 kB/s, the Grunewald archive (z12 to
+/// z15, 80 kB) about ten seconds of it. While it loads the frames go
+/// from the outline through at least two pictures of stand-ins, and the
+/// whole region ends it.
+#[test]
+fn a_region_fills_the_frame_in_while_it_downloads() {
+    use leviculum_mapcut::serve::Serve;
+    use std::time::{Duration, Instant};
+    const ARCHIVE: &[u8] = include_bytes!("../../leviculum-mapcut/fixtures/grunewald.pmtiles");
+    let serve = Serve::start(vec![("o.pmtiles".into(), ARCHIVE.to_vec())]).expect("serve");
+    serve.throttle(8_000, Duration::from_millis(20));
+    let home = tempfile::tempdir().expect("home");
+    std::fs::create_dir_all(home.path().join("maps")).expect("maps");
+    std::fs::write(
+        home.path().join(loquax::config::CONFIG_FILE),
+        format!("map_source = \"{}\"\n", serve.url("o.pmtiles")),
+    )
+    .expect("config");
+    let at = project(LatLon::from_degrees(52.4715, 13.2280));
+    let ask = MapRequest {
+        x: Some(at.x),
+        y: Some(at.y),
+        zoom: Some(15),
+        ..request(home.path(), false)
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut frames: Vec<(MapShown, Vec<u8>)> = Vec::new();
+    loop {
+        let (shown, rgba) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        let done = !shown.loading && !shown.filling && !shown.pending && frames.len() > 1;
+        frames.push((shown, rgba));
+        if done {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the region never landed");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let last = &frames[frames.len() - 1].1;
+    // The distinct pictures while the region loads, each with how like
+    // the last it is, per cent.
+    let mut states: Vec<(Vec<u8>, usize)> = Vec::new();
+    for (_, rgba) in frames.iter().filter(|(s, _)| s.loading) {
+        if states.last().map(|s| &s.0) != Some(rgba) {
+            states.push((rgba.clone(), same_share(rgba, last)));
+        }
+    }
+    let near: Vec<usize> = states.iter().map(|s| s.1).collect();
+    let filling = frames.iter().filter(|(s, _)| s.filling).count();
+    println!(
+        "frames {} filling {filling} while loading {near:?}",
+        frames.len()
+    );
+    assert!(filling > 0, "a frame said the region is arriving");
+    assert!(
+        near.len() >= 3,
+        "the outline and two pictures of stand-ins: {near:?}"
+    );
+    assert!(
+        near[0] < near[near.len() - 1],
+        "the region came nearer: {near:?}"
+    );
+}

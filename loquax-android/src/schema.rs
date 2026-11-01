@@ -156,6 +156,9 @@
 //! The chip of a load for the screen (1292) came within version 1 too:
 //! [`MapShown::loading_here`]. An older app reads `loading`, which also
 //! counts loads for areas the view left.
+//! A region filling in while it arrives (1291) came within version 1 too:
+//! [`MapShown::filling`]. An older app asks again every 1.5 s while
+//! `loading`, and sees the map fill in at that pace.
 
 use serde::{Deserialize, Serialize};
 
@@ -2161,7 +2164,16 @@ pub struct MapShown {
     /// area the view left, which the chip does not name.
     #[serde(default)]
     pub loading_here: bool,
+    /// The frame shows tiles of a region still arriving (1291): ask again
+    /// in [`FILLING_MS`], when more of it may be there.
+    #[serde(default)]
+    pub filling: bool,
 }
+
+/// How long after a frame that says [`MapShown::filling`] the app asks
+/// again: the loader bumps the maps' progress at most this often
+/// (`loquax::mapload::PROGRESS_EVERY_MS`).
+pub const FILLING_MS: u32 = 250;
 
 /// A map frame as the host's tests and tools read it: the description's
 /// length, the description, the pixels. The app gets its pixels in its

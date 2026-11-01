@@ -20,6 +20,14 @@
 //! and a painter that sees a new epoch reads the directory again before its
 //! next paint. Every region that reaches into a view is drawn, each into its
 //! own box, so regions loaded side by side join up.
+//!
+//! A region the autoload is still writing is in the directory too (1291):
+//! its tiles draw as they arrive, each one not there yet stood in for by
+//! the nearest coarser one ([`leviculum_map::region::Region::stand_in`]).
+//! The loader bumps [`Maps::progress`] as rounds land, at most four times
+//! a second; a painter that sees it reads the directory again, and a view
+//! with a tile not there yet says so ([`Drawn::pending`]), so a tile
+//! cache holds it only until the next progress.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -83,7 +91,8 @@ pub fn is_auto(name: &str) -> bool {
 }
 
 /// The maps directory as every painter and the shell share it: where it
-/// is, and an epoch bumped whenever a region is added or removed.
+/// is, an epoch bumped whenever a region is added or removed, and a
+/// progress count bumped as a region being written gains tiles.
 #[derive(Clone, Debug, Default)]
 pub struct Maps {
     inner: Arc<MapsInner>,
@@ -93,6 +102,7 @@ pub struct Maps {
 struct MapsInner {
     dir: Option<PathBuf>,
     epoch: AtomicU64,
+    progress: AtomicU64,
 }
 
 impl Maps {
@@ -102,6 +112,7 @@ impl Maps {
             inner: Arc::new(MapsInner {
                 dir,
                 epoch: AtomicU64::new(0),
+                progress: AtomicU64::new(0),
             }),
         }
     }
@@ -119,6 +130,18 @@ impl Maps {
     /// A region was added or removed.
     pub fn changed(&self) {
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How often a region being written gained tiles (1291): a painter
+    /// holding an older count reads the directory again, a tile cache
+    /// draws again what it drew before those tiles were there.
+    pub fn progress(&self) -> u64 {
+        self.inner.progress.load(Ordering::SeqCst)
+    }
+
+    /// A region being written gained tiles.
+    pub fn arrived(&self) {
+        self.inner.progress.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Every region there now, and a line for each that did not open.
@@ -235,6 +258,10 @@ pub fn load(dir: &Path) -> (Vec<Installed>, Vec<String>) {
 pub struct Drawn {
     pub fb: Vec<u16>,
     pub attribution: String,
+    /// Tiles of the view a region still being written does not hold yet,
+    /// stood in for or left out (1291): draw it again on its next
+    /// [`Maps::progress`].
+    pub pending: usize,
 }
 
 /// The installed regions and the buffers a view is read into, kept from
@@ -243,6 +270,8 @@ pub struct Painter {
     maps: Maps,
     /// The epoch `regions` were read at.
     epoch: u64,
+    /// The progress `regions` were read at.
+    progress: u64,
     regions: Vec<Installed>,
     read: Vec<(ViewTile, Vec<u8>)>,
     /// The building sections a view that draws them read (1192).
@@ -283,10 +312,12 @@ impl Painter {
     /// A painter over the regions of `maps`, read now.
     pub fn new(maps: Maps) -> Self {
         let epoch = maps.epoch();
+        let progress = maps.progress();
         let (regions, _) = maps.load();
         Self {
             maps,
             epoch,
+            progress,
             regions,
             read: Vec::new(),
             buildings: Vec::new(),
@@ -295,13 +326,15 @@ impl Painter {
         }
     }
 
-    /// Read the directory again when it changed since; whether it did.
+    /// Read the directory again when it changed since, or a region in it
+    /// gained tiles; whether it did.
     pub fn refresh(&mut self) -> bool {
-        let epoch = self.maps.epoch();
-        if epoch == self.epoch {
+        let (epoch, progress) = (self.maps.epoch(), self.maps.progress());
+        if epoch == self.epoch && progress == self.progress {
             return false;
         }
         self.epoch = epoch;
+        self.progress = progress;
         self.regions = self.maps.load().0;
         true
     }
@@ -353,6 +386,7 @@ impl Painter {
         );
         let mut attribution = outline::ATTRIBUTION.to_string();
         let mut shown: Vec<usize> = Vec::new();
+        let mut pending = 0;
         if let Some(mut frame) = Frame::new(&mut fb, w, h) {
             // The outline goes under the view unless one region fills it.
             let whole = frame.bounding_box();
@@ -372,7 +406,7 @@ impl Painter {
             for &i in &order {
                 let installed = &self.regions[i];
                 let area = installed.region.area(view);
-                if region_into(
+                if let Some(owed) = region_into(
                     &installed.region,
                     view,
                     area,
@@ -386,13 +420,18 @@ impl Painter {
                 ) {
                     attribution = installed.region.attribution().to_string();
                     shown.push(i);
+                    pending += owed;
                 }
             }
         }
         for i in shown {
             self.viewed(i);
         }
-        Drawn { fb, attribution }
+        Drawn {
+            fb,
+            attribution,
+            pending,
+        }
     }
 
     /// The names `view` shows from every region that reaches into it, in
@@ -451,7 +490,8 @@ impl Painter {
 
 /// Draw `region`'s tiles of `view` into `area` of `frame`, with their
 /// building footprints where the view draws them ([`draws_buildings`]);
-/// `false` when a tile could not be read, and the region is left out.
+/// how many of its tiles are not there yet (1291), `None` when a tile
+/// could not be read, and the region is left out.
 #[allow(clippy::too_many_arguments)]
 fn region_into(
     region: &Region<File>,
@@ -464,12 +504,12 @@ fn region_into(
     buildings: &mut Vec<(TileId, Vec<u8>)>,
     fill: &mut FillScratch,
     frame: &mut Frame<'_>,
-) -> bool {
-    if region.read_view(view, read).is_err() {
-        return false;
-    }
+) -> Option<usize> {
+    let Ok(pending) = region.read_view(view, read) else {
+        return None;
+    };
     let Ok(mut tiles) = draw_tiles(read) else {
-        return false;
+        return None;
     };
     buildings.clear();
     if draws_buildings(style, ink, view.zoom()) {
@@ -505,7 +545,7 @@ fn region_into(
         &mut work,
         &mut NoClock,
     );
-    true
+    Some(pending)
 }
 
 #[cfg(test)]

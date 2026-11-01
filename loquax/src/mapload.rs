@@ -17,8 +17,13 @@
 //!   does not: the next view asks again, and "offline" holds only until a
 //!   load starts.
 //! - No internet is said once, not per box, until a load succeeds again.
-//! - The region lands atomically: written beside the directory's regions
-//!   under a name a painter does not read, checked whole, then renamed.
+//! - The region is written in place under its own name, as its tiles
+//!   arrive (1291): coarse to fine, a round at a time, and a painter draws
+//!   every tile there, the nearest coarser one standing in for the rest
+//!   ([`leviculum_map::region::Region::stand_in`]). Each round bumps
+//!   [`Maps::progress`], at most every [`PROGRESS_EVERY_MS`], so a frame
+//!   on screen draws again; once complete it is checked whole and lands
+//!   ([`Maps::changed`], by the shell). A load that fails removes its file.
 //! - Autoloaded regions are a cache under a cap, named [`AUTO_PREFIX`],
 //!   evicted least recently viewed first (a painter marks a region viewed
 //!   by its file's modification time). A file without the prefix was placed
@@ -37,8 +42,9 @@ use std::time::{Instant, SystemTime};
 use std::vec::Vec;
 
 use leviculum_map::region::{Bounds, Region};
+use leviculum_mapcut::cut::Progress;
 use leviculum_mapcut::http::{self, HttpRange};
-use leviculum_mapcut::load::{load, Loaded, TooLarge, Want};
+use leviculum_mapcut::load::{cut_planned, plan, Loaded, TooLarge, Want};
 use leviculum_mapcut::pmtiles::Archive;
 
 use crate::picture::{is_auto, Maps, AUTO_PREFIX};
@@ -63,6 +69,9 @@ pub const MAX_AWAY: usize = 8;
 const PROFILE: u8 = leviculum_map::profile::CUT_1;
 /// What the region's notice names as the program that cut it.
 const BY: &str = "loquax";
+/// The least time between two progress bumps of a region being written
+/// (1291): a frame on screen is drawn again at most four times a second.
+pub const PROGRESS_EVERY_MS: u64 = 250;
 
 /// The language of a locale setting (`de_DE.UTF-8` is `de`), `None` for
 /// the C and POSIX locales and an empty one.
@@ -478,6 +487,7 @@ impl Loader {
         let (tx, rx) = channel();
         let job = Job {
             dir: dir.to_path_buf(),
+            maps: self.maps.clone(),
             source: self.source.clone(),
             resolved: Arc::clone(&self.resolved),
             want: want.clone(),
@@ -510,6 +520,7 @@ impl Loader {
 /// One load, on its thread.
 struct Job {
     dir: PathBuf,
+    maps: Maps,
     source: Source,
     resolved: Arc<Mutex<Option<String>>>,
     want: MapWant,
@@ -557,36 +568,52 @@ impl Job {
             // terminal and the M9 never read the section.
             buildings: true,
         };
-        // Not `*.lmr`, so no painter reads it half written.
-        let part = self.dir.join(format!(
-            ".{}.part",
-            auto_name(&want.bounds, self.want.zooms)
-        ));
+        let planned = plan(&archive, &want)?;
+        let zooms = (*planned.zooms.start(), *planned.zooms.end());
+        let name = auto_name(&want.bounds, zooms);
+        // Under its own name from the first byte (1291): a painter draws
+        // what has arrived, a version 4 file says what that is.
+        let path = self.dir.join(&name);
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get() / 2)
             .max(1);
+        let maps = self.maps.clone();
+        let mut bumped: Option<Instant> = None;
+        let mut progress = |p: Progress| {
+            let due =
+                bumped.is_none_or(|at| at.elapsed().as_millis() >= u128::from(PROGRESS_EVERY_MS));
+            if !p.complete && due {
+                bumped = Some(Instant::now());
+                maps.arrived();
+            }
+        };
         let write = || -> leviculum_mapcut::Res<Loaded> {
-            let mut out = BufWriter::new(File::create(&part)?);
-            let loaded = load(&archive, &want, BY, threads, &mut out)?;
+            let mut out = BufWriter::new(File::create(&path)?);
+            let loaded = cut_planned(
+                &archive,
+                &want,
+                planned,
+                BY,
+                threads,
+                &mut out,
+                &mut progress,
+            )?;
             let file = out.into_inner().map_err(|e| e.into_error())?;
             file.sync_all()?;
-            let region = Region::open(File::open(&part)?).map_err(|e| format!("{e:?}"))?;
+            let region = Region::open(File::open(&path)?).map_err(|e| format!("{e:?}"))?;
             region
                 .verify()
                 .map_err(|e| format!("the region does not verify: {e:?}"))?;
             Ok(loaded)
         };
-        let written = write();
-        let loaded = match written {
+        let loaded = match write() {
             Ok(loaded) => loaded,
             Err(error) => {
-                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(&path);
+                self.maps.changed();
                 return Err(error);
             }
         };
-        let zooms = (*loaded.zooms.start(), *loaded.zooms.end());
-        let name = auto_name(&want.bounds, zooms);
-        std::fs::rename(&part, self.dir.join(&name))?;
         let evicted = evict(&self.dir, self.cache_bytes, &name)?;
         Ok(Landed {
             bytes: loaded.stats.bytes,
@@ -697,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn a_load_lands_atomically_and_bumps_the_epoch() {
+    fn a_load_lands_in_place_and_bumps_the_epoch() {
         let serve = Serve::start(vec![("o.pmtiles".into(), FIXTURE.to_vec())]).expect("serve");
         let dir = tempfile::tempdir().expect("tmp");
         let maps = Maps::new(Some(dir.path().to_path_buf()));
@@ -717,6 +744,9 @@ mod tests {
         };
         assert_eq!(landed.name, auto_name(&w.bounds, (14, 15)));
         assert_eq!(maps.epoch(), 1);
+        // The z14 round told the painters before the region was whole
+        // (1291).
+        assert!(maps.progress() >= 1);
         let names: Vec<String> = std::fs::read_dir(dir.path())
             .expect("dir")
             .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())

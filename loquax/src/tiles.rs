@@ -32,7 +32,10 @@
 //!
 //! The cache is dropped when the maps directory changes (its epoch) and
 //! when the style does (the light or dark table, the line widths of the
-//! screen's density). [`BUDGET_MB`] bounds it; a prefetched tile no frame
+//! screen's density). A tile drawn while a region in it was still being
+//! written, some of its data stood in for ([`crate::picture::Drawn::pending`],
+//! 1291), is held until the region gains tiles ([`Maps::progress`]) and
+//! then drawn again, so the map fills in while the region arrives. [`BUDGET_MB`] bounds it; a prefetched tile no frame
 //! used yet goes first, then the least recently used.
 //!
 //! A view at rest prefetches (1135): [`plan`] lists the zoom out of the
@@ -150,6 +153,9 @@ struct Entry {
     /// Drawn ahead by [`TileCache::prefetch`] and not used by a frame
     /// since: evicted first.
     prefetched: bool,
+    /// Drawn while a region in it was still arriving (1291): dropped on
+    /// the next progress.
+    provisional: bool,
 }
 
 /// What the cache did since it was made.
@@ -169,6 +175,9 @@ pub struct Stats {
     pub evicted: u64,
     /// Times the whole cache was dropped: a new epoch or style.
     pub cleared: u64,
+    /// Provisional tiles dropped to be drawn again as a region arrived
+    /// (1291).
+    pub redrawn: u64,
     /// Microseconds the workers spent drawing tiles, each worker's own
     /// time summed: on one worker the CPU a cold frame's tiles cost; on
     /// more it is that or above, as the workers share cores.
@@ -223,6 +232,10 @@ pub struct TileCache {
     maps: Maps,
     budget: usize,
     epoch: u64,
+    /// The maps' progress the provisional tiles were drawn at.
+    progress: u64,
+    /// Provisional tiles the last frame showed.
+    filling: usize,
     style: Option<(Style, u32)>,
     entries: HashMap<TileKey, Entry>,
     bytes: usize,
@@ -251,6 +264,8 @@ impl TileCache {
             .clamp(1, WORKERS);
         Self {
             epoch: maps.epoch(),
+            progress: maps.progress(),
+            filling: 0,
             maps,
             budget,
             style: None,
@@ -310,13 +325,28 @@ impl TileCache {
         self.entries.contains_key(key)
     }
 
+    /// Tiles the last frame showed that were drawn while a region in them
+    /// was still arriving (1291): the frame is drawn again as it gains
+    /// tiles.
+    pub fn filling(&self) -> usize {
+        self.filling
+    }
+
     /// Drop the cache when the directory or the style changed since the
-    /// last frame.
+    /// last frame, and the provisional tiles when a region gained tiles.
     fn check(&mut self, style: Style, percent: u32) {
         let epoch = self.maps.epoch();
         if epoch != self.epoch {
             self.epoch = epoch;
             self.clear();
+        }
+        let progress = self.maps.progress();
+        if progress != self.progress {
+            self.progress = progress;
+            let before = self.entries.len();
+            self.entries.retain(|_, e| !e.provisional);
+            self.bytes = self.entries.values().map(|e| e.rgba.len()).sum();
+            self.stats.redrawn += (before - self.entries.len()) as u64;
         }
         if self.style.is_some_and(|s| s != (style, percent)) {
             self.clear();
@@ -398,11 +428,16 @@ impl TileCache {
         let wanted: Vec<TileKey> = draw.iter().filter_map(|&i| keys[i]).collect();
         let drawn = self.render(&wanted);
         self.stats.rendered += drawn.len() as u64;
-        for (&i, (key, rgba, attribution)) in draw.iter().zip(drawn) {
+        for (&i, (key, rgba, attribution, provisional)) in draw.iter().zip(drawn) {
             let tile = (Arc::new(rgba), Arc::<str>::from(attribution));
-            self.put(key, tile.0.clone(), tile.1.clone());
+            self.put(key, tile.0.clone(), tile.1.clone(), provisional);
             got[i] = Some(tile);
         }
+        self.filling = keys
+            .iter()
+            .flatten()
+            .filter(|k| self.entries.get(k).is_some_and(|e| e.provisional))
+            .count();
         // Every tile there: the grid writes every pixel, so the buffer
         // need not start blank and nothing is left to cover after.
         let whole = got.iter().all(Option::is_some);
@@ -578,7 +613,7 @@ impl TileCache {
         Some((entry.rgba.clone(), entry.attribution.clone()))
     }
 
-    fn put(&mut self, key: TileKey, rgba: Arc<Vec<u8>>, attribution: Arc<str>) {
+    fn put(&mut self, key: TileKey, rgba: Arc<Vec<u8>>, attribution: Arc<str>, provisional: bool) {
         self.tick += 1;
         self.bytes += rgba.len();
         let old = self.entries.insert(
@@ -588,6 +623,7 @@ impl TileCache {
                 attribution,
                 used: self.tick,
                 prefetched: false,
+                provisional,
             },
         );
         if let Some(old) = old {
@@ -621,7 +657,13 @@ impl TileCache {
 
     /// Hold a prefetched tile, making room only from tiles neither the
     /// last frame showed nor a prefetch since drew. Whether it is held.
-    fn put_prefetched(&mut self, key: TileKey, rgba: Vec<u8>, attribution: String) -> bool {
+    fn put_prefetched(
+        &mut self,
+        key: TileKey,
+        rgba: Vec<u8>,
+        attribution: String,
+        provisional: bool,
+    ) -> bool {
         let shown_from = self.shown_from;
         while self.bytes + rgba.len() > self.budget {
             if !self.evict(|e| e.used < shown_from) {
@@ -637,6 +679,7 @@ impl TileCache {
                 attribution: Arc::from(attribution),
                 used: self.tick,
                 prefetched: true,
+                provisional,
             },
         );
         if let Some(old) = old {
@@ -672,8 +715,8 @@ impl TileCache {
             batch.push(want.key);
         }
         let mut stored = 0;
-        for (key, rgba, attribution) in self.render(&batch) {
-            if !self.put_prefetched(key, rgba, attribution) {
+        for (key, rgba, attribution, provisional) in self.render(&batch) {
+            if !self.put_prefetched(key, rgba, attribution, provisional) {
                 plan.next = plan.wants.len();
                 break;
             }
@@ -688,7 +731,7 @@ impl TileCache {
     }
 
     /// Draw `keys`, split over the workers, each with its own painter.
-    fn render(&mut self, keys: &[TileKey]) -> Vec<(TileKey, Vec<u8>, String)> {
+    fn render(&mut self, keys: &[TileKey]) -> Vec<Rendered> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -863,8 +906,13 @@ fn outline_under(
     by_rows(rgba, w, workers, one_row);
 }
 
-/// The tile of `key` drawn: RGBA and its credit.
-fn draw_tile(painter: &mut Painter, key: &TileKey) -> (TileKey, Vec<u8>, String) {
+/// A tile drawn: its key, RGBA, its credit, and whether a region in it
+/// was still arriving.
+type Rendered = (TileKey, Vec<u8>, String, bool);
+
+/// The tile of `key` drawn: RGBA, its credit, and whether a region in it
+/// was still arriving (1291).
+fn draw_tile(painter: &mut Painter, key: &TileKey) -> Rendered {
     let shift = 24 - u32::from(key.zoom);
     let mid = |t: u32| ((u64::from(t) * u64::from(TILE) + u64::from(TILE / 2)) << shift) as u32;
     let view = Viewport::new(
@@ -877,7 +925,12 @@ fn draw_tile(painter: &mut Painter, key: &TileKey) -> (TileKey, Vec<u8>, String)
         TILE,
     );
     let drawn = painter.draw(&view, Ink::Colour, key.style, key.percent);
-    (*key, to_rgba(&drawn.fb), drawn.attribution)
+    (
+        *key,
+        to_rgba(&drawn.fb),
+        drawn.attribution,
+        drawn.pending > 0,
+    )
 }
 
 /// A drawn tile's big endian Rgb565 pixels as opaque RGBA, the bytes

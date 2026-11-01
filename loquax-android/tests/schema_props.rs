@@ -991,9 +991,15 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
         )
             .boxed(),
         (any::<bool>(), u32s(), u32s(), any::<bool>()).boxed(),
+        any::<bool>(),
     )
         .prop_map(
-            |(shown, (own_x, own_y, autoload), (fling, room_north, room_south, loading_here))| {
+            |(
+                shown,
+                (own_x, own_y, autoload),
+                (fling, room_north, room_south, loading_here),
+                filling,
+            )| {
                 MapShown {
                     own_x,
                     own_y,
@@ -1002,6 +1008,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                     room_north,
                     room_south,
                     loading_here,
+                    filling,
                     ..shown
                 }
             },
