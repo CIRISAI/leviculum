@@ -46,6 +46,7 @@
 - [Firmware layers: one orchestration, many boards](concepts/firmware-layers.md)
 - [A messenger whose core runs anywhere](concepts/handheld-messenger.md)
   - [A GUI toolkit for the desktop and the M9](concepts/gui-toolkit.md)
+  - [lnomad everywhere: the browser on the four targets](concepts/lnomad-everywhere.md)
 - [An LXMF propagation node on a board](concepts/propagation-node-on-a-board.md)
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 - [Checks that are actually checks](concepts/checks-and-citations.md)
