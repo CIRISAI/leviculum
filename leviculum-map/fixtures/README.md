@@ -36,6 +36,20 @@ leviculum-map-tool cut -o mitte.lmr https://build.protomaps.com/20261031.pmtiles
 from the Protomaps daily build of 2026-10-31, which the bucket keeps for
 about a week; a later build cuts other bytes.
 
+`buildings/firenze.lmr`: the same Florence region cut again with its
+building footprints (`LMR1` version 3, 1191), 248,384 bytes, sha256
+`7e474141c3bd7c907d97869751ca80049d363497e63294a114e6e625acb5ab40`: two
+building sections, 2,931 footprints in 50,115 bytes. Its tile blobs are
+`firenze.lmr`'s byte for byte; its names are a newer cut's (271 strings
+against 265). In a directory of its own, so the tests that read this one
+see the region without buildings. Cut from the same archive with
+
+```sh
+leviculum-map-tool cut -o firenze.lmr firenze.pmtiles \
+    --bbox 11.2505,43.7728,11.2700,43.7785 --min-zoom 11 --max-zoom 15 \
+    --locale de
+```
+
 **© OpenStreetMap contributors**, <https://www.openstreetmap.org/copyright>.
 The data is available under the Open Database License (ODbL) 1.0,
 <https://opendatacommons.org/licenses/odbl/1-0/>. These files are derived

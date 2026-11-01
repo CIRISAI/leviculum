@@ -13,6 +13,11 @@
 //! casings first, so the casings of a junction join under its fills and a
 //! bridge's casing covers the road it crosses.
 //!
+//! Building footprints come from the region's building sections, not
+//! from the blobs (1191): drawn after the areas, so over water and under
+//! every line and name, at view zoom [`BUILDINGS_FROM`] and deeper where
+//! the style asks for them ([`Style::buildings`]).
+//!
 //! The line widths follow the view zoom ([`crate::profile::line_widths`]),
 //! and [`Ink::Lines`] draws the lines alone in one colour, for a terminal
 //! that has one colour a cell and no fill (braille).
@@ -28,14 +33,44 @@ use leviculum_mapfill::fixture::{Feature, Features, Fixture};
 use leviculum_mapfill::render::{Clock, Look, Pass, Placement, RenderStats, Work};
 use leviculum_mapfill::style::{Class, Profile, Style, AREAS};
 
-use crate::region::{check_tile, Region, RegionError, Storage};
+use crate::buildings::{Bbox, Buildings, BUILDING_ZOOM};
+use crate::region::{check_tile, Region, RegionError, Storage, TileId};
 use crate::viewport::{ViewTile, Viewport};
 
-/// A tile of the view with its geometry.
+/// The view zoom buildings are drawn from. At z15 they are 3 to 8 px long
+/// and cost a fifth to a quarter more on the dearest frame; at z16 the
+/// phone shows them as CoMaps shows its z14.5 (the study of 1191,
+/// section 2, "Zoom gate").
+pub const BUILDINGS_FROM: u8 = 16;
+
+/// The most footprints a z15 tile's building section may hold and be
+/// drawn outlined. A tile over it is drawn as blocks: every footprint
+/// filled, no outline, so touching buildings merge into their block, as
+/// Protomaps' merged z14 blocks look. The outline is about half the cost
+/// of a building (the study of 1191, section 2), so this bounds the
+/// dearest tiles at the cost of their fills. Counted over the whole
+/// section, not over the part a view shows, so a tile looks the same in
+/// the tile cache's 256 pixel tiles and in a view drawn whole. Frankfurt's
+/// z15 tiles hold 876 footprints at the 90th percentile, 1,554 at the
+/// 99th and 2,228 at most, Berlin's 1,426 at most: Frankfurt's densest
+/// tiles are the ones it draws as blocks.
+pub const BUILDING_CAP: u32 = 2048;
+
+/// A tile of the view with its geometry and, where the view draws them,
+/// its building footprints.
 #[derive(Clone, Copy, Debug)]
 pub struct DrawTile<'a> {
     pub fixture: Fixture<'a>,
     pub tile: ViewTile,
+    /// The tile's building section; `None` where it has none or the view
+    /// does not draw them ([`draws_buildings`]).
+    pub buildings: Option<Buildings<'a>>,
+}
+
+/// Whether a view at zoom `zoom` drawn in `ink` and `style` draws
+/// building footprints.
+pub fn draws_buildings(style: Style, ink: Ink, zoom: u8) -> bool {
+    style.buildings && ink == Ink::Colour && zoom >= BUILDINGS_FROM
 }
 
 /// How a view is inked.
@@ -146,6 +181,13 @@ where
             }
         }
     }
+    if draws_buildings(style, ink, zoom) {
+        for t in tiles {
+            if let Some(b) = t.buildings {
+                buildings(&mut pass, t.tile, b, target, work, clock)?;
+            }
+        }
+    }
     // Every cursor now stands at its tile's first line. One walk keeps the
     // tunnels and bridges aside, few in any view, in the order the lines
     // are drawn in; the ground's lines are walked again for each phase. A
@@ -189,6 +231,66 @@ where
         pass.feature(f, *at, profile, target, work, clock)?;
     }
     Ok(pass.stats)
+}
+
+/// Draw the footprints of the z15 tile `tile` that its part of the view
+/// shows: every cell whose box meets that part, each footprint culled by
+/// its box; outlined unless the section holds more than [`BUILDING_CAP`].
+fn buildings<D, C>(
+    pass: &mut Pass<'_, '_>,
+    tile: ViewTile,
+    b: Buildings<'_>,
+    target: &mut D,
+    work: &mut Work<'_>,
+    clock: &mut C,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+    C: Clock,
+{
+    if tile.id.z != BUILDING_ZOOM {
+        return Ok(());
+    }
+    // A section's units are a z15 tile's at extent 4096, one sub-pixel
+    // each at 256 pixels a tile; the overzoom doubles them per step.
+    let at = Placement {
+        shift: tile.overzoom as i8,
+        origin: tile.origin,
+    };
+    let (vl, vt, vr, vb) = pass.view();
+    let unit = |v: i32, o: i32| {
+        let u = (v - o) >> tile.overzoom.min(31);
+        u.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+    };
+    let part = Bbox {
+        x0: unit(vl, at.origin.x),
+        y0: unit(vt, at.origin.y),
+        x1: unit(vr, at.origin.x),
+        y1: unit(vb, at.origin.y),
+    };
+    let outline = b.len() <= BUILDING_CAP;
+    if !outline {
+        pass.stats.blocks += 1;
+    }
+    for cell in b.touching(part) {
+        for f in cell.footprints() {
+            let Ok(f) = f else {
+                // A corrupt record ends its cell; the rest is drawn.
+                pass.stats.overflows += 1;
+                break;
+            };
+            let bb = f.bbox;
+            let rings = f.rings().map(|r| r.points());
+            let bbox = (
+                i32::from(bb.x0),
+                i32::from(bb.y0),
+                i32::from(bb.x1),
+                i32::from(bb.y1),
+            );
+            pass.building(rings, bbox, at, outline, target, work, clock)?;
+        }
+    }
+    Ok(())
 }
 
 /// Hand `visit` every feature left in `cursors`, class by class of
@@ -261,7 +363,11 @@ impl<'a> Region<&'a [u8]> {
         let mut out = Vec::new();
         for tile in view.tiles(self.zooms()) {
             if let Some(fixture) = self.fixture(tile.id)? {
-                out.push(DrawTile { fixture, tile });
+                out.push(DrawTile {
+                    fixture,
+                    tile,
+                    buildings: None,
+                });
             }
         }
         Ok(out)
@@ -290,6 +396,60 @@ impl<S: Storage> Region<S> {
     }
 }
 
+impl<'a> Region<&'a [u8]> {
+    /// Give each z15 tile of `tiles` its building section, borrowed in
+    /// place: what a view that draws buildings ([`draws_buildings`])
+    /// asks after [`Region::view`]. A region older than version 3 has
+    /// none.
+    pub fn with_buildings(&self, tiles: &mut [DrawTile<'a>]) -> Result<(), RegionError> {
+        for t in tiles.iter_mut() {
+            if t.tile.id.z == BUILDING_ZOOM {
+                t.buildings = self.buildings(t.tile.id)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<S: Storage> Region<S> {
+    /// Read the building sections of the z15 tiles of `tiles` into `out`,
+    /// one buffer each, for storage that is not addressable memory, as
+    /// [`Region::read_view`] reads the blobs; `out` is cleared first and
+    /// its buffers reused. [`attach_buildings`] then hands them to the
+    /// tiles. Only a view that draws buildings reads them, so the M9 and
+    /// the terminal never read a byte of them.
+    pub fn read_buildings(
+        &self,
+        tiles: &[DrawTile<'_>],
+        out: &mut Vec<(TileId, Vec<u8>)>,
+    ) -> Result<(), RegionError> {
+        let mut spare: Vec<Vec<u8>> = out.drain(..).map(|(_, b)| b).collect();
+        for t in tiles.iter().filter(|t| t.tile.id.z == BUILDING_ZOOM) {
+            if let Some(e) = self.find_buildings(t.tile.id)? {
+                let mut buf = spare.pop().unwrap_or_default();
+                self.read_tile(&e, &mut buf)?;
+                out.push((t.tile.id, buf));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Give each tile of `tiles` its building section from `read`, as
+/// [`Region::read_buildings`] read them, the head checked.
+pub fn attach_buildings<'a>(
+    tiles: &mut [DrawTile<'a>],
+    read: &'a [(TileId, Vec<u8>)],
+) -> Result<(), RegionError> {
+    for (id, bytes) in read {
+        let b = Buildings::parse(bytes).map_err(|e| RegionError::Buildings(*id, e))?;
+        for t in tiles.iter_mut().filter(|t| t.tile.id == *id) {
+            t.buildings = Some(b);
+        }
+    }
+    Ok(())
+}
+
 /// The tiles [`Region::read_view`] read, checked and ready to draw.
 pub fn draw_tiles(read: &[(ViewTile, Vec<u8>)]) -> Result<Vec<DrawTile<'_>>, RegionError> {
     read.iter()
@@ -297,6 +457,7 @@ pub fn draw_tiles(read: &[(ViewTile, Vec<u8>)]) -> Result<Vec<DrawTile<'_>>, Reg
             Ok(DrawTile {
                 fixture: check_tile(tile.id, buf)?,
                 tile: *tile,
+                buildings: None,
             })
         })
         .collect()
