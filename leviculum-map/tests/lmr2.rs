@@ -198,6 +198,7 @@ fn as_version_1(v2: &Region<&[u8]>) -> Vec<u8> {
         index,
         len: out.len() as u64,
         labels: None,
+        buildings: None,
         ..h
     };
     out[..HEADER_LEN].copy_from_slice(&header.encode());
@@ -226,17 +227,20 @@ fn a_version_1_file_still_reads_without_names() {
 #[test]
 fn a_version_this_reader_does_not_know_is_refused() {
     let mut b = FLORENCE.to_vec();
-    b[4] = 3;
-    assert_eq!(Region::from_bytes(&b).err(), Some(RegionError::Version(3)));
+    b[4] = 4;
+    assert_eq!(Region::from_bytes(&b).err(), Some(RegionError::Version(4)));
     // A version 1 reader's check is the same field: it sees 2 and stops,
     // where reading on would take the label index for tiles. Here a v2
-    // file claiming version 1 is caught by its header length.
-    let mut b = FLORENCE.to_vec();
-    b[4] = 1;
-    assert_eq!(
-        Region::from_bytes(&b).err(),
-        Some(RegionError::Header("header length"))
-    );
+    // file claiming version 1 or 3 is caught by its header length.
+    for v in [1, 3] {
+        let mut b = FLORENCE.to_vec();
+        b[4] = v;
+        assert_eq!(
+            Region::from_bytes(&b).err(),
+            Some(RegionError::Header("header length")),
+            "version {v}"
+        );
+    }
     // The label index must end where the tile index starts.
     let r = Region::from_bytes(FLORENCE).expect("open");
     let mut h = *r.header();

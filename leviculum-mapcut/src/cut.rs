@@ -604,6 +604,7 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
             table: strings_at,
             table_len: bytes.len() as u64,
         }),
+        buildings: None,
     };
     out.seek(SeekFrom::Start(0))?;
     out.write_all(&header.encode())?;

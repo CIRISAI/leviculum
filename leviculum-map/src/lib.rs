@@ -9,6 +9,8 @@
 //! - [`profile`]: which classes each zoom of a region keeps, and how its
 //!   geometry was simplified.
 //! - [`pins`]: pins and their labels placed in a view, as data.
+//! - [`buildings`]: the building footprints a region carries (LMR3), per
+//!   z15 tile in a 4 x 4 grid of cells.
 //! - [`labels`]: the names a region carries (LMR2) and the one rule every
 //!   frontend places them by.
 //! - [`draw`]: the tiles of one view drawn into any `DrawTarget`, class by
@@ -31,6 +33,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod buildings;
 pub mod cells;
 pub mod choice;
 pub mod draw;

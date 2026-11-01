@@ -1,14 +1,16 @@
 //! The region file: one tile pyramid of `leviculum-mapfill`'s flat
 //! geometry, read in place (`docs/src/concepts/loquax-map.md`, section 4,
-//! "Region file"), and from version 2 (LMR2) the names on it: one string
-//! table and a label section per tile ([`crate::labels`]).
+//! "Region file"), from version 2 (LMR2) the names on it: one string
+//! table and a label section per tile ([`crate::labels`]), and from
+//! version 3 (LMR3) the buildings: a building section per z15 tile
+//! ([`crate::buildings`]).
 //!
 //! All integers little-endian. Offsets are from the start of the file.
 //!
 //! ```text
-//! header  64 bytes (version 1), 96 (version 2)
+//! header  64 bytes (version 1), 96 (version 2), 112 (version 3)
 //!   0  "LMR1"
-//!   4  u16 version (1 or 2)     6  u16 header length (64 or 96)
+//!   4  u16 version (1 to 3)     6  u16 header length (64, 96 or 112)
 //!   8  i32 west, south, east, north, degrees x 10^7 (west > east: the
 //!      region crosses the antimeridian)
 //!  24  u8 min zoom  25 u8 max zoom (<= 16)  26 u8 layer profile  27 u8 0
@@ -16,18 +18,26 @@
 //!  36  u32 notice offset        40 u32 notice length
 //!  44  u32 tile count           48 u64 index offset
 //!  56  u64 file length
-//!   version 2 only:
+//!   version 2 and 3:
 //!  64  u64 label index offset   72 u32 label section count
 //!  76  u32 string count         80 u64 string table offset
 //!  88  u64 string table length
+//!   version 3 only:
+//!  96  u64 building index offset  104 u32 building section count
+//! 108  u32 0
 //! text    the attribution (one line, shown on the map) and the notice
 //!         (the licence and the source), UTF-8, both required
 //! tiles   one `LMF1` fixture per tile: view 256x256, one tile at offset
 //!         (0, 0), its shift taking the tile's extent to 4096 sub-pixels
 //! labels  version 2: one label section per tile that has names
-//! strings version 2: the string table, after every blob
+//! buildings  version 3: one building section per z15 tile that has
+//!         buildings
+//! strings version 2: the string table, after every blob and section
 //! label index  version 2: label section count x 20 bytes, the entries'
-//!         layout, ending where the index starts
+//!         layout, ending where the building index starts (version 3)
+//!         or the index (version 2)
+//! building index  version 3: building section count x 20 bytes, the
+//!         entries' layout, ending where the index starts
 //! index   tile count x 20 bytes, ascending by (z, x, y), last in the file:
 //!         u8 z  u8 0  u16 x  u16 y  u16 0  u64 offset  u32 length
 //! ```
@@ -39,10 +49,14 @@
 //! in place, 20 bytes per probe: a whole country's index is megabytes,
 //! which the M9 does not load.
 //!
-//! A reader of version 1 refuses a version 2 file with
-//! [`RegionError::Version`], never misreads it; this reader reads both. A
-//! frontend that draws no names never touches the label index or the
-//! string table, so they cost it nothing.
+//! A reader refuses a version newer than it knows with
+//! [`RegionError::Version`] before it reads anything past the version
+//! field, never misreads it: version 1 readers refuse version 2 and 3,
+//! version 2 readers (those before 1191) refuse version 3. This reader reads
+//! all three. A cut without buildings writes version 2, which every
+//! version 2 reader still reads. A frontend that draws no names never
+//! touches the label index or the string table, one that draws no
+//! buildings never touches the building index, so they cost it nothing.
 
 use alloc::string::String;
 use alloc::vec;
@@ -50,12 +64,17 @@ use alloc::vec::Vec;
 
 use leviculum_mapfill::fixture::{Fixture, FixtureError, Kind};
 
+use crate::buildings::{BuildingError, Buildings};
 use crate::labels::{LabelError, Section};
 
 /// The file's first four bytes.
 pub const MAGIC: [u8; 4] = *b"LMR1";
-/// The format version the writer writes, the newest this reader reads.
-pub const VERSION: u16 = 2;
+/// The format version the writer writes, the newest this reader reads:
+/// names and buildings.
+pub const VERSION: u16 = 3;
+/// The version with names and without buildings, which a cut without
+/// buildings writes and this reader reads too.
+pub const VERSION_2: u16 = 2;
 /// The first version, without names, which this reader reads too.
 pub const VERSION_1: u16 = 1;
 /// Header length in bytes of a version 1 file, the part every version
@@ -63,6 +82,8 @@ pub const VERSION_1: u16 = 1;
 pub const HEADER_LEN: usize = 64;
 /// Header length in bytes of a version 2 file.
 pub const HEADER_LEN_2: usize = 96;
+/// Header length in bytes of a version 3 file.
+pub const HEADER_LEN_3: usize = 112;
 /// Index entry length in bytes.
 pub const ENTRY_LEN: usize = 20;
 /// The highest zoom a region may hold: x and y are `u16`.
@@ -96,6 +117,8 @@ pub enum RegionError {
     /// A tile's label section is not one, or names a feature its tile
     /// does not hold as a line.
     Labels(TileId, LabelError),
+    /// A tile's building section is not one.
+    Buildings(TileId, BuildingError),
 }
 
 /// A tile address.
@@ -138,6 +161,19 @@ pub struct Header {
     pub len: u64,
     /// The names: `None` in a version 1 file, which has none.
     pub labels: Option<LabelTables>,
+    /// The buildings: `None` before version 3. A version 3 header has
+    /// names too; [`Header::encode`] writes empty ones where they are
+    /// `None`.
+    pub buildings: Option<BuildingTables>,
+}
+
+/// Where a version 3 file keeps its buildings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BuildingTables {
+    /// The building index: entries like the tile index's, pointing at
+    /// building sections.
+    pub index: u64,
+    pub sections: u32,
 }
 
 /// Where a version 2 file keeps its names.
@@ -173,16 +209,29 @@ impl Header {
     pub fn len_of(version: u16) -> Option<usize> {
         match version {
             VERSION_1 => Some(HEADER_LEN),
-            VERSION => Some(HEADER_LEN_2),
+            VERSION_2 => Some(HEADER_LEN_2),
+            VERSION => Some(HEADER_LEN_3),
             _ => None,
         }
     }
 
-    /// This header's length: 96 bytes with names, 64 without.
+    /// The version this header encodes as: 3 with buildings, 2 with names
+    /// alone, 1 with neither.
+    pub fn version_of(&self) -> u16 {
+        match (self.buildings, self.labels) {
+            (Some(_), _) => VERSION,
+            (None, Some(_)) => VERSION_2,
+            (None, None) => VERSION_1,
+        }
+    }
+
+    /// This header's length: 112 bytes with buildings, 96 with names
+    /// alone, 64 with neither.
     pub fn header_len(&self) -> usize {
-        match self.labels {
-            Some(_) => HEADER_LEN_2,
-            None => HEADER_LEN,
+        match self.version_of() {
+            VERSION => HEADER_LEN_3,
+            VERSION_2 => HEADER_LEN_2,
+            _ => HEADER_LEN,
         }
     }
 
@@ -190,16 +239,27 @@ impl Header {
     /// magic is checked; [`RegionError::Version`] for one this reader does
     /// not know, before anything else of the header is read.
     pub fn version(b: &[u8; HEADER_LEN]) -> Result<u16, RegionError> {
+        Self::version_up_to(b, VERSION)
+    }
+
+    /// [`Header::version`] for a reader whose newest version is `newest`:
+    /// the check every reader runs first, so a test can hold an older
+    /// reader's refusal to the rule.
+    pub fn version_up_to(b: &[u8; HEADER_LEN], newest: u16) -> Result<u16, RegionError> {
         if b[..4] != MAGIC {
             return Err(RegionError::Magic);
         }
         let version = u16_at(b, 4);
+        if version > newest {
+            return Err(RegionError::Version(version));
+        }
         Self::len_of(version).ok_or(RegionError::Version(version))?;
         Ok(version)
     }
 
     /// Decode and check the fields that need nothing but the header: the
-    /// first 64 bytes, and for version 2 the 32 after them. The checks
+    /// first 64 bytes, for version 2 the 32 after them, and for version 3
+    /// the 16 after those. The checks
     /// against the file's length are [`Region::open`]'s.
     pub fn parse(b: &[u8]) -> Result<Self, RegionError> {
         let head: &[u8; HEADER_LEN] = b
@@ -236,7 +296,7 @@ impl Header {
         if min_zoom > max_zoom || max_zoom > MAX_ZOOM {
             return Err(RegionError::Header("zoom"));
         }
-        if b[27] != 0 {
+        if b[27] != 0 || (version == VERSION && u32_at(b, 108) != 0) {
             return Err(RegionError::Header("reserved"));
         }
         Ok(Self {
@@ -249,24 +309,26 @@ impl Header {
             tiles: u32_at(b, 44),
             index: u64_at(b, 48),
             len: u64_at(b, 56),
-            labels: (version == VERSION).then(|| LabelTables {
+            labels: (version >= VERSION_2).then(|| LabelTables {
                 index: u64_at(b, 64),
                 sections: u32_at(b, 72),
                 strings: u32_at(b, 76),
                 table: u64_at(b, 80),
                 table_len: u64_at(b, 88),
             }),
+            buildings: (version == VERSION).then(|| BuildingTables {
+                index: u64_at(b, 96),
+                sections: u32_at(b, 104),
+            }),
         })
     }
 
-    /// The header bytes, version 2 with names and version 1 without; the
-    /// writer's half, kept beside the reader.
+    /// The header bytes: version 3 with buildings, 2 with names alone, 1
+    /// with neither ([`Header::version_of`]); the writer's half, kept
+    /// beside the reader.
     pub fn encode(&self) -> Vec<u8> {
         let mut b = vec![0u8; self.header_len()];
-        let version = match self.labels {
-            Some(_) => VERSION,
-            None => VERSION_1,
-        };
+        let version = self.version_of();
         b[..4].copy_from_slice(&MAGIC);
         b[4..6].copy_from_slice(&version.to_le_bytes());
         b[6..8].copy_from_slice(&(self.header_len() as u16).to_le_bytes());
@@ -288,12 +350,17 @@ impl Header {
         }
         b[48..56].copy_from_slice(&self.index.to_le_bytes());
         b[56..64].copy_from_slice(&self.len.to_le_bytes());
-        if let Some(l) = self.labels {
+        if version >= VERSION_2 {
+            let l = self.labels.unwrap_or_default();
             b[64..72].copy_from_slice(&l.index.to_le_bytes());
             b[72..76].copy_from_slice(&l.sections.to_le_bytes());
             b[76..80].copy_from_slice(&l.strings.to_le_bytes());
             b[80..88].copy_from_slice(&l.table.to_le_bytes());
             b[88..96].copy_from_slice(&l.table_len.to_le_bytes());
+        }
+        if let Some(bt) = self.buildings {
+            b[96..104].copy_from_slice(&bt.index.to_le_bytes());
+            b[104..108].copy_from_slice(&bt.sections.to_le_bytes());
         }
         b
     }
@@ -385,7 +452,7 @@ pub struct Region<S> {
 impl<S: Storage> Region<S> {
     /// Check the header against the storage and read the two texts.
     pub fn open(storage: S) -> Result<Self, RegionError> {
-        let mut hb = [0u8; HEADER_LEN_2];
+        let mut hb = [0u8; HEADER_LEN_3];
         if storage.size() < HEADER_LEN as u64 {
             // Too short for a header: say Magic when even that is wrong.
             let n = storage.size() as usize;
@@ -417,11 +484,21 @@ impl<S: Storage> Region<S> {
             return Err(RegionError::Header("index"));
         }
         // Blobs lie after the header and before the string table, which
-        // lies before the label index, which ends where the index starts.
+        // lies before the label index, which ends where the building index
+        // starts, which ends where the index starts.
         let mut data_end = header.index;
+        let mut labels_end = header.index;
+        if let Some(bt) = header.buildings {
+            let len = u64::from(bt.sections) * ENTRY_LEN as u64;
+            if bt.index.checked_add(len) != Some(header.index) || bt.index < first {
+                return Err(RegionError::Header("building index"));
+            }
+            labels_end = bt.index;
+            data_end = bt.index;
+        }
         if let Some(l) = header.labels {
             let label_index_len = u64::from(l.sections) * ENTRY_LEN as u64;
-            if l.index.checked_add(label_index_len) != Some(header.index) || l.index < first {
+            if l.index.checked_add(label_index_len) != Some(labels_end) || l.index < first {
                 return Err(RegionError::Header("label index"));
             }
             let offsets = (u64::from(l.strings) + 1) * 4;
@@ -546,6 +623,28 @@ impl<S: Storage> Region<S> {
         }
     }
 
+    /// Building index entry `n`, checked as [`Region::entry`] checks a
+    /// tile's.
+    pub fn building_entry(&self, n: u32) -> Result<Entry, RegionError> {
+        let b = self.header.buildings.ok_or(RegionError::Entry(n))?;
+        self.entry_in(b.index, b.sections, n)
+    }
+
+    /// Building sections the region holds, 0 before version 3.
+    pub fn building_sections(&self) -> u32 {
+        self.header.buildings.map_or(0, |b| b.sections)
+    }
+
+    /// The building section entry of `id`; `None` when the tile has no
+    /// buildings or the file is older than version 3. Only a frontend that
+    /// draws buildings asks.
+    pub fn find_buildings(&self, id: TileId) -> Result<Option<Entry>, RegionError> {
+        match self.header.buildings {
+            Some(b) => self.find_in(b.index, b.sections, id),
+            None => Ok(None),
+        }
+    }
+
     /// Byte range of string `n` in the storage.
     fn string_range(&self, n: u32) -> Result<(u64, u32), RegionError> {
         let l = self.header.labels.ok_or(RegionError::Strings(n))?;
@@ -598,10 +697,29 @@ impl<S: Storage> Region<S> {
     }
 
     /// Walk the whole index: every entry in range, strictly ascending, and
-    /// every blob a one-tile fixture; in a version 2 file the string table
-    /// and every label section too. What the cut runs on its own output
-    /// and a frontend may run once on a file it did not make.
+    /// every blob a one-tile fixture; from version 2 the string table and
+    /// every label section too, in version 3 every building section and
+    /// every record in it. What the cut runs on its own output and a
+    /// frontend may run once on a file it did not make.
     pub fn verify(&self) -> Result<(), RegionError> {
+        self.verify_tiles_and_labels()?;
+        let mut prev: Option<TileId> = None;
+        let mut sec = Vec::new();
+        for n in 0..self.building_sections() {
+            let e = self.building_entry(n)?;
+            if prev.is_some_and(|p| p >= e.id) {
+                return Err(RegionError::Entry(n));
+            }
+            prev = Some(e.id);
+            self.read_tile(&e, &mut sec)?;
+            Buildings::parse(&sec)
+                .and_then(|b| b.check())
+                .map_err(|err| RegionError::Buildings(e.id, err))?;
+        }
+        Ok(())
+    }
+
+    fn verify_tiles_and_labels(&self) -> Result<(), RegionError> {
         let mut prev: Option<TileId> = None;
         let mut buf = Vec::new();
         for n in 0..self.header.tiles {
@@ -756,6 +874,23 @@ impl<'a> Region<&'a [u8]> {
         Section::parse(blob, self.string_count())
             .map(Some)
             .map_err(|err| RegionError::Labels(id, err))
+    }
+
+    /// Tile `id`'s building section, borrowed from the region, its head
+    /// checked; `None` when it has no buildings or the file is older than
+    /// version 3. The records are checked as they are read.
+    pub fn buildings(&self, id: TileId) -> Result<Option<Buildings<'a>>, RegionError> {
+        let Some(e) = self.find_buildings(id)? else {
+            return Ok(None);
+        };
+        let start = e.offset as usize;
+        let blob = self
+            .storage
+            .get(start..start + e.len as usize)
+            .ok_or(RegionError::Truncated)?;
+        Buildings::parse(blob)
+            .map(Some)
+            .map_err(|err| RegionError::Buildings(id, err))
     }
 
     /// String `n` of the table, borrowed from the region.
