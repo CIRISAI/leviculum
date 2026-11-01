@@ -438,12 +438,15 @@ fn the_settings_page_sets_the_map_theme() {
     );
 }
 
-/// The Map tab's loading chip (1199) reads the frame's `loading`: a map
+/// The Map tab's loading chip (1199) reads the frame's `loading_here`
+/// (1292, `loading` before): a map
 /// opened on a place no region holds asks the autoload for it, and while
 /// the download runs (a fake source that takes the connection and never
 /// answers) every frame says `loading`, so Java asks again and the chip
 /// stays. A source that refuses ends the load with a notice, the chip's
-/// line for a load that could not start, and `loading` drops.
+/// line for a load that could not start, and once the loads the screen
+/// asked for found no internet too, `loading` drops and the frame says
+/// `offline`.
 #[test]
 fn a_missing_region_loads_by_itself_and_the_frame_says_so() {
     let stalls = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
@@ -473,7 +476,10 @@ fn a_missing_region_loads_by_itself_and_the_frame_says_so() {
         Some(Vec::new()),
         now(),
     ));
-    assert!(shown.loading, "the autoload runs: {shown:?}");
+    assert!(
+        shown.loading && shown.loading_here,
+        "the autoload runs: {shown:?}"
+    );
     let (shown, _) = frame(&loquax_android::map::render(
         &request(home.path(), false),
         Some(Vec::new()),
@@ -506,7 +512,24 @@ fn a_missing_region_loads_by_itself_and_the_frame_says_so() {
         ))
         .0;
     }
-    assert!(!last.loading, "the load ended: {last:?}");
+    // The view asks for the cells its screen lacks too (1292); each finds
+    // no internet in turn, said once, and then nothing loads and the chip
+    // says "Offline".
+    while last.loading {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the loads never ended: {last:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        last = frame(&loquax_android::map::render(
+            &request(home.path(), false),
+            Some(Vec::new()),
+            now(),
+        ))
+        .0;
+        assert!(last.notice.is_none(), "no internet said once: {last:?}");
+    }
+    assert!(last.offline && !last.loading_here, "{last:?}");
 }
 
 /// A tap on a pin's marker selects it and names it; the selected pin is
@@ -2110,4 +2133,245 @@ fn the_walks_frankfurt_shows_the_building_fill_at_z16_and_not_at_z15() {
         );
         eprintln!("dark={dark} fill z16={z16:.3} z15={z15:.3}");
     }
+}
+
+/// The walk of 1292: a phone's map driven as `MapView` drives it, the
+/// renderer's clock held, a frame every [`FRAME_MS`] while a finger or a
+/// coast moves it; at rest a frame again while one is `pending`, every
+/// 1.5 s while one says `loading`, and the prefetch while one says
+/// `prefetching` and none `loading`.
+struct Walk {
+    home: tempfile::TempDir,
+    /// The source that takes the connection and never answers: a load
+    /// that starts stays running.
+    source: std::net::TcpListener,
+    ask: MapRequest,
+    t_ms: u64,
+    /// When the screen was first more than a tenth uncovered.
+    uncovered_ms: Option<u64>,
+    /// When a frame first said a region loads for the screen.
+    loading_ms: Option<u64>,
+    /// The chip of the last frame.
+    chip: &'static str,
+    /// The chip of the frame that first said a region loads.
+    chip_then: &'static str,
+    /// The zoom the fingers made, in thousandths: a frame that moves is
+    /// drawn at its tile step, and `MapView` asks from the step it got
+    /// for what the fingers did since.
+    fingers_milli: i32,
+}
+
+/// The Florence view held by the committed region, 480 x 320 at z16.
+const WALK_LAT: f64 = 43.7756;
+const WALK_LON: f64 = 11.2600;
+
+impl Walk {
+    fn new() -> Self {
+        let home = home();
+        let source = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = source.local_addr().expect("its address").port();
+        std::fs::write(
+            home.path().join(loquax::config::CONFIG_FILE),
+            format!("map_source = \"http://127.0.0.1:{port}/planet.pmtiles\"\n"),
+        )
+        .expect("config");
+        let at = project(LatLon::from_degrees(WALK_LAT, WALK_LON));
+        let ask = MapRequest {
+            x: Some(at.x),
+            y: Some(at.y),
+            ..request(home.path(), false)
+        };
+        let mut walk = Self {
+            home,
+            source,
+            ask,
+            t_ms: 0,
+            uncovered_ms: None,
+            loading_ms: None,
+            chip: "",
+            chip_then: "",
+            fingers_milli: 16_000,
+        };
+        let first = walk.frame(0, 0, 0, false);
+        assert!(!first.loading_here, "the start is held: {first:?}");
+        walk
+    }
+
+    /// The share of the screen of `shown` no region holds.
+    fn share(&self, shown: &MapShown) -> f64 {
+        let regions = Maps::new(Some(self.home.path().join("maps"))).headers();
+        let view = Viewport::new(
+            World {
+                x: shown.x,
+                y: shown.y,
+            },
+            shown.zoom,
+            W,
+            H,
+        );
+        loquax::ui::viewload::uncovered(&view, &regions)
+    }
+
+    /// The chip `MapPane` shows over `shown`.
+    fn chip_of(shown: &MapShown) -> &'static str {
+        if shown.loading_here {
+            "Loading the map of this area"
+        } else if shown.offline {
+            "Offline"
+        } else if shown.no_map {
+            "No map here yet"
+        } else {
+            "none"
+        }
+    }
+
+    fn note(&mut self, shown: &MapShown, at_ms: u64) {
+        if self.uncovered_ms.is_none() && self.share(shown) > 0.10 {
+            self.uncovered_ms = Some(at_ms);
+        }
+        if self.loading_ms.is_none() && shown.loading_here {
+            self.loading_ms = Some(at_ms);
+            self.chip_then = Self::chip_of(shown);
+        }
+        self.chip = Self::chip_of(shown);
+    }
+
+    /// One frame at the walk's clock, panned by `(dx, dy)` and the
+    /// fingers zoomed by `zoom_by_milli` since the last; the clock then
+    /// moves a frame on.
+    fn frame(&mut self, dx: i32, dy: i32, zoom_by_milli: i32, moving: bool) -> MapShown {
+        let dir = self.home.path().to_path_buf();
+        self.fingers_milli += zoom_by_milli;
+        let drawn = self.ask.zoom_milli.unwrap_or(16_000) as i32;
+        let zoom_by_milli = self.fingers_milli - drawn;
+        loquax_android::map::tune_clock(&dir, Some(self.t_ms));
+        let ask = MapRequest {
+            pan_x: dx,
+            pan_y: dy,
+            zoom_by_milli,
+            about_x: (W / 2) as i32,
+            about_y: (H / 2) as i32,
+            moving,
+            ..self.ask.clone()
+        };
+        let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        loquax_android::map::tune_clock(&dir, Some(self.t_ms));
+        self.ask.x = Some(shown.x);
+        self.ask.y = Some(shown.y);
+        self.ask.zoom = None;
+        self.ask.zoom_milli = Some(shown.zoom_milli);
+        let at = self.t_ms;
+        self.note(&shown, at);
+        self.t_ms += FRAME_MS;
+        shown
+    }
+
+    /// At rest until `ms` from now, as `MapView`'s frame thread is.
+    fn rest(&mut self, ms: u64) {
+        let until = self.t_ms + ms;
+        let mut last = self.frame(0, 0, 0, false);
+        while self.t_ms < until {
+            if last.pending {
+                last = self.frame(0, 0, 0, false);
+            } else if last.loading {
+                self.t_ms += 1500;
+                last = self.frame(0, 0, 0, false);
+            } else if last.prefetching {
+                loquax_android::map::tune_clock(self.home.path(), Some(self.t_ms));
+                let answer = prefetch(&self.ask);
+                self.t_ms += FRAME_MS;
+                // The prefetch's answer is no frame: the chip waits for
+                // the next one, which nothing asks for.
+                last.prefetching = answer.prefetching;
+                if answer.loading_here && self.loading_ms.is_none() {
+                    self.loading_ms = Some(self.t_ms);
+                    self.chip_then = "none (no frame asked)";
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Whether the load reached the source.
+    fn connected(&self) -> bool {
+        self.source.set_nonblocking(true).expect("nonblocking");
+        self.source.accept().is_ok()
+    }
+
+    fn row(&self, name: &str) -> String {
+        let ms = |t: Option<u64>| t.map_or("never".to_string(), |t| t.to_string());
+        let after = match (self.uncovered_ms, self.loading_ms) {
+            (Some(u), Some(l)) => format!("{}", l.saturating_sub(u)),
+            _ => "-".to_string(),
+        };
+        format!(
+            "| {name} | {} | {} | {after} | {} | {} | {} |",
+            ms(self.uncovered_ms),
+            ms(self.loading_ms),
+            self.chip_then,
+            self.chip,
+            self.connected()
+        )
+    }
+}
+
+/// A pan, a fling and a zoom out from the Florence region into the empty
+/// (1292): the frame that first leaves more than a tenth of the screen
+/// uncovered asks for its region within 300 ms, during the motion too,
+/// the chip says it loads here, and the load reaches the source. A table
+/// row a gesture: uncovered at, loading at, the difference, the chip
+/// then and at the end, whether the source was asked.
+#[test]
+fn a_pan_into_the_empty_loads_what_is_on_screen_at_once() {
+    let mut rows = Vec::new();
+    let mut late = Vec::new();
+    let mut check = |walk: &Walk, name: &str| {
+        rows.push(walk.row(name));
+        match (walk.uncovered_ms, walk.loading_ms) {
+            (Some(u), Some(l)) if l <= u + 300 => {}
+            other => late.push(format!("{name}: {other:?}")),
+        }
+    };
+    // A pan of a screen and a half east in 576 ms, then at rest.
+    let mut walk = Walk::new();
+    for _ in 0..36 {
+        walk.frame(20, 0, 0, true);
+    }
+    walk.rest(3000);
+    check(&walk, "pan, then rest");
+    // The same pan, then on slowly for two seconds, never at rest.
+    let mut walk = Walk::new();
+    for _ in 0..36 {
+        walk.frame(20, 0, 0, true);
+    }
+    for _ in 0..125 {
+        walk.frame(2, 0, 0, true);
+    }
+    check(&walk, "pan, on slowly");
+    // A short drag east, the finger lifts, the map coasts on (1209).
+    let mut walk = Walk::new();
+    for _ in 0..8 {
+        walk.frame(30, 0, 0, true);
+    }
+    let mut v = 40.0f64;
+    while v >= 1.0 {
+        walk.frame(v.round() as i32, 0, 0, true);
+        v *= 0.96;
+    }
+    walk.rest(3000);
+    check(&walk, "fling, coasting");
+    // Two steps out about the screen's middle in eight frames.
+    let mut walk = Walk::new();
+    for _ in 0..8 {
+        walk.frame(0, 0, -250, true);
+    }
+    walk.rest(3000);
+    check(&walk, "zoom out two steps");
+    eprintln!("| gesture | uncovered at ms | loading at ms | after ms | chip then | chip at end | source asked |");
+    eprintln!("|---|---|---|---|---|---|---|");
+    for row in &rows {
+        eprintln!("{row}");
+    }
+    assert!(late.is_empty(), "late or never: {late:?}");
 }

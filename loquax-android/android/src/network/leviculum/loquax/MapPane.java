@@ -394,15 +394,16 @@ final class MapPane implements MapView.Listener {
     }
 
     /**
-     * The chip of the map's state, when no event's chip is up: loading,
-     * offline, no map here; none when all is well.
+     * The chip of the map's state, when no event's chip is up: loading
+     * for the area on screen (1292; a load for an area the view left says
+     * nothing), offline, no map here; none when all is well.
      */
     private void state(Map<String, Object> shown) {
         if (shown == null) {
             return;
         }
         int words;
-        if (Core.bool(shown, "loading")) {
+        if (Core.bool(shown, "loading_here")) {
             words = R.string.map_loading;
         } else if (Core.bool(shown, "offline")) {
             words = R.string.map_offline;

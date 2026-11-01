@@ -392,8 +392,11 @@ The frontends:
   so a gesture waits one tile at most and drops the plan; a prefetched
   tile no frame used is evicted first, and a prefetch evicts neither a
   tile on screen nor one it drew. Only while the map is in front and
-  the battery saver is off. When the ring reaches past the regions that
-  hold the frame, the autoload is asked for the ring's area. The frame
+  the battery saver is off. Which regions the screen and its ring need
+  is the frames' scheduler's since 1292 ("The screen first", below), no
+  longer the prefetch's: a prefetch answer is no frame, so a load it
+  started showed no chip, and it asked nothing over a frame no region
+  held. The frame
   itself, the names kept, the prefetch's plan and the view held to one
   world are `loquax::mapframe`, which the window calls too (1144); the
   phone's glue keeps its requests, its fit and its autoload. The
@@ -860,11 +863,43 @@ config, #471) says the map works without a step. Decided 2026-10-27
   join up (this replaces "one region or the outline" of section 7). A
   place's map is fitted again to the region when it lands, unless the
   reader moved it.
-- *Quiet and robust.* One load at a time on a thread of its own; the map
-  title says `loading map`; `tui.log` has `MAPLOAD start`, `done` and
-  `failed` lines with the box, zooms, bytes and `elapsed_ms`; a failure is
-  one toast; a failed box backs off 30 s doubling to an hour; no internet
-  is said once until a load succeeds again.
+- *The screen first* (1292, Lew 2026-11-01: "the area he is looking at
+  loads as fast as possible, always with the highest priority"). On the
+  phone every frame, during a pan, a fling's coast and a pinch too, goes
+  to one scheduler in the core, `loquax::ui::viewload`: the screen is
+  sampled 16 by 16, and when the regions leave more than 10 % of it
+  uncovered at the view's zoom, the cells under the uncovered samples
+  are asked for at once, nearest the screen's centre first. A cell is the
+  tile three zooms above the view's (z13 at most, about 3 km in Europe;
+  above z10 only), so a pan asks for the same boxes again and a landed
+  cell is never asked twice; its load reaches from three zooms above the
+  view's to z15 as the visible area's does. Then the uncovered cells
+  within two tiles of the screen, those in the pan's direction first, and
+  while the view moves only those (from z12). One decision every 250 ms
+  while the view moves, counted from the last decision, so the frames of
+  a pan never restart the wait; every new frame at rest decides; the same
+  view and regions again decide nothing. The loader orders its queue by
+  that decision: a box asked for by hand (a place, the pins, "load this
+  area"), then the screen's, then the ones next to it, then those the
+  view left, of which it keeps the newest eight. A load the view left
+  cannot be paused, the cut reads the archive in one call, so the
+  screen's load starts beside it: two at most. Measured with the facade
+  and a source that never answers (`a_pan_into_the_empty_loads_what_is_on_screen_at_once`,
+  a frame every 16 ms): a pan of a screen and a half that rests, one that
+  goes on slowly, a fling that coasts and a zoom out by two steps each
+  ask within 32 to 112 ms of the first frame more than a tenth uncovered;
+  before 1292 none of them asked at all.
+- *Quiet and robust.* One load at a time on a thread of its own, two
+  when the screen's starts beside a load the view left; the map title
+  says `loading map`; `tui.log` has `MAPLOAD start`, `done` and `failed`
+  lines with the box, zooms, bytes and `elapsed_ms`; a failure is one
+  toast; a failed box backs off 30 s doubling to an hour, but a box that
+  found no internet does not: "Offline" holds until the next load
+  starts, which the next view the user moves to asks for, and no internet
+  is said once until a load succeeds again. The phone's chip says
+  "Loading the map of this area" only for a load for the screen
+  (`loading_here`, 1292); a load for an area the view left says nothing,
+  and "No map here yet" shows over it.
 - *Disk.* Loaded regions are named `auto-<box>-z<min>-<max>.lmr` and are a
   cache of `map_cache_mb` megabytes (500 by default, a hundred or more city
   places), the least recently viewed evicted first, viewed meaning drawn,

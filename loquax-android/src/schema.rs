@@ -153,6 +153,9 @@
 //! never sends: `moving`, `take_back` and `anyway`.
 //! Deleting every map (1290) came within version 1 too:
 //! [`Request::DeleteRegions`]. An older app deletes them one by one.
+//! The chip of a load for the screen (1292) came within version 1 too:
+//! [`MapShown::loading_here`]. An older app reads `loading`, which also
+//! counts loads for areas the view left.
 
 use serde::{Deserialize, Serialize};
 
@@ -2153,6 +2156,11 @@ pub struct MapShown {
     pub room_north: u32,
     #[serde(default)]
     pub room_south: u32,
+    /// A region loads for the area on screen (1292): the map's "Loading
+    /// the map of this area" chip. `loading` alone may be a load for an
+    /// area the view left, which the chip does not name.
+    #[serde(default)]
+    pub loading_here: bool,
 }
 
 /// A map frame as the host's tests and tools read it: the description's
