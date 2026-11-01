@@ -66,6 +66,7 @@ pub const VERSION: &str = env!("LEVICULUM_VERSION");
 pub mod address;
 pub mod body;
 pub mod clock;
+pub mod code;
 pub mod config;
 pub mod display_name;
 pub mod effects;

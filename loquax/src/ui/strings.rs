@@ -186,6 +186,30 @@ leviculum_ui::catalogue! {
     VoiceCancel = "voice_cancel", "Slide left to cancel", "Zum Abbrechen nach links wischen";
     VoiceTooLong = "voice_too_long", "A voice message lasts at most %1$s.", "Eine Sprachnachricht dauert höchstens %1$s.";
     VoiceNoMicrophone = "voice_no_microphone", "Loquax needs the microphone to record a voice message.", "Loquax braucht das Mikrofon für Sprachnachrichten.";
+    // A code read (1263, `crate::code`): what a scanner, the pencil and
+    // the palette say for one they cannot take.
+    CodeForeign = "code_foreign", "That is not a Loquax code.", "Das ist kein Loquax-Code.";
+    CodeDamaged = "code_damaged", "This code is damaged. Ask for it again.", "Dieser Code ist beschädigt. Lass ihn dir noch einmal geben.";
+    CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a friend.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
+    // The pencil's screen (1263): scan first, paste second, typing under
+    // Advanced.
+    NewScan = "new_scan", "Scan a code", "Code scannen";
+    NewPaste = "new_paste", "Paste a code", "Code einfügen";
+    NewHint = "new_hint", "Your friend's code is on their profile, behind their picture.", "Den Code deines Kontakts findest du in seinem Profil, hinter dem Bild.";
+    NewTyped = "new_typed", "Or type the address your friend gave you.", "Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.";
+    NewNothing = "new_nothing", "There is nothing to paste. Copy your friend's code first.", "Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.";
+    // Joining a mailbox (1263, finding 8): one sentence each, the
+    // daemon's words under Details.
+    JoinNoAnswer = "join_no_answer", "The mailbox did not answer. Is the computer on?", "Das Postfach hat nicht geantwortet. Ist der Computer an?";
+    JoinSlow = "join_slow", "The mailbox did not answer in time. Try again.", "Das Postfach hat nicht rechtzeitig geantwortet. Versuch es noch einmal.";
+    JoinNotMailbox = "join_not_mailbox", "That code is not a mailbox code.", "Das ist kein Postfach-Code.";
+    JoinRefused = "join_refused", "The mailbox did not take this code. Make a new one on the computer.", "Das Postfach hat den Code nicht angenommen. Mach am Computer einen neuen.";
+    JoinNoCode = "join_no_code", "Scan or paste the code your mailbox shows.", "Scanne den Code, den dein Postfach zeigt, oder füge ihn ein.";
+    JoinWhere = "join_where", "Loquax does not know where your mailbox is. Type where it is below.", "Loquax weiß nicht, wo dein Postfach ist. Gib es unten ein.";
+    JoinBadWhere = "join_bad_where", "Loquax cannot read where the mailbox is. It looks like 192.168.1.20:4242.", "Loquax kann nicht lesen, wo das Postfach ist. Das sieht so aus: 192.168.1.20:4242.";
+    JoinFailed = "join_failed", "Joining the mailbox did not work.", "Das Postfach ließ sich nicht verbinden.";
+    JoinOtherMailbox = "join_other_mailbox", "This phone already reads another mailbox.", "Dieses Handy liest schon ein anderes Postfach.";
+    Details = "details", "Details", "Details";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";
     Pan = "scene_pan", "Move the map", "Karte verschieben";

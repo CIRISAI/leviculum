@@ -274,6 +274,12 @@ pub const ROWS: &[Row<Action>] = {
             .palette("archive")
             .note("a message brings it back unless muted"),
         Row::new("list the archived, or the rest", CONVERSATIONS, &[]).palette("archived"),
+        Row::new("start a conversation", CONVERSATIONS, &[])
+            .palette("new conversation")
+            .note("a friend's code or address"),
+        Row::new("add a contact", CONVERSATIONS, &[])
+            .palette("add contact")
+            .note("a friend's code, then a name"),
         Row::new("import from another messenger", CONVERSATIONS, &[])
             .palette("import")
             .note("contacts and history; the identity: loquax import"),

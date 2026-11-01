@@ -572,12 +572,21 @@ impl App {
             Message::NewAddress(typed) => self.new_address = Some(typed),
             Message::NewGo => {
                 let typed = self.new_address.clone().unwrap_or_default();
-                match loquax::address::parse(typed.trim()) {
-                    Ok(peer) => {
+                // The one reader every frontend asks (1263): a contact
+                // code, an address, and what is neither in plain words.
+                match loquax::code::read(&typed).map(|code| code.address()) {
+                    Ok(Some(peer)) => {
                         self.new_address = None;
                         return self.intent(Intent::OpenChat { peer });
                     }
-                    Err(error) => self.seen.notice = Some(format!("'{}': {error}", typed.trim())),
+                    Ok(None) => {
+                        self.seen.notice = Some(
+                            loquax::ui::strings::StrId::CodeIsMailbox
+                                .text(self.lang)
+                                .to_string(),
+                        )
+                    }
+                    Err(why) => self.seen.notice = Some(why.say(self.lang).to_string()),
                 }
             }
             Message::Compose(action) => {
@@ -698,7 +707,7 @@ impl App {
                 self.screen = Screen::Chats;
                 return iced::widget::operation::focus(chat::SEARCH_FIELD);
             }
-            Intent::NewConversation => {
+            Intent::NewConversation | Intent::AddContact { .. } => {
                 self.new_address = match self.new_address {
                     Some(_) => None,
                     None => Some(String::new()),
@@ -2131,7 +2140,10 @@ mod tests {
         let _ = app.update(Message::NewAddress("not hex".to_string()));
         let _ = app.update(Message::NewGo);
         assert!(told(&mut rx).is_empty());
-        assert!(app.seen.notice.is_some());
+        assert_eq!(
+            app.seen.notice.as_deref(),
+            Some("That is not a Loquax code.")
+        );
         assert!(app.new_address.is_some(), "the field stays for a fix");
         let hex = loquax::address::to_hex(&BERT);
         let _ = app.update(Message::NewAddress(hex));

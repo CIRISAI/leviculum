@@ -3222,6 +3222,14 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             );
             vec![UiEffect::Import]
         }
+        PaletteCommand::NewConversation => {
+            model.ask_code(false);
+            Vec::new()
+        }
+        PaletteCommand::AddContact => {
+            model.ask_code(true);
+            Vec::new()
+        }
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -3246,7 +3254,7 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     if model.conversations.get(model.selected).is_none() {
         model.toast(
             ToastKind::Error,
-            "no conversation to send to: start loquax tui --to <address>".to_string(),
+            "no conversation to send to: :new conversation starts one".to_string(),
         );
         return Vec::new();
     }
@@ -4037,7 +4045,8 @@ pub const MAP_LOADING: &str = "loading map";
 pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
 
 /// The empty conversations pane's line.
-pub const NO_CONVERSATIONS: &str = "No conversations: start with --to <address>.";
+pub const NO_CONVERSATIONS: &str =
+    "No conversations yet: :new conversation starts one with a friend's code.";
 
 /// The `blocked` view's line while nothing is blocked.
 pub const NO_BLOCKED: &str = "Nothing blocked. :blocked returns.";

@@ -605,6 +605,12 @@ impl From<Command> for Intent {
             Command::Archived => Intent::ShowArchived,
             Command::Import => Intent::Import,
             Command::ReadReceipts => Intent::ReadReceipts { on: Switch::Toggle },
+            Command::NewConversation => Intent::NewConversation,
+            // No code yet: the frontend asks for it.
+            Command::AddContact => Intent::AddContact {
+                lxma: String::new(),
+                name: None,
+            },
         }
     }
 }

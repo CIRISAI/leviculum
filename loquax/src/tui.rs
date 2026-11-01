@@ -1921,6 +1921,106 @@ mod tests {
         }
     }
 
+    /// The first user in the terminal (1263, finding 6): the empty list
+    /// names the palette's command, the palette offers `new conversation`
+    /// and `add contact`, and a friend's code typed into either opens the
+    /// conversation, `add contact` asking the name next. The three screens
+    /// are pinned in `tests/fixtures/tui_palette_new.frames`.
+    #[test]
+    fn the_palette_starts_a_conversation_and_adds_a_contact() {
+        let keys = |model: &mut Model, text: &str| {
+            for ch in text.chars() {
+                let name = match ch {
+                    ' ' => "space".to_string(),
+                    _ => ch.to_string(),
+                };
+                update(model, UiEvent::Key(parse_key(&name).expect("key")));
+            }
+        };
+        let key = |model: &mut Model, name: &str| {
+            update(model, UiEvent::Key(parse_key(name).expect("key")));
+        };
+        let mut model = Model::new(&[]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 16,
+            },
+        );
+        let empty = screen(&model, 80, 16);
+        assert!(empty.contains(":new conversation"), "{empty}");
+        assert!(!empty.contains("--to"), "{empty}");
+
+        key(&mut model, ":");
+        let listed = screen(&model, 80, 16);
+        key(&mut model, "esc");
+        key(&mut model, ":");
+        keys(&mut model, "new conv");
+        key(&mut model, "enter");
+        let asking = screen(&model, 80, 16);
+        assert!(asking.contains("your friend's code or address"), "{asking}");
+
+        // An old code: the address alone, in capitals.
+        let bert = loquax::address::to_hex(&[0xbe; 16]).to_ascii_uppercase();
+        keys(&mut model, &bert);
+        key(&mut model, "enter");
+        assert_eq!(
+            model.conversations.get(model.selected).map(|c| c.peer),
+            Some([0xbe; 16])
+        );
+        assert_eq!(model.focus, Pane::Compose);
+
+        // Garbage says so in the phone's sentence and opens nothing.
+        key(&mut model, "esc");
+        key(&mut model, ":");
+        keys(&mut model, "new conv");
+        key(&mut model, "enter");
+        keys(&mut model, "hello");
+        key(&mut model, "enter");
+        assert_eq!(model.conversations.len(), 1);
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("That is not a Loquax code.")
+        );
+
+        // A contact code: the conversation, then its name asked.
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
+        let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key_bytes).expect("a code");
+        let peer = loquax::home::lxmf_address(&key_bytes).expect("an address");
+        key(&mut model, ":");
+        keys(&mut model, "add contact");
+        key(&mut model, "enter");
+        keys(&mut model, &code);
+        key(&mut model, "enter");
+        assert_eq!(
+            model.conversations.get(model.selected).map(|c| c.peer),
+            Some(peer)
+        );
+        let naming = screen(&model, 80, 16);
+        assert!(naming.contains("your name for"), "{naming}");
+        keys(&mut model, "Carol");
+        key(&mut model, "enter");
+        assert_eq!(model.names.petname(&peer), Some("Carol"));
+
+        let frames = format!(
+            "--- empty\n{empty}--- palette\n{listed}--- asking\n{asking}--- naming\n{naming}"
+        );
+        let expected = include_str!("../tests/fixtures/tui_palette_new.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-palette-new.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_palette_new.frames\n{frames}",
+                kept.display()
+            );
+        }
+    }
+
     #[test]
     fn the_help_and_the_palette_draw_over_the_panes() {
         let mut model = Model::new(&[[0xab; 16]]);
