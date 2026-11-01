@@ -2275,6 +2275,70 @@ mod tests {
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
     }
 
+    /// A photo, a file and a voice message without words (1268): each is
+    /// one bubble, its media first and its time (and for ours the mark)
+    /// in its last row, no empty text row under it. Pixel for pixel the
+    /// golden, light.
+    #[test]
+    fn media_without_words_is_one_bubble_each() {
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        model.names.remember(OWN, "Mia Sander");
+        model.names.remember(ANNA, "Anna Schulz");
+        let carrying = |model: &mut crate::shell::Model, id: u8, fields| {
+            update(
+                model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [id; 32],
+                    source: ANNA,
+                    title: Vec::new(),
+                    body: Vec::new(),
+                    fields,
+                    verified: true,
+                }),
+            );
+        };
+        update(&mut model, UiEvent::Clock(at(30, 9, 10)));
+        carrying(
+            &mut model,
+            1,
+            loquax::ui::photos::photo_fields("jpg", vec![7; 312_400]),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 20)));
+        carrying(
+            &mut model,
+            2,
+            loquax::ui::files::file_fields("report.pdf", vec![7; 1_400]),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 30)));
+        carrying(
+            &mut model,
+            3,
+            loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 900]),
+        );
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        update(&mut model, UiEvent::Clock(at(30, 9, 40)));
+        update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer: ANNA,
+                format: "jpg".into(),
+                data: vec![0xff, 0xd8, 0xff],
+            },
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let open = app.scene.chat.as_ref().expect("the chat");
+        let bubbles: Vec<_> = open.groups.iter().flat_map(|g| &g.bubbles).collect();
+        assert_eq!(bubbles.len(), 4, "one bubble a message");
+        assert!(bubbles.iter().all(|b| b.text.is_none() && b.place.meta));
+        assert!(bubbles[3].bubble.ours && bubbles[3].mark.is_some());
+        let (w, h) = (900, 560);
+        app.window = Size::new(w as f32, h as f32);
+        map::tests::same_as("gui-chat-media.png", &shoot(&app, w, h), w, h);
+    }
+
     /// A narrow window stacks as the phone does, and a resize switches
     /// (1218): below [`WIDE_FROM`] the open chat is alone, with a back in
     /// its bar and no tabs; the back (and `Escape`, the keymap's Back)

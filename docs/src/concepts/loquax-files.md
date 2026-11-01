@@ -91,7 +91,7 @@ held in memory to be refused.
 - `loquax::file_save::save` (std) writes the file under the home.
 
 The terminal draws `▤ report.pdf · 313 KB` (`[f] report.pdf - 313 KB` in
-ASCII) under the text or alone; Enter saves the first file and hands it to
+ASCII) above the text or alone; Enter saves the first file and hands it to
 the system's handler (`Output::File`). The window draws the same line,
 pressable. `loquax send --file FILE` sends one from a script.
 
@@ -102,8 +102,8 @@ pressable. `loquax send --file FILE` sends one from a script.
   and the bytes off the UI thread and sends `Request::File { peer, name,
   data, size }`. A refusal shows on the chat's status line.
 - `MessageRow::files` carries each file's safe name, bytes, size words and
-  words. The rows sit above the bubble in its colours, as a photo does; a
-  tap asks `Query::SaveFile`, gets the path, and starts `ACTION_VIEW`
+  words. The rows sit in the bubble above its words (1268), as a photo
+  does; a tap asks `Query::SaveFile`, gets the path, and starts `ACTION_VIEW`
   with the type from the extension; where nothing opens that kind the
   share sheet is offered, and where nothing takes it either the chat says
   "No app here opens this file." A long press shares it.

@@ -11106,8 +11106,9 @@ mod tests {
     }
 
     /// A received photo in the terminal (1220): its line alone where it has
-    /// no text, under the text where it has one, ASCII where the screen is;
-    /// `Enter` on it asks the shell to show it whole, and a forward carries it.
+    /// no text, above the text where it has one (1268), ASCII where the
+    /// screen is; `Enter` on it asks the shell to show it whole, and a
+    /// forward carries it.
     #[test]
     fn the_terminal_says_photo_and_enter_shows_it() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -11157,8 +11158,8 @@ mod tests {
             .position(|r| r.contains("the view"))
             .expect("the text");
         assert!(
-            rows[text + 1].contains("▣ photo"),
-            "under its text: {rows:#?}"
+            text > 0 && rows[text - 1].contains("▣ photo"),
+            "above its text (1268): {rows:#?}"
         );
         model.ascii = true;
         assert!(shown(&model)
@@ -11178,8 +11179,8 @@ mod tests {
     }
 
     /// A received file in the terminal (1221): its name, made safe, and
-    /// size alone or under its text, ASCII where the screen is; `Enter`
-    /// on it asks the shell to save and open it.
+    /// size alone or above its text (1268), ASCII where the screen is;
+    /// `Enter` on it asks the shell to save and open it.
     #[test]
     fn the_terminal_says_a_file_and_enter_opens_it() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -11229,8 +11230,8 @@ mod tests {
             .position(|r| r.contains("the minutes"))
             .expect("the text");
         assert!(
-            rows[text + 1].contains("▤ notes"),
-            "under its text: {rows:#?}"
+            text > 0 && rows[text - 1].contains("▤ notes"),
+            "above its text (1268): {rows:#?}"
         );
         model.ascii = true;
         assert!(shown(&model)
@@ -11250,7 +11251,7 @@ mod tests {
         );
     }
 
-    /// A voice message in the terminal (1222): its length under its text
+    /// A voice message in the terminal (1222): its length above its text
     /// or alone, ASCII where the screen is; `Enter` on it asks the shell
     /// to play it.
     #[test]

@@ -451,63 +451,40 @@ fn block(
         }
         _ => body,
     };
-    // A photo (1220) says so under its text, or alone: `Enter` on it
-    // shows it whole in the system's viewer.
-    let body = match super::photos::photo_of(&message.fields) {
-        Some(photo) => {
-            let (glyph, dot) = match draw.ascii {
-                true => ("[#]", "-"),
-                false => ("▣", "·"),
-            };
-            let line = format!(
-                "{glyph} photo {dot} {}",
-                super::photos::size_words(photo.bytes)
-            );
-            match body.trim().is_empty() {
-                true => line,
-                false => format!("{body}\n{line}"),
-            }
-        }
-        None => body,
+    // The media first, the words under them (1268), as every target draws
+    // a bubble: a photo (1220) says so, `Enter` on it shows it whole in
+    // the system's viewer; a file (1221) its name and size, `Enter` saves
+    // it under the home and opens it; a voice message (1222) its length,
+    // `Enter` plays it. Without words the media is the block alone, no
+    // empty row under it.
+    let (dot, photo_glyph, file_glyph, voice_glyph) = match draw.ascii {
+        true => ("-", "[#]", "[f]", "[v]"),
+        false => ("·", "▣", "▤", "♪"),
     };
-    // A file (1221) says its name and size under its text, or alone:
-    // `Enter` on it saves it under the home and opens it.
-    let body = super::files::files_of(&message.fields)
-        .into_iter()
-        .fold(body, |body, file| {
-            let (glyph, dot) = match draw.ascii {
-                true => ("[f]", "-"),
-                false => ("▤", "·"),
-            };
-            let line = format!(
-                "{glyph} {} {dot} {}",
-                super::files::safe_name(&file.name),
-                super::photos::size_words(file.bytes)
-            );
-            match body.trim().is_empty() {
-                true => line,
-                false => format!("{body}\n{line}"),
-            }
-        });
-    // A voice message (1222) says its length under its text, or alone:
-    // `Enter` on it plays it.
-    let body = match super::voice::voice_of(&message.fields) {
-        Some(voice) => {
-            let (glyph, dot) = match draw.ascii {
-                true => ("[v]", "-"),
-                false => ("♪", "·"),
-            };
-            let line = format!(
-                "{glyph} voice message {dot} {}",
-                super::voice::duration_words(voice.duration_ms)
-            );
-            match body.trim().is_empty() {
-                true => line,
-                false => format!("{body}\n{line}"),
-            }
-        }
-        None => body,
-    };
+    let mut media = Vec::new();
+    if let Some(photo) = super::photos::photo_of(&message.fields) {
+        media.push(format!(
+            "{photo_glyph} photo {dot} {}",
+            super::photos::size_words(photo.bytes)
+        ));
+    }
+    for file in super::files::files_of(&message.fields) {
+        media.push(format!(
+            "{file_glyph} {} {dot} {}",
+            super::files::safe_name(&file.name),
+            super::photos::size_words(file.bytes)
+        ));
+    }
+    if let Some(voice) = super::voice::voice_of(&message.fields) {
+        media.push(format!(
+            "{voice_glyph} voice message {dot} {}",
+            super::voice::duration_words(voice.duration_ms)
+        ));
+    }
+    if !body.trim().is_empty() {
+        media.push(body);
+    }
+    let body = media.join("\n");
     // A reaction drawn as a block, its signature broken: what it claims.
     let body = match (body.trim().is_empty(), message.reaction()) {
         (true, Some((_, content))) => format!("reacted {content}"),

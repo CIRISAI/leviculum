@@ -131,8 +131,8 @@ The window draws the same line, and a press does the same.
   why not, which the status line shows.
 - **Slide left** by 96 dp: the recording is gone.
 - `AudioRecord` asks for 16 kHz, then 48 kHz, then 44.1 kHz.
-- A bubble's voice message is a rounded row above the bubble in its
-  colours, as a file's row is: the play or pause button, the level bar
+- A bubble's voice message is a row in the bubble above its words
+  (1268), as a file's row is: the play or pause button, the level bar
   (played part bright, the rest dimmed) and the length. A tap asks the
   library for the sound (`Query::Voice`, answered as `VoicePcm`) and
   writes it to an `AudioTrack`; `Request::PlayVoice` tells the library

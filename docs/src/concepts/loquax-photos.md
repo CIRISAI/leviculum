@@ -117,11 +117,17 @@ same tree without and with the `photos` feature.
   (`Photo, 279 KB`, `Foto, 279 KB`) and its tap,
   `Intent::ViewPhoto`. The bubble's screen reader label is the photo's
   words when it has no text. The list's last line says `photo`.
+- A message is one bubble whatever it carries (1268):
+  `scene::BubbleNode::text` is its words, none when the body holds
+  nothing to read, and every renderer draws the media first, the words
+  under them and the time and mark closing the last row, with no text row
+  where `text` is none. Before 1268 the phone drew the photo above an
+  empty text bubble.
 - `UiEvent::ViewPhoto` answers `UiEffect::ShowPhoto` for a message that
   carries one. The terminal and the window write the picture to
   `$LNMSG_HOME/photos/<peer>-<key>.<format>` and hand it to the system's
   viewer; the phone opens its viewer screen.
-- The terminal draws `▣ photo · 279 KB` under the text or alone
+- The terminal draws `▣ photo · 279 KB` above the text or alone
   (`[#] photo - 279 KB` in ASCII); `Enter` on it shows it. The window
   draws the photo's words as a pressable line; its thumbnail in the window
   is open.
@@ -153,8 +159,8 @@ same tree without and with the `photos` feature.
   (`Request::Photo`); the library's refusal is said on the status line.
 - `MessageRow` carries `photo`, `photo_bytes`, `photo_w`, `photo_h` (the
   size it shows at, upright, from the picture's header) and
-  `photo_words`. The row draws the thumbnail above the bubble, 240 dp on
-  the longer side, its shape the picture's, from
+  `photo_words`. The row draws the thumbnail first in the bubble (1268),
+  240 dp on the longer side (less where the bubble is narrower), its shape the picture's, from
   `Query::Photo { peer, key, edge }`, which answers RGBA rows that
   `Bitmap.copyPixelsFromBuffer` takes as they are; a cache of 16 MiB
   keeps them. A tap opens `PhotoActivity`, which asks for the screen's

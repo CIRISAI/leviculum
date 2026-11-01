@@ -830,11 +830,9 @@ impl App {
                 });
             inside = inside.push(row![stripe, said].spacing(8).height(Length::Shrink));
         }
-        if !bubble.body.is_empty() {
-            inside = inside.push(text(bubble.body.clone()).size(size::BODY).color(ink));
-        }
-        // A photo (1220): its words, a press shows it whole in the
-        // system's viewer. The thumbnail in the window is a later slice.
+        // The media first, inside the one bubble (1268). A photo (1220):
+        // its words, a press shows it whole in the system's viewer. The
+        // thumbnail in the window is a later slice.
         if let Some(photo) = &node.photo {
             inside = inside.push(flat(
                 text(format!("▣ {}", photo.words.resolve(self.lang)))
@@ -864,6 +862,11 @@ impl App {
                 None => line.into(),
             };
             inside = inside.push(line);
+        }
+        // The words under the media, none where the scene has none
+        // (1268): a photo alone is the photo and its time.
+        if let Some(words) = &node.text {
+            inside = inside.push(text(words.clone()).size(size::BODY).color(ink));
         }
         if let Some(fix) = &bubble.fix {
             let mut words = loquax::telemetry::coordinates(&fix.location);

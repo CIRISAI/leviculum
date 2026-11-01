@@ -374,6 +374,13 @@ pub struct BubbleNode {
     /// Grouping, corners, the day line, whether the time and mark show
     /// ([`chat::placements`]): no renderer computes it again.
     pub place: Placement,
+    /// The words the bubble reads (1268): its body, none when the body
+    /// holds nothing to read. A bubble is one shape whatever it carries:
+    /// its media first (the photo, the file rows, the voice player), these
+    /// words under them, the time and the mark closing the last row. A
+    /// renderer draws no text row where this is none, so a photo without
+    /// words is the photo and its time in one bubble.
+    pub text: Option<String>,
     /// The newest report's words (`live · every 10 min · 2 min ago`).
     pub live: Option<Text>,
     /// Ours only: the ladder's mark, what a screen reader says for it,
@@ -1005,7 +1012,13 @@ fn bubble_node(
         }),
         words: super::voice::voice_words(voice),
     });
-    let spoken = match (&live, &photo, files.first(), &voice, bubble.body.is_empty()) {
+    let spoken = match (
+        &live,
+        &photo,
+        files.first(),
+        &voice,
+        bubble.body.trim().is_empty(),
+    ) {
         (Some(live), _, _, _, true) => live.clone(),
         (_, Some(photo), _, _, true) => photo.words.clone(),
         (_, _, Some(file), _, true) => file.words.clone(),
@@ -1022,9 +1035,11 @@ fn bubble_node(
             })
         }),
     });
+    let text = (!bubble.body.trim().is_empty()).then(|| bubble.body.clone());
     BubbleNode {
         id,
         a11y: A11y::of(id, Role::Bubble, spoken),
+        text,
         bubble,
         place,
         live,
@@ -1231,6 +1246,7 @@ impl BubbleNode {
             "msg_id": opt(b.id, |id| hex(&id)),
             "ours": b.ours,
             "body": b.body,
+            "text": self.text,
             "mark": opt(b.mark, |m| json!(m.word())),
             "at": wall(b.at),
             "chips": b.chips.iter().map(|c| json!({
@@ -1760,6 +1776,50 @@ mod tests {
         assert_eq!(found(""), 1);
         assert_eq!(found(&format!("m0 {}", name.to_uppercase())), 1);
         assert_eq!(found(&format!("{name} nowhere")), 0);
+    }
+
+    /// A photo without words is one bubble (1268): the photo node, the
+    /// mark, and no text run, so no renderer draws an empty row under the
+    /// picture; with words the run is the body, and a body of blanks is
+    /// none. A file or a voice message alone is the same.
+    #[test]
+    fn a_photo_without_words_is_one_bubble_with_media_a_mark_and_no_text() {
+        use crate::ui::files::file_fields;
+        use crate::ui::photos::photo_fields;
+        use crate::ui::voice::{voice_fields, AM_OPUS_OGG};
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(true, t), (true, t + 60), (true, t + 120), (true, t + 180)]);
+        let messages = &mut model.conversations[0].messages;
+        messages[0].body = String::new();
+        messages[0].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        messages[1].body = " \n".into();
+        messages[1].fields = file_fields("report.pdf", alloc::vec![7; 1_400]);
+        messages[2].body = String::new();
+        messages[2].fields = voice_fields(AM_OPUS_OGG, alloc::vec![7; 900]);
+        messages[3].body = "the view".into();
+        messages[3].fields = photo_fields("jpg", alloc::vec![7; 1_000]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        let groups = &scene.chat.as_ref().expect("the chat").groups;
+        let bubbles: Vec<&BubbleNode> = groups.iter().flat_map(|g| &g.bubbles).collect();
+        assert_eq!(bubbles.len(), 4, "one bubble a message: {bubbles:#?}");
+
+        let photo = scene.bubble(NodeId::Bubble(1)).expect("the photo's bubble");
+        assert!(photo.photo.is_some(), "the photo is in the bubble");
+        assert_eq!(photo.text, None, "no text run");
+        assert!(photo.mark.is_some(), "the mark is in the bubble");
+        assert_eq!(photo.to_json()["text"], Value::Null);
+        let file = scene.bubble(NodeId::Bubble(2)).expect("the file's bubble");
+        assert_eq!((file.files.len(), file.text.as_deref()), (1, None));
+        assert_eq!(file.a11y.label, file.files[0].words, "said as the file");
+        let voice = scene.bubble(NodeId::Bubble(3)).expect("the voice's bubble");
+        assert!(voice.voice.is_some() && voice.text.is_none() && voice.mark.is_some());
+        let worded = scene.bubble(NodeId::Bubble(4)).expect("photo and words");
+        assert!(worded.photo.is_some());
+        assert_eq!(worded.text.as_deref(), Some("the view"));
+        assert_eq!(worded.to_json()["text"], "the view");
+        // The last of the group closes it with its time and its mark.
+        assert!(worded.place.meta && worded.mark.is_some());
     }
 
     /// A photo is a node of its bubble (1220): its words, a resource the

@@ -2467,6 +2467,103 @@ mod tests {
         }
     }
 
+    /// A photo, a file and a voice message without words (1268), drawn
+    /// from the model at 80 x 24: each its media line alone in its block
+    /// with its time, no empty row; then one of ours, the photo with its
+    /// mark closing the row, and one with words, the media above them.
+    /// Pinned in `tests/fixtures/tui_media.frames`.
+    #[test]
+    fn media_without_words_is_its_line_alone() {
+        let alice = [0x4f; 16];
+        let mut model = Model::new(&[alice]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        let recv = |m: &mut Model, id: u8, minute: u32, body: &str, fields| {
+            update(
+                m,
+                UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, minute, 3600)),
+            );
+            update(
+                m,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [id; 32],
+                    source: alice,
+                    title: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                    fields,
+                    verified: true,
+                }),
+            );
+        };
+        recv(
+            &mut model,
+            1,
+            1,
+            "",
+            loquax::ui::photos::photo_fields("jpg", vec![7; 312_400]),
+        );
+        recv(
+            &mut model,
+            2,
+            11,
+            "",
+            loquax::ui::files::file_fields("report.pdf", vec![7; 1_400]),
+        );
+        recv(
+            &mut model,
+            3,
+            21,
+            "",
+            loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 900]),
+        );
+        model.toasts.clear();
+        let mut frames = String::new();
+        let alone = screen(&model, 80, 24);
+        assert!(alone.contains("▣ photo · 313 KB"), "{alone}");
+        assert!(alone.contains("▤ report.pdf · 2 KB"), "{alone}");
+        assert!(alone.contains("♪ voice message"), "{alone}");
+        frames.push_str(&format!("--- photo, file, voice alone ---\n{alone}"));
+        update(
+            &mut model,
+            UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, 31, 3600)),
+        );
+        update(
+            &mut model,
+            UiEvent::SendPhoto {
+                peer: alice,
+                format: "jpg".into(),
+                data: vec![0xff, 0xd8, 0xff],
+            },
+        );
+        recv(
+            &mut model,
+            4,
+            41,
+            "the view from the hill",
+            loquax::ui::photos::photo_fields("jpg", vec![7; 1_000]),
+        );
+        model.toasts.clear();
+        frames.push_str(&format!(
+            "--- ours, then words under a photo ---\n{}",
+            screen(&model, 80, 24)
+        ));
+        let expected = include_str!("../tests/fixtures/tui_media.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-media.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_media.frames\n{frames}",
+                kept.display()
+            );
+        }
+    }
+
     /// The search of section 5's 120 x 40 mockup, drawn from the model at
     /// both sizes: the field and the messages group as `tripod` is typed,
     /// the third result opened with its match marked in place, both groups
