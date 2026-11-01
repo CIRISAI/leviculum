@@ -42,9 +42,15 @@ pub fn wants_pull(newest: u64, cursor: u64) -> bool {
 
 /// How long one attempt to open the link and ask `/watch` may take.
 const ATTEMPT: Duration = Duration::from_secs(30);
-/// How often the link is looked at besides its events: a closed link whose
-/// event the tap lost is found within this.
-const LOOK: Duration = Duration::from_secs(5);
+/// The longest the link goes unlooked at besides its events. The watch is
+/// event-driven (1176): a closed link says so with `LinkClosed`, a tap that
+/// lost events says so with `Lagged` and the link is looked at then, and a
+/// frontend that went away closes the channel. This look is only the
+/// backstop for a close no event reported, and it is the link keepalive's
+/// ceiling (`KEEPALIVE_MAX`, Link.py:92; `LINK_KEEPALIVE_SECS`), so on a
+/// phone it never wakes more often than the link's own keepalive does. It
+/// was 5 s before 1176, a wakeup every 5 s for the life of the app.
+pub const LOOK: Duration = Duration::from_secs(leviculum_core::constants::LINK_KEEPALIVE_SECS);
 
 /// The wait before the next attempt to open the watching link: doubled on
 /// each attempt that did not come up, back to the first once a link stood.
@@ -188,7 +194,8 @@ async fn listen(
     tap: &mut leviculum_std::driver::EventTap,
     events: &UnboundedSender<WatchEvent>,
 ) {
-    let mut look = tokio::time::interval(LOOK);
+    // The first tick of an interval is at once; the link was just checked.
+    let mut look = tokio::time::interval_at(tokio::time::Instant::now() + LOOK, LOOK);
     loop {
         tokio::select! {
             event = tap.recv() => match event {
@@ -209,15 +216,19 @@ async fn listen(
                 Some(TapEvent::Lagged(lost)) => {
                     tracing::info!("HOME watch lost {lost} node events; pulling");
                     let _ = events.send(WatchEvent::Wake(u64::MAX));
+                    // The lost events may have held this link's close.
+                    if !watch.node.link_is_established(link) {
+                        return;
+                    }
                 }
                 Some(_) => {}
                 None => return,
             },
+            () = events.closed() => {
+                let _ = watch.node.close_link(link).await;
+                return;
+            }
             _ = look.tick() => {
-                if events.is_closed() {
-                    let _ = watch.node.close_link(link).await;
-                    return;
-                }
                 if !watch.node.link_is_established(link) {
                     return;
                 }
@@ -229,6 +240,13 @@ async fn listen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The watch's own timer is no faster than the link keepalive's
+    /// ceiling (1176): the link's events carry everything else.
+    #[test]
+    fn the_watch_looks_no_more_often_than_the_link_keepalive() {
+        assert!(LOOK >= Duration::from_secs(leviculum_core::constants::LINK_KEEPALIVE_SECS));
+    }
 
     #[test]
     fn a_wake_pulls_only_past_the_cursor() {

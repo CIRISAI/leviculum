@@ -17,6 +17,13 @@ final class Events {
     private static Listener listener;
     private static Listener service;
     private static Thread reader;
+    /**
+     * How long one read waits for an event. Long, so an idle phone is not
+     * woken once a second for nothing (1176): every event, the session's
+     * end included, returns the read at once, and a read with no session
+     * returns "stopped" at once.
+     */
+    private static final int WAIT_MS = 360_000;
 
     private Events() {}
 
@@ -47,7 +54,7 @@ final class Events {
 
     private static void read() {
         while (true) {
-            final Map<String, Object> event = Core.nextEvent(1000);
+            final Map<String, Object> event = Core.nextEvent(WAIT_MS);
             if (event == null) {
                 continue;
             }
