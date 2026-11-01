@@ -34,6 +34,7 @@ use iced::{
 };
 
 use loquax::ui::chat::{self, size, Colours, Mark};
+use loquax::ui::compose::Button as BarButton;
 use loquax::ui::intent::{Intent, Switch};
 use loquax::ui::reactions::SIGNAL_QUICK;
 use loquax::ui::scene::{
@@ -150,6 +151,12 @@ pub enum Icon {
     Map,
     /// The settings: a gear.
     Settings,
+    /// The compose bar's buttons beyond the emoji and Send (1270): the
+    /// plus, the position button's crosshair, the camera, the microphone.
+    Plus,
+    Locate,
+    Camera,
+    Mic,
 }
 
 struct Drawing {
@@ -293,6 +300,57 @@ impl canvas::Program<Message> for Drawing {
                         line,
                     );
                 }
+            }
+            Icon::Plus => {
+                frame.stroke(&Path::line(p(0.5, 0.22), p(0.5, 0.78)), line);
+                frame.stroke(&Path::line(p(0.22, 0.5), p(0.78, 0.5)), line);
+            }
+            Icon::Locate => {
+                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.27), line);
+                frame.fill(&Path::circle(p(0.5, 0.5), s * 0.09), self.ink);
+                for (a, b) in [
+                    ((0.5, 0.08), (0.5, 0.23)),
+                    ((0.5, 0.77), (0.5, 0.92)),
+                    ((0.08, 0.5), (0.23, 0.5)),
+                    ((0.77, 0.5), (0.92, 0.5)),
+                ] {
+                    frame.stroke(&Path::line(p(a.0, a.1), p(b.0, b.1)), line);
+                }
+            }
+            Icon::Camera => {
+                let body = Path::new(|b| {
+                    b.move_to(p(0.12, 0.33));
+                    b.line_to(p(0.31, 0.33));
+                    b.line_to(p(0.38, 0.23));
+                    b.line_to(p(0.62, 0.23));
+                    b.line_to(p(0.69, 0.33));
+                    b.line_to(p(0.88, 0.33));
+                    b.line_to(p(0.88, 0.79));
+                    b.line_to(p(0.12, 0.79));
+                    b.close();
+                });
+                frame.stroke(&body, line);
+                frame.stroke(&Path::circle(p(0.5, 0.54), s * 0.15), line);
+            }
+            Icon::Mic => {
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        p(0.38, 0.12),
+                        iced::Size::new(s * 0.24, s * 0.5),
+                        (s * 0.12).into(),
+                    ),
+                    self.ink,
+                );
+                let cup = Path::new(|b| {
+                    b.arc(canvas::path::Arc {
+                        center: p(0.5, 0.46),
+                        radius: s * 0.25,
+                        start_angle: iced::Radians(0.0),
+                        end_angle: iced::Radians(std::f32::consts::PI),
+                    });
+                });
+                frame.stroke(&cup, line);
+                frame.stroke(&Path::line(p(0.5, 0.71), p(0.5, 0.88)), line);
             }
             Icon::Face => {
                 frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
@@ -1084,6 +1142,41 @@ impl App {
             Message::Intent(Intent::Emoji),
         )
         .padding(6);
+        // The scene's buttons in the field's right edge (1270): those the
+        // window can do; today it has none of them, so none show.
+        let tail = open
+            .compose
+            .buttons
+            .iter()
+            .filter(|b| b.button.inside() && b.button != BarButton::Emoji)
+            .fold(row![].align_y(Alignment::Center), |tail, b| {
+                let icon = match b.button {
+                    BarButton::Locate => Icon::Locate,
+                    BarButton::Camera => Icon::Camera,
+                    _ => Icon::Mic,
+                };
+                tail.push(
+                    flat(
+                        drawing(
+                            icon,
+                            colour(t.text_secondary),
+                            (Color::TRANSPARENT, Color::TRANSPARENT),
+                            28.0,
+                        ),
+                        Message::Intent(b.action.intent.clone()),
+                    )
+                    .padding(6),
+                )
+            });
+        // The round one: the plus while there is nothing to send, Send
+        // once there is (the scene's rule); the window's plus has no row
+        // yet, so the round button is Send.
+        let plus = open
+            .compose
+            .buttons
+            .iter()
+            .find(|b| b.button == BarButton::Plus)
+            .map(|b| b.action.intent.clone());
         let send = Message::Intent(open.compose.send.intent.clone());
         let enter = send.clone();
         let editor = text_editor(&self.compose)
@@ -1113,7 +1206,7 @@ impl App {
                 value: colour(t.text),
                 selection: colour(t.selected_row),
             });
-        let pill = container(row![face, editor].align_y(Alignment::Center))
+        let pill = container(row![face, editor, tail].align_y(Alignment::Center))
             .width(Length::Fill)
             .padding([0, 6])
             .style(move |_: &Theme| container::Style {
@@ -1121,16 +1214,20 @@ impl App {
                 border: border::rounded(size::COMPOSE_CORNER),
                 ..container::Style::default()
             });
+        let (round, press) = match plus {
+            Some(intent) => (Icon::Plus, Message::Intent(intent)),
+            None => (Icon::Send, send),
+        };
         let send = button(
             container(drawing(
-                Icon::Send,
+                round,
                 colour(t.on_send),
                 (Color::TRANSPARENT, Color::TRANSPARENT),
                 28.0,
             ))
             .center(size::SEND),
         )
-        .on_press(send)
+        .on_press(press)
         .padding(0)
         .width(size::SEND)
         .height(size::SEND)

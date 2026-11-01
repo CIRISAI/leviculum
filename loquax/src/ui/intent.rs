@@ -254,6 +254,46 @@ pub enum Intent {
     },
     /// The reader's photo size: the settings' row (1220).
     PhotoSize(super::photos::PhotoSize),
+    /// The compose bar's plus (1270): the attachment sheet opens.
+    Attach {
+        peer: [u8; 16],
+    },
+    /// The compose bar's position button, and the plus sheet's Position
+    /// row (1270): the position sheet opens.
+    Locate {
+        peer: [u8; 16],
+    },
+    /// The compose bar's camera (1270): the platform takes a photo and
+    /// answers with [`Intent::StagePhoto`].
+    Camera {
+        peer: [u8; 16],
+    },
+    /// The photo the camera took for `peer`, as taken (1270): the shell
+    /// scales and strips it as [`Intent::SendPhoto`]'s and stages it in
+    /// the bar, where Send takes it with the caption. Empty in the
+    /// scene's action, which the platform fills.
+    StagePhoto {
+        peer: [u8; 16],
+        data: Vec<u8>,
+    },
+    /// The staged photo's cross.
+    Unstage {
+        peer: [u8; 16],
+    },
+    /// The open sheet goes.
+    CloseSheet,
+    /// The position sheet's "Send my position now" (1270): the own fix
+    /// goes to `peer` as a position report.
+    ShareFix {
+        peer: [u8; 16],
+    },
+    /// The position sheet without a fix: the platform turns location on
+    /// (the 1201 permission flow) and answers with [`Intent::OwnFix`].
+    LocationOn,
+    /// The platform's own fix, or none.
+    OwnFix {
+        location: Option<Location>,
+    },
     /// Send the file the user picked to `peer` (1221): the paperclip's
     /// "File", its name and bytes as picked. `size` is the whole file's
     /// bytes where the shell stopped reading one too large to go, else 0.
@@ -461,6 +501,15 @@ impl Intent {
             Intent::ViewPhoto { .. } => StrId::ViewPhoto,
             Intent::SendPhoto { .. } => StrId::AttachPhoto,
             Intent::PhotoSize(_) => StrId::PhotoSize,
+            Intent::Attach { .. } => StrId::Attach,
+            Intent::Locate { .. } => StrId::Locate,
+            Intent::Camera { .. } => StrId::Camera,
+            Intent::StagePhoto { .. } => StrId::Camera,
+            Intent::Unstage { .. } => StrId::Unstage,
+            Intent::CloseSheet => StrId::Dismiss,
+            Intent::ShareFix { .. } => StrId::ShareNow,
+            Intent::LocationOn => StrId::LocationOn,
+            Intent::OwnFix { .. } => StrId::Locate,
             Intent::SendFile { .. } => StrId::AttachFile,
             Intent::OpenFile { .. } => StrId::OpenFile,
             Intent::SendVoice { .. } => StrId::RecordVoice,

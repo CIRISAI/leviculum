@@ -158,7 +158,7 @@ leviculum_ui::catalogue! {
     // Photos (1220): the bubble's words, the paperclip's entry, the
     // setting under Settings › Chats with its one line.
     Photo = "scene_photo", "Photo, %1$s", "Foto, %1$s";
-    AttachPhoto = "attach_photo", "Photo", "Foto";
+    AttachPhoto = "attach_photo", "Gallery", "Galerie";
     ViewPhoto = "scene_view_photo", "Show photo", "Foto zeigen";
     PhotoSize = "photo_size", "Photo size", "Fotogröße";
     PhotoSizeText = "photo_size_text", "Photos are made smaller before they go. Their place and camera data never go.", "Fotos werden vor dem Senden verkleinert. Ort und Kameradaten gehen nie mit.";
@@ -186,6 +186,20 @@ leviculum_ui::catalogue! {
     VoiceCancel = "voice_cancel", "Slide left to cancel", "Zum Abbrechen nach links wischen";
     VoiceTooLong = "voice_too_long", "A voice message lasts at most %1$s.", "Eine Sprachnachricht dauert höchstens %1$s.";
     VoiceNoMicrophone = "voice_no_microphone", "Loquax needs the microphone to record a voice message.", "Loquax braucht das Mikrofon für Sprachnachrichten.";
+    // The compose bar after Signal (1270): the plus and its sheet, the
+    // position button and its sheet, the camera and the staged photo.
+    Attach = "scene_attach", "Attach", "Anhängen";
+    Locate = "scene_locate", "My position", "Meine Position";
+    Camera = "scene_camera", "Take a photo", "Foto aufnehmen";
+    CameraNoApp = "camera_no_app", "No camera app here takes a photo.", "Keine Kamera-App hier nimmt ein Foto auf.";
+    Staged = "scene_staged", "Photo to send, %1$s", "Foto zum Senden, %1$s";
+    Unstage = "scene_unstage", "Remove photo", "Foto entfernen";
+    CaptionHint = "caption_hint", "Add a caption", "Bildunterschrift hinzufügen";
+    ShareNow = "share_now", "Send my position now", "Meine Position jetzt senden";
+    LocationOn = "location_on", "Turn location on", "Standort einschalten";
+    NoFix = "no_fix", "Loquax does not know where you are yet.", "Loquax weiß noch nicht, wo du bist.";
+    FixAge = "fix_age", "Found %1$s", "Ermittelt %1$s";
+    FixNow = "fix_now", "Found just now", "Gerade eben ermittelt";
     // A code read (1263, `crate::code`): what a scanner, the pencil and
     // the palette say for one they cannot take.
     CodeForeign = "code_foreign", "That is not a Loquax code.", "Das ist kein Loquax-Code.";

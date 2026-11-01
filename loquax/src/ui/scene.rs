@@ -49,6 +49,7 @@ use alloc::vec::Vec;
 use serde_json::{json, Map, Value};
 
 use super::chat::{self, Bubble, ListRow, Placement};
+use super::compose::{self, Button, Round, SheetRow};
 use super::intent::{Intent, Messages, Switch, Target};
 use super::liveness::{self, Liveness};
 use super::strings::{Arg, StrId, Text};
@@ -107,7 +108,19 @@ pub enum NodeId {
     Compose,
     /// The compose bar's microphone (1222).
     Record,
+    /// The compose bar's other buttons (1270): the emoji, the position
+    /// button, the camera, and the round button outside the field as the
+    /// plus or as Send.
+    Emoji,
+    Locate,
+    Camera,
+    Plus,
+    Send,
+    /// The photo staged in the compose bar (1270).
+    Staged,
     Sheet,
+    /// A row of the sheet the compose bar opened (1270).
+    SheetRow(SheetRow),
     Card,
     Chip(u32),
 }
@@ -134,7 +147,14 @@ impl NodeId {
             NodeId::Voice(key) => format!("voice_{key}"),
             NodeId::Compose => "compose".to_string(),
             NodeId::Record => "record".to_string(),
+            NodeId::Emoji => "emoji".to_string(),
+            NodeId::Locate => "locate".to_string(),
+            NodeId::Camera => "camera".to_string(),
+            NodeId::Plus => "plus".to_string(),
+            NodeId::Send => "send".to_string(),
+            NodeId::Staged => "staged".to_string(),
             NodeId::Sheet => "sheet".to_string(),
+            NodeId::SheetRow(row) => format!("sheet_{}", row.word()),
             NodeId::Card => "card".to_string(),
             NodeId::Chip(n) => format!("chip_{n}"),
         }
@@ -513,7 +533,46 @@ pub struct Compose {
     /// fills [`Intent::SendVoice`] with what it recorded; slid away, it
     /// cancels. Its words are the hint to hold it.
     pub record: Action,
+    /// The round button outside the field (1270): the plus while there
+    /// is nothing to send, Send once there is ([`Round::of`]).
+    pub round: Round,
+    /// The bar's buttons in the order drawn (1270,
+    /// [`compose::buttons`]): those inside the field, then the round
+    /// one. What the shell cannot do is not among them.
+    pub buttons: Vec<ComposeButton>,
+    /// The photo the camera took, waiting for Send and its caption.
+    pub staged: Option<StagedNode>,
     pub a11y: A11y,
+}
+
+/// A button of the compose bar (1270).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComposeButton {
+    pub id: NodeId,
+    pub button: Button,
+    pub action: Action,
+    pub a11y: A11y,
+}
+
+/// The photo staged in the compose bar (1270): its size in words, its
+/// cross.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StagedNode {
+    pub id: NodeId,
+    pub format: String,
+    pub bytes: usize,
+    pub words: Text,
+    pub remove: Action,
+    pub a11y: A11y,
+}
+
+/// What the position sheet shows above its row (1270): the own fix for
+/// its map preview, and its age, or the words that there is none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Whereabouts {
+    /// Degrees times a million, north and east.
+    pub fix: Option<(i32, i32)>,
+    pub words: Text,
 }
 
 /// The open conversation.
@@ -555,6 +614,8 @@ pub struct Scene {
     pub list: Option<List>,
     pub chat: Option<Chat>,
     pub sheet: Option<Sheet>,
+    /// The position sheet's fix and words (1270), while it is open.
+    pub whereabouts: Option<Whereabouts>,
     pub card: Option<Card>,
     pub chips: Vec<Chip>,
 }
@@ -568,6 +629,10 @@ impl<B> UiModel<B> {
             Some(chat) => ScreenId::Chat { peer: chat.peer },
             None => ScreenId::Chats,
         };
+        let (sheet, whereabouts) = match &chat {
+            Some(chat) => bar_sheet(self, chat.peer),
+            None => (None, None),
+        };
         Scene {
             class: LayoutClass::Wide,
             screen,
@@ -575,7 +640,8 @@ impl<B> UiModel<B> {
             tabs: Some(tabs(self)),
             list: Some(list(self)),
             chat,
-            sheet: None,
+            sheet,
+            whereabouts,
             card: None,
             chips: Vec::new(),
         }
@@ -648,6 +714,22 @@ impl Scene {
                 .and_then(|node| node.voice.as_ref())
                 .and_then(|voice| voice.toggle.as_ref()),
             NodeId::Record => self.chat.as_ref().map(|chat| &chat.compose.record),
+            NodeId::Emoji | NodeId::Locate | NodeId::Camera | NodeId::Plus | NodeId::Send => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.compose.buttons.iter().find(|b| b.id == id))
+                .map(|b| &b.action),
+            NodeId::Staged => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.compose.staged.as_ref())
+                .map(|staged| &staged.remove),
+            NodeId::SheetRow(row) => self.sheet.as_ref().and_then(|sheet| {
+                sheet
+                    .actions
+                    .iter()
+                    .find(|a| sheet_row(&a.intent) == Some(row))
+            }),
             _ => None,
         }
     }
@@ -911,6 +993,8 @@ pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
     let conversation = model.conversations.get(c);
     let peer = conversation.map_or([0; 16], |c| c.peer);
     let draft = conversation.map(|c| &c.draft);
+    let round = model.round(peer);
+    let staged = model.bar.staged.contains_key(&peer);
     Compose {
         id: NodeId::Compose,
         hint: Text::key(StrId::ComposeHint),
@@ -925,12 +1009,141 @@ pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
             pcm: Vec::new(),
             rate: 0,
         }),
+        round,
+        buttons: compose::buttons(model.bar.abilities, round)
+            .into_iter()
+            .map(|button| compose_button(peer, button))
+            .collect(),
+        staged: model.bar.staged.get(&peer).map(|staged| {
+            let words = Text::Key(
+                StrId::Staged,
+                Vec::from([Arg::Str(super::photos::size_words(staged.data.len()))]),
+            );
+            StagedNode {
+                id: NodeId::Staged,
+                format: staged.format.clone(),
+                bytes: staged.data.len(),
+                a11y: A11y::of(NodeId::Staged, Role::Button, words.clone()),
+                words,
+                remove: Action::of(Intent::Unstage { peer }),
+            }
+        }),
         a11y: A11y::of(
             NodeId::Compose,
             Role::TextField,
-            Text::key(StrId::ComposeHint),
+            Text::key(match staged {
+                true => StrId::CaptionHint,
+                false => StrId::ComposeHint,
+            }),
         ),
     }
+}
+
+/// One button of `peer`'s compose bar, its action and its words.
+fn compose_button(peer: [u8; 16], button: Button) -> ComposeButton {
+    let (id, intent) = match button {
+        Button::Emoji => (NodeId::Emoji, Intent::Emoji),
+        Button::Locate => (NodeId::Locate, Intent::Locate { peer }),
+        Button::Camera => (NodeId::Camera, Intent::Camera { peer }),
+        Button::Microphone => (
+            NodeId::Record,
+            Intent::SendVoice {
+                peer,
+                pcm: Vec::new(),
+                rate: 0,
+            },
+        ),
+        Button::Plus => (NodeId::Plus, Intent::Attach { peer }),
+        Button::Send => (
+            NodeId::Send,
+            Intent::Send {
+                to: Target::Peer(peer),
+                body: None,
+            },
+        ),
+    };
+    let action = Action::of(intent);
+    ComposeButton {
+        id,
+        button,
+        a11y: A11y::of(id, Role::Button, Text::key(action.label_key)),
+        action,
+    }
+}
+
+/// The row of a sheet `intent` is, if it is one.
+pub fn sheet_row(intent: &Intent) -> Option<SheetRow> {
+    match intent {
+        Intent::SendPhoto { .. } => Some(SheetRow::Gallery),
+        Intent::SendFile { .. } => Some(SheetRow::File),
+        Intent::Locate { .. } => Some(SheetRow::Position),
+        Intent::ShareFix { .. } => Some(SheetRow::ShareNow),
+        Intent::LocationOn => Some(SheetRow::LocationOn),
+        _ => None,
+    }
+}
+
+/// The sheet the compose bar of `peer`'s chat opened (1270): the plus's
+/// rows, or the position sheet's one row and what it shows above it.
+pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Option<Whereabouts>) {
+    let Some(open) = model.bar.sheet.filter(|s| s.peer() == peer) else {
+        return (None, None);
+    };
+    let (title, rows, whereabouts) = match open {
+        compose::Sheet::Attach { .. } => (
+            StrId::Attach,
+            compose::attach_rows(model.bar.abilities),
+            None,
+        ),
+        compose::Sheet::Position { .. } => {
+            let fix = model.bar.own_fix.as_ref();
+            let words = match (fix, model.now) {
+                (None, _) => Text::key(StrId::NoFix),
+                (Some(fix), Some(now)) if now.unix_secs - fix.last_update >= 60 => Text::Key(
+                    StrId::FixAge,
+                    Vec::from([Arg::Text(Box::new(ago(now.unix_secs - fix.last_update)))]),
+                ),
+                (Some(_), _) => Text::key(StrId::FixNow),
+            };
+            let whereabouts = Whereabouts {
+                fix: fix.map(|f| (f.latitude_e6, f.longitude_e6)),
+                words,
+            };
+            (
+                StrId::Locate,
+                Vec::from([compose::position_row(fix)]),
+                Some(whereabouts),
+            )
+        }
+    };
+    let actions = rows
+        .into_iter()
+        .map(|row| {
+            Action::of(match row {
+                SheetRow::Gallery => Intent::SendPhoto {
+                    peer,
+                    data: Vec::new(),
+                },
+                SheetRow::File => Intent::SendFile {
+                    peer,
+                    name: String::new(),
+                    data: Vec::new(),
+                    size: 0,
+                },
+                SheetRow::Position => Intent::Locate { peer },
+                SheetRow::ShareNow => Intent::ShareFix { peer },
+                SheetRow::LocationOn => Intent::LocationOn,
+            })
+        })
+        .collect();
+    let sheet = Sheet {
+        id: NodeId::Sheet,
+        title: Text::key(title),
+        rows: Vec::new(),
+        actions,
+        a11y: A11y::of(NodeId::Sheet, Role::Sheet, Text::key(title)),
+    };
+    (Some(sheet), whereabouts)
 }
 
 fn bubble_node(
@@ -1323,6 +1536,20 @@ impl Chat {
                 "reply": opt(self.compose.reply, |id| hex(&id)),
                 "send": self.compose.send.to_json(),
                 "record": self.compose.record.to_json(),
+                "round": self.compose.round.word(),
+                "buttons": self.compose.buttons.iter().map(|b| json!({
+                    "id": b.id.resource(),
+                    "inside": b.button.inside(),
+                    "action": b.action.to_json(),
+                    "a11y": b.a11y.to_json(),
+                })).collect::<Vec<_>>(),
+                "staged": opt(self.compose.staged.as_ref(), |st| json!({
+                    "id": st.id.resource(),
+                    "format": st.format,
+                    "bytes": st.bytes,
+                    "words": st.words.to_json(),
+                    "remove": st.remove.to_json(),
+                })),
                 "a11y": self.compose.a11y.to_json(),
             },
             "a11y": self.a11y.to_json(),
@@ -1356,7 +1583,22 @@ impl Scene {
         map.insert("chat".into(), opt(self.chat.as_ref(), Chat::to_json));
         map.insert(
             "sheet".into(),
-            opt(self.sheet.as_ref(), |s| json!(s.id.resource())),
+            opt(self.sheet.as_ref(), |s| {
+                json!({
+                    "id": s.id.resource(),
+                    "title": s.title.to_json(),
+                    "rows": s.actions.iter().map(|a| json!({
+                        "id": sheet_row(&a.intent).map(|r| NodeId::SheetRow(r).resource()),
+                        "action": a.to_json(),
+                    })).collect::<Vec<_>>(),
+                })
+            }),
+        );
+        map.insert(
+            "whereabouts".into(),
+            opt(self.whereabouts.as_ref(), |w| {
+                json!({ "fix": w.fix.map(|(lat, lon)| [lat, lon]), "words": w.words.to_json() })
+            }),
         );
         map.insert(
             "card".into(),
@@ -1448,6 +1690,209 @@ mod tests {
         let row = wide.list.as_ref().map(|list| &list.rows[0]);
         assert!(row.is_some_and(|row| row.position.is_none() && row.avatar.ring.is_none()));
         assert!(wide.action(NodeId::Pin(peer)).is_none());
+    }
+
+    /// 1270: the compose node carries the button set as data, the plus
+    /// turns into Send on typing and with a staged photo, the plus and
+    /// the position button open their sheets as `Sheet` nodes with their
+    /// rows, the position sheet shows the own fix and its age or says
+    /// there is none, and every node's words are the catalogue's.
+    #[test]
+    fn the_compose_bar_has_its_buttons_and_its_sheets() {
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        model.bar.abilities = compose::Abilities::phone(true);
+        let ids = |model: &UiModel<Line>| -> Vec<String> {
+            let scene = model.scene(LayoutClass::Compact);
+            let compose = &scene.chat.as_ref().expect("a chat").compose;
+            compose.buttons.iter().map(|b| b.id.resource()).collect()
+        };
+        assert_eq!(ids(&model), ["emoji", "locate", "camera", "record", "plus"]);
+        let scene = model.scene(LayoutClass::Compact);
+        assert_eq!(
+            scene.action(NodeId::Plus).map(|a| a.intent.clone()),
+            Some(Intent::Attach { peer })
+        );
+        assert_eq!(
+            scene.action(NodeId::Camera).map(|a| &a.intent),
+            Some(&Intent::Camera { peer })
+        );
+        let compose = &scene.chat.as_ref().expect("a chat").compose;
+        let words: Vec<_> = compose
+            .buttons
+            .iter()
+            .map(|b| b.a11y.label.resolve(Lang::De))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "Emoji",
+                "Meine Position",
+                "Foto aufnehmen",
+                "Halten für eine Sprachnachricht",
+                "Anhängen"
+            ]
+        );
+        assert!(scene.sheet.is_none());
+
+        // Typing: Send, and the microphone hides.
+        crate::ui::update(
+            &mut model,
+            UiEvent::Draft {
+                peer,
+                text: "hi".into(),
+                reply: None,
+            },
+        );
+        assert_eq!(ids(&model), ["emoji", "locate", "camera", "send"]);
+        let scene = model.scene(LayoutClass::Compact);
+        assert_eq!(
+            scene.action(NodeId::Send).map(|a| a.intent.clone()),
+            Some(Intent::Send {
+                to: Target::Peer(peer),
+                body: None
+            })
+        );
+        assert!(
+            scene.action(NodeId::Record).is_some(),
+            "held, it still is the record"
+        );
+
+        // A staged photo with an empty field: Send, its node, the caption hint.
+        crate::ui::update(
+            &mut model,
+            UiEvent::Draft {
+                peer,
+                text: String::new(),
+                reply: None,
+            },
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::StagePhoto {
+                peer,
+                format: "jpg".into(),
+                data: Vec::from([7; 1_500]),
+            },
+        );
+        assert_eq!(ids(&model), ["emoji", "locate", "camera", "send"]);
+        let scene = model.scene(LayoutClass::Compact);
+        let compose = &scene.chat.as_ref().expect("a chat").compose;
+        let staged = compose.staged.as_ref().expect("staged");
+        assert_eq!(staged.words.resolve(Lang::En), "Photo to send, 2 KB");
+        assert_eq!(staged.remove.intent, Intent::Unstage { peer });
+        assert_eq!(compose.a11y.label.resolve(Lang::En), "Add a caption");
+        crate::ui::update(&mut model, UiEvent::Unstage { peer });
+
+        // The plus's sheet: Gallery, File, Position.
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Attach { peer }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let sheet = scene.sheet.as_ref().expect("the attachment sheet");
+        assert_eq!(sheet.title.resolve(Lang::En), "Attach");
+        let rows: Vec<_> = sheet
+            .actions
+            .iter()
+            .map(|a| {
+                (
+                    sheet_row(&a.intent).map(|r| NodeId::SheetRow(r).resource()),
+                    Text::key(a.label_key).resolve(Lang::En),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("sheet_gallery".to_string()), "Gallery".to_string()),
+                (Some("sheet_file".to_string()), "File".to_string()),
+                (
+                    Some("sheet_position".to_string()),
+                    "My position".to_string()
+                ),
+            ]
+        );
+        assert!(scene.whereabouts.is_none());
+        assert_eq!(
+            scene
+                .action(NodeId::SheetRow(SheetRow::Position))
+                .map(|a| a.intent.clone()),
+            Some(Intent::Locate { peer })
+        );
+
+        // The position sheet: no fix, then one five minutes old.
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Position { peer }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let there = scene.whereabouts.as_ref().expect("whereabouts");
+        assert_eq!(there.fix, None);
+        assert_eq!(
+            there.words.resolve(Lang::En),
+            "Loquax does not know where you are yet."
+        );
+        assert!(scene
+            .action(NodeId::SheetRow(SheetRow::LocationOn))
+            .is_some());
+        let now = 1_793_351_000;
+        crate::ui::update(
+            &mut model,
+            UiEvent::Clock(WallTime {
+                unix_secs: now,
+                offset_secs: 0,
+            }),
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::OwnFix(Some(leviculum_lxmf::telemetry::Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: now - 300,
+            })),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let there = scene.whereabouts.as_ref().expect("whereabouts");
+        assert_eq!(there.fix, Some((43_773_100, 11_256_000)));
+        assert_eq!(there.words.resolve(Lang::En), "Found 5 min ago");
+        assert_eq!(there.words.resolve(Lang::De), "Ermittelt vor 5 Min.");
+        let sheet = scene.sheet.as_ref().expect("the position sheet");
+        assert_eq!(sheet.title.resolve(Lang::En), "My position");
+        assert_eq!(
+            scene
+                .action(NodeId::SheetRow(SheetRow::ShareNow))
+                .map(|a| a.intent.clone()),
+            Some(Intent::ShareFix { peer })
+        );
+        let json = scene.to_json();
+        assert_eq!(json["sheet"]["rows"][0]["id"], "sheet_share_now");
+        assert_eq!(json["chat"]["compose"]["round"], "plus");
+
+        // Another chat's sheet is not this one's.
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Attach { peer: [0x43; 16] }),
+        );
+        assert!(model.scene(LayoutClass::Compact).sheet.is_none());
+    }
+
+    /// A shell that can do nothing of it (the window today) shows the
+    /// emoji and Send alone, and no plus with nothing in it.
+    #[test]
+    fn a_window_without_camera_or_picker_shows_emoji_and_send() {
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Wide);
+        let compose = &scene.chat.as_ref().expect("a chat").compose;
+        let ids: Vec<_> = compose.buttons.iter().map(|b| b.id.resource()).collect();
+        assert_eq!(ids, ["emoji", "send"]);
+        assert_eq!(compose.round, Round::Send);
     }
 
     #[test]

@@ -109,7 +109,7 @@
     <string name="read_receipts">Lesebestätigungen senden</string>
     <string name="read_receipts_text">Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.</string>
     <string name="scene_photo">Foto, %1$s</string>
-    <string name="attach_photo">Foto</string>
+    <string name="attach_photo">Galerie</string>
     <string name="scene_view_photo">Foto zeigen</string>
     <string name="photo_size">Fotogröße</string>
     <string name="photo_size_text">Fotos werden vor dem Senden verkleinert. Ort und Kameradaten gehen nie mit.</string>
@@ -132,6 +132,18 @@
     <string name="voice_cancel">Zum Abbrechen nach links wischen</string>
     <string name="voice_too_long">Eine Sprachnachricht dauert höchstens %1$s.</string>
     <string name="voice_no_microphone">Loquax braucht das Mikrofon für Sprachnachrichten.</string>
+    <string name="scene_attach">Anhängen</string>
+    <string name="scene_locate">Meine Position</string>
+    <string name="scene_camera">Foto aufnehmen</string>
+    <string name="camera_no_app">Keine Kamera-App hier nimmt ein Foto auf.</string>
+    <string name="scene_staged">Foto zum Senden, %1$s</string>
+    <string name="scene_unstage">Foto entfernen</string>
+    <string name="caption_hint">Bildunterschrift hinzufügen</string>
+    <string name="share_now">Meine Position jetzt senden</string>
+    <string name="location_on">Standort einschalten</string>
+    <string name="no_fix">Loquax weiß noch nicht, wo du bist.</string>
+    <string name="fix_age">Ermittelt %1$s</string>
+    <string name="fix_now">Gerade eben ermittelt</string>
     <string name="code_foreign">Das ist kein Loquax-Code.</string>
     <string name="code_damaged">Dieser Code ist beschädigt. Lass ihn dir noch einmal geben.</string>
     <string name="code_is_mailbox">Dieser Code ist für ein Postfach, nicht für einen Kontakt.</string>

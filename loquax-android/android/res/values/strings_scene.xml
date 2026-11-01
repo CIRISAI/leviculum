@@ -109,7 +109,7 @@
     <string name="read_receipts">Send read receipts</string>
     <string name="read_receipts_text">Others see when you have read their messages. Off, you do not see it from others either.</string>
     <string name="scene_photo">Photo, %1$s</string>
-    <string name="attach_photo">Photo</string>
+    <string name="attach_photo">Gallery</string>
     <string name="scene_view_photo">Show photo</string>
     <string name="photo_size">Photo size</string>
     <string name="photo_size_text">Photos are made smaller before they go. Their place and camera data never go.</string>
@@ -132,6 +132,18 @@
     <string name="voice_cancel">Slide left to cancel</string>
     <string name="voice_too_long">A voice message lasts at most %1$s.</string>
     <string name="voice_no_microphone">Loquax needs the microphone to record a voice message.</string>
+    <string name="scene_attach">Attach</string>
+    <string name="scene_locate">My position</string>
+    <string name="scene_camera">Take a photo</string>
+    <string name="camera_no_app">No camera app here takes a photo.</string>
+    <string name="scene_staged">Photo to send, %1$s</string>
+    <string name="scene_unstage">Remove photo</string>
+    <string name="caption_hint">Add a caption</string>
+    <string name="share_now">Send my position now</string>
+    <string name="location_on">Turn location on</string>
+    <string name="no_fix">Loquax does not know where you are yet.</string>
+    <string name="fix_age">Found %1$s</string>
+    <string name="fix_now">Found just now</string>
     <string name="code_foreign">That is not a Loquax code.</string>
     <string name="code_damaged">This code is damaged. Ask for it again.</string>
     <string name="code_is_mailbox">That code is for a mailbox, not for a friend.</string>

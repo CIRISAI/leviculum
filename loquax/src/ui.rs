@@ -133,6 +133,7 @@ use leviculum_lxmf::Field;
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
 pub mod chat;
+pub mod compose;
 pub mod contacts;
 pub mod files;
 pub mod history;
@@ -816,6 +817,8 @@ pub struct UiModel<B> {
     /// The voice message that plays (1222): its bubble shows the pause
     /// button, every other the play button.
     pub playing: Option<voice::Playing>,
+    /// The compose bar's buttons, sheets and staged photo (1270).
+    pub bar: compose::Bar,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -907,6 +910,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             reading: receipts::Reading::default(),
             photo_size: photos::PhotoSize::default(),
             playing: None,
+            bar: compose::Bar::default(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1400,6 +1404,26 @@ pub enum UiEvent {
     },
     /// The reader's photo size (1220), set: the settings page's row.
     PhotoSize(photos::PhotoSize),
+    /// A photo the camera took for `peer` (1270), scaled by the shell as
+    /// [`UiEvent::SendPhoto`]'s: it waits in the compose bar, and the next
+    /// [`UiEvent::Write`] sends it with the text as its caption.
+    StagePhoto {
+        peer: [u8; 16],
+        format: String,
+        data: Vec<u8>,
+    },
+    /// The staged photo's cross: it goes nowhere.
+    Unstage { peer: [u8; 16] },
+    /// The plus or the position button opened its sheet (1270).
+    OpenSheet(compose::Sheet),
+    /// The sheet was dismissed, or a row of it handed to the shell.
+    CloseSheet,
+    /// The shell's newest own fix, or none (1270): the position sheet
+    /// shows it and its age.
+    OwnFix(Option<leviculum_lxmf::telemetry::Location>),
+    /// The position sheet's "Send my position now": the own fix goes to
+    /// `peer` as a report.
+    ShareFix { peer: [u8; 16] },
     /// A tap on a photo's bubble: the shell shows it whole
     /// ([`UiEffect::ShowPhoto`]).
     ViewPhoto { peer: [u8; 16], key: u64 },
@@ -1621,6 +1645,27 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::ReadReceipts(on) => model.set_receipts(on),
         UiEvent::SendPhoto { peer, format, data } => model.send_photo(peer, &format, data),
+        UiEvent::StagePhoto { peer, format, data } => {
+            model.stage_photo(peer, format, data);
+            Vec::new()
+        }
+        UiEvent::Unstage { peer } => {
+            model.unstage(peer);
+            Vec::new()
+        }
+        UiEvent::OpenSheet(sheet) => {
+            model.open_sheet(sheet);
+            Vec::new()
+        }
+        UiEvent::CloseSheet => {
+            model.bar.sheet = None;
+            Vec::new()
+        }
+        UiEvent::OwnFix(fix) => {
+            model.bar.own_fix = fix;
+            Vec::new()
+        }
+        UiEvent::ShareFix { peer } => model.share_fix(peer),
         UiEvent::PhotoSize(size) => {
             model.photo_size = size;
             vec![UiEffect::Remember {
@@ -3266,6 +3311,10 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 /// Send `body` in the open conversation: the compose pane's text, or a
 /// frontend's ([`UiEvent::Write`]). Blank text sends nothing.
 fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
+    // A staged photo goes with the text as its caption (1270).
+    if let Some(effects) = model.send_staged(body.clone()) {
+        return effects;
+    }
     if body.trim().is_empty() {
         return Vec::new();
     }

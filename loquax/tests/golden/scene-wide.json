@@ -58,6 +58,46 @@
         "role": "text_field",
         "selected": false
       },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
       "hint": {
         "args": [],
         "key": "compose_hint"
@@ -69,11 +109,13 @@
         "label_key": "record_voice"
       },
       "reply": null,
+      "round": "send",
       "send": {
         "enabled": true,
         "intent": "Send { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), body: None }",
         "label_key": "send"
       },
+      "staged": null,
       "text": ""
     },
     "groups": [
@@ -4647,5 +4689,6 @@
       "args": [],
       "key": "tab_chats"
     }
-  }
+  },
+  "whereabouts": null
 }
