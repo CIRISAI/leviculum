@@ -113,6 +113,17 @@ check_composition() {
     expect "an image is written back verbatim, size kept" \
         "--chip esp32 --port $PORT --baud 921600 --before default-reset --after hard-reset write-flash --flash-size keep 0x0 /tmp/gate-image.bin" "$out"
 
+    note "our own build (write-app): the app region only, then its hash"
+    out="$(compose write-app heltec-v4 --image /tmp/gate-app.bin)"
+    expect "the built app goes to 0x10000 on the S3" \
+        "--chip esp32s3 --port $PORT --baud 921600 --before default-reset --after hard-reset write-flash --flash-mode dio --flash-freq 80m --flash-size detect 0x10000 /tmp/gate-app.bin" "$out"
+    expect "the image's hash becomes the EEPROM target" \
+        "$PORT --firmware-hash <sha256 of /tmp/gate-app.bin>" "$out"
+    expect "the board is reset only after the whole hash reads back" \
+        "$PORT --get-target-firmware-hash (until <sha256 of /tmp/gate-app.bin>)
+/home" "$out"
+    refute "write-app never touches the bootloader" "0x0 " "$out"
+
     note "a chip name passes straight through"
     out="$(compose extract esp32s3)"
     expect "--chip esp32s3 given by name still reads 0x0" \

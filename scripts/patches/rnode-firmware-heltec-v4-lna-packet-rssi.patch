@@ -1,0 +1,16 @@
+--- a/sx126x.cpp
++++ b/sx126x.cpp
+@@ -557,6 +557,13 @@
+   uint8_t buf[3] = {0};
+   executeOpcodeRead(OP_PACKET_STATUS_6X, buf, 3);
+   int pkt_rssi = -buf[0] / 2;
++  // Leviculum patch: upstream (d39339f8, sx126x.cpp:555-561) leaves the
++  // external LNA gain in here, though packetRssi() above takes it out. The
++  // ESP32 receive path uses this overload, so a Heltec V4 reported every
++  // packet 21 dB hot on our rig (KCT8103L, v4.3). Same subtraction as above.
++  #if HAS_LORA_LNA
++    pkt_rssi -= lora_lna_gain;
++  #endif
+   return pkt_rssi;
+ }
+ 
