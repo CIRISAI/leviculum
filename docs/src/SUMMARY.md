@@ -43,6 +43,7 @@
   - [Loquax on Android: navigation and views](concepts/loquax-android-navigation.md)
   - [Loquax on Android: the scripted device walk](concepts/loquax-device-walk.md)
   - [Loquax on a phone: what it costs, tier P proxies](concepts/loquax-phone-power.md)
+  - [Loquax on a phone as a full node](concepts/loquax-phone-node.md)
   - [Loquax: import and export](concepts/loquax-import.md)
 - [Public channels over LXMF](concepts/public-channels.md)
 - [Telemetry](concepts/telemetry.md)
