@@ -54,4 +54,9 @@
          text_secondary, and the map's chips are text on the bar. -->
     <color name="status_up">#2e7d32</color>
     <color name="status_down">#80848c</color>
+    <!-- The recording bar (1276): the dot, the held microphone (its white
+         glyph 5.6:1 on it) and the armed hint, 5.0:1 on the bar; the
+         timer in its last 30 s, 4.8:1 on the bar. -->
+    <color name="rec_red">#c62828</color>
+    <color name="rec_amber">#9a5b00</color>
 </resources>

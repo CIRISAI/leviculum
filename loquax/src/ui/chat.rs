@@ -713,11 +713,16 @@ pub struct Colours {
     /// and down. Marks, so 3:1 on the background is their floor.
     pub status_up: u32,
     pub status_down: u32,
+    /// The recording bar (1276): its dot, timer and armed cancel hint,
+    /// and the timer in the last 30 s before the cap. Text on the bar,
+    /// so 4.5:1 on the background is their floor.
+    pub rec_red: u32,
+    pub rec_amber: u32,
 }
 
 impl Colours {
     /// Each colour by its name, in the table's order.
-    pub fn named(&self) -> [(&'static str, u32); 27] {
+    pub fn named(&self) -> [(&'static str, u32); 29] {
         [
             ("background", self.background),
             ("text", self.text),
@@ -746,6 +751,8 @@ impl Colours {
             ("selected_row", self.selected_row),
             ("status_up", self.status_up),
             ("status_down", self.status_down),
+            ("rec_red", self.rec_red),
+            ("rec_amber", self.rec_amber),
         ]
     }
 }
@@ -779,6 +786,8 @@ pub const LIGHT: Colours = Colours {
     selected_row: 0x403a7d44,
     status_up: 0xff2e7d32,
     status_down: 0xff80848c,
+    rec_red: 0xffc62828,
+    rec_amber: 0xff9a5b00,
 };
 
 /// The dark theme.
@@ -810,6 +819,8 @@ pub const DARK: Colours = Colours {
     selected_row: 0x4081c784,
     status_up: 0xff81c784,
     status_down: 0xff7d8087,
+    rec_red: 0xffee6464,
+    rec_amber: 0xffffb74d,
 };
 
 /// The sizes of a pixel screen, in the phone's dp and sp, which the

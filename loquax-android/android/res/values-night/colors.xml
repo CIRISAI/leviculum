@@ -48,4 +48,8 @@
          text_secondary, and the map's chips are text on the bar. -->
     <color name="status_up">#81c784</color>
     <color name="status_down">#7d8087</color>
+    <!-- The recording bar (1276): red 4.6:1 on the bar, the held
+         microphone's white glyph 3.2:1 on it; amber 8.6:1 on the bar. -->
+    <color name="rec_red">#ee6464</color>
+    <color name="rec_amber">#ffb74d</color>
 </resources>
