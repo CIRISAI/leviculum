@@ -12,6 +12,7 @@
     <string name="paste">Einfügen</string>
     <string name="open">Öffnen</string>
     <string name="pulling">Suche nach Nachrichten…</string>
+    <string name="reconnecting">Verbinde neu…</string>
     <plurals name="pulled">
         <item quantity="one">%1$d neue Nachricht.</item>
         <item quantity="other">%1$d neue Nachrichten.</item>

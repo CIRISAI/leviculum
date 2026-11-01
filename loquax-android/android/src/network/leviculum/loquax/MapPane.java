@@ -723,7 +723,7 @@ final class MapPane implements MapView.Listener {
 
     /** A line from the session the map shows as a chip; null leaves the chip. */
     void event(String line) {
-        if (line != null) {
+        if (line != null && !line.isEmpty()) {
             say(line);
         }
     }

@@ -9,6 +9,9 @@
   <!-- The one TCP connection to the home node, or, with the mailbox on
        the phone, to the entry servers and the screens' loopback one. -->
   <uses-permission a:name='android.permission.INTERNET'/>
+  <!-- Which network carries the traffic, so a change re-dials at once
+       (NetWatch, 1298). A normal permission, no question. -->
+  <uses-permission a:name='android.permission.ACCESS_NETWORK_STATE'/>
   <!-- The service that holds the session in the background (LoquaxService). -->
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE'/>
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING'/>

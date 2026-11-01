@@ -11,6 +11,7 @@
     <string name="open">Open</string>
     <string name="address_hint">Address of a new conversation</string>
     <string name="pulling">Checking your mailbox…</string>
+    <string name="reconnecting">Reconnecting…</string>
     <!-- 1283, walk finding 28: one and many, in each language's own words. -->
     <plurals name="pulled">
         <item quantity="one">%1$d new message.</item>

@@ -164,7 +164,10 @@ final class Ui {
      * {@link #LINE_MS}, so the line never says an old result.
      */
     static boolean stays(Map<String, Object> event) {
-        return "sync".equals(Core.str(event, "t")) && "running".equals(Core.str(event, "state"));
+        String kind = Core.str(event, "t");
+        String state = Core.str(event, "state");
+        return ("sync".equals(kind) && "running".equals(state))
+                || ("network".equals(kind) && "reconnecting".equals(state));
     }
 
     /**
@@ -219,6 +222,12 @@ final class Ui {
             // (a down link in front pulls every minute, a wake pulls at once).
             Log.i(PhotoView.TAG, "pull failed: " + Core.str(event, "detail"));
             return context.getString(R.string.pull_failed);
+        }
+        if ("network".equals(kind)) {
+            // "Reconnecting…" stays until the connection is back, then the
+            // line is gone (1298).
+            return "reconnecting".equals(Core.str(event, "state"))
+                    ? context.getString(R.string.reconnecting) : "";
         }
         if ("stopped".equals(kind)) {
             String detail = Core.str(event, "detail");

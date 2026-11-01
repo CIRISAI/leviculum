@@ -655,6 +655,14 @@ final class Core {
     }
 
     /**
+     * The phone's network is `kind` now (`none`, `wifi`, `mobile`, `other`),
+     * `changed` when it is another network than before (1298, {@link NetWatch}).
+     */
+    static String network(String kind, boolean changed) {
+        return command(map("t", "network", "kind", kind, "changed", changed));
+    }
+
+    /**
      * The conversation list; with `search` only the rows the library's
      * search finds, every word in the name or the last line (1217).
      */
