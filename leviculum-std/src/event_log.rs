@@ -817,6 +817,17 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "LNMSG_DONE",
         required_keys: &["id", "outcome", "code"],
     },
+    // Loquax's rendezvous (1196, `loquax/src/home/rendezvous.rs`): one
+    // line per change of the entry that carries a phone's or a mailbox's
+    // traffic, and the phone's path request for its mailbox on every up.
+    EventSchema {
+        name: "HOME_RENDEZVOUS",
+        required_keys: &["host", "port", "state", "entry"],
+    },
+    EventSchema {
+        name: "HOME_PATH_REQUEST",
+        required_keys: &["dst", "via"],
+    },
     EventSchema {
         name: "LNMSG_VIA",
         required_keys: &["method", "reason"],

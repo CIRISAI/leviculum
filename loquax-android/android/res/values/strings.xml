@@ -288,6 +288,7 @@
     <string name="profile_mailbox_change">Use another mailbox</string>
     <string name="profile_identity">Identity hash</string>
     <string name="profile_home_node">Home node</string>
+    <string name="profile_rendezvous">Rendezvous (● connected)</string>
     <string name="profile_pn_chosen">Chosen by your mailbox</string>
     <string name="profile_version">App version</string>
     <string name="add_contact">Add contact</string>

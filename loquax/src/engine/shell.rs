@@ -214,9 +214,17 @@ pub struct AttachConfig<N = Terminal> {
 /// What attaching a leaf needs to know: [`AttachConfig`] without the
 /// shared instance, and with the one node the leaf talks to instead.
 pub struct LeafConfig<N = Terminal> {
-    /// The home node's TCP server, `host:port`: an lnsd `TCPServerInterface`
-    /// or an rnsd one. A name is looked up again on every reconnect.
-    pub server: String,
+    /// The servers the leaf dials, `host:port` each, one at a time in this
+    /// order with failover (`crate::home::rendezvous`): the rendezvous
+    /// list on their access point ports, or one fixed address. Each an
+    /// lnsd `TCPServerInterface` or an rnsd one; a name is looked up again
+    /// on every reconnect.
+    pub servers: Vec<String>,
+    /// The home destination whose path the leaf asks for each time a
+    /// server comes up (1196, rule 2), `None` for none.
+    pub home_destination: Option<[u8; 16]>,
+    /// How the failover waits.
+    pub timing: crate::home::rendezvous::Timing,
     /// Where this leaf keeps its node state: as [`AttachConfig::storage_dir`],
     /// and here also the node's transport identity, since no daemon holds one.
     pub storage_dir: PathBuf,
@@ -235,9 +243,12 @@ pub struct LeafConfig<N = Terminal> {
 /// mailbox, with no daemon on the device (1152;
 /// `docs/drafts/loquax-onboarding-2026-10.md`, section 3).
 pub struct MeshConfig<N = Terminal> {
-    /// The entry servers the node dials, `host:port` each, every one a TCP
-    /// client interface of its own: the node's way into the network.
+    /// The entry servers the node dials, `host:port` each, on their
+    /// ordinary ports: one at a time in this order with failover, as a
+    /// peer (`crate::home::rendezvous`), the node's way into the network.
     pub servers: Vec<String>,
+    /// How the failover waits.
+    pub timing: crate::home::rendezvous::Timing,
     /// The listener the device's own screens dial, bound by the caller on
     /// the loopback address: one TCP server interface, so the screens reach
     /// the mailbox the way a phone reaches an external one.
@@ -291,19 +302,12 @@ enum Upstream {
         instance: String,
         config_dir: Option<PathBuf>,
     },
-    /// One TCP client interface to this host and port, the node's only one.
-    Tcp {
-        host: String,
-        port: u16,
-        tcp: crate::config::TcpLiveness,
-    },
-    /// A TCP client interface to each entry server, and a TCP server on the
-    /// screens' listener.
-    Mesh {
-        servers: Vec<(String, u16)>,
-        screens: std::net::TcpListener,
-        tcp: crate::config::TcpLiveness,
-    },
+    /// No interface at the start: the rendezvous rotation dials the
+    /// servers one at a time once the node runs ([`Attached::dial`]).
+    Tcp,
+    /// A TCP server on the screens' listener; the entry servers are dialled
+    /// by the rotation as for [`Upstream::Tcp`].
+    Mesh { screens: std::net::TcpListener },
 }
 
 /// Why attaching failed.
@@ -348,6 +352,8 @@ pub struct Attached {
     node: Arc<ReticulumNode>,
     /// The frontend's end of the seam.
     pub outbox: InProcessOutbox,
+    /// The rendezvous rotation, when this node dials one.
+    rendezvous: Option<crate::home::rendezvous::Rendezvous>,
 }
 
 impl Attached {
@@ -357,10 +363,56 @@ impl Attached {
         Arc::clone(&self.node)
     }
 
+    /// Where the rendezvous rotation stands, when this node dials one.
+    pub fn rendezvous(&self) -> Option<crate::home::rendezvous::State> {
+        self.rendezvous.as_ref().map(|r| r.state())
+    }
+
+    /// Dial `servers` (`host:port` each) one at a time with failover, as
+    /// `side` ([`crate::home::rendezvous`]), replacing a rotation already
+    /// running. An empty list dials nothing. A shared instance's client
+    /// may dial too: the mailbox beside a daemon keeps its own peer
+    /// connection to the rendezvous that way, with transport off, so it
+    /// relays nothing between the two.
+    pub fn dial(
+        &mut self,
+        servers: &[String],
+        side: crate::home::rendezvous::Side,
+        tcp: crate::config::TcpLiveness,
+        timing: crate::home::rendezvous::Timing,
+    ) -> Result<(), AttachError> {
+        let entries = servers
+            .iter()
+            .map(|server| {
+                parse_server(server).map_err(|detail| AttachError::NoServer {
+                    server: server.clone(),
+                    detail,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.rendezvous = None;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        self.rendezvous = Some(crate::home::rendezvous::Rendezvous::start(
+            crate::home::rendezvous::Dial {
+                node: Arc::clone(&self.node),
+                entries,
+                side,
+                tcp,
+                timing,
+            },
+        ));
+        Ok(())
+    }
+
     /// Stop the node. Best effort: the send outcome is already decided by the
     /// time anything calls this. A task still holding the node (a pull cut
     /// off at exit) leaves it to be torn down with the process.
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
+        if let Some(rendezvous) = self.rendezvous.take() {
+            rendezvous.stop().await;
+        }
         if let Ok(mut node) = Arc::try_unwrap(self.node) {
             let _ = node.stop().await;
         }
@@ -415,22 +467,36 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
     role: Role,
 ) -> Result<Attached, AttachError> {
     let LeafConfig {
-        server,
+        servers,
+        home_destination,
+        timing,
         storage_dir,
         identity,
         display_name,
         notices,
         tcp,
     } = config;
-    let (host, port) =
-        parse_server(&server).map_err(|detail| AttachError::NoServer { server, detail })?;
+    for server in &servers {
+        parse_server(server).map_err(|detail| AttachError::NoServer {
+            server: server.clone(),
+            detail,
+        })?;
+    }
     let joined = Joined {
         storage_dir,
         identity,
         display_name,
         notices,
     };
-    attach_through(joined, role, Upstream::Tcp { host, port, tcp }).await
+    let mut attached = attach_through(joined, role, Upstream::Tcp).await?;
+    let side = match home_destination {
+        Some(hash) => {
+            crate::home::rendezvous::Side::Phone(leviculum_core::DestinationHash::new(hash))
+        }
+        None => crate::home::rendezvous::Side::Peer(None),
+    };
+    attached.dial(&servers, side, tcp, timing)?;
+    Ok(attached)
 }
 
 /// Attach a mailbox with a node of its own: transport off, a TCP client
@@ -444,6 +510,7 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
 ) -> Result<Attached, AttachError> {
     let MeshConfig {
         servers,
+        timing,
         screens,
         storage_dir,
         identity,
@@ -451,37 +518,39 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
         notices,
         tcp,
     } = config;
-    let servers = servers
-        .iter()
-        .map(|server| {
-            parse_server(server).map_err(|detail| AttachError::NoServer {
-                server: server.clone(),
-                detail,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    for server in &servers {
+        parse_server(server).map_err(|detail| AttachError::NoServer {
+            server: server.clone(),
+            detail,
+        })?;
+    }
+    // A home node announces its home destination on every up of its entry.
+    let home = match &role {
+        Role::Home { .. } => crate::home::destination_hash(&identity.public_key_bytes())
+            .ok()
+            .map(leviculum_core::DestinationHash::new),
+        _ => None,
+    };
     let joined = Joined {
         storage_dir,
         identity,
         display_name,
         notices,
     };
-    attach_through(
-        joined,
-        role,
-        Upstream::Mesh {
-            servers,
-            screens,
-            tcp,
-        },
-    )
-    .await
+    let mut attached = attach_through(joined, role, Upstream::Mesh { screens }).await?;
+    attached.dial(
+        &servers,
+        crate::home::rendezvous::Side::Peer(home),
+        tcp,
+        timing,
+    )?;
+    Ok(attached)
 }
 
 /// `section` with the config file's `tcp_*` keys (1176) on it: the same
 /// keys an lnsd section takes, so the node checks their range exactly as
 /// lnsd does.
-fn tcp_section(
+pub(crate) fn tcp_section(
     section: leviculum_std::config::InterfaceConfig,
     tcp: crate::config::TcpLiveness,
 ) -> leviculum_std::config::InterfaceConfig {
@@ -510,17 +579,9 @@ async fn attach_through<N: Effects + Send + 'static>(
     // What a failure names, taken before the build consumes the upstream.
     let shared = match &upstream {
         Upstream::Shared { instance, .. } => Some(instance.clone()),
-        Upstream::Tcp { .. } | Upstream::Mesh { .. } => None,
+        Upstream::Tcp | Upstream::Mesh { .. } => None,
     };
-    let dialled = match &upstream {
-        Upstream::Shared { .. } => String::new(),
-        Upstream::Tcp { host, port, .. } => format!("{host}:{port}"),
-        Upstream::Mesh { servers, .. } => servers
-            .iter()
-            .map(|(host, port)| format!("{host}:{port}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-    };
+    let dialled = String::from("the rendezvous list");
     let fail = |detail: String| match &shared {
         Some(instance) => AttachError::NoDaemon {
             instance: instance.clone(),
@@ -589,64 +650,26 @@ async fn attach_through<N: Effects + Send + 'static>(
                 None => builder,
             }
         }
-        // The interface as a config section, not `add_tcp_client`: that
-        // takes a socket address, and a home node behind a dynamic DNS name
-        // has to be looked up again on each reconnect, which the TCP
-        // client does for a name in `target_host`. Nothing else in the
-        // config: no shared instance to serve, no discovery, no other
-        // interface. A leaf is never a transport node.
-        Upstream::Tcp { host, port, tcp } => {
-            let mut config = leviculum_std::Config::default();
-            config.interfaces.insert(
-                "Home Node".to_string(),
-                tcp_section(
-                    leviculum_std::config::InterfaceConfig {
-                        name: "Home Node".to_string(),
-                        interface_type: "TCPClientInterface".to_string(),
-                        target_host: Some(host),
-                        target_port: Some(port),
-                        ..Default::default()
-                    },
-                    tcp,
-                ),
-            );
-            builder
-                .config(config)
-                .share_instance(false)
-                .discover_interfaces(false)
-        }
-        // As a leaf's, the entry servers as config sections, looked up again
-        // on each reconnect; the screens' server on the listener the caller
-        // bound. Neither discovery nor a shared instance: the phone's
-        // mailbox is a destination on the network, not a transport node.
-        Upstream::Mesh {
-            servers,
-            screens,
-            tcp,
-        } => {
-            let mut config = leviculum_std::Config::default();
-            for (index, (host, port)) in servers.into_iter().enumerate() {
-                let name = format!("Entry {}", index + 1);
-                config.interfaces.insert(
-                    name.clone(),
-                    tcp_section(
-                        leviculum_std::config::InterfaceConfig {
-                            name,
-                            interface_type: "TCPClientInterface".to_string(),
-                            target_host: Some(host),
-                            target_port: Some(port),
-                            ..Default::default()
-                        },
-                        tcp,
-                    ),
-                );
-            }
-            builder
-                .config(config)
-                .add_tcp_server_listener(screens)
-                .share_instance(false)
-                .discover_interfaces(false)
-        }
+        // No interface in the config: the rendezvous rotation spawns one
+        // TCP client interface at a time once the node runs, as a config
+        // section and not `add_tcp_client`, since that takes a socket
+        // address and a home node behind a dynamic DNS name has to be
+        // looked up again on each reconnect, which the TCP client does for
+        // a name in `target_host`. No shared instance to serve, no
+        // discovery, no other interface. A leaf is never a transport node.
+        Upstream::Tcp => builder
+            .config(leviculum_std::Config::default())
+            .share_instance(false)
+            .discover_interfaces(false),
+        // As a leaf's, the entry servers dialled by the rotation; the
+        // screens' server on the listener the caller bound. Neither
+        // discovery nor a shared instance: the phone's mailbox is a
+        // destination on the network, not a transport node.
+        Upstream::Mesh { screens } => builder
+            .config(leviculum_std::Config::default())
+            .add_tcp_server_listener(screens)
+            .share_instance(false)
+            .discover_interfaces(false),
     };
     let mut node = builder
         .storage_path(config.storage_dir)
@@ -686,6 +709,7 @@ async fn attach_through<N: Effects + Send + 'static>(
             commands: commands_tx,
             events: events_rx,
         },
+        rendezvous: None,
     })
 }
 

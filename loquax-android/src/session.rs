@@ -170,6 +170,8 @@ pub struct Session {
     here: Mutex<Option<mailbox::Here>>,
     address: [u8; 16],
     server: String,
+    /// The list the leaf dials one at a time, [`Session::server`] first.
+    servers: Vec<String>,
 }
 
 impl Session {
@@ -192,15 +194,15 @@ impl Session {
         };
         let start = &start;
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
-        let mut carried = None;
+        let mut carried = Vec::new();
         let code = match (&client, start.code.as_deref().map(str::trim)) {
             (_, Some(code)) if !code.is_empty() => {
-                let (code, server) = loquax::home::code::HomeCode::parse_with_server(code)
+                let (code, list) = loquax::home::code::HomeCode::parse_with_rendezvous(code)
                     .map_err(|error| StartError {
                         need: Some("code"),
                         text: format!("That is not a mailbox code: {error}"),
                     })?;
-                carried = server;
+                carried = list;
                 Some(code)
             }
             (Some(_), _) => None,
@@ -221,17 +223,23 @@ impl Session {
                 });
             }
         }
-        let server = match start.server.as_deref().map(str::trim) {
-            Some(server) if !server.is_empty() => server.to_string(),
-            _ => carried.or_else(|| load_server(&home)).ok_or(StartError {
+        // The keepalive of the connection to the mailbox: the same `tcp_*`
+        // keys as an lnsd section (1176), from this app's config file, and
+        // the rendezvous keys (1196) beside them.
+        let config =
+            loquax::config::load(&home).map_err(|error| StartError::other(error.to_string()))?;
+        let servers =
+            dial_list(start.server.as_deref(), &config, carried, &home).ok_or(StartError {
                 need: Some("server"),
                 text: "Type your mailbox's address, host:port of its lnsd TCP server.".to_string(),
-            })?,
-        };
-        loquax::engine::parse_server(&server).map_err(|text| StartError {
-            need: Some("server"),
-            text,
-        })?;
+            })?;
+        for server in &servers {
+            loquax::engine::parse_server(server).map_err(|text| StartError {
+                need: Some("server"),
+                text,
+            })?;
+        }
+        let server = servers.first().cloned().unwrap_or_default();
         let public_key = match (&code, client) {
             (Some(code), _) => code.public_key,
             (None, Some(key)) => key,
@@ -246,14 +254,14 @@ impl Session {
         std::fs::create_dir_all(&storage)
             .map_err(|error| StartError::other(format!("{}: {error}", storage.display())))?;
 
-        // The keepalive of the connection to the mailbox: the same `tcp_*`
-        // keys as an lnsd section (1176), from this app's config file.
-        let tcp = loquax::config::load(&home)
-            .map_err(|error| StartError::other(error.to_string()))?
-            .tcp;
+        let tcp = config.tcp;
+        let home_destination =
+            loquax::home::destination_hash(&public_key).map_err(StartError::other)?;
         let attached = runtime.block_on(attach_leaf(
             LeafConfig {
-                server: server.clone(),
+                servers: servers.clone(),
+                home_destination: Some(home_destination),
+                timing: loquax::home::rendezvous::Timing::default(),
                 storage_dir: storage,
                 identity: device.clone(),
                 display_name: Vec::new(),
@@ -288,7 +296,7 @@ impl Session {
                 };
                 return Err(StartError {
                     need,
-                    text: join_words(&error, &server),
+                    text: join_words(&error, &servers.join(", ")),
                 });
             }
             loquax::home::client::save_client(&home, &code.public_key)
@@ -296,7 +304,7 @@ impl Session {
         }
         // The phone's own mailbox listens on another port at every start.
         if here.is_none() {
-            save_server(&home, &server).map_err(StartError::other)?;
+            save_servers(&home, &servers).map_err(StartError::other)?;
         }
 
         let (events_tx, events_rx) = channel();
@@ -354,6 +362,7 @@ impl Session {
             here: Mutex::new(here),
             address,
             server,
+            servers,
         };
         // What the home node holds since the last run, on open.
         session.lock().apply(UiEvent::Run(PaletteCommand::Fetch));
@@ -481,6 +490,12 @@ impl Session {
             since,
             identity: loquax::address::to_hex(identity.hash()),
             home_node: loquax::address::to_hex(&loquax::home::destination_hash(&public_key)?),
+            rendezvous: self
+                .rendezvous()
+                .iter()
+                .map(|(server, up)| format!("{} {server}", if *up { '●' } else { '○' }))
+                .collect::<Vec<_>>()
+                .join("\n"),
             propagation_node,
             version: loquax::VERSION.to_string(),
         })
@@ -588,9 +603,20 @@ impl Session {
         self.address
     }
 
-    /// The server the session talks to.
+    /// The server the session talks to: the first of its list.
     pub fn server(&self) -> &str {
         &self.server
+    }
+
+    /// The servers the session dials one at a time, in order, each with
+    /// whether its connection is up now: the rendezvous list Advanced
+    /// shows with the active entry marked (1196).
+    pub fn rendezvous(&self) -> Vec<(String, bool)> {
+        let state = self.lock().attached.rendezvous().unwrap_or_default();
+        self.servers
+            .iter()
+            .map(|server| (server.clone(), state.up && state.entry == *server))
+            .collect()
     }
 
     /// Whether the TCP interface to the home node is up now.
@@ -2266,15 +2292,51 @@ fn wall_now(offset: i32) -> WallTime {
     }
 }
 
-fn load_server(home: &Path) -> Option<String> {
+/// The kept list, one `host:port` a line; a file from before the list holds
+/// one line and reads as a list of one.
+fn load_servers(home: &Path) -> Vec<String> {
     std::fs::read_to_string(home.join(SERVER_FILE))
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
-fn save_server(home: &Path, server: &str) -> Result<(), String> {
-    loquax::home::client::write_atomically(&home.join(SERVER_FILE), &format!("{server}\n"))
+fn save_servers(home: &Path, servers: &[String]) -> Result<(), String> {
+    let mut text = servers.join("\n");
+    text.push('\n');
+    loquax::home::client::write_atomically(&home.join(SERVER_FILE), &text)
+}
+
+/// What the leaf dials, in order (1196): a server given beside the code
+/// wins, as a fixed address; then the config's `home_address`,
+/// `rendezvous_dial` and `rendezvous` keys; then the list the code carried,
+/// else the one kept from the last start; then the shipped rendezvous list,
+/// unless this host holds the shipped defaults back
+/// ([`loquax::home::rendezvous::defaults_held_back`], a rig or CI host).
+/// `None` when nothing is left to dial: the join screen asks for an address.
+fn dial_list(
+    given: Option<&str>,
+    config: &loquax::config::Config,
+    carried: Vec<String>,
+    home: &Path,
+) -> Option<Vec<String>> {
+    use loquax::home::rendezvous::{default_list, defaults_held_back, reach, Reach};
+    if let Some(given) = given.map(str::trim).filter(|given| !given.is_empty()) {
+        return Some(vec![given.to_string()]);
+    }
+    let known = match carried.is_empty() {
+        true => load_servers(home),
+        false => carried,
+    };
+    match reach(config, &known) {
+        Reach::Fixed(fixed) => Some(vec![fixed]),
+        Reach::MeshOnly => None,
+        Reach::List(list) if list == default_list() && defaults_held_back() => None,
+        Reach::List(list) => Some(list),
+    }
 }
 
 /// A peer's address as the app hands it back.

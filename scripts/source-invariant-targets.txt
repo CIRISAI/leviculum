@@ -229,6 +229,7 @@ skip  loquax-android   device_walk_script         # starts python3 on the device
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
 skip  loquax-android   fling                      # starts javac and java on Fling.java and its host test; subject is the code
 skip  loquax-android   glyph                      # Glyph.java against the core's mark shapes, and the shapes rasterised; subject is the code
+skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code

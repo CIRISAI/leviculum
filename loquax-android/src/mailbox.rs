@@ -30,12 +30,15 @@ pub const DIR: &str = "mailbox";
 /// ended the process (the sticky service) finds it.
 pub const HERE_FILE: &str = "mailbox-here";
 /// The file under [`DIR`] that names the entry servers, `host:port` one per
-/// line; the shipped list when it is absent or holds none.
+/// line, tried one at a time in this order with failover; the shipped
+/// rendezvous list when it is absent or holds none.
 pub const SERVERS_FILE: &str = "servers";
 /// The file under [`DIR`] with the name recipients see.
 pub const NAME_FILE: &str = "name";
-/// The shipped entry server: the first of the zero-config server list
-/// (`docs/src/concepts/zero-config.md`, "The server list").
+/// The shipped entry servers, as the mailbox dials them: the rendezvous
+/// list (`loquax::home::rendezvous::DEFAULT`) on its ordinary port, as a
+/// peer (1196). The phones' default is the same node's access point port,
+/// `leviculum.network:4343`, with `:4242` as its last fallback.
 pub const DEFAULT_SERVERS: &[&str] = &["leviculum.network:4242"];
 /// The name the screens' device is admitted under.
 const SCREENS: &str = "this phone";
@@ -207,6 +210,7 @@ impl Here {
                 servers: servers(&self.app),
                 screens: listener,
                 tcp: config.tcp,
+                timing: loquax::home::rendezvous::Timing::default(),
             },
             storage_dir,
             identity: identity(&self.app)?,
@@ -256,6 +260,15 @@ impl Here {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shipped_servers_are_the_rendezvous_list_on_its_peer_port() {
+        let shipped: Vec<String> = DEFAULT_SERVERS.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(
+            shipped,
+            loquax::home::rendezvous::peer_list(&loquax::home::rendezvous::default_list())
+        );
+    }
 
     #[test]
     fn the_servers_file_replaces_the_shipped_list_and_an_empty_one_does_not() {

@@ -2,7 +2,7 @@
 
 Status: concept, decided by Lew on 2026-10-31 (order 1195, Refs #232,
 #471). The implementation is order 1196; the rules below are its
-acceptance. The mailbox itself is [the home node](loquax-home-node.md).
+acceptance, and "Decided" near the end records the open points it closed. The mailbox itself is [the home node](loquax-home-node.md).
 
 ## The problem
 
@@ -50,9 +50,10 @@ the join code carries what the phone needs.
 - **Hops:** two relays, the rendezvous and the mailbox host's daemon.
 - **Who sees what:** the rendezvous sees destination hashes, packet
   sizes and timing, and the two IP addresses. It sees no content and no
-  name: the link is end to end encrypted, and `loquax.home` is never
-  announced, so the rendezvous only learns that some identity holds a
-  link to some destination.
+  name: the link is end to end encrypted. Since 1196 `loquax.home` is
+  announced (below, "Decided"), so the rendezvous also learns that this
+  identity, whose key the LXMF announce publishes anyway, runs a Loquax
+  mailbox.
 - **Failure:** rendezvous down: the phone and the mailbox each move to
   the next entry of the mailbox's rendezvous list (below). Mailbox
   offline: the path request goes unanswered and the phone shows the
@@ -68,7 +69,7 @@ the join code carries what the phone needs.
 
 Our own node, `leviculum.network`, is preconfigured; the Android app
 already ships it as its default server (`DEFAULT_SERVERS`,
-`loquax-android/src/mailbox.rs:39`). The list may hold several. Anyone
+`loquax-android/src/mailbox.rs:42`). The list may hold several. Anyone
 who runs a mailbox on a public server has a rendezvous for their own
 phones by that fact, and other operators may offer one. Order 1190
 hardens the rendezvous (caps per source, silent clients timed out).
@@ -99,12 +100,12 @@ reference gates the search on the receiving interface's mode
 (`discovers_paths`, `leviculum-core/src/traits.rs:115`;
 `leviculum-core/src/transport.rs:12492`). lnsd widens the gate only for
 interfaces that report live peers, and today only BLE does
-(`leviculum-std/src/interfaces/ble/mod.rs:1811`). Since `loquax.home` is
-never announced, no relay holds its path from an announce either. So A
-works when the mailbox's own daemon is node A's direct neighbour, and
-fails when a third relay stands between them. The fix is not decided
-here (see the last section); cells 2 and 3 below are written so that
-they show it.
+(`leviculum-std/src/interfaces/ble/mod.rs:1811`). Without an announce of
+`loquax.home` no relay holds its path either. So A worked only when the
+mailbox's own daemon was node A's direct neighbour, and failed when a
+third relay stood between them. 1196 closes it by announcing
+`loquax.home` (below, "Decided"); its cells show both, red with the
+announce held back and green with it.
 
 ### E: at home, in the same WiFi
 
@@ -191,20 +192,29 @@ with a separate relay as node B and the mailbox one hop behind it. The
 second shape is the catch under A; it stays red until the open decision
 below is made and built.
 
+## Decided (the reviewer, 2026-10-31, order 1196)
+
+- **`loquax.home` is announced** on the delivery destination's cadence,
+  and again by a mailbox each time its rendezvous connection comes up.
+  Every relay then holds the path, and A works beyond the first relay.
+  The client still asks for the path on every connect. The residual case
+  is a mailbox behind a third party's plain port whose announce has not
+  reached the phone's entry node yet: the client asks again with a
+  doubling wait (`loquax/src/home/client.rs`, `PATH_RETRY`) and logs each
+  request.
+- **The access point port on `leviculum.network` is 4343**; 4242 stays
+  the peer port. The shipped list is port 4343 of `leviculum.network`,
+  then its port 4242 as the last fallback for a server from before the
+  access point port (`loquax/src/home/rendezvous.rs`, `DEFAULT`).
+- **One rendezvous at a time**, with failover and return
+  (`loquax/src/home/rendezvous.rs`, `Rotation`).
+- **C** waits for the measurement; **D** stays under Advanced
+  (`home_address` in Loquax's config).
+
 ## What this page does not decide
 
-- **How a relay finds `loquax.home` beyond the first search.** The
-  options: announce `loquax.home` like the LXMF delivery destination
-  (every relay then holds the path, at the cost of telling the network
-  that this identity runs a Loquax mailbox; its public key is already
-  public through the LXMF announce); widen lnsd's search gate to TCP
-  peers as it is widened for BLE (helps only where lnsd relays); or
-  accept the limit and document it.
 - **The rendezvous list beyond `leviculum.network`**: who else is in the
   shipped list, and whether a mailbox's list is the shipped list, its
-  own server, or both.
-- **The access point port on `leviculum.network`**: its number, and
-  whether it replaces port 4242 for phones.
-- **How many rendezvous the phone holds at once**: one at a time with
-  failover (less power) or two (faster failover).
+  own server, or both. Today it is both: `loquax mailbox admit --server`
+  puts the mailbox's own phone port first, the shipped list behind it.
 - **Whether C is ever built**, after the measurement.

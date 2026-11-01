@@ -65,6 +65,10 @@ fn a_first_start_says_what_it_needs() {
         .unwrap()
         .starts_with("That is not a mailbox code"));
 
+    // A code without an address dials the shipped rendezvous (1196); with
+    // "mesh only" in the app's config there is nothing to dial, and the
+    // screen asks for the address as before.
+    std::fs::write(dir.path().join("config"), "rendezvous_dial = off\n").expect("config");
     let code = code_for(&leviculum_core::Identity::generate(&mut rand_core::OsRng));
     let answer = started(&loquax_android::start(&start_bytes(&Start {
         code: Some(code.clone()),
@@ -1622,6 +1626,8 @@ impl HomeNode {
                     mailbox: Box::new(|| {
                         Box::pin(async { loquax::mailbox_state::MailboxRun { input: None } })
                     }),
+                    rendezvous: Vec::new(),
+                    tcp: Default::default(),
                 },
                 storage_dir: daemon_storage,
                 identity,
