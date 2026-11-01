@@ -26,6 +26,10 @@
     <item name="maps_region_line" type="id" />
     <item name="maps_used" type="id" />
     <item name="privacy_receipts" type="id" />
+    <item name="photo_full" type="id" />
+    <item name="photo_size_small" type="id" />
+    <item name="photo_size_phone" type="id" />
+    <item name="photo_size_original" type="id" />
     <item name="privacy_shared_row" type="id" />
     <item name="profile_avatar" type="id" />
     <item name="profile_name" type="id" />

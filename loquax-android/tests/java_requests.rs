@@ -145,6 +145,18 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "photo",
+            java_map(&[
+                ("t", Java::Str("photo")),
+                ("peer", Java::Str(PEER)),
+                ("data", Java::Bin(&[0xff, 0xd8, 0xff, 0xe0])),
+            ]),
+            Request::Photo {
+                peer: s(PEER),
+                data: schema::Blob(vec![0xff, 0xd8, 0xff, 0xe0]),
+            },
+        ),
+        (
             "sendAgain",
             java_map(&[
                 ("t", Java::Str("sendagain")),
@@ -485,6 +497,28 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             java_map(&[("t", Java::Str("maptheme")), ("set", Java::Str("dark"))]),
             Query::MapTheme {
                 set: Some(s("dark")),
+            },
+        ),
+        ("photoSize", t("photosize"), Query::PhotoSize { set: None }),
+        (
+            "photoSize (set)",
+            java_map(&[("t", Java::Str("photosize")), ("set", Java::Str("small"))]),
+            Query::PhotoSize {
+                set: Some(s("small")),
+            },
+        ),
+        (
+            "photoBitmap",
+            java_map(&[
+                ("t", Java::Str("photo")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+                ("edge", Java::Long(720)),
+            ]),
+            Query::Photo {
+                peer: s(PEER),
+                key: KEY,
+                edge: 720,
             },
         ),
         ("mapFling", t("mapfling"), Query::MapFling { set: None }),

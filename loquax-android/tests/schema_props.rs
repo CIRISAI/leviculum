@@ -169,6 +169,7 @@ fn request() -> impl Strategy<Value = Request> {
         }),
         (text(), i64s(), text()).prop_map(|(peer, key, to)| Request::Forward { peer, key, to }),
         (text(), i64s()).prop_map(|(peer, key)| Request::SendAgain { peer, key }),
+        (text(), blob()).prop_map(|(peer, data)| Request::Photo { peer, data }),
         (text(), keys()).prop_map(|(peer, keys)| Request::Delete { peer, keys }),
         text().prop_map(|emoji| Request::Used { emoji }),
         Just(Request::Pull),
@@ -252,6 +253,8 @@ fn query() -> impl Strategy<Value = Query> {
         }),
         opt_text().prop_map(|set| Query::MapTheme { set }),
         prop::option::of(any::<bool>()).prop_map(|set| Query::MapFling { set }),
+        opt_text().prop_map(|set| Query::PhotoSize { set }),
+        (text(), i64s(), u32s()).prop_map(|(peer, key, edge)| Query::Photo { peer, key, edge }),
     ]
 }
 
@@ -290,6 +293,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         (u32s(), i64s(), i64s()),
         (text(), u32s()),
         (any::<(bool, bool, bool, bool)>(), text(), text()),
+        (text(), u32s(), u32s(), u32s(), text()),
     )
         .prop_map(
             |(
@@ -300,6 +304,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (updates, since, read_at),
                 (liveness, cadence_s),
                 ((joins_before, joins_after, meta, newest), day, live),
+                (photo, photo_bytes, photo_w, photo_h, photo_words),
             )| MessageRow {
                 id,
                 ours,
@@ -328,6 +333,11 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 newest,
                 day,
                 live,
+                photo,
+                photo_bytes,
+                photo_w,
+                photo_h,
+                photo_words,
             },
         )
         .boxed()

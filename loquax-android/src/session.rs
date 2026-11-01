@@ -638,6 +638,17 @@ impl Session {
             } => UiEvent::Reply { peer, target, body },
             Intent::Forward { from, key, to } => UiEvent::Forward { from, key, to },
             Intent::SendAgain { peer, key } => UiEvent::SendAgain { peer, key },
+            // Scaled and stripped off the lock: a 12 MP picture takes a
+            // quarter of a second on a desktop, more on a phone.
+            Intent::SendPhoto { peer, data } => {
+                let size = self.lock().model.photo_size;
+                let prepared = loquax::photo::prepare(&data, size).map_err(|e| e.to_string())?;
+                UiEvent::SendPhoto {
+                    peer,
+                    format: prepared.format.to_string(),
+                    data: prepared.data,
+                }
+            }
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed: true,
@@ -805,6 +816,39 @@ impl Session {
             }
             // The Privacy page's switch (1233): the model's, which the
             // config keeps (`UiEffect::Remember`).
+            // The Chats page's photo size (1220), kept as the receipts'
+            // switch is.
+            schema::Query::PhotoSize { set } => {
+                let mut inner = self.lock();
+                if let Some(word) = set {
+                    let size = loquax::ui::photos::PhotoSize::from_word(&word)
+                        .ok_or_else(|| format!("{word:?} is not small, phone or original"))?;
+                    inner.apply(UiEvent::PhotoSize(size));
+                }
+                return Ok(schema::encode(&schema::PhotoSizeChoice {
+                    v: VERSION,
+                    ok: true,
+                    size: inner.model.photo_size.word().to_string(),
+                }));
+            }
+            // A photo's pixels (1220): its bytes copied under the lock,
+            // decoded and scaled off it.
+            schema::Query::Photo { peer, key, edge } => {
+                let peer = parse_peer(&peer)?;
+                let bytes = self
+                    .lock()
+                    .picture(peer, schema::model_key(key))
+                    .ok_or_else(|| "no such photo".to_string())?;
+                let pixels =
+                    loquax::photo::fit(&bytes, edge.clamp(1, 4096)).map_err(|e| e.to_string())?;
+                return Ok(schema::encode(&schema::PhotoPixels {
+                    v: VERSION,
+                    ok: true,
+                    width: pixels.width,
+                    height: pixels.height,
+                    rgba: schema::Blob(pixels.rgba),
+                }));
+            }
             schema::Query::Receipts { set } => {
                 let mut inner = self.lock();
                 if let Some(on) = set {
@@ -893,7 +937,9 @@ impl Session {
             | schema::Query::MapRegions { .. }
             | schema::Query::MapTheme { .. }
             | schema::Query::MapFling { .. }
-            | schema::Query::Receipts { .. } => return Err("answered above".to_string()),
+            | schema::Query::Receipts { .. }
+            | schema::Query::PhotoSize { .. }
+            | schema::Query::Photo { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -989,6 +1035,7 @@ impl Inner {
         model.home_client = true;
         model.list_apart = true;
         model.reading.on = config.read_receipts.unwrap_or(true);
+        model.photo_size = config.photo_size.unwrap_or_default();
         for (message_id, source, packed) in store.unverified().map_err(|e| e.to_string())? {
             let verify = Command::Verify {
                 message_id,
@@ -1606,6 +1653,20 @@ impl Inner {
         })
     }
 
+    /// The picture bytes of the message `key` of `peer`'s conversation,
+    /// if it carries a photo.
+    fn picture(&self, peer: [u8; 16], key: u64) -> Option<Vec<u8>> {
+        self.model
+            .conversations
+            .iter()
+            .find(|c| c.peer == peer)?
+            .messages
+            .iter()
+            .find(|m| m.activity == key)
+            .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+            .map(<[u8]>::to_vec)
+    }
+
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
         let index = self.model.conversations.iter().position(|c| c.peer == peer);
         let icon =
@@ -1785,7 +1846,29 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
     for (g, group) in groups.into_iter().enumerate() {
         let mut day = group.day.map(|day| day.words.resolve(lang));
         for node in group.bubbles {
+            let photo = node.photo.as_ref().map(|photo| {
+                let shown = model.conversations[c]
+                    .messages
+                    .iter()
+                    .find(|m| m.activity == node.bubble.key)
+                    .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+                    .and_then(loquax::photo::dimensions)
+                    .unwrap_or((0, 0));
+                (
+                    photo.format.clone(),
+                    photo.bytes,
+                    shown,
+                    photo.words.resolve(lang),
+                )
+            });
             let mut row = row(node.bubble);
+            if let Some((format, bytes, (w, h), words)) = photo {
+                row.photo = format;
+                row.photo_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+                row.photo_w = w;
+                row.photo_h = h;
+                row.photo_words = words;
+            }
             row.joins_before = node.place.joins_before;
             row.joins_after = node.place.joins_after;
             row.meta = node.place.meta;
@@ -1860,6 +1943,11 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         newest: false,
         day: String::new(),
         live: String::new(),
+        photo: String::new(),
+        photo_bytes: 0,
+        photo_w: 0,
+        photo_h: 0,
+        photo_words: String::new(),
     }
 }
 
@@ -2004,6 +2092,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         R::SendAgain { peer, key } => Intent::SendAgain {
             peer: parse_peer(&peer)?,
             key: schema::model_key(key),
+        },
+        R::Photo { peer, data } => Intent::SendPhoto {
+            peer: parse_peer(&peer)?,
+            data: data.0,
         },
         R::Delete { peer, keys } => Intent::Delete {
             messages: Messages::Keys {

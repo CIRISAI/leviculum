@@ -180,6 +180,44 @@ final class Core {
         return command(map("t", "sendagain", "peer", peer, "key", key));
     }
 
+    /**
+     * A picture the user picked with the paperclip's "Photo" (1220), as the
+     * picker gave it: the library scales and strips it and sends it.
+     */
+    static String photo(String peer, byte[] data) {
+        return command(map("t", "photo", "peer", peer, "data", data));
+    }
+
+    /**
+     * The photo of the message `key`, upright and scaled into an `edge`
+     * square by the library (1220), as a Bitmap; null when it has none or
+     * it does not decode. Not on the UI thread.
+     */
+    static Bitmap photoBitmap(String peer, long key, int edge) {
+        Map<String, Object> answer = answer(Native.query(MsgPack.pack(
+                map("t", "photo", "peer", peer, "key", key, "edge", (long) edge))));
+        Object rgba = answer.get("rgba");
+        long w = num(answer, "width");
+        long h = num(answer, "height");
+        if (!(rgba instanceof byte[]) || w <= 0 || h <= 0
+                || ((byte[]) rgba).length != w * h * 4) {
+            return null;
+        }
+        Bitmap bitmap = Bitmap.createBitmap((int) w, (int) h, Bitmap.Config.ARGB_8888);
+        bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap((byte[]) rgba));
+        return bitmap;
+    }
+
+    /**
+     * The Chats page's photo size (1220): `set` (small, phone, original)
+     * stored, or with null only asked; the size in force as "size".
+     */
+    static Map<String, Object> photoSize(String set) {
+        Map<String, Object> request = map("t", "photosize");
+        if (set != null) request.put("set", set);
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
     /** Delete the messages `keys`, asked already. */
     static String delete(String peer, List<Long> keys) {
         return command(map("t", "delete", "peer", peer, "keys", keys));

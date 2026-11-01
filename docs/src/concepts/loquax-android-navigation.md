@@ -320,7 +320,8 @@ a friend already on screen is one tap away from the map (the pin).
   Help), back behaviour for sub views, Refresh and Map out of the menu.
   Map gets the whole screen; moon, "All" and "Load area" go; the map
   theme control moves to Settings, Appearance; the settings list gets its
-  eight entries (pages that do not exist yet show what exists today).
+  eight entries (pages that do not exist yet show what exists today);
+  1220 added a ninth, Chats, with the photo size.
   Built in 1199 with two choices of its own: on the Map tab the search
   icon stays hidden until the Friends sheet of 1200 gives it something to
   find, and the map's one chip says "Loading the map of this area…" or
@@ -360,7 +361,8 @@ a friend already on screen is one tap away from the map (the pin).
   position" picks the chat first (the empty map has no friend to send
   to), so it is two taps there; the card's "Share mine" and the chat's
   attachment menu (a paper clip in the compose field, one entry "My
-  position" for now) send at once. A share is a report of ours with no
+  position" then; "Photo" joined it above in 1220,
+  [photos](loquax-photos.md)) send at once. A share is a report of ours with no
   text, the Telemeter alone, and the chat shows it as our bubble with the
   position line. The Maps page names a map by its middle ("Around 52.52°
   N, 13.40° E"), since the region files carry no place name; Delete asks

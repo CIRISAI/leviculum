@@ -108,6 +108,11 @@
               a:theme='@style/Loquax.List'
               a:exported='{{WALK_EXPORTED}}'/>
 
+    <!-- A photo whole, from a chat's bubble (1220). -->
+    <activity a:name='network.leviculum.loquax.PhotoActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
     <activity a:name='network.leviculum.loquax.ContactActivity'
               a:theme='@style/Loquax.List'
               a:exported='false'/>

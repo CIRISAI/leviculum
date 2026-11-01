@@ -151,7 +151,7 @@ def settings_list(titles=None, summaries=None):
 
 
 class Settings(unittest.TestCase):
-    def test_the_eight_entries_as_built_have_no_problem(self):
+    def test_the_nine_entries_as_built_have_no_problem(self):
         titles, problems = walk.settings_list_problems(settings_list())
         self.assertEqual(titles, walk.SETTINGS_PAGES)
         self.assertEqual(problems, [])
@@ -159,14 +159,14 @@ class Settings(unittest.TestCase):
     def test_a_missing_entry_a_missing_line_and_the_wrong_order(self):
         _, problems = walk.settings_list_problems(settings_list(walk.SETTINGS_PAGES[:-1]))
         self.assertEqual(problems, [f"entries {walk.SETTINGS_PAGES[:-1]}, want {walk.SETTINGS_PAGES}"])
-        _, problems = walk.settings_list_problems(settings_list(summaries=["x"] * 7 + [""]))
-        self.assertEqual(problems, ["8 entries with 7 descriptions"])
+        _, problems = walk.settings_list_problems(settings_list(summaries=["x"] * 8 + [""]))
+        self.assertEqual(problems, ["9 entries with 8 descriptions"])
         swapped = ["Mailbox", "Profile"] + walk.SETTINGS_PAGES[2:]
         _, problems = walk.settings_list_problems(settings_list(swapped))
         self.assertEqual(len(problems), 1)
 
     def test_a_raw_hash_on_a_main_row_and_a_line_that_did_not_decode(self):
-        lines = ["what it holds"] * 8
+        lines = ["what it holds"] * len(walk.SETTINGS_PAGES)
         lines[1] = "Mailbox 3e35f10c9a7b4d2e8f1a0b6c5d4e3f21"
         _, problems = walk.settings_list_problems(settings_list(summaries=lines))
         self.assertEqual(problems, [f"a raw hash on a main row: {lines[1]!r}"])
@@ -618,6 +618,33 @@ class Notifications(unittest.TestCase):
 
 def boxed(rid, bounds, desc=""):
     return walk.Node(text="", desc=desc, rid="network.leviculum.loquax.debug:id/" + rid, cls="", bounds=bounds)
+
+
+class Photo(unittest.TestCase):
+    """The image step's reading of the screen (1220)."""
+
+    def node(self, desc: str, bounds=(0, 0, 480, 640)) -> "walk.Node":
+        return walk.Node("", desc, "network.leviculum.loquax:id/photo", "android.widget.ImageView", bounds)
+
+    def test_a_new_named_photo_is_right(self):
+        photos = [self.node("Photo, 104 KB"), self.node("Photo, 1.4 MB", (0, 700, 360, 1180))]
+        self.assertEqual(walk.photo_problems(photos, 1), [])
+
+    def test_none_new_unnamed_or_a_sliver_is_refused(self):
+        self.assertEqual(walk.photo_problems([], 0), ["0 photos on screen, 0 before the send"])
+        self.assertEqual(
+            walk.photo_problems([self.node("")], 0), ["a photo says ''"]
+        )
+        self.assertEqual(
+            walk.photo_problems([self.node("Photo, 9 KB", (0, 0, 480, 20))], 0),
+            ["a photo is 480x20"],
+        )
+
+    def test_only_photo_ids_are_photos_top_first(self):
+        low = self.node("Photo, 1 KB", (0, 900, 100, 1000))
+        high = self.node("Photo, 2 KB", (0, 100, 100, 200))
+        other = walk.Node("", "Photo, 3 KB", "network.leviculum.loquax:id/body", "", (0, 0, 9, 9))
+        self.assertEqual(walk.photos_on([low, other, high]), [high, low])
 
 
 class Draft(unittest.TestCase):

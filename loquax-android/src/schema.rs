@@ -221,6 +221,12 @@ pub enum Request {
     /// Tapped the red mark of the message `key` of `peer`'s conversation,
     /// one of ours not sent: it goes again (1232), the failed one leaves.
     SendAgain { peer: String, key: i64 },
+    /// Picked a picture with the paperclip's "Photo" (1220): the system
+    /// picker's bytes as they came. The session scales and strips them
+    /// by the reader's photo size (`loquax::photo::prepare`) and sends
+    /// them to `peer` as the image field; a picture it cannot send
+    /// answers the request with the reason.
+    Photo { peer: String, data: Blob },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
     Delete { peer: String, keys: Vec<i64> },
@@ -470,6 +476,38 @@ pub enum Query {
         #[serde(default)]
         set: Option<bool>,
     },
+    /// The Chats page's photo size (1220): `set` (`small`, `phone`,
+    /// `original`) stored when given, the size in force answered as
+    /// [`PhotoSizeChoice`].
+    PhotoSize {
+        #[serde(default)]
+        set: Option<String>,
+    },
+    /// The photo of the message `key` of `peer`'s conversation, decoded
+    /// upright and scaled into an `edge` by `edge` box, never up (1220):
+    /// a bubble's thumbnail, the full view. Answered as [`PhotoPixels`].
+    Photo { peer: String, key: i64, edge: u32 },
+}
+
+/// What [`Query::PhotoSize`] answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhotoSizeChoice {
+    pub v: u32,
+    pub ok: bool,
+    /// `small`, `phone` or `original`.
+    pub size: String,
+}
+
+/// What [`Query::Photo`] answers: RGBA rows without padding, the layout
+/// of `Bitmap.Config.ARGB_8888`'s buffer, which
+/// `Bitmap.copyPixelsFromBuffer` takes as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhotoPixels {
+    pub v: u32,
+    pub ok: bool,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Blob,
 }
 
 /// What [`Query::MapRegions`] answers: the regions, newest first, their
@@ -1104,6 +1142,20 @@ pub struct MessageRow {
     /// position 3 h ago`; empty on every other row.
     #[serde(default)]
     pub live: String,
+    /// The photo it carries (1220), else empty and 0: the format word
+    /// the sender wrote, its bytes, the size it shows at upright (0 by 0
+    /// for one that does not decode), and what a screen reader says,
+    /// `Photo, 279 KB`. [`Query::Photo`] has its pixels.
+    #[serde(default)]
+    pub photo: String,
+    #[serde(default)]
+    pub photo_bytes: u32,
+    #[serde(default)]
+    pub photo_w: u32,
+    #[serde(default)]
+    pub photo_h: u32,
+    #[serde(default)]
+    pub photo_words: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

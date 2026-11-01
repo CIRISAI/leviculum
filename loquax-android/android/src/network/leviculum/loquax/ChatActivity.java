@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
@@ -14,6 +15,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.LruCache;
 import android.text.Editable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -43,6 +45,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * One conversation, after a modern messenger's layout (1129): a bar with
@@ -120,6 +124,22 @@ public class ChatActivity extends Activity implements Events.Listener {
     private boolean insertWithAddress;
     /** The contact screen's request code. */
     private static final int CONTACT = 45;
+    /** The system picker's answer for the paperclip's "Photo" (1220). */
+    private static final int PHOTO = 46;
+    /** The longer side of a bubble's photo, in dp. */
+    private static final int PHOTO_DP = 240;
+    /** The most bytes of a picked picture read; past it the pick is refused. */
+    private static final int PICKED_MAX = 64 * 1024 * 1024;
+
+    /** Thumbnails the library drew, by message key: 16 MiB of them. */
+    private final LruCache<Long, Bitmap> thumbs = new LruCache<Long, Bitmap>(16 * 1024 * 1024) {
+        @Override
+        protected int sizeOf(Long key, Bitmap bitmap) {
+            return bitmap.getByteCount();
+        }
+    };
+    /** Decodes thumbnails and hands picked pictures over, one at a time. */
+    private final ExecutorService photos = Executors.newSingleThreadExecutor();
     /**
      * The last search in this conversation and the key of its match shown, null for none: a key
      * has either sign (Rust's schema::wire_key), so no number stands for none.
@@ -344,6 +364,14 @@ public class ChatActivity extends Activity implements Events.Listener {
         super.onPause();
     }
 
+    @Override
+    protected void onDestroy() {
+        // A picked picture already handed over still goes; thumbnails
+        // still owed are not drawn.
+        photos.shutdown();
+        super.onDestroy();
+    }
+
     /** Back ends a selection first, then a reply being written, then the screen. */
     @Override
     public void onBackPressed() {
@@ -516,16 +544,24 @@ public class ChatActivity extends Activity implements Events.Listener {
     }
 
     /**
-     * The attachment menu (1201): the own position, sent once to this
-     * chat when the user picks it; the permission first if need be.
+     * The attachment menu (1201): a photo from the system's picker (1220),
+     * the own position, sent once to this chat when the user picks it;
+     * the permission first if need be.
      */
     private void attach(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
+        popup.getMenu().add(0, R.string.attach_photo, 0, R.string.attach_photo);
         popup.getMenu().add(0, R.string.attach_position, 0, R.string.attach_position);
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
-                if (item.getItemId() == R.string.attach_position) {
+                if (item.getItemId() == R.string.attach_photo) {
+                    // The system's picker, no camera yet (1220); the
+                    // picked bytes go to the library as they are.
+                    startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT)
+                            .setType("image/*")
+                            .addCategory(Intent.CATEGORY_OPENABLE), PHOTO);
+                } else if (item.getItemId() == R.string.attach_position) {
                     locator.shareWith(peer, Core.str(header, "name"), new Locator.Fix() {
                         @Override
                         public void on(android.location.Location location) {
@@ -681,6 +717,10 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (result != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
+        if (request == PHOTO) {
+            sendPhoto(data.getData());
+            return;
+        }
         if (request != Book.PICK && request != Book.INSERT) {
             return;
         }
@@ -696,6 +736,111 @@ public class ChatActivity extends Activity implements Events.Listener {
         String error = Core.link(peer, copy);
         line(error != null ? error : getString(R.string.linked_to, Core.str(copy, "name")));
         refresh();
+    }
+
+    /**
+     * The picked picture's bytes, read off the UI thread, to the library,
+     * which scales, strips and sends it (1220); what it refuses is said.
+     */
+    private void sendPhoto(final android.net.Uri uri) {
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                String error;
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[64 * 1024];
+                    int n;
+                    while (in != null && (n = in.read(chunk)) > 0 && bytes.size() <= PICKED_MAX) {
+                        bytes.write(chunk, 0, n);
+                    }
+                    error = bytes.size() > PICKED_MAX
+                            ? getString(R.string.photo_unreadable)
+                            : Core.photo(peer, bytes.toByteArray());
+                } catch (java.io.IOException | SecurityException e) {
+                    error = getString(R.string.photo_unreadable);
+                }
+                final String said = error;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (said != null) {
+                            line(said);
+                        }
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * A row's photo (1220): sized to its shape within PHOTO_DP, the
+     * library's thumbnail from the cache or drawn now, a tap to the whole
+     * photo; gone for a row without one.
+     */
+    private void photo(final ImageView view, Map<String, Object> row) {
+        if (Core.str(row, "photo").isEmpty()) {
+            view.setVisibility(View.GONE);
+            view.setTag(null);
+            view.setImageDrawable(null);
+            view.setOnClickListener(null);
+            return;
+        }
+        final long key = Core.num(row, "key");
+        long w = Core.num(row, "photo_w");
+        long h = Core.num(row, "photo_h");
+        int box = dp(PHOTO_DP);
+        int vw = box;
+        int vh = box;
+        if (w > 0 && h > 0) {
+            if (w >= h) {
+                vh = (int) Math.max(dp(48), box * h / w);
+            } else {
+                vw = (int) Math.max(dp(48), box * w / h);
+            }
+        }
+        ViewGroup.LayoutParams params = view.getLayoutParams();
+        params.width = vw;
+        params.height = vh;
+        view.setLayoutParams(params);
+        view.setVisibility(View.VISIBLE);
+        view.setContentDescription(Core.str(row, "photo_words"));
+        view.setTag(key);
+        Bitmap cached = thumbs.get(key);
+        if (cached != null) {
+            view.setImageBitmap(cached);
+        } else {
+            view.setImageDrawable(new android.graphics.drawable.ColorDrawable(
+                    getColor(R.color.bubble_theirs)));
+            final int edge = Math.max(vw, vh);
+            photos.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final Bitmap bitmap = Core.photoBitmap(peer, key, edge);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (bitmap == null) {
+                                return;
+                            }
+                            thumbs.put(key, bitmap);
+                            if (Long.valueOf(key).equals(view.getTag())) {
+                                view.setImageBitmap(bitmap);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        view.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(ChatActivity.this, PhotoActivity.class)
+                        .putExtra(PhotoActivity.PEER, peer)
+                        .putExtra(PhotoActivity.KEY, key));
+            }
+        });
     }
 
     /** The contact screen of this conversation's peer (1146). */
@@ -1365,6 +1510,8 @@ public class ChatActivity extends Activity implements Events.Listener {
                     ? new float[] {big, big, top, top, bottom, bottom, big, big}
                     : new float[] {top, top, big, big, big, big, bottom, bottom});
             bubble.setBackground(shape);
+
+            photo((ImageView) view.findViewById(R.id.photo), row);
 
             TextView body = (TextView) view.findViewById(R.id.body);
             body.setText(text(row, ours, now));

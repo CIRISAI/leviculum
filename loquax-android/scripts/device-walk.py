@@ -65,6 +65,7 @@ STEPS = [
     "info",
     "marks",
     "reply_send",
+    "image",
     "receive_wake",
     "receive_report",
     "position_pin",
@@ -106,13 +107,15 @@ TABS = ["tab_chats", "tab_map"]
 NOT_DECODED = "did not decode"
 # The settings' entries in the list's order (1199, SettingsActivity.PAGES).
 SETTINGS_PAGES = [
-    "Profile", "Mailbox", "Appearance", "Notifications", "Privacy", "Maps", "Backup", "Advanced",
+    "Profile", "Mailbox", "Appearance", "Chats", "Notifications", "Privacy", "Maps", "Backup",
+    "Advanced",
 ]
 # Each page's mark that it is that page and not a copy of another (1201):
 # an id or a text only it shows. Pages with no mark of their own say none.
 SETTINGS_PAGE_MARKS = {
     "Profile": ("rid", "profile_qr"),
     "Appearance": ("text", THEME_AUTO),
+    "Chats": ("rid", "photo_size_phone"),
     "Privacy": ("text", "Positions you shared"),
     "Maps": ("rid", "maps_auto"),
 }
@@ -122,6 +125,13 @@ RECEIPTS_ROW = "Send read receipts"
 RECEIPTS_LINE = "Others see when you have read their messages."
 RECEIPTS_SWITCH = "privacy_receipts"
 BLOCKED_HEADER = "Blocked contacts"
+# A photo (1220): the repository's fixture, what the paperclip's entry
+# says, what a bubble's photo is called by a screen reader (the
+# catalogue's scene_photo), and the whole photo's view id.
+FIXTURE_PHOTO = REPO / "loquax" / "tests" / "fixtures" / "photo-portrait.jpg"
+ATTACH_PHOTO = "Photo"
+PHOTO_WORDS = re.compile(r"^Photo, \d+(?:\.\d)? (?:B|KB|MB)$")
+PHOTO_FULL = "photo_full"
 # The region the walk puts on the phone for the Maps page (1207): the
 # repository's Florence fixture, and the middle the page names it by
 # (Ui.place, two decimals, either decimal mark).
@@ -230,6 +240,27 @@ def marks_problems(seen: dict[str, str]) -> list[str]:
     for rid, desc in seen.items():
         if not desc.startswith(MARK_WORDS[rid]):
             problems.append(f"{rid} says {desc!r}, not {' or '.join(MARK_WORDS[rid])!r}")
+    return problems
+
+
+def photos_on(nodes: list[Node]) -> list[Node]:
+    """The bubbles' photos on screen (1220), top first."""
+    return by_top(find(nodes, rid="photo"))
+
+
+def photo_problems(photos: list[Node], before: int) -> list[str]:
+    """What is wrong with the photos on screen after one was sent, when
+    `before` were there: none new, one a screen reader cannot name, or
+    one drawn as a sliver (its thumbnail is at least 48 px a side)."""
+    problems = []
+    if len(photos) <= before:
+        problems.append(f"{len(photos)} photos on screen, {before} before the send")
+    for node in photos:
+        if not PHOTO_WORDS.match(node.desc):
+            problems.append(f"a photo says {node.desc!r}")
+        x1, y1, x2, y2 = node.bounds
+        if min(x2 - x1, y2 - y1) < 48:
+            problems.append(f"a photo is {x2 - x1}x{y2 - y1}")
     return problems
 
 
@@ -402,7 +433,7 @@ RAW_HASH = re.compile(r"[0-9a-f]{32}|<[0-9a-f]{8}…>")
 
 def settings_list_problems(nodes: list[Node]) -> tuple[list[str], list[str]]:
     """The settings list's titles from the top down (1201), and what is
-    wrong: not the eight pages in their order, a title without its one
+    wrong: not the nine pages in their order, a title without its one
     line description, a raw hash on a main row, a line that did not
     decode."""
     titles = [n.text for n in by_top(find(nodes, rid="settings_entry_title"))]
@@ -1456,6 +1487,54 @@ class Walk:
         if not accepted:
             raise StepFailed("the mailbox log has no 'HOME send accepted'")
         return f"bubble_ms={ms} mark={mark!r} mailbox=accepted"
+
+    def step_image(self) -> str:
+        """A photo through the paperclip (1220): the fixture onto the
+        phone's pictures, the system's picker, the bubble's thumbnail
+        with its words and a tick, the mailbox's send, the whole photo on
+        a tap and Back to the chat."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not FIXTURE_PHOTO.is_file():
+            raise StepFailed(f"{FIXTURE_PHOTO} missing")
+        name = f"walk-photo-{self.nonce}.jpg"
+        dev.run("push", str(FIXTURE_PHOTO), f"/sdcard/Pictures/{name}", timeout=60)
+        dev.shell(
+            "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+            f"-d file:///sdcard/Pictures/{name}",
+            check=False,
+        )
+        sent_before = fixture.mailbox_log().count("HOME send accepted")
+        before = len(photos_on(dev.dump()))
+        dev.tap_node(self.wait_id("attach", 5)[0])
+        self.tap_text(ATTACH_PHOTO)
+        # The system's picker: the file by its name, in its recent or its
+        # pictures list.
+        start = time.monotonic()
+        dev.tap_node(self.wait_text(name, 20, contains=True)[0])
+        problems: list[str] = []
+
+        def shown():
+            nonlocal problems
+            nodes = dev.dump()
+            problems = photo_problems(photos_on(nodes), before)
+            return not problems
+
+        if not wait_for(shown, 15, every=0.3):
+            raise StepFailed("; ".join(problems))
+        ms = int((time.monotonic() - start) * 1000)
+        accepted = wait_for(
+            lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+        )
+        if not accepted:
+            raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        photo = photos_on(dev.dump())[-1]
+        dev.tap_node(photo)
+        self.wait_id(PHOTO_FULL, 10)
+        dev.key("KEYCODE_BACK")
+        self.wait_id("compose", 10)
+        dev.shell(f"rm -f /sdcard/Pictures/{name}", check=False)
+        return f"picked_to_bubble_ms={ms} desc={photo.desc!r} mailbox=accepted full=shown"
 
     def step_receive_wake(self) -> str:
         dev = self.need_device()

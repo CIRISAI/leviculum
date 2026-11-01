@@ -3531,3 +3531,259 @@ fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
         Some(DeliveryState::Read { at: want })
     );
 }
+
+/// The photo fixture (1220, `loquax/tests/fixtures/make-photo.py`): 1800 x 2400
+/// as shown, stored turned with EXIF orientation 6, a GPS position and a
+/// camera model in its EXIF, a red block top left as it shows.
+const PHOTO: &[u8] = include_bytes!("../../loquax/tests/fixtures/photo-portrait.jpg");
+
+/// The image field of the fields map Python's router handed its delivery
+/// callback (`umsgpack.packb(message.fields)`), as our codec reads it.
+fn python_photo(message: &serde_json::Value) -> Option<(String, Vec<u8>)> {
+    let packed = message.get("fields")?.as_str()?;
+    let packed: Vec<u8> = (0..packed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).ok()?;
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).ok()?;
+        let start = at;
+        msgpack::skip(&packed, &mut at).ok()?;
+        if key == leviculum_lxmf::constants::FIELD_IMAGE {
+            let fields = [(key, packed[start..at].to_vec())];
+            return loquax::ui::photos::photo_parts(&fields)
+                .map(|(format, data)| (format, data.to_vec()));
+        }
+    }
+    None
+}
+
+/// Whether the top left of `rgba` (`width` wide) is the fixture's red
+/// block: the picture is upright.
+fn red_corner(rgba: &[u8], width: u32) -> bool {
+    let at = ((8 * width + 8) * 4) as usize;
+    rgba.get(at..at + 3)
+        .is_some_and(|p| p[0] > 200 && p[1] < 80 && p[2] < 80)
+}
+
+/// Photos both ways between the phone and the Python reference (1220).
+/// A photo Python sends as Sideband does, `fields[FIELD_IMAGE] = ["jpg",
+/// bytes]`, shows on the phone: its row says photo, its size upright and
+/// its words, and the library draws it upright. A photo the phone sends
+/// at each of the three sizes reaches Python's router as that field with
+/// the size's longest edge, upright, without the EXIF's place or camera;
+/// past one packet it travels to the phone's mailbox as a request
+/// resource (`ReticulumNode::send_request_awaited`). A picture that is
+/// none is refused with the reason, and nothing goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_travels_both_ways_with_python_lxmf_at_each_size() {
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    // Python to the phone, as Sideband sends one.
+    let mut field = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut field, 1);
+    leviculum_lxmf::msgpack::int(&mut field, leviculum_lxmf::constants::FIELD_IMAGE);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::string(&mut field, "jpg");
+    leviculum_lxmf::msgpack::bin(&mut field, PHOTO);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": "",
+                "fields": hex(&field),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let shown_python = python.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let row = loop {
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: shown_python.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode");
+            if let Some(row) = messages.messages.iter().find(|m| !m.photo.is_empty()) {
+                break row.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screens never showed the photo: {messages:?}"
+            );
+            session.next_event(Duration::from_millis(200));
+        };
+        assert_eq!(row.photo, "jpg");
+        assert_eq!(row.photo_bytes as usize, PHOTO.len());
+        assert_eq!((row.photo_w, row.photo_h), (1800, 2400), "upright");
+        assert_eq!(row.photo_words, "Photo, 361 KB");
+        assert_eq!(row.body, "");
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let listed = list
+            .conversations
+            .iter()
+            .find(|c| c.peer == shown_python)
+            .expect("listed");
+        assert_eq!(
+            (listed.last.as_str(), listed.kind.as_str()),
+            ("photo", "photo")
+        );
+        let pixels: schema::PhotoPixels = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Photo {
+                    peer: shown_python.clone(),
+                    key: row.key,
+                    edge: 480,
+                })
+                .expect("its pixels"),
+        )
+        .expect("decode");
+        assert_eq!((pixels.width, pixels.height), (360, 480));
+        assert_eq!(pixels.rgba.0.len(), 360 * 480 * 4);
+        assert!(red_corner(&pixels.rgba.0, pixels.width), "drawn upright");
+        session
+    })
+    .await
+    .expect("the photo on the phone");
+
+    // The phone to Python, at each size.
+    let mut session = session;
+    for (size, edge) in [("small", 800), ("phone", 1600), ("original", 2400)] {
+        let to = python.clone();
+        let (back, before) = (session, peer.received().len());
+        session = tokio::task::spawn_blocking(move || {
+            let chosen: schema::PhotoSizeChoice = rmp_serde::from_slice(
+                &back
+                    .query(schema::Query::PhotoSize {
+                        set: Some(size.to_string()),
+                    })
+                    .expect("set"),
+            )
+            .expect("decode");
+            assert_eq!(chosen.size, size);
+            back.request(Request::Photo {
+                peer: to,
+                data: schema::Blob(PHOTO.to_vec()),
+            })
+            .unwrap_or_else(|error| panic!("{size}: {error}"));
+            back
+        })
+        .await
+        .expect("sent");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (format, data) = loop {
+            let got = peer.received();
+            if let Some(photo) = got.iter().skip(before).find_map(python_photo) {
+                break photo;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{size}: Python never received the photo: {:?}",
+                got.len()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        assert_eq!(format, "jpg", "{size}");
+        let (w, h) = loquax::photo::dimensions(&data).expect("Python got a picture");
+        assert_eq!(w.max(h), edge, "{size}: {w}x{h}");
+        assert!(h > w, "{size}: upright, portrait: {w}x{h}");
+        let pixels = loquax::photo::fit(&data, 400).expect("decodes");
+        assert!(red_corner(&pixels.rgba, pixels.width), "{size}: upright");
+        for secret in [&b"Exif"[..], b"Pixel 8", b"GPS"] {
+            assert!(
+                !data.windows(secret.len()).any(|w| w == secret),
+                "{size}: carries {:?}",
+                String::from_utf8_lossy(secret)
+            );
+        }
+    }
+
+    // Negative: no picture, nothing sent, the reason said.
+    let to = python.clone();
+    let before = peer.received().len();
+    let session = tokio::task::spawn_blocking(move || {
+        let refused = session.request(Request::Photo {
+            peer: to,
+            data: schema::Blob(b"%PDF-1.7 a document".to_vec()),
+        });
+        assert!(
+            refused.as_ref().is_err_and(|e| e.contains("not a picture")),
+            "{refused:?}"
+        );
+        session
+    })
+    .await
+    .expect("refused");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(peer.received().len(), before, "nothing went");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}
