@@ -52,7 +52,7 @@ mod tests {
         (side, stride, luma)
     }
 
-    /// The join code of 1121, as `loquax home admit --server` prints it:
+    /// The join code of 1121, as `loquax mailbox admit --server` prints it:
     /// the code goes upper case into the alphanumeric segment, the address
     /// behind it as bytes, and both come back.
     #[test]

@@ -210,7 +210,7 @@ impl Session {
                 return Err(StartError {
                     need: Some("code"),
                     text: "This phone reads no mailbox yet. Paste the code \
-                           `loquax home admit` printed on the computer."
+                           `loquax mailbox setup` showed on the computer."
                         .to_string(),
                 })
             }

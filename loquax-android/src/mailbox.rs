@@ -99,7 +99,7 @@ pub fn set_name(app: &Path, name: &str) -> Result<(), String> {
 }
 
 /// An admission for the screens: a token issued in the mailbox's store, as
-/// `loquax home admit` issues one, and the code that carries it.
+/// `loquax mailbox admit` issues one, and the code that carries it.
 pub fn admission(app: &Path) -> Result<HomeCode, String> {
     let identity = identity(app)?;
     let address = loquax::engine::delivery_address(&identity)?;
