@@ -1632,13 +1632,10 @@ pub struct ReticulumNode {
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
     event_rx: Option<EventReceiver>,
-    /// Shutdown sender
-    shutdown_tx: Option<watch::Sender<bool>>,
-    /// Runner task handle
-    runner_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Channel for dispatching TickOutput from outside the event loop
-    /// (used by connect, send_on_link, close_link, announce)
-    action_dispatch_tx: mpsc::Sender<TickOutput>,
+    /// What a run owns (shutdown signal, event-loop task, runtime, commit
+    /// channel, per-run senders, traffic counter), behind one lock so start
+    /// and stop work through `&self` (leviculum#90). See `lifecycle.rs`.
+    run: Mutex<lifecycle::RunState>,
     /// Fault injection: corrupt ~1 byte per N bytes on TCP write
     corrupt_every: Option<u64>,
     /// Outbound-socket hook applied to each TCP client's connect socket.
@@ -1692,39 +1689,6 @@ pub struct ReticulumNode {
     /// [`wait_for_interface_ready`](Self::wait_for_interface_ready)
     /// and [`wait_for_interfaces_ready`](Self::wait_for_interfaces_ready).
     iface_ready_map: crate::interfaces::InterfaceReadyMap,
-    /// Dedicated, time-enabled runtime that hosts the event loop and every
-    /// interface task. Owning our own runtime means the node works regardless
-    /// of how the *embedding* application built its runtime — e.g. a PyO3 host
-    /// that constructed a current-thread runtime without `enable_time()`, which
-    /// previously panicked the timer-driven event loop (`sleep_until`) and the
-    /// interface timers. Torn down via `shutdown_background()` in `Drop` so the
-    /// runtime is never dropped blocking inside a host async context.
-    runtime: Option<tokio::runtime::Runtime>,
-    /// Runtime interface-registration sender, cloned from the channel the event
-    /// loop consumes. `Some` once `start()` has run. Lets the node attach a
-    /// fresh interface (e.g. a hot-plugged RNode radio) while running. See
-    /// [`spawn_rnode_channel_interface`](Self::spawn_rnode_channel_interface).
-    new_iface_tx: Option<mpsc::Sender<InterfaceHandle>>,
-    /// Shared monotonic interface-id allocator (same counter the event loop and
-    /// `initialize_interfaces` use, so runtime ids never collide). `Some` once
-    /// `start()` has run.
-    iface_id_counter: Option<Arc<AtomicUsize>>,
-    /// Reconnect-notify sender handed to runtime-attached interfaces so their
-    /// re-announce-on-recovery works like config interfaces. `Some` after
-    /// `start()`.
-    reconnect_tx: Option<mpsc::Sender<InterfaceId>>,
-    /// Tunnel-synthesize notify sender handed to runtime-attached TCP clients so
-    /// they initiate the synthesize handshake like config interfaces (Codeberg
-    /// #64). `Some` after `start()`.
-    tunnel_notify_tx: Option<mpsc::Sender<InterfaceId>>,
-    /// Peer-transition sender handed to runtime-attached multi-peer
-    /// interfaces (BLE) so their per-peer path culling and peer-up pull
-    /// work like config interfaces (Codeberg #365). `Some` after `start()`.
-    peer_event_tx: Option<mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>>,
-    /// Runtime interface-removal sender. [`remove_interface`](Self::remove_interface)
-    /// fires an id here; the event loop tears the interface down through the
-    /// same path as a channel-close disconnect. `Some` after `start()`.
-    remove_iface_tx: Option<mpsc::Sender<InterfaceId>>,
     /// Storage directory, needed by interface types that persist per-interface
     /// state (currently only `I2PInterface`, which stores its SAM destination
     /// private key so its `.b32.i2p` address survives restarts). Set by the
@@ -1782,10 +1746,17 @@ impl Drop for ReticulumNode {
         // the node from one of its tasks), where a blocking await would panic.
         // The node owns a separate worker thread, so the polling sleep here does
         // not stall its event loop / interface tasks.
-        if let Some(tx) = self.shutdown_tx.take() {
+        let run = std::mem::replace(
+            &mut *self.run.lock_recover(),
+            lifecycle::RunState::new(mpsc::channel(1).0),
+        );
+        if let Some(counter) = run.traffic_counter {
+            counter.end();
+        }
+        if let Some(tx) = run.shutdown_tx {
             let _ = tx.send(true);
         }
-        if let Some(handle) = self.runner_handle.take() {
+        if let Some(handle) = run.runner_handle {
             let deadline = std::time::Instant::now() + DROP_FLUSH_BOUND;
             while !handle.is_finished() && std::time::Instant::now() < deadline {
                 std::thread::sleep(SHUTDOWN_FLUSH_POLL);
@@ -1797,7 +1768,7 @@ impl Drop for ReticulumNode {
         // host dropping the node from one of its own tasks).
         // `shutdown_background` aborts the event loop + interface tasks and
         // returns immediately.
-        if let Some(runtime) = self.runtime.take() {
+        if let Some(runtime) = run.runtime {
             runtime.shutdown_background();
         }
     }
@@ -1858,9 +1829,7 @@ impl ReticulumNode {
             metrics_baseline: Mutex::default(),
             direct_link: crate::direct_link::DirectLinkSettings::default(),
             event_rx,
-            shutdown_tx: None,
-            runner_handle: None,
-            action_dispatch_tx,
+            run: Mutex::new(lifecycle::RunState::new(action_dispatch_tx)),
             corrupt_every,
             outbound_socket_hook: None,
             host_resolver: None,
@@ -1877,13 +1846,6 @@ impl ReticulumNode {
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             local_client_count: Arc::new(AtomicUsize::new(0)),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
-            runtime: None,
-            new_iface_tx: None,
-            iface_id_counter: None,
-            reconnect_tx: None,
-            tunnel_notify_tx: None,
-            peer_event_tx: None,
-            remove_iface_tx: None,
             storage_path: None,
             autoconnect_max: 0,
             discovery_network_identity: None,
@@ -2076,7 +2038,19 @@ impl ReticulumNode {
     /// This spawns the internal event loop and initializes interfaces.
     /// The node will process incoming packets and emit events until `stop()` is called.
     pub async fn start(&mut self) -> Result<(), Error> {
-        if self.runner_handle.is_some() {
+        self.start_shared().await
+    }
+
+    /// [`start`](Self::start) through a shared handle (+ciris, leviculum#90),
+    /// for a host that holds the node as an `Arc` and restarts it, e.g. a
+    /// phone app suspending the node while backgrounded. A stopped node
+    /// starts again with its identity, destinations, configured interfaces
+    /// and event channel; it re-announces as on a first start.
+    pub async fn start_shared(&self) -> Result<(), Error> {
+        // One run at a time: the lock is held for the whole (synchronous)
+        // start, so a concurrent start or stop waits for it (leviculum#90).
+        let mut run = self.run.lock_recover();
+        if run.runner_handle.is_some() {
             return Err(Error::Config("node already running".to_string()));
         }
 
@@ -2145,12 +2119,15 @@ impl ReticulumNode {
         // Retain clones so the node can attach and detach interfaces at runtime
         // (hot-plug), not just at construction. Used by `spawn_interface` /
         // `remove_interface` and `spawn_rnode_channel_interface`.
-        self.new_iface_tx = Some(new_iface_tx.clone());
-        self.iface_id_counter = Some(Arc::clone(&next_id));
-        self.reconnect_tx = Some(reconnect_tx.clone());
-        self.tunnel_notify_tx = Some(tunnel_notify_tx.clone());
-        self.remove_iface_tx = Some(remove_iface_tx);
-        self.peer_event_tx = Some(peer_event_tx.clone());
+        let running = lifecycle::Running {
+            runtime: runtime.handle().clone(),
+            new_iface_tx: new_iface_tx.clone(),
+            iface_id_counter: Arc::clone(&next_id),
+            reconnect_tx: reconnect_tx.clone(),
+            tunnel_notify_tx: tunnel_notify_tx.clone(),
+            peer_event_tx: peer_event_tx.clone(),
+            remove_iface_tx,
+        };
 
         // Initialize interfaces, the driver owns them, NOT NodeCore.
         // Interface init is the one fallible step after the runtime exists
@@ -2266,7 +2243,7 @@ impl ReticulumNode {
         }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        self.shutdown_tx = Some(shutdown_tx);
+        run.shutdown_tx = Some(shutdown_tx);
 
         // Channel for dispatching TickOutput from outside the event loop.
         // connect(), send_on_link(), close_link(), and
@@ -2276,7 +2253,7 @@ impl ReticulumNode {
         // every iteration, so the queue only backs up if the event loop is
         // blocked (which also stalls all other I/O).
         let (action_dispatch_tx, action_dispatch_rx) = mpsc::channel(ACTION_DISPATCH_CAPACITY);
-        self.action_dispatch_tx = action_dispatch_tx;
+        run.action_dispatch_tx = action_dispatch_tx;
 
         // Clone handles for the runner. The event loop owns a single
         // `EventSink` built from clones of both plane senders; it is the only
@@ -2349,11 +2326,7 @@ impl ReticulumNode {
         // In-driver core processor (Codeberg #196). Moved out of the node here:
         // it belongs to the event loop from now on, and a restart therefore
         // runs without it rather than with a half-owned one.
-        let core_processor = self
-            .core_processor
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let core_processor = self.core_processor.lock_recover().take();
 
         // Auto-connect wiring (Codeberg #32, sub-task b): the event loop spawns
         // discovered TCP endpoints at runtime through the same interface-id
@@ -2458,12 +2431,17 @@ impl ReticulumNode {
             .await;
         });
 
-        self.runner_handle = Some(runner_handle);
+        run.runner_handle = Some(runner_handle);
+        run.running = Some(running);
+        // Background traffic counter (Python Transport.count_traffic_loop),
+        // one per run and ended by stop (leviculum#90).
+        run.traffic_counter =
+            crate::interfaces::spawn_traffic_counter(Arc::clone(&self.iface_stats_map));
 
         // Release the runtime context now that all tasks are spawned, then keep
         // the runtime alive in the node so its worker thread keeps driving them.
         drop(enter_guard);
-        self.runtime = Some(runtime);
+        run.runtime = Some(runtime);
 
         Ok(())
     }
@@ -2473,7 +2451,7 @@ impl ReticulumNode {
     /// Static interfaces (TCP clients) are connected and registered directly.
     /// Server listeners spawn accept loops that send new handles via `new_iface_tx`.
     fn initialize_interfaces(
-        &mut self,
+        &self,
         next_id: &Arc<AtomicUsize>,
         new_iface_tx: &mpsc::Sender<InterfaceHandle>,
         reconnect_tx: &mpsc::Sender<InterfaceId>,
@@ -2561,7 +2539,9 @@ impl ReticulumNode {
             // factory replaces the serial-port open. Ids continue past the
             // file-config interfaces via the shared `next_id` allocator.
             #[cfg(feature = "serial")]
-            for spec in std::mem::take(&mut self.rnode_channels) {
+            // Cloned, not taken: a restarted node brings them up again
+            // (leviculum#90).
+            for spec in self.rnode_channels.iter().cloned() {
                 let id = InterfaceId(next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                 let iface_name = format!("rnode_channel_{}", id.0);
                 // TEMPORARY (#347): the same selector the serial path reads,
@@ -2700,9 +2680,6 @@ impl ReticulumNode {
             }
         }
 
-        // Spawn background traffic counter (matches Python Transport.count_traffic_loop)
-        crate::interfaces::spawn_traffic_counter(Arc::clone(&self.iface_stats_map));
-
         Ok(registry)
     }
 
@@ -2711,13 +2688,31 @@ impl ReticulumNode {
     /// This signals the event loop to stop, waits for completion, and persists
     /// known destinations to disk.
     pub async fn stop(&mut self) -> Result<(), Error> {
+        self.stop_shared().await
+    }
+
+    /// [`stop`](Self::stop) through a shared handle (+ciris, leviculum#90).
+    /// Returns once the event loop has exited, every interface socket and
+    /// listener is closed, and the traffic-counter thread has ended. Calls
+    /// that need a running node then fail as not running until the next
+    /// [`start_shared`](Self::start_shared). Stopping a stopped node is a
+    /// no-op.
+    pub async fn stop_shared(&self) -> Result<(), Error> {
+        // Take the whole run out under the lock, then tear it down without
+        // it: the waits below are awaits (leviculum#90).
+        let run = {
+            let mut guard = self.run.lock_recover();
+            let dispatch = mpsc::channel(1).0;
+            std::mem::replace(&mut *guard, lifecycle::RunState::new(dispatch))
+        };
+
         // Signal shutdown
-        if let Some(tx) = self.shutdown_tx.take() {
+        if let Some(tx) = run.shutdown_tx {
             let _ = tx.send(true);
         }
 
         // Wait for runner to finish
-        if let Some(handle) = self.runner_handle.take() {
+        if let Some(handle) = run.runner_handle {
             handle
                 .await
                 .map_err(|e| Error::Config(format!("runner panicked: {}", e)))?;
@@ -2726,12 +2721,19 @@ impl ReticulumNode {
         // Persist state to disk
         shutdown_flush(&self.inner).await;
 
-        // Tear down the node's runtime (non-blocking) now that the event loop
-        // has exited. Clearing it means a subsequent start() builds a fresh
-        // runtime instead of overwriting (and blocking-dropping) a live one in
-        // this async context.
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
+        // Close every socket and listener before returning (leviculum#90): a
+        // suspended phone must hold none. The runtime is shut down on a
+        // blocking thread, where its bounded shutdown may wait for its tasks
+        // to drop their sockets; dropping it inline here would block (or
+        // panic) inside the caller's async context.
+        if let Some(runtime) = run.runtime {
+            let _ = tokio::task::spawn_blocking(move || {
+                runtime.shutdown_timeout(RUNTIME_SHUTDOWN_BOUND);
+            })
+            .await;
+        }
+        if let Some(counter) = run.traffic_counter {
+            let _ = tokio::task::spawn_blocking(move || counter.end()).await;
         }
 
         tracing::info!("ReticulumNode stopped");
@@ -2794,7 +2796,9 @@ impl ReticulumNode {
 
     /// Check if the node is running
     pub fn is_running(&self) -> bool {
-        self.runner_handle
+        self.run
+            .lock_recover()
+            .runner_handle
             .as_ref()
             .map(|h| !h.is_finished())
             .unwrap_or(false)
@@ -3007,10 +3011,10 @@ impl ReticulumNode {
     ) -> Result<crate::interfaces::rnode::RNodeChannelHandle, Error> {
         use std::sync::atomic::Ordering;
 
-        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
-        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
-        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
-        let reconnect_tx = self.reconnect_tx.clone();
+        let runtime = self.running()?.runtime;
+        let new_iface_tx = self.running()?.new_iface_tx;
+        let next_id = self.running()?.iface_id_counter;
+        let reconnect_tx = self.running().ok().map(|r| r.reconnect_tx);
 
         let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -3088,9 +3092,9 @@ impl ReticulumNode {
     ) -> Result<TcpClientHandle, Error> {
         use std::sync::atomic::Ordering;
 
-        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
-        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
-        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+        let runtime = self.running()?.runtime;
+        let new_iface_tx = self.running()?.new_iface_tx;
+        let next_id = self.running()?.iface_id_counter;
 
         // With a proxy, the dialed endpoint is the proxy (its CONNECT reaches the
         // peer) and only it is resolved locally; the target host travels to the
@@ -3122,7 +3126,7 @@ impl ReticulumNode {
                 max_reconnect_tries: None,
                 reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
                 connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
-                reconnect_notify: self.reconnect_tx.clone(),
+                reconnect_notify: self.running().ok().map(|r| r.reconnect_tx),
                 tunnel_notify: None,
                 socks_target,
                 shutdown: Some(shutdown_rx),
@@ -3163,9 +3167,9 @@ impl ReticulumNode {
     ) -> Result<crate::interfaces::PipeClientHandle, Error> {
         use std::sync::atomic::Ordering;
 
-        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
-        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
-        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+        let runtime = self.running()?.runtime;
+        let new_iface_tx = self.running()?.new_iface_tx;
+        let next_id = self.running()?.iface_id_counter;
 
         let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -3180,7 +3184,7 @@ impl ReticulumNode {
                     respawn_delay: respawn_delay
                         .unwrap_or(crate::interfaces::pipe::PIPE_DEFAULT_RESPAWN_DELAY),
                     buffer_size: crate::interfaces::pipe::PIPE_DEFAULT_BUFFER_SIZE,
-                    reconnect_notify: self.reconnect_tx.clone(),
+                    reconnect_notify: self.running().ok().map(|r| r.reconnect_tx),
                     shutdown: Some(shutdown_rx),
                 },
             )
@@ -3206,23 +3210,23 @@ impl ReticulumNode {
     pub fn spawn_interface(&self, config: InterfaceConfig) -> Result<Vec<InterfaceId>, Error> {
         use std::sync::atomic::Ordering;
 
-        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
-        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
-        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
-        let reconnect_tx = self.reconnect_tx.as_ref().ok_or(Error::NotRunning)?;
-        let tunnel_notify_tx = self.tunnel_notify_tx.as_ref().ok_or(Error::NotRunning)?;
-        let peer_event_tx = self.peer_event_tx.as_ref().ok_or(Error::NotRunning)?;
+        let runtime = self.running()?.runtime;
+        let next_id = self.running()?.iface_id_counter;
+        let new_iface_tx = self.running()?.new_iface_tx;
+        let reconnect_tx = self.running()?.reconnect_tx;
+        let tunnel_notify_tx = self.running()?.tunnel_notify_tx;
+        let peer_event_tx = self.running()?.peer_event_tx;
 
         // A runtime interface draws a fresh base id so it never collides with a
         // config-index id; fan-out children draw more.
         let base = next_id.fetch_add(1, Ordering::Relaxed);
 
         let ctx = interface_build::InterfaceBuildCtx {
-            next_id,
-            new_iface_tx,
-            reconnect_tx,
-            tunnel_notify_tx,
-            peer_event_tx,
+            next_id: &next_id,
+            new_iface_tx: &new_iface_tx,
+            reconnect_tx: &reconnect_tx,
+            tunnel_notify_tx: &tunnel_notify_tx,
+            peer_event_tx: &peer_event_tx,
             corrupt_every: self.corrupt_every,
             storage_path: self.storage_path.clone(),
             outbound_socket_hook: self.outbound_socket_hook.clone(),
@@ -3260,9 +3264,8 @@ impl ReticulumNode {
     /// removing an unknown id is a no-op. Returns [`Error::NotRunning`] if called
     /// before [`start`](Self::start).
     pub fn remove_interface(&self, id: InterfaceId) -> Result<(), Error> {
-        self.remove_iface_tx
-            .as_ref()
-            .ok_or(Error::NotRunning)?
+        self.running()?
+            .remove_iface_tx
             .try_send(id)
             .map_err(|_| Error::NotRunning)?;
         Ok(())
@@ -3289,7 +3292,7 @@ impl ReticulumNode {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
         // Request link from NodeCore. A refusal by the configured link cap
         // (`max_links`, #388) surfaces as `Error::Link(TableFull)`.
-        let link_id = dispatch_committed(&self.action_dispatch_tx, || {
+        let link_id = dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             let (link_id, _was_routed, output) = inner.connect_with_first_hop_timeout(
                 *dest_hash,
@@ -3303,7 +3306,7 @@ impl ReticulumNode {
         Ok(LinkHandle::new(
             link_id,
             Arc::clone(&self.inner),
-            self.action_dispatch_tx.clone(),
+            self.action_dispatch_tx(),
         ))
     }
 
@@ -3346,9 +3349,9 @@ impl ReticulumNode {
     {
         use std::sync::atomic::Ordering;
 
-        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
-        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
-        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+        let runtime = self.running()?.runtime;
+        let new_iface_tx = self.running()?.new_iface_tx;
+        let next_id = self.running()?.iface_id_counter;
 
         let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -3384,11 +3387,7 @@ impl ReticulumNode {
     /// # Arguments
     /// * `link_id` - The link ID from the responder-side `LinkEstablished` event
     pub fn link_handle(&self, link_id: &LinkId) -> LinkHandle {
-        LinkHandle::new(
-            *link_id,
-            Arc::clone(&self.inner),
-            self.action_dispatch_tx.clone(),
-        )
+        LinkHandle::new(*link_id, Arc::clone(&self.inner), self.action_dispatch_tx())
     }
 
     /// Take the event receiver
@@ -3440,7 +3439,7 @@ impl ReticulumNode {
         idx: usize,
         timeout: std::time::Duration,
     ) -> Result<(), InterfaceReadyError> {
-        if self.runner_handle.is_none() {
+        if self.run.lock_recover().runner_handle.is_none() {
             return Err(InterfaceReadyError::NotStarted);
         }
         let signal = {
@@ -3467,7 +3466,7 @@ impl ReticulumNode {
         &self,
         timeout: std::time::Duration,
     ) -> Result<(), Vec<(usize, ReadyState)>> {
-        if self.runner_handle.is_none() {
+        if self.run.lock_recover().runner_handle.is_none() {
             return Err(vec![(0, ReadyState::NotStarted)]);
         }
         let signals: Vec<(usize, std::sync::Arc<crate::interfaces::ReadySignal>)> = {
@@ -3718,7 +3717,7 @@ impl ReticulumNode {
         &self,
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             Ok(((), inner.request_path_unthrottled(dest_hash)))
         })
@@ -3732,7 +3731,7 @@ impl ReticulumNode {
         &self,
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             Ok(((), inner.request_path(dest_hash)))
         })
@@ -4088,7 +4087,7 @@ impl ReticulumNode {
         dest_hash: &leviculum_core::DestinationHash,
         app_data: Option<&[u8]>,
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let output = self
                 .inner
                 .lock_recover()
@@ -4105,7 +4104,7 @@ impl ReticulumNode {
     /// # Arguments
     /// * `link_id` - The link ID of the link to close
     pub async fn close_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             Ok(((), inner.close_link(link_id)))
         })
@@ -4120,7 +4119,7 @@ impl ReticulumNode {
         link_id: &LinkId,
         identity: &leviculum_core::Identity,
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             Ok(((), inner.identify_link(link_id, identity)?))
         })
@@ -4154,7 +4153,7 @@ impl ReticulumNode {
             core.set_direct_link_config(config);
             core.propose_direct_link(link_id)?
         };
-        self.action_dispatch_tx
+        self.action_dispatch_tx()
             .send(output)
             .await
             .map_err(|_| Error::NotRunning)?;
@@ -4173,7 +4172,7 @@ impl ReticulumNode {
     /// outcome arrives as `DirectLinkEstablished` or `DirectLinkFailed`.
     pub async fn accept_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
         let output = self.inner.lock_recover().accept_direct_link(link_id)?;
-        self.action_dispatch_tx
+        self.action_dispatch_tx()
             .send(output)
             .await
             .map_err(|_| Error::NotRunning)
@@ -4184,7 +4183,7 @@ impl ReticulumNode {
     /// sent nothing about its address.
     pub async fn reject_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
         let output = self.inner.lock_recover().reject_direct_link(link_id)?;
-        self.action_dispatch_tx
+        self.action_dispatch_tx()
             .send(output)
             .await
             .map_err(|_| Error::NotRunning)
@@ -4198,7 +4197,7 @@ impl ReticulumNode {
     /// nothing changes.
     pub async fn retire_direct_link(&self, link_id: &LinkId) -> Result<(), Error> {
         let output = self.inner.lock_recover().retire_direct_link(link_id)?;
-        self.action_dispatch_tx
+        self.action_dispatch_tx()
             .send(output)
             .await
             .map_err(|_| Error::NotRunning)
@@ -4247,7 +4246,7 @@ impl ReticulumNode {
         data: Option<&[u8]>,
         timeout_ms: Option<u64>,
     ) -> Result<[u8; 16], Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             inner
                 .send_request(link_id, path, data, timeout_ms)
@@ -4288,7 +4287,7 @@ impl ReticulumNode {
         request_id: &[u8; 16],
         response_data: &[u8],
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             let output = inner
                 .send_response(link_id, request_id, response_data)
@@ -4311,7 +4310,7 @@ impl ReticulumNode {
         request_id: &[u8; 16],
         response_data: &[u8],
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let (_resource_hash, output) = {
                 let mut inner = self.inner.lock_recover();
                 inner
@@ -4335,7 +4334,7 @@ impl ReticulumNode {
         data: &[u8],
         metadata: &[u8],
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let (_resource_hash, output) = {
                 let mut inner = self.inner.lock_recover();
                 inner
@@ -4392,7 +4391,7 @@ impl ReticulumNode {
                 &mut rand_core::OsRng,
             )
             .map_err(Error::Resource)?;
-            let committed = dispatch_committed(&self.action_dispatch_tx, || {
+            let committed = dispatch_committed(&self.action_dispatch_tx(), || {
                 let (resource_hash, output) = {
                     let mut inner = self.inner.lock_recover();
                     inner
@@ -4435,7 +4434,7 @@ impl ReticulumNode {
     ///
     /// Call this after receiving a `NodeEvent::ResourceAdvertised` event.
     pub async fn accept_resource(&self, link_id: &LinkId) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             Ok(((), inner.accept_resource(link_id).map_err(Error::Resource)?))
         })
@@ -4446,7 +4445,7 @@ impl ReticulumNode {
     ///
     /// Call this after receiving a `NodeEvent::ResourceAdvertised` event.
     pub async fn reject_resource(&self, link_id: &LinkId) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             Ok(((), inner.reject_resource(link_id).map_err(Error::Resource)?))
         })
@@ -4470,7 +4469,7 @@ impl ReticulumNode {
         data: &[u8],
     ) -> Result<[u8; TRUNCATED_HASHBYTES], Error> {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             // Python prices the receipt with the daemon's answer
             // (Packet.py:433-434); the core takes it before the send.
@@ -4490,7 +4489,7 @@ impl ReticulumNode {
         packet_hash: &[u8; 32],
         dest_hash: &DestinationHash,
     ) -> Result<(), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let mut inner = self.inner.lock_recover();
             let output = inner
                 .send_proof(packet_hash, dest_hash)
@@ -4513,7 +4512,7 @@ impl ReticulumNode {
         PacketSender::new(
             *dest_hash,
             Arc::clone(&self.inner),
-            self.action_dispatch_tx.clone(),
+            self.action_dispatch_tx(),
             self.shared_instance_client(),
         )
     }
@@ -4594,7 +4593,7 @@ impl ReticulumNode {
         dest_signing_key: &[u8; 32],
     ) -> Result<(LinkHandle, LinkEstablishedFuture), Error> {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
-        let (link_id, established) = dispatch_committed(&self.action_dispatch_tx, || {
+        let (link_id, established) = dispatch_committed(&self.action_dispatch_tx(), || {
             let (link_id, _was_routed, output) = {
                 let mut inner = self.inner.lock_recover();
                 inner.connect_with_first_hop_timeout(
@@ -4608,11 +4607,7 @@ impl ReticulumNode {
         })
         .await?;
         Ok((
-            LinkHandle::new(
-                link_id,
-                Arc::clone(&self.inner),
-                self.action_dispatch_tx.clone(),
-            ),
+            LinkHandle::new(link_id, Arc::clone(&self.inner), self.action_dispatch_tx()),
             established,
         ))
     }
@@ -4652,7 +4647,7 @@ impl ReticulumNode {
                 &mut rand_core::OsRng,
             )
             .map_err(Error::Resource)?;
-            let committed = dispatch_committed(&self.action_dispatch_tx, || {
+            let committed = dispatch_committed(&self.action_dispatch_tx(), || {
                 let (resource_hash, output) = {
                     let mut inner = self.inner.lock_recover();
                     inner
@@ -4693,7 +4688,7 @@ impl ReticulumNode {
         data: Option<&[u8]>,
         timeout_ms: Option<u64>,
     ) -> Result<([u8; 16], RequestResponseFuture), Error> {
-        dispatch_committed(&self.action_dispatch_tx, || {
+        dispatch_committed(&self.action_dispatch_tx(), || {
             let (request_id, output) = {
                 let mut inner = self.inner.lock_recover();
                 inner
@@ -7939,7 +7934,12 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
     }
 }
 
-mod wire_id; // CIRISVerify#309, kept in its own file so no cited line moves
+mod lifecycle;
+mod wire_id; // CIRISVerify#309, kept in its own file so no cited line moves // leviculum#90: what a run owns, restartable through &self
+pub(crate) use lifecycle::TrafficCounter as TrafficCounterHandle;
+/// How long `stop` waits for the node's runtime to drop its tasks, and with
+/// them every socket and listener (leviculum#90).
+const RUNTIME_SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
 #[cfg(test)]
 mod tests {
     use super::*;

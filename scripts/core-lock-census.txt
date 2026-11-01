@@ -90,7 +90,7 @@ driver::ReticulumNode::send_single_packet
 driver::ReticulumNode::set_announce_control
 driver::ReticulumNode::set_interface_announce_cap
 driver::ReticulumNode::set_resource_strategy
-driver::ReticulumNode::start
+driver::ReticulumNode::start_shared
 driver::ReticulumNode::transport_stats
 driver::ReticulumNode::tunnel_ids
 driver::ReticulumNode::unregister_destination

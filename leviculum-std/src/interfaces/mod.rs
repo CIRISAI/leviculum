@@ -404,13 +404,22 @@ impl InterfaceCounters {
 /// self-terminates within ~1 s of the owning node dropping its last strong
 /// reference (the driver retains `self.iface_stats_map`) — no leaked thread
 /// per node.
-pub(crate) fn spawn_traffic_counter(iface_stats_map: InterfaceStatsMap) {
+pub(crate) fn spawn_traffic_counter(
+    iface_stats_map: InterfaceStatsMap,
+) -> Option<crate::driver::TrafficCounterHandle> {
     let stats = Arc::downgrade(&iface_stats_map);
     drop(iface_stats_map); // don't keep the map alive ourselves
+                           // Ended by the node's stop (leviculum#90) as well as by its drop: one
+                           // thread per run, not one per start for the life of the process.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
     let spawned = std::thread::Builder::new()
         .name("reticulum-traffic-counter".into())
         .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::park_timeout(std::time::Duration::from_secs(1));
+            if stopping.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
             let Some(map) = stats.upgrade() else {
                 break; // owning node dropped — nothing left to sample
             };
@@ -418,9 +427,13 @@ pub(crate) fn spawn_traffic_counter(iface_stats_map: InterfaceStatsMap) {
                 counters.update_speed();
             }
         });
-    if let Err(e) = spawned {
-        // Speed reporting is observability-only; degrade rather than abort.
-        tracing::warn!("traffic-counter thread not spawned: {e}");
+    match spawned {
+        Ok(thread) => Some(crate::driver::TrafficCounterHandle::new(stop, thread)),
+        Err(e) => {
+            // Speed reporting is observability-only; degrade rather than abort.
+            tracing::warn!("traffic-counter thread not spawned: {e}");
+            None
+        }
     }
 }
 

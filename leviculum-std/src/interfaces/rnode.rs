@@ -3632,6 +3632,7 @@ impl RNodeChannelInterfaceConfig {
 ///
 /// The node assigns the `InterfaceId` and name; this config carries only the
 /// caller-relevant fields. `frequency`/`bandwidth` are Hz, `tx_power` is dBm.
+#[derive(Clone)]
 pub struct RNodeChannelConfig {
     pub factory: Arc<dyn RNodeChannelFactory>,
     pub frequency: u32,
