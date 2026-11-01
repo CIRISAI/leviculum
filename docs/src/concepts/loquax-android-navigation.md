@@ -407,4 +407,6 @@ a friend already on screen is one tap away from the map (the pin).
   open a chooser?
 - **Unread badge** on the Chats tab: count of messages or of chats?
 - **Help**: a page in the app, or a link to the book on
-  leviculum.network?
+  leviculum.network? Since 1278 the menu opens the user help page,
+  leviculum.network/help, or /help-de on a German phone (`help_url`), not
+  the book.

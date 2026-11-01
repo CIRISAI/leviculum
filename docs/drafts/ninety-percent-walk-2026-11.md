@@ -321,6 +321,16 @@ first start's Share sends the contact code). 1264 takes #7: "Link a device"
 on the profile of a phone that holds the mailbox, "Join an existing
 mailbox" at the first start; over the rendezvous today, not yet over the
 same WiFi (`docs/src/concepts/loquax-reachability.md`).
+1278 takes #9 (the name is the address page's one field, above the QR,
+prefilled from the owner's card where the app may read it), #12 (an
+`lxma://` link, or a shared text carrying one, opens "Add contact"),
+#13 (the address page once after a join), #15 ("Save to your phone's
+contacts?", not shown in the chat of a contact just added), #18 (Help
+opens /help, /help-de), #19 ("Connected to your mailbox" / "Not
+connected, trying again") and #20 (no status line on the join form). #14
+(the name set from the phone through a computer mailbox) went back to the
+pool: it needs a new request path to the mailbox and a rename of the
+running mailbox's announce.
 
 ## 6. The three worst
 
