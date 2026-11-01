@@ -236,6 +236,44 @@
       "recovered_reply_to_hex": "9aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b"
     },
     {
+      "id": "VEC-MSG-LEV-MARK",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "48656c6c6f",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "810001",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03ca78c23da72d23c81e2fd8726d0086f96feaf11d79eaee2a74aa65158c6a71ceea94906d5bb210c1a333e14bfece190abb1272c58a7a2c2f6c901338e0a8eb30394cb41d954fc40000000c400c40548656c6c6f82ccfbc4036c6576ccfc810001",
+      "message_id_hex": "de35336bad77178f386d7d4d5c025aa500c094e63b1622029919939e8b04d705",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "810001",
+      "recovered_capabilities": 1,
+      "signature_validated": true
+    },
+    {
+      "id": "VEC-MSG-LEV-RECEIPT",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "8200010192ce6553f16491c4209aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03ca4797eed1c29b4ecd8ebe417de8f390ee9d8c368096e43a64bad5d6aa8c6b871fe75ba90afa36eb082b8ae6588c8e35174ce3ca8062d358061c31d07853f2b0794cb41d954fc40000000c400c40082ccfbc4036c6576ccfc8200010192ce6553f16491c4209aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b",
+      "message_id_hex": "238e02fd0a5f786c0f854fce301cb860423f5db889466a971af0f642b814254b",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "8200010192ce6553f16491c4209aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b",
+      "recovered_capabilities": 1,
+      "signature_validated": true,
+      "recovered_read_at": 1700000100,
+      "recovered_ids_hex": [
+        "9aec506b63deab21d8fa4954d9f743cf20f5adeeb1abd1c7429bb3f832dc287b"
+      ]
+    },
+    {
       "id": "VEC-MSG-FOREIGN-UINT32",
       "title": "Foreign writer: payload[0] as MessagePack uint32",
       "kind": "frozen",
