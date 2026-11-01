@@ -653,9 +653,12 @@ impl Session {
                 return Ok(());
             }
             Intent::Front(front) => {
-                self.lock().front = front;
+                let mut inner = self.lock();
+                inner.front = front;
+                inner.apply(UiEvent::Front(front));
                 return Ok(());
             }
+            Intent::Viewport { peer, keys } => UiEvent::Viewport { peer, keys },
             Intent::Name(name) => return self.rename(&name),
             Intent::AddContact { lxma, name } => return self.add_contact(&lxma, name.as_deref()),
             Intent::Rename {
@@ -1976,6 +1979,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         R::Used { emoji } => Intent::Insert(emoji),
         R::Pull => Intent::Pull,
         R::Front { front } => Intent::Front(front),
+        R::Viewport { peer, keys } => Intent::Viewport {
+            peer: parse_peer(&peer)?,
+            keys: keys.into_iter().map(schema::model_key).collect(),
+        },
         R::Name { name } => Intent::Name(name),
         R::Link { peer, contact } => {
             return Ok(Decoded::Platform(Platform::Link {

@@ -108,6 +108,8 @@
 //! list row's [`ConversationRow::draft`] and the chat's [`Messages::draft`]
 //! and [`Messages::draft_reply`]. An older app sends no draft, and keeps
 //! none.
+//! The viewport (1231) came within version 1 too: [`Request::Viewport`].
+//! An app that sends none sends no read receipts.
 //! Read receipts (1230) came within version 1 too: the delivery word
 //! `read` on [`MessageRow::state`] and [`ConversationRow::state`], with
 //! [`MessageRow::read_at`], and the peer's flag [`Messages::receipts`]. An
@@ -225,6 +227,10 @@ pub enum Request {
     /// front and with the watching link down, the session pulls every
     /// minute.
     Front { front: bool },
+    /// These bubbles of `peer`'s chat are on screen, at least half of each,
+    /// by their [`MessageRow::key`], on every change (1231): the core
+    /// decides from it, and from the front, what was read.
+    Viewport { peer: String, keys: Vec<i64> },
     /// The name recipients see, for the mailbox on this phone (the first
     /// start's last screen, 1152).
     Name { name: String },

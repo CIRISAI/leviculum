@@ -172,6 +172,7 @@ fn request() -> impl Strategy<Value = Request> {
         text().prop_map(|emoji| Request::Used { emoji }),
         Just(Request::Pull),
         any::<bool>().prop_map(|front| Request::Front { front }),
+        (text(), keys()).prop_map(|(peer, keys)| Request::Viewport { peer, keys }),
         text().prop_map(|name| Request::Name { name }),
         (text(), contact()).prop_map(|(peer, contact)| Request::Link { peer, contact }),
         text().prop_map(|peer| Request::Unlink { peer }),
