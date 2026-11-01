@@ -35,6 +35,7 @@ loquax/home_node loquax-tui cargo test -p loquax --features tui --bins --test tu
 loquax/import loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import
 loquax/wire_props loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props
 loquax/scene_golden loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden
+loquax/mailbox_receipts loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts
 # Run by `fast`, which `standard` depends on.
 leviculum-std/mvr mvr cargo test -p leviculum-std --test mvr
 leviculum-std/doc_citations citation-guard cargo test -p leviculum-std --test doc_citations
