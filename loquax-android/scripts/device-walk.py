@@ -72,6 +72,10 @@ STEPS = [
     "picture_zoom",
     "file",
     "voice",
+    "voice_hold_release",
+    "voice_slide_cancel",
+    "voice_lock_send",
+    "voice_silence_hint",
     "camera_photo",
     "share_position_from_bar",
     "share_for_15_min",
@@ -188,6 +192,40 @@ VOICE_WORDS = re.compile(r"^Voice message, (?P<m>\d+):(?P<s>\d\d)$")
 VOICE_PLAY = "Play"
 VOICE_PAUSE = "Pause"
 VOICE_FIXTURE = "voice-fixture.pcm"
+# Recording a voice message (1276): the recording bar's parts by the
+# scene's ids (rec_dot the pulsing dot, selected while it pulses, rec_held
+# the microphone under the finger), its words (the catalogue's rec_*, the
+# hint with RecordingBar's chevron), the timer's form, and the parts each
+# phase shows and does not.
+REC_TIMER = re.compile(r"^REC (?P<m>\d\d):(?P<s>\d\d)$")
+REC_SLIDE = "\u2039 Slide left to cancel"
+REC_RELEASE = "\u2039 Release to cancel"
+REC_HELD = "Release to send"
+REC_LOCK = "Lock the recording"
+REC_LOCKED = "Recording locked"
+REC_SILENT = "Nothing heard. Is the microphone allowed?"
+REC_ALLOW = "Allow the microphone"
+REC_PARTS = {
+    "held": (
+        ["rec_bar", "rec_dot", "rec_timer", "rec_wave", "rec_cancel", "rec_held", "rec_lock"],
+        ["compose", "rec_send", "rec_pause", "rec_discard", "rec_resume"],
+    ),
+    "locked": (
+        ["rec_bar", "rec_dot", "rec_timer", "rec_wave", "rec_lock", "rec_discard", "rec_pause", "rec_send"],
+        ["compose", "rec_held", "rec_cancel", "rec_resume", "rec_play"],
+    ),
+    "paused": (
+        ["rec_bar", "rec_dot", "rec_timer", "rec_wave", "rec_discard", "rec_play", "rec_resume", "rec_send"],
+        ["compose", "rec_held", "rec_cancel", "rec_pause", "rec_lock"],
+    ),
+}
+# RecordingBar.log's line in a debuggable build, under the tag `loquax`,
+# whenever the phase, the dot, the chip, the hint's arming, the buttons or
+# the line change.
+REC_LINE = re.compile(
+    r"REC_BAR phase=(?P<phase>\w+) pulsing=(?P<pulsing>true|false) locked=(?P<locked>true|false) "
+    r"armed=(?P<armed>true|false) buttons=(?P<buttons>[\w,]*) notice=(?P<notice>[^\r\n]*)"
+)
 # One contact code everywhere (1263, finding 1): the first start's
 # address page, opened in the debug APK by `am start` with this extra, and
 # the start of every contact code its QR and the profile's hold.
@@ -289,6 +327,7 @@ class Node:
     long_clickable: bool = False
     scrollable: bool = False
     checked: bool = False
+    selected: bool = False
 
     @property
     def center(self) -> tuple[int, int]:
@@ -514,6 +553,96 @@ def voice_problems(voices: list[Node], before: int, least_s: int) -> list[str]:
     if secs < least_s:
         return [f"the newest is {secs} s long, want at least {least_s}"]
     return []
+
+
+def rec_bar_problems(nodes: list[Node], phase: str) -> list[str]:
+    """What is wrong with the recording bar on screen for `phase` (1276,
+    `held`, `locked` or `paused`): a part it shows missing, one it does
+    not show there, a timer not of the form `REC 00:07`, the hint, the
+    held microphone or the chip with other words, a button without words
+    for a screen reader."""
+    want, gone = REC_PARTS[phase]
+    problems = [f"no {rid}" for rid in want if not find(nodes, rid=rid)]
+    problems += [f"{rid} on screen while {phase}" for rid in gone if find(nodes, rid=rid)]
+    timer = find(nodes, rid="rec_timer")
+    if timer and not REC_TIMER.match(timer[0].text):
+        problems.append(f"the timer says {timer[0].text!r}")
+    lock = find(nodes, rid="rec_lock")
+    if phase == "held":
+        hint = find(nodes, rid="rec_cancel")
+        if hint and hint[0].text not in (REC_SLIDE, REC_RELEASE):
+            problems.append(f"the hint says {hint[0].text!r}")
+        held = find(nodes, rid="rec_held")
+        if held and held[0].desc != REC_HELD:
+            problems.append(f"the held microphone says {held[0].desc!r}")
+        if lock and (lock[0].desc != REC_LOCK or lock[0].selected):
+            problems.append(f"the chip says {lock[0].desc!r}, closed={lock[0].selected}, want open")
+    if phase == "locked" and lock and (lock[0].desc != REC_LOCKED or not lock[0].selected):
+        problems.append(f"the chip says {lock[0].desc!r}, closed={lock[0].selected}, want closed")
+    for rid in ("rec_discard", "rec_pause", "rec_resume", "rec_play", "rec_send"):
+        for button in find(nodes, rid=rid):
+            if not button.desc:
+                problems.append(f"{rid} has no words for a screen reader")
+    return problems
+
+
+def rec_seconds(nodes: list[Node]) -> int | None:
+    """The recording bar's timer in seconds; None without one."""
+    timer = find(nodes, rid="rec_timer")
+    m = REC_TIMER.match(timer[0].text) if timer else None
+    return int(m.group("m")) * 60 + int(m.group("s")) if m else None
+
+
+def rec_pulsing(nodes: list[Node]) -> bool | None:
+    """Whether the bar's dot pulses (selected); None without a dot."""
+    dot = find(nodes, rid="rec_dot")
+    return dot[0].selected if dot else None
+
+
+def rec_notice_problems(nodes: list[Node]) -> list[str]:
+    """What is wrong with the line of a microphone that hears nothing:
+    not there, other words, no way to the permission, a dot that still
+    pulses."""
+    problems = []
+    said = [n.text for n in find(nodes, rid="rec_notice")]
+    if said != [REC_SILENT]:
+        problems.append(f"the line says {said}, want [{REC_SILENT!r}]")
+    allow = find(nodes, rid="rec_allow")
+    if not allow or allow[0].text != REC_ALLOW:
+        problems.append(f"no {REC_ALLOW!r} button: {[n.text for n in allow]}")
+    if rec_pulsing(nodes) is not False:
+        problems.append(f"the dot pulses={rec_pulsing(nodes)}, want False")
+    return problems
+
+
+def parse_rec_lines(logcat: str) -> list[dict]:
+    """RecordingBar's lines in a logcat, oldest first: the phase, the dot,
+    the chip, the hint's arming as booleans, the buttons as a list."""
+    out = []
+    for m in REC_LINE.finditer(logcat):
+        line = m.groupdict()
+        for key in ("pulsing", "locked", "armed"):
+            line[key] = line[key] == "true"
+        line["buttons"] = [b for b in line["buttons"].split(",") if b]
+        line["notice"] = line["notice"].strip()
+        out.append(line)
+    return out
+
+
+def rec_went(lines: list[dict], *path: str) -> list[str]:
+    """What is missing from the phases `lines` went through for them to
+    have gone `path` in that order (`held`, then `cancelled`; a phase
+    word, or `armed` for a held line armed to cancel)."""
+    at = 0
+    for line in lines:
+        if at == len(path):
+            break
+        want = path[at]
+        if want == "armed" and line["phase"] == "held" and line["armed"]:
+            at += 1
+        elif want == line["phase"]:
+            at += 1
+    return [] if at == len(path) else [f"no {path[at]!r} after {list(path[:at])} in {[l['phase'] for l in lines]}"]
 
 
 # --- The photo viewer's zoom (1269). ---
@@ -746,6 +875,7 @@ def parse_dump(xml_text: str) -> list[Node]:
                 long_clickable=el.get("long-clickable") == "true",
                 scrollable=el.get("scrollable") == "true",
                 checked=el.get("checked") == "true",
+                selected=el.get("selected") == "true",
             )
         )
     return nodes
@@ -1425,6 +1555,15 @@ class Device:
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, ms: int = 300) -> None:
         self.shell(f"input swipe {x1} {y1} {x2} {y2} {ms}")
+
+    def swipe_async(self, x1: int, y1: int, x2: int, y2: int, ms: int) -> subprocess.Popen:
+        """A swipe that runs while the walk dumps the screen: a hold of the
+        microphone is a swipe that does not move (1276)."""
+        return subprocess.Popen(
+            [self.adb, "-s", self.serial, "shell", f"input swipe {x1} {y1} {x2} {y2} {ms}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def double_tap(self, x: int, y: int) -> None:
         # One shell, the two taps back to back: the map zooms on a double
@@ -2434,6 +2573,207 @@ class Walk:
             dev.shell(f"run-as {PACKAGE} rm -f files/{VOICE_FIXTURE}", check=False)
             dev.shell(f"rm -f /data/local/tmp/{VOICE_FIXTURE}", check=False)
         return f"held_to_bubble_ms={ms} desc={player.desc!r} mailbox=accepted played=ok cancel=ok"
+
+    # Recording a voice message (1276): the recording bar.
+
+    def seed_voice(self, pcm: bytes) -> None:
+        """`pcm` where the debug build records it from (Voice.FIXTURE),
+        the permission granted, the compose field empty."""
+        dev = self.need_device()
+        local = Path(tempfile.mkdtemp(prefix="walk-voice-")) / VOICE_FIXTURE
+        local.write_bytes(pcm)
+        dev.run("push", str(local), f"/data/local/tmp/{VOICE_FIXTURE}", timeout=60)
+        local.unlink()
+        local.parent.rmdir()
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'cat /data/local/tmp/{VOICE_FIXTURE} > files/{VOICE_FIXTURE}'"
+        )
+        dev.shell(f"pm grant {PACKAGE} android.permission.RECORD_AUDIO", check=False)
+        self.clear_compose()
+
+    def unseed_voice(self) -> None:
+        dev = self.need_device()
+        dev.shell(f"run-as {PACKAGE} rm -f files/{VOICE_FIXTURE}", check=False)
+        dev.shell(f"rm -f /data/local/tmp/{VOICE_FIXTURE}", check=False)
+
+    def bar_gone(self, timeout: float) -> bool:
+        """Whether the recording bar gave way to the compose field."""
+        dev = self.need_device()
+
+        def gone():
+            nodes = dev.dump()
+            return not find(nodes, rid="rec_bar") and bool(find(nodes, rid="compose"))
+
+        return wait_for(gone, timeout, every=0.3)
+
+    def wait_bar(self, phase: str, timeout: float) -> list[Node]:
+        """The recording bar in `phase` on screen within `timeout`."""
+        dev = self.need_device()
+        nodes: list[Node] = []
+        problems: list[str] = []
+
+        def shows():
+            nonlocal nodes, problems
+            nodes = dev.dump()
+            problems = rec_bar_problems(nodes, phase)
+            return not problems
+
+        if not wait_for(shows, timeout, every=0.3):
+            raise StepFailed(f"{phase}: " + "; ".join(problems))
+        return nodes
+
+    def lock_by_swipe(self) -> None:
+        """A swipe up from the microphone, 400 px (past 72 dp at any
+        density up to 5.5), and the finger lifts: locked, it records on."""
+        dev = self.need_device()
+        mic = self.wait_id("record", 5)[0]
+        x, y = mic.center
+        dev.swipe(x, y, x, max(0, y - 400), 900)
+
+    def step_voice_hold_release(self) -> str:
+        """Held, the compose row is the recording bar at once (1276): the
+        dot pulsing, `REC 00:0N`, the wave, "Slide left to cancel", the
+        held microphone saying "Release to send", the open lock chip;
+        released after six seconds, the bar gives way to the field, the
+        bubble is at least five seconds long and the mailbox took it."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(speech_pcm(16_000, 10_000))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(voices_on(dev.dump()))
+            x, y = self.wait_id("record", 5)[0].center
+            hold = dev.swipe_async(x, y, x, y, 6_000)
+            time.sleep(1.5)
+            nodes = dev.dump()
+            problems = rec_bar_problems(nodes, "held")
+            if rec_pulsing(nodes) is not True:
+                problems.append(f"the dot pulses={rec_pulsing(nodes)}, want True")
+            seconds = rec_seconds(nodes)
+            hold.wait(timeout=30)
+            if problems:
+                raise StepFailed("held: " + "; ".join(problems))
+            if not self.bar_gone(10):
+                raise StepFailed("the bar did not give way to the field after the release")
+            shown: list[str] = []
+
+            def bubble():
+                nonlocal shown
+                shown = voice_problems(voices_on(dev.dump()), before, 5)
+                return not shown
+
+            if not wait_for(bubble, 15, every=0.3):
+                raise StepFailed("; ".join(shown))
+            if not wait_for(lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30):
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        finally:
+            self.unseed_voice()
+        return f"held timer={seconds}s bar=ok bubble=ok mailbox=accepted"
+
+    def step_voice_slide_cancel(self) -> str:
+        """Held and slid left 500 px (past 96 dp at any density up to 5),
+        the hint arms ("Release to cancel", RecordingBar's line) and the
+        release discards: the bar goes, no bubble, nothing sent."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(speech_pcm(16_000, 10_000))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            count = len(voices_on(dev.dump()))
+            x, y = self.wait_id("record", 5)[0].center
+            dev.shell("logcat -c", check=False)
+            dev.swipe(x, y, max(0, x - 500), y, 3_000)
+            lines = parse_rec_lines(dev.shell("logcat -d -s loquax:I", check=False))
+            went = rec_went(lines, "held", "armed", "cancelled")
+            if went:
+                raise StepFailed("; ".join(went))
+            if not self.bar_gone(10):
+                raise StepFailed("the bar stayed after the cancelling release")
+            time.sleep(4)
+            if len(voices_on(dev.dump())) != count:
+                raise StepFailed("a hold slid left made a voice message")
+            if fixture.mailbox_log().count("HOME send accepted") != sent_before:
+                raise StepFailed("a hold slid left reached the mailbox")
+        finally:
+            self.unseed_voice()
+        return f"phases={[l['phase'] for l in lines]} armed=ok sent=none"
+
+    def step_voice_lock_send(self) -> str:
+        """Swiped up, it locks: the chip closed ("Recording locked"), the
+        bin, the pause and the big Send, no held microphone, and the
+        finger is free. Pause stands it still (play, resume, the dot
+        steady), resume goes on, Send sends: the bar goes, one bubble at
+        least three seconds long, the mailbox took it."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(speech_pcm(16_000, 12_000))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(voices_on(dev.dump()))
+            self.lock_by_swipe()
+            locked = self.wait_bar("locked", 8)
+            time.sleep(1.5)
+            dev.tap_node(find(locked, rid="rec_pause")[0])
+            paused = self.wait_bar("paused", 8)
+            if rec_pulsing(paused) is not False:
+                raise StepFailed(f"paused, the dot pulses={rec_pulsing(paused)}")
+            dev.tap_node(find(paused, rid="rec_resume")[0])
+            resumed = self.wait_bar("locked", 8)
+            time.sleep(1.5)
+            dev.tap_node(find(resumed, rid="rec_send")[0])
+            if not self.bar_gone(10):
+                raise StepFailed("the bar stayed after Send")
+            shown: list[str] = []
+
+            def bubble():
+                nonlocal shown
+                shown = voice_problems(voices_on(dev.dump()), before, 3)
+                return not shown
+
+            if not wait_for(bubble, 15, every=0.3):
+                raise StepFailed("; ".join(shown))
+            if not wait_for(lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30):
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        finally:
+            self.unseed_voice()
+        return "locked=ok paused=ok resumed=ok sent=ok mailbox=accepted"
+
+    def step_voice_silence_hint(self) -> str:
+        """A microphone that hears nothing (a fixture of digital silence,
+        the blocked microphone's zeros): locked and two seconds in, the
+        line under the wave says "Nothing heard. Is the microphone
+        allowed?" with "Allow the microphone", and the dot stops pulsing;
+        the bin then discards and nothing is sent."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        self.seed_voice(bytes(16_000 * 2 * 8))
+        try:
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            self.lock_by_swipe()
+            self.wait_bar("locked", 8)
+            problems: list[str] = []
+            nodes: list[Node] = []
+
+            def hint():
+                nonlocal problems, nodes
+                nodes = dev.dump()
+                problems = rec_notice_problems(nodes)
+                return not problems
+
+            if not wait_for(hint, 10, every=0.3):
+                raise StepFailed("; ".join(problems))
+            seconds = rec_seconds(nodes)
+            if seconds is None or seconds < 2:
+                raise StepFailed(f"the line came at {seconds} s, before 2")
+            dev.tap_node(find(nodes, rid="rec_discard")[0])
+            if not self.bar_gone(10):
+                raise StepFailed("the bin left the bar up")
+            time.sleep(3)
+            if fixture.mailbox_log().count("HOME send accepted") != sent_before:
+                raise StepFailed("the discarded silence reached the mailbox")
+        finally:
+            self.unseed_voice()
+        return f"notice_at={seconds}s dot=steady discarded=ok"
 
     def step_receive_wake(self) -> str:
         dev = self.need_device()

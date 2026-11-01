@@ -11,6 +11,24 @@
     <item name="state_ticks_read" type="id" />
     <item name="state_failed" type="id" />
     <item name="friends_sheet" type="id" />
+    <!-- The recording bar (1276), by the scene's ids (NodeId::resource and
+         recording::Verb::word); rec_dot is the pulsing dot, selected while
+         it pulses, rec_held the microphone under the finger. -->
+    <item name="rec_bar" type="id" />
+    <item name="rec_dot" type="id" />
+    <item name="rec_timer" type="id" />
+    <item name="rec_wave" type="id" />
+    <item name="rec_cancel" type="id" />
+    <item name="rec_held" type="id" />
+    <item name="rec_lock" type="id" />
+    <item name="rec_discard" type="id" />
+    <item name="rec_pause" type="id" />
+    <item name="rec_resume" type="id" />
+    <item name="rec_play" type="id" />
+    <item name="rec_stop_play" type="id" />
+    <item name="rec_send" type="id" />
+    <item name="rec_notice" type="id" />
+    <item name="rec_allow" type="id" />
     <!-- The compose bar's sheet (1270) and its rows, by the scene's ids
          (NodeId::SheetRow::resource). -->
     <item name="sheet" type="id" />

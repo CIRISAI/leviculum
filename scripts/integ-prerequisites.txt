@@ -99,3 +99,6 @@ reference/LXMF/LXMF/__init__.py loquax/home_node the_old_apps_imported_ratchets_
 # JDK skips it here.
 command:javac loquax-android/fling the_fling_decides_and_coasts_as_the_phone_does
 command:java loquax-android/fling the_fling_decides_and_coasts_as_the_phone_does
+# The recorder's level windows (1276): Levels.java against the core's rms.
+command:javac loquax-android/fling the_recorders_windows_are_the_librarys
+command:java loquax-android/fling the_recorders_windows_are_the_librarys

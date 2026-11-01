@@ -68,6 +68,11 @@ final class Core {
         return value instanceof Number ? ((Number) value).doubleValue() : 0;
     }
 
+    /** A list of strings of an answer, empty for none (1276: the recorder's effects). */
+    static List<String> words(Map<String, Object> map, String key) {
+        return strings(map.get(key));
+    }
+
     static boolean bool(Map<String, Object> map, String key) {
         return Boolean.TRUE.equals(map.get(key));
     }
@@ -377,6 +382,33 @@ final class Core {
      */
     static Map<String, Object> voicePcm(String peer, long key) {
         return answer(Native.query(MsgPack.pack(map("t", "voice", "peer", peer, "key", key))));
+    }
+
+    /**
+     * The microphone's gesture or the recorder's level for `peer`'s
+     * recording (1276): `press`, `slide` (`dx`, `dy` dp from where the
+     * finger landed), `release`, `cancel`, `level` (`rms` of the window),
+     * `tick` or `played`, at `now` on the uptime clock. Every field goes,
+     * each a long; {@link #recording} has what to do next.
+     */
+    static String record(String peer, String input, long now, int dx, int dy, int rms) {
+        return command(map("t", "record", "peer", peer, "input", input, "now", now,
+                "dx", (long) dx, "dy", (long) dy, "rms", (long) rms));
+    }
+
+    /** A button of the recording bar, by its id (`rec_lock` … `rec_allow`, 1276). */
+    static String recordingVerb(String peer, String verb) {
+        return command(map("t", "recording", "peer", peer, "verb", verb));
+    }
+
+    /**
+     * `peer`'s recording bar and the recorder's work since the last ask
+     * (1276): `phase`, `shown`, `pulsing`, `timer`, `wave` (bytes), the
+     * hint, the chip, `buttons`, `notice`, `effects`, and the library's
+     * distances `cancel_dp` and `lock_dp`.
+     */
+    static Map<String, Object> recording(String peer) {
+        return answer(Native.query(MsgPack.pack(map("t", "recording", "peer", peer))));
     }
 
     /** Delete the messages `keys`, asked already. */

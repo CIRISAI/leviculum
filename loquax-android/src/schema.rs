@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -135,6 +135,15 @@
 //! The switch (1233) came within version 1 too: [`Query::Receipts`] with
 //! its [`ReceiptsChoice`]. An older app shows no switch, and the phone
 //! sends receipts unless its config says `read_receipts = off`.
+//! Recording a voice message (1276) came within version 1 too: the
+//! requests [`Request::Record`] (`record`, the microphone's gestures and
+//! the recorder's levels) and [`Request::Recording`] (`recording`, the
+//! bar's buttons), [`Query::Recording`] with its [`Recording`], and
+//! [`Messages::recording`] and [`Bar::recording`]. An older app sends
+//! neither request and records as 1222 did, straight into
+//! [`Request::Voice`], which is unchanged but for its cap (10 min, was
+//! 5); its bubbles draw the levels they always drew, now the
+//! recording's own track where the model has one.
 
 use serde::{Deserialize, Serialize};
 
@@ -283,8 +292,11 @@ pub enum Request {
     /// `AudioRecord` made it, mono 16-bit PCM, little endian, at `rate`.
     /// The session codes it as Opus in Ogg off the lock
     /// (`loquax::voice::encode`) and sends it to `peer` as the audio
-    /// field; one shorter than 0.6 s or longer than 5 min answers the
-    /// request with the reason.
+    /// field; one shorter than 0.6 s or longer than the cap (10 min,
+    /// `loquax::ui::voice::LONGEST_MS`, 1276) answers the request with
+    /// the reason. Since 1276 Java sends it on the recording's `finish`
+    /// effect ([`Recording::effects`]), and the model keeps the
+    /// recording's level track as the bubble's waveform.
     Voice {
         peer: String,
         pcm: Blob,
@@ -484,6 +496,35 @@ pub enum Request {
     StopShare {
         peer: String,
     },
+    /// The microphone's gesture or the recorder's word for `peer`'s
+    /// recording (1276, `loquax::ui::recording::Input`): `press` (at
+    /// `now`), `slide` (the finger `dx`, `dy` dp from where it landed,
+    /// left and up negative), `release` (at `now`), `cancel` (the system
+    /// took the gesture), `level` (one 50 ms window recorded, its `rms`
+    /// at `now`), `tick` (the clock at `now`) or `played` (the preview's
+    /// end). `now` is the phone's monotonic milliseconds
+    /// (`SystemClock.uptimeMillis`). What the recorder is to do comes
+    /// back in [`Query::Recording`]'s `effects`.
+    Record {
+        peer: String,
+        input: String,
+        #[serde(default)]
+        now: i64,
+        #[serde(default)]
+        dx: i32,
+        #[serde(default)]
+        dy: i32,
+        #[serde(default)]
+        rms: u32,
+    },
+    /// A button of `peer`'s recording bar (1276), by its resource id:
+    /// `rec_lock`, `rec_pause`, `rec_resume`, `rec_play`,
+    /// `rec_stop_play`, `rec_send`, `rec_discard`, or the silence line's
+    /// `rec_allow`.
+    Recording {
+        peer: String,
+        verb: String,
+    },
 }
 
 /// What a contact said when loquax read it.
@@ -678,8 +719,15 @@ pub enum Query {
     SaveFile { peer: String, key: i64, index: u32 },
     /// The voice message of the message `key` of `peer`'s conversation,
     /// decoded for `AudioTrack` (1222): Opus at 24 kHz, Codec2 at 8 kHz.
-    /// Answered as [`VoicePcm`].
+    /// Answered as [`VoicePcm`]. A message without a level track of its
+    /// own (one received) gets the decoded sound's from then on (1276,
+    /// `LevelTrack::from_pcm`): its bubble's `voice_levels` follow.
     Voice { peer: String, key: i64 },
+    /// `peer`'s recording bar and what the recorder is to do since the
+    /// last ask (1276); answered as [`Recording`]. Java asks it after
+    /// every [`Request::Record`] and [`Request::Recording`]: the effects
+    /// are handed out once.
+    Recording { peer: String },
     /// One gesture on the photo viewer (1269), folded into the zoom it
     /// was at, needing no session: the viewer's state is the app's,
     /// handed back as [`ZoomShown`] gave it, the logic
@@ -768,6 +816,73 @@ pub struct VoicePcm {
     pub ok: bool,
     pub rate: u32,
     pub pcm: Blob,
+}
+
+/// What [`Query::Recording`] answers (1276,
+/// `docs/src/concepts/loquax-voice-recording.md`): the scene's recording
+/// bar for the peer in the phone's words, and the recorder's work. With
+/// no bar up, `shown` is false and the parts are empty; `phase` still
+/// says how the last recording went (`cancelled`, `sent`) or `idle`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recording {
+    pub v: u32,
+    pub ok: bool,
+    /// `idle`, `held`, `locked`, `paused`, `preview`, `cancelled` or
+    /// `sent` (`recording::Phase::word`).
+    pub phase: String,
+    /// The bar is up: held, locked, paused or stopped at the cap.
+    pub shown: bool,
+    /// The red dot pulses: it records and is heard, or not yet doubted.
+    pub pulsing: bool,
+    /// `REC 00:07`, its milliseconds, and amber in the last 30 s.
+    pub timer: String,
+    pub timer_ms: u32,
+    pub amber: bool,
+    /// The waveform: levels 0 to 100, oldest first, the newest at the
+    /// right edge; `moving` while it records. Its words for a screen
+    /// reader.
+    pub wave: Blob,
+    pub moving: bool,
+    pub wave_label: String,
+    /// How many bars the moving waveform stands across the width
+    /// (`recording::LIVE_WINDOWS`, three seconds): fewer levels fill it
+    /// from the right.
+    pub wave_slots: u32,
+    /// While held: `Slide left to cancel`, or `Release to cancel` once
+    /// `armed`; how far the finger is toward it, 0 to 100. Empty else.
+    pub cancel: String,
+    pub cancel_progress: u32,
+    pub armed: bool,
+    /// While held: the microphone's words under the finger
+    /// (`Release to send`); empty else.
+    pub held: String,
+    /// The lock chip's words, empty for no chip; closed once locked; how
+    /// far the finger swiped up toward it, 0 to 100. A tap on an open
+    /// chip is `rec_lock`.
+    pub lock: String,
+    pub lock_closed: bool,
+    pub lock_progress: u32,
+    /// The bin, pause or resume, play or stop, Send, in the order drawn,
+    /// by resource id with their words; each is a [`Request::Recording`].
+    pub buttons: Vec<BarButton>,
+    /// The line under the waveform (nothing heard, or the cap); empty
+    /// for none. `notice_allow` is its button's words when it has the
+    /// way to the microphone's permission (`rec_allow`), else empty.
+    pub notice: String,
+    pub notice_allow: String,
+    /// What the recorder is to do, in order, since the last ask:
+    /// `haptic_start`, `haptic_lock`, `haptic_cap`, `start`, `pause`,
+    /// `resume`, `stop`, `finish` (hand the PCM over as
+    /// [`Request::Voice`]), `discard`, `play`, `stop_play`,
+    /// `ask_microphone`.
+    pub effects: Vec<String>,
+    /// The core's distances and window (`recording::CANCEL_DP`,
+    /// `LOCK_DP`, `WINDOW_MS`) and the cap (`voice::LONGEST_MS`): Java
+    /// keeps no copy of its own.
+    pub cancel_dp: u32,
+    pub lock_dp: u32,
+    pub window_ms: u32,
+    pub longest_ms: u32,
 }
 
 /// What [`Query::SaveFile`] answers: where the file is, under the app's
@@ -1621,6 +1736,12 @@ pub struct Messages {
     pub share: String,
     #[serde(default)]
     pub share_stop: String,
+    /// While a voice message records for this chat (1276): the bar's
+    /// phase (`held`, `locked`, `paused`, `preview`), and the compose
+    /// bar gives way to the recording bar, which [`Query::Recording`]
+    /// draws; empty for none.
+    #[serde(default)]
+    pub recording: String,
 }
 
 /// What [`Query::Shares`] answers (1273): the running shares, by peer,
@@ -1666,6 +1787,9 @@ pub struct Bar {
     pub fix_lat_e6: i32,
     pub fix_lon_e6: i32,
     pub fix_words: String,
+    /// [`Messages::recording`].
+    #[serde(default)]
+    pub recording: String,
 }
 
 /// A button of the compose bar or a row of its sheet (1270): its resource

@@ -465,6 +465,27 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             java_map(&[("t", Java::Str("stopshare")), ("peer", Java::Str(PEER))]),
             Request::StopShare { peer: s(PEER) },
         ),
+        // The microphone's gestures and the recorder's levels (1276):
+        // `Core.record` writes every field, all of them longs.
+        record("press", 5_000_123, 0, 0, 0),
+        record("slide", 0, -120, -80, 0),
+        record("release", 5_003_000, 0, 0, 0),
+        record("cancel", 0, 0, 0, 0),
+        record("level", 5_000_173, 0, 0, 32_767),
+        record("tick", 5_000_400, 0, 0, 0),
+        record("played", 0, 0, 0, 0),
+        (
+            "recordingVerb",
+            java_map(&[
+                ("t", Java::Str("recording")),
+                ("peer", Java::Str(PEER)),
+                ("verb", Java::Str("rec_lock")),
+            ]),
+            Request::Recording {
+                peer: s(PEER),
+                verb: s("rec_lock"),
+            },
+        ),
         (
             "Locator.tell",
             java_map(&[
@@ -484,6 +505,36 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
     ]
+}
+
+/// `Core.record`'s bytes for `input`: every field, each a long.
+fn record(
+    input: &'static str,
+    now: i64,
+    dx: i64,
+    dy: i64,
+    rms: i64,
+) -> (&'static str, Vec<u8>, Request) {
+    (
+        input,
+        java_map(&[
+            ("t", Java::Str("record")),
+            ("peer", Java::Str(PEER)),
+            ("input", Java::Str(input)),
+            ("now", Java::Long(now)),
+            ("dx", Java::Long(dx)),
+            ("dy", Java::Long(dy)),
+            ("rms", Java::Long(rms)),
+        ]),
+        Request::Record {
+            peer: PEER.to_string(),
+            input: input.to_string(),
+            now,
+            dx: dx as i32,
+            dy: dy as i32,
+            rms: rms as u32,
+        },
+    )
 }
 
 fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
@@ -690,6 +741,11 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             Query::Bar { peer: s(PEER) },
         ),
         (
+            "recording",
+            java_map(&[("t", Java::Str("recording")), ("peer", Java::Str(PEER))]),
+            Query::Recording { peer: s(PEER) },
+        ),
+        (
             "shares",
             java_map(&[("t", Java::Str("shares"))]),
             Query::Shares,
@@ -809,7 +865,12 @@ fn every_request_java_builds_decodes_as_java_means_it() {
 fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
     use loquax::ui::intent::{Intent, Switch, Target};
     use loquax_android::session::{decode, Decoded};
-    let glue = ["link", "unlink", "notNow", "relink"];
+    // The microphone's gestures and levels (1276) are the platform's
+    // input, not intents: `Core.record`'s rows, named by their input.
+    let glue = [
+        "link", "unlink", "notNow", "relink", "press", "slide", "release", "cancel", "level",
+        "tick", "played",
+    ];
     let mut wrong = Vec::new();
     for (name, bytes, _) in commands() {
         let request = schema::decode::<Request>(&bytes).expect("decodes");

@@ -11,6 +11,7 @@ import android.media.AudioTrack;
 import android.media.MediaRecorder;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.View;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -28,35 +29,50 @@ import java.io.IOException;
 final class Voice {
     /** The permission request's code. */
     static final int ASK = 0x5622;
-    /** Columba's limit, the library's LONGEST_MS: the recorder stops there. */
-    static final long LONGEST_MS = 5 * 60 * 1000;
     /**
      * In a debuggable build, a file of this name in the app's files is
      * recorded instead of the microphone (16 kHz mono 16-bit): the device
-     * walk's fixture, since an emulator has no voice to give.
+     * walk's fixture, since an emulator has no voice to give. It feeds its
+     * levels as the microphone does, window by window in real time, so a
+     * fixture of zeros is a microphone that hears nothing (1276).
      */
     static final String FIXTURE = "voice-fixture.pcm";
 
     private Voice() {}
 
-    /** The microphone, from press to release. Not thread safe: the UI thread's. */
+    /**
+     * The microphone, from the library's `start` to its `finish` or
+     * `discard` (1276): it records, pauses and goes on as the recording's
+     * effects say, and hands each window's RMS to `levels` with the
+     * phone's uptime clock. How long it may run is the library's: the cap
+     * comes as a `stop` effect. Its methods are the UI thread's; `levels`
+     * is called on the reader thread.
+     */
     static final class Recorder {
+        /** A window recorded: its end on the uptime clock, and its RMS. */
+        interface Feed {
+            void level(long now, int rms);
+        }
+
         private final Context context;
+        private final Feed feed;
+        private final int windowMs;
         private AudioRecord record;
         private Thread reader;
         private volatile boolean running;
+        private volatile boolean paused;
         private final ByteArrayOutputStream pcm = new ByteArrayOutputStream();
         private int rate;
-        private long started;
 
-        Recorder(Context context) {
+        Recorder(Context context, int windowMs, Feed feed) {
             this.context = context;
+            this.windowMs = windowMs > 0 ? windowMs : 50;
+            this.feed = feed;
         }
 
         /** Starts; false when no microphone would open. */
         boolean start() {
             pcm.reset();
-            started = System.currentTimeMillis();
             final File fixture = new File(context.getFilesDir(), FIXTURE);
             boolean debuggable =
                     (context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
@@ -97,16 +113,27 @@ final class Voice {
             record.startRecording();
             running = true;
             final AudioRecord r = record;
+            final Levels levels = levels();
             reader = new Thread(new Runnable() {
                 @Override
                 public void run() {
-                    byte[] buffer = new byte[rate / 10 * 2];
+                    // One window a read: the levels come as the sound does.
+                    byte[] buffer = new byte[levels.samples() * 2];
                     while (running) {
+                        if (paused) {
+                            pause(10);
+                            continue;
+                        }
+                        // A read the pause cut short is sound from before
+                        // it: kept, and its level the library drops.
                         int n = r.read(buffer, 0, buffer.length);
                         if (n > 0) {
                             synchronized (pcm) {
                                 pcm.write(buffer, 0, n);
                             }
+                            levels.feed(buffer, 0, n);
+                        } else if (n <= 0) {
+                            pause(10);
                         }
                     }
                 }
@@ -115,32 +142,84 @@ final class Voice {
             return true;
         }
 
+        /** The window cutter, its windows to `feed` at the time each ends. */
+        private Levels levels() {
+            return new Levels(rate, windowMs, new Levels.Sink() {
+                @Override
+                public void window(int rms) {
+                    feed.level(SystemClock.uptimeMillis(), rms);
+                }
+            });
+        }
+
         private void readFixture(File fixture) {
-            byte[] buffer = new byte[rate / 10 * 2];
+            Levels levels = levels();
+            byte[] buffer = new byte[levels.samples() * 2];
             try (FileInputStream in = new FileInputStream(fixture)) {
                 int n;
-                while (running && (n = in.read(buffer)) > 0) {
+                while (running) {
+                    if (paused) {
+                        Thread.sleep(10);
+                        continue;
+                    }
+                    if ((n = in.read(buffer)) <= 0) break;
                     synchronized (pcm) {
                         pcm.write(buffer, 0, n);
                     }
                     // In real time, so a hold of the button means a length.
-                    Thread.sleep(100);
+                    Thread.sleep(windowMs);
+                    levels.feed(buffer, 0, n);
                 }
             } catch (IOException | InterruptedException e) {
                 // What was read is the recording.
             }
         }
 
-        /** How long it has recorded. */
-        long ms() {
-            return System.currentTimeMillis() - started;
+        private static void pause(long ms) {
+            try {
+                Thread.sleep(ms);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         int rate() {
             return rate;
         }
 
-        /** Stops; the PCM recorded, little endian. */
+        /** The library's `pause`, and its `stop` at the cap: what is there stays. */
+        void pause() {
+            paused = true;
+            if (record != null) {
+                try {
+                    record.stop();
+                } catch (IllegalStateException e) {
+                    // Not recording: nothing to stop.
+                }
+            }
+        }
+
+        /** The library's `resume`: on with the same recording. */
+        void resume() {
+            if (record != null) {
+                try {
+                    record.startRecording();
+                } catch (IllegalStateException e) {
+                    // Released: nothing goes on.
+                    return;
+                }
+            }
+            paused = false;
+        }
+
+        /** What is recorded so far, little endian: the preview's sound. */
+        byte[] pcm() {
+            synchronized (pcm) {
+                return pcm.toByteArray();
+            }
+        }
+
+        /** Stops for good; the PCM recorded, little endian. */
         byte[] stop() {
             running = false;
             if (reader != null) {
@@ -154,14 +233,12 @@ final class Voice {
                 try {
                     record.stop();
                 } catch (IllegalStateException e) {
-                    // Never started: nothing recorded.
+                    // Never started or paused: nothing recorded since.
                 }
                 record.release();
                 record = null;
             }
-            synchronized (pcm) {
-                return pcm.toByteArray();
-            }
+            return pcm();
         }
     }
 
@@ -292,6 +369,93 @@ final class Voice {
                 canvas.drawRoundRect(x, (h - bar) / 2, x + w * 0.6f, (h + bar) / 2,
                         w * 0.3f, w * 0.3f, paint);
             }
+        }
+    }
+
+    /**
+     * The recording bar's waveform (1276): the library's levels, 0 to 100,
+     * as bars in the accent colour, loud ones tall and bright, quiet ones
+     * short and dim. While it records (`moving`) the bars stand at a fixed
+     * pitch of `slots` with the newest at the right edge, so the picture
+     * scrolls right to left as levels come; standing still it is the whole
+     * recording across the width. It sends no accessibility events of its
+     * own as it redraws: its words are its content description.
+     */
+    static final class Wave extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private byte[] levels = new byte[0];
+        private boolean moving;
+        private int slots = 60;
+        private int color;
+
+        Wave(Context context) {
+            super(context);
+        }
+
+        void set(byte[] levels, boolean moving, int slots, int color) {
+            this.levels = levels == null ? new byte[0] : levels;
+            this.moving = moving;
+            this.slots = Math.max(1, slots);
+            this.color = color;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            int n = levels.length;
+            if (n == 0) return;
+            int columns = moving ? Math.max(slots, n) : n;
+            float w = getWidth() / (float) columns;
+            float h = getHeight();
+            int first = columns - n;
+            paint.setColor(color);
+            for (int i = 0; i < n; i++) {
+                int level = Math.min(100, levels[i] & 0xff);
+                float bar = Math.max(h * 0.08f, h * level / 100f);
+                paint.setAlpha(90 + level * 165 / 100);
+                float x = (first + i) * w + w * 0.18f;
+                canvas.drawRoundRect(x, (h - bar) / 2, x + w * 0.64f, (h + bar) / 2,
+                        w * 0.32f, w * 0.32f, paint);
+            }
+        }
+    }
+
+    /**
+     * The red dot of the recording bar (1276): pulsing while it records and
+     * is heard, steady once it stands or hears nothing. Drawn, not
+     * animated through the view's alpha, so a pulse is no accessibility
+     * event; `selected` says whether it pulses, for the device walk.
+     */
+    static final class Dot extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private boolean pulsing;
+        private int color;
+
+        Dot(Context context) {
+            super(context);
+        }
+
+        void set(boolean pulsing, int color) {
+            this.color = color;
+            if (this.pulsing != pulsing) {
+                this.pulsing = pulsing;
+                setSelected(pulsing);
+            }
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float r = Math.min(getWidth(), getHeight()) / 2f;
+            int alpha = 255;
+            if (pulsing) {
+                double t = (SystemClock.uptimeMillis() % 1200) / 1200.0;
+                alpha = (int) (110 + 145 * (0.5 + 0.5 * Math.cos(2 * Math.PI * t)));
+                postInvalidateOnAnimation();
+            }
+            paint.setColor(color);
+            paint.setAlpha(alpha);
+            canvas.drawCircle(getWidth() / 2f, getHeight() / 2f, r * 0.8f, paint);
         }
     }
 }

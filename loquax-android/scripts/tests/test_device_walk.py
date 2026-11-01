@@ -998,6 +998,143 @@ class Voice(unittest.TestCase):
         self.assertTrue(any(b != 0 for b in pcm[2000:4000]), "it sounds")
 
 
+class Recording(unittest.TestCase):
+    """The recording bar's reading (1276): its parts by phase, the timer,
+    the dot, the silence line, RecordingBar's log lines."""
+
+    def bar(self, phase, **say):
+        def part(rid, text="", desc="", selected=False):
+            pkg = "network.leviculum.loquax.debug:id/"
+            return walk.Node(text, desc, pkg + rid, "", (0, 0, 1, 1), selected=selected)
+
+        timer = say.get("timer", "REC 00:07")
+        common = [
+            part("rec_bar", desc=timer),
+            part("rec_dot", selected=say.get("pulsing", phase != "paused")),
+            part("rec_timer", text=timer),
+            part("rec_wave", desc="Sound level"),
+        ]
+        if phase == "held":
+            return common + [
+                part("rec_cancel", text=say.get("hint", walk.REC_SLIDE)),
+                part("rec_held", desc=say.get("held", walk.REC_HELD)),
+                part("rec_lock", desc=say.get("lock", walk.REC_LOCK), selected=say.get("closed", False)),
+            ]
+        buttons = {
+            "locked": [("rec_discard", "Discard recording"), ("rec_pause", "Pause recording")],
+            "paused": [
+                ("rec_discard", "Discard recording"),
+                ("rec_play", "Listen"),
+                ("rec_resume", "Continue recording"),
+            ],
+        }[phase]
+        out = common + [part(rid, desc=desc) for rid, desc in buttons]
+        out.append(part("rec_send", desc=say.get("send", "Send voice message")))
+        if phase == "locked":
+            out.append(part("rec_lock", desc=say.get("lock", walk.REC_LOCKED), selected=say.get("closed", True)))
+        return out
+
+    def test_each_phase_as_drawn_passes(self):
+        for phase in ("held", "locked", "paused"):
+            self.assertEqual(walk.rec_bar_problems(self.bar(phase), phase), [], phase)
+        self.assertEqual(walk.rec_bar_problems(self.bar("held", hint=walk.REC_RELEASE), "held"), [])
+
+    def test_a_missing_part_one_out_of_place_and_wrong_words_are_named(self):
+        held = [n for n in self.bar("held") if not n.is_id("rec_wave")] + [node("compose")]
+        self.assertEqual(
+            walk.rec_bar_problems(held, "held"), ["no rec_wave", "compose on screen while held"]
+        )
+        self.assertEqual(
+            walk.rec_bar_problems(self.bar("held", timer="0:07"), "held"), ["the timer says '0:07'"]
+        )
+        self.assertEqual(
+            walk.rec_bar_problems(self.bar("held", closed=True), "held"),
+            [f"the chip says {walk.REC_LOCK!r}, closed=True, want open"],
+        )
+        self.assertEqual(
+            walk.rec_bar_problems(self.bar("locked", lock=walk.REC_LOCK, closed=False), "locked"),
+            [f"the chip says {walk.REC_LOCK!r}, closed=False, want closed"],
+        )
+        self.assertEqual(
+            walk.rec_bar_problems(self.bar("paused", send=""), "paused"),
+            ["rec_send has no words for a screen reader"],
+        )
+        self.assertIn("rec_held on screen while locked", walk.rec_bar_problems(self.bar("locked") + self.bar("held")[-2:-1], "locked"))
+
+    def test_the_timer_and_the_dot_are_read(self):
+        self.assertEqual(walk.rec_seconds(self.bar("held", timer="REC 01:12")), 72)
+        self.assertIsNone(walk.rec_seconds([node("compose")]))
+        self.assertTrue(walk.rec_pulsing(self.bar("held")))
+        self.assertFalse(walk.rec_pulsing(self.bar("paused")))
+        self.assertIsNone(walk.rec_pulsing([node("compose")]))
+
+    def test_the_silence_line_with_its_button_and_a_steady_dot(self):
+        line = [
+            walk.Node(walk.REC_SILENT, "", "x:id/rec_notice", "", (0, 0, 1, 1)),
+            walk.Node(walk.REC_ALLOW, "", "x:id/rec_allow", "", (0, 0, 1, 1)),
+        ]
+        self.assertEqual(walk.rec_notice_problems(self.bar("locked", pulsing=False) + line), [])
+        self.assertEqual(
+            walk.rec_notice_problems(self.bar("locked") + line[:1]),
+            [f"no {walk.REC_ALLOW!r} button: []", "the dot pulses=True, want False"],
+        )
+        self.assertEqual(
+            walk.rec_notice_problems(self.bar("locked", pulsing=False) + line[1:]),
+            [f"the line says [], want [{walk.REC_SILENT!r}]"],
+        )
+
+    def test_the_dump_says_what_is_selected(self):
+        xml = (
+            "<hierarchy><node text=\"\" resource-id=\"p:id/rec_dot\" selected=\"true\" "
+            "bounds=\"[0,0][1,1]\" /><node text=\"\" resource-id=\"p:id/rec_lock\" "
+            "selected=\"false\" bounds=\"[0,0][1,1]\" /></hierarchy>"
+        )
+        dot, chip = walk.parse_dump(xml)
+        self.assertTrue(dot.selected)
+        self.assertFalse(chip.selected)
+
+    LOGCAT = (
+        "11-01 17:00:00.100  4242  4242 I loquax  : REC_BAR phase=held pulsing=true locked=false "
+        "armed=false buttons= notice=\n"
+        "11-01 17:00:01.200  4242  4242 I loquax  : PHOTO_ZOOM scale=1.0 left=0 top=0 width=1 height=1 view=1x1\n"
+        "11-01 17:00:02.300  4242  4242 I loquax  : REC_BAR phase=held pulsing=true locked=false "
+        "armed=true buttons= notice=\n"
+        "11-01 17:00:03.000  4242  4242 I loquax  : REC_BAR phase=cancelled pulsing=false "
+        "locked=false armed=false buttons= notice=\n"
+        "11-01 17:00:09.000  4242  4242 I loquax  : REC_BAR phase=locked pulsing=false "
+        "locked=true armed=false buttons=rec_discard,rec_pause,rec_send "
+        "notice=Nothing heard. Is the microphone allowed?\r\n"
+    )
+
+    def test_the_bars_log_lines_are_read_in_order(self):
+        lines = walk.parse_rec_lines(self.LOGCAT)
+        self.assertEqual([l["phase"] for l in lines], ["held", "held", "cancelled", "locked"])
+        self.assertEqual([l["armed"] for l in lines], [False, True, False, False])
+        self.assertEqual(lines[3]["buttons"], ["rec_discard", "rec_pause", "rec_send"])
+        self.assertEqual(lines[0]["buttons"], [])
+        self.assertEqual(lines[3]["notice"], walk.REC_SILENT)
+        self.assertTrue(lines[3]["locked"])
+
+    def test_the_phases_gone_through_in_order(self):
+        lines = walk.parse_rec_lines(self.LOGCAT)
+        self.assertEqual(walk.rec_went(lines, "held", "armed", "cancelled"), [])
+        self.assertEqual(
+            walk.rec_went(lines[:1] + lines[2:3], "held", "armed", "cancelled"),
+            ["no 'armed' after ['held'] in ['held', 'cancelled']"],
+        )
+        self.assertEqual(
+            walk.rec_went(lines, "cancelled", "held"),
+            ["no 'held' after ['cancelled'] in ['held', 'held', 'cancelled', 'locked']"],
+        )
+
+    def test_the_four_steps_follow_the_voice_step(self):
+        at = walk.STEPS.index("voice")
+        self.assertEqual(
+            walk.STEPS[at + 1 : at + 5],
+            ["voice_hold_release", "voice_slide_cancel", "voice_lock_send", "voice_silence_hint"],
+        )
+
+
 class Draft(unittest.TestCase):
     """Where the draft step finds a row's last line (1219), and what it
     refuses."""

@@ -30,6 +30,7 @@ use loquax::store::Store;
 use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
+use loquax::ui::recording::{Effect, Haptic, Input, LevelTrack, Verb};
 use loquax::ui::strings::{Lang, StrId, Text};
 use loquax::ui::{chat, compose, scene, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
@@ -174,6 +175,9 @@ struct Inner {
     book: Book,
     /// The contact keys the home node took (1187), for the facade test.
     keys_told: Arc<std::sync::atomic::AtomicUsize>,
+    /// What the recorder is to do (1276, `UiEffect::Recording`), by peer,
+    /// until [`schema::Query::Recording`] hands it out.
+    recorder: Vec<([u8; 16], Effect)>,
 }
 
 /// A running session.
@@ -909,6 +913,12 @@ impl Session {
             Intent::ShareFix { peer } => UiEvent::ShareFix { peer },
             Intent::StartShare { peer, span } => UiEvent::StartShare { peer, span },
             Intent::StopShare { peer } => UiEvent::StopShare { peer },
+            // The recording bar's buttons (1276) are the recording's
+            // input like the gestures.
+            Intent::Recording { peer, verb } => UiEvent::Record {
+                peer,
+                input: Input::Verb(verb),
+            },
             other => return Err(format!("not a request of the facade: {other:?}")),
         };
         self.lock().apply(event);
@@ -916,10 +926,15 @@ impl Session {
     }
 
     /// A request that is the phone's own glue, not the user's intent: the
-    /// address book's links.
+    /// address book's links, and the microphone's gestures and levels
+    /// (1276).
     fn platform(&self, request: Platform) -> Result<(), String> {
         match request {
             Platform::Link { peer, contact } => self.lock().link(peer, &contact),
+            Platform::Record { peer, input } => {
+                self.lock().apply(UiEvent::Record { peer, input });
+                Ok(())
+            }
             Platform::Unlink { peer } => self.lock().unlink(peer),
             Platform::NotNow { peer } => {
                 let mut inner = self.lock();
@@ -1067,6 +1082,19 @@ impl Session {
                         .ok_or_else(|| "no such voice message".to_string())?
                 };
                 let pcm = loquax::voice::decode(mode, &data)?;
+                // The bubble draws the decoded sound's own track from now
+                // on (1276), where the model has none: a received message,
+                // or ours from before the recording kept one.
+                let mut inner = self.lock();
+                if inner.model.voice_track(peer, key).is_none() {
+                    inner.apply(UiEvent::VoiceTrack {
+                        peer,
+                        key,
+                        track: LevelTrack::from_pcm(&pcm.samples, pcm.rate),
+                    });
+                    inner.dirty = true;
+                }
+                drop(inner);
                 return Ok(schema::encode(&schema::VoicePcm {
                     v: VERSION,
                     ok: true,
@@ -1101,6 +1129,25 @@ impl Session {
                     path: path.display().to_string(),
                     name,
                 }));
+            }
+            // The recording bar (1276): the effects are handed out once.
+            schema::Query::Recording { peer } => {
+                let peer = parse_peer(&peer)?;
+                let mut inner = self.lock();
+                let (mine, others) = std::mem::take(&mut inner.recorder)
+                    .into_iter()
+                    .partition::<Vec<_>, _>(|(of, _)| *of == peer);
+                inner.recorder = others;
+                let effects = mine
+                    .into_iter()
+                    .map(|(_, effect)| effect_word(effect).to_string())
+                    .collect();
+                return Ok(schema::encode(&recording(
+                    &inner.model,
+                    peer,
+                    inner.lang,
+                    effects,
+                )));
             }
             schema::Query::Receipts { set } => {
                 let mut inner = self.lock();
@@ -1195,6 +1242,7 @@ impl Session {
             | schema::Query::Photo { .. }
             | schema::Query::Staged { .. }
             | schema::Query::SaveFile { .. }
+            | schema::Query::Recording { .. }
             | schema::Query::Voice { .. } => return Err("answered above".to_string()),
             // The viewer's zoom needs no session: `lib.rs` answers it.
             schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
@@ -1359,6 +1407,7 @@ impl Inner {
             fallback: Fallback::default(),
             book: links::load(home),
             keys_told: Arc::default(),
+            recorder: Vec::new(),
         })
     }
 
@@ -1625,6 +1674,9 @@ impl Inner {
                     }
                     self.dirty = true;
                 }
+                // The recorder's work (1276), for Java's next
+                // `Query::Recording`.
+                UiEffect::Recording { peer, effect } => self.recorder.push((peer, effect)),
                 // What the terminal does with its screen and its maps has
                 // no place here yet.
                 _ => {}
@@ -2062,6 +2114,7 @@ impl Inner {
                 .map(|chip| chip.words.resolve(self.lang))
                 .unwrap_or_default(),
             share_stop: Text::key(StrId::ShareStop).resolve(self.lang),
+            recording: bar.recording,
         }
     }
 
@@ -2079,6 +2132,11 @@ impl Inner {
             ..schema::Bar::default()
         };
         if let Some(compose) = compose {
+            bar.recording = compose
+                .recording
+                .as_ref()
+                .map(|r| r.phase.word().to_string())
+                .unwrap_or_default();
             bar.round = compose.round.word().to_string();
             bar.buttons = compose
                 .buttons
@@ -2494,6 +2552,12 @@ pub enum Platform {
     Relink {
         rows: Vec<schema::ImRow>,
     },
+    /// The microphone's gesture or the recorder's level (1276): the
+    /// platform's input, not an intent (`loquax::ui::recording::Input`).
+    Record {
+        peer: [u8; 16],
+        input: Input,
+    },
 }
 
 /// `request` as an intent, with its addresses and ids parsed: every
@@ -2686,8 +2750,151 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         R::StopShare { peer } => Intent::StopShare {
             peer: parse_peer(&peer)?,
         },
+        R::Record {
+            peer,
+            input,
+            now,
+            dx,
+            dy,
+            rms,
+        } => {
+            return Ok(Decoded::Platform(Platform::Record {
+                peer: parse_peer(&peer)?,
+                input: record_input(&input, now, dx, dy, rms)?,
+            }))
+        }
+        R::Recording { peer, verb } => Intent::Recording {
+            peer: parse_peer(&peer)?,
+            verb: verb_of(&verb)
+                .ok_or_else(|| format!("{verb:?} is no button of the recording bar"))?,
+        },
     };
     Ok(Decoded::Intent(intent))
+}
+
+/// The recording bar's verbs (1276), each by its resource id.
+const VERBS: [Verb; 8] = [
+    Verb::Lock,
+    Verb::Pause,
+    Verb::Resume,
+    Verb::Play,
+    Verb::StopPlay,
+    Verb::Send,
+    Verb::Discard,
+    Verb::AskMicrophone,
+];
+
+/// The verb whose resource id is `word` (`rec_lock` …, `rec_allow`).
+pub fn verb_of(word: &str) -> Option<Verb> {
+    VERBS.into_iter().find(|verb| verb.word() == word)
+}
+
+/// [`schema::Request::Record`]'s input: its word and the numbers that
+/// word takes. A time before the phone's clock began is 0, an RMS past
+/// 16 bits full scale.
+pub fn record_input(input: &str, now: i64, dx: i32, dy: i32, rms: u32) -> Result<Input, String> {
+    let now = u64::try_from(now).unwrap_or(0);
+    Ok(match input {
+        "press" => Input::Press { now },
+        "slide" => Input::Slide { dx, dy },
+        "release" => Input::Release { now },
+        "cancel" => Input::Cancel,
+        "level" => Input::Level {
+            now,
+            rms: u16::try_from(rms).unwrap_or(u16::MAX),
+        },
+        "tick" => Input::Tick { now },
+        "played" => Input::Played,
+        other => {
+            return Err(format!(
+                "{other:?} is not press, slide, release, cancel, level, tick or played"
+            ))
+        }
+    })
+}
+
+/// What the recorder is to do as the facade says it ([`schema::Recording::effects`]).
+pub fn effect_word(effect: Effect) -> &'static str {
+    match effect {
+        Effect::Haptic(Haptic::Start) => "haptic_start",
+        Effect::Haptic(Haptic::Lock) => "haptic_lock",
+        Effect::Haptic(Haptic::Cap) => "haptic_cap",
+        Effect::Start => "start",
+        Effect::Pause => "pause",
+        Effect::Resume => "resume",
+        Effect::Stop => "stop",
+        Effect::Finish => "finish",
+        Effect::Discard => "discard",
+        Effect::Play => "play",
+        Effect::StopPlay => "stop_play",
+        Effect::AskMicrophone => "ask_microphone",
+    }
+}
+
+/// `peer`'s recording bar in `lang` (1276, the scene's
+/// [`scene::recording_bar`]), with `effects` for the recorder.
+pub fn recording<B>(
+    model: &UiModel<B>,
+    peer: [u8; 16],
+    lang: Lang,
+    effects: Vec<String>,
+) -> schema::Recording {
+    use loquax::ui::recording as rec;
+    let phase = match model.recording.peer == peer {
+        true => model.recording.phase.word(),
+        false => rec::Phase::Idle.word(),
+    };
+    let mut answer = schema::Recording {
+        v: VERSION,
+        ok: true,
+        phase: phase.to_string(),
+        effects,
+        cancel_dp: rec::CANCEL_DP.unsigned_abs(),
+        lock_dp: rec::LOCK_DP.unsigned_abs(),
+        window_ms: rec::WINDOW_MS,
+        wave_slots: u32::try_from(rec::LIVE_WINDOWS).unwrap_or(u32::MAX),
+        longest_ms: loquax::ui::voice::LONGEST_MS,
+        ..schema::Recording::default()
+    };
+    let Some(bar) = scene::recording_bar(model, peer) else {
+        return answer;
+    };
+    answer.shown = true;
+    answer.pulsing = bar.pulsing;
+    answer.timer = bar.timer.words.resolve(lang);
+    answer.timer_ms = bar.timer.ms;
+    answer.amber = bar.timer.amber;
+    answer.wave = schema::Blob(bar.wave.levels);
+    answer.moving = bar.wave.moving;
+    answer.wave_label = bar.wave.a11y.label.resolve(lang);
+    if let Some(cancel) = &bar.cancel {
+        answer.cancel = cancel.words.resolve(lang);
+        answer.cancel_progress = u32::from(cancel.progress);
+        answer.armed = cancel.armed;
+    }
+    if let Some(held) = &bar.held {
+        answer.held = held.words.resolve(lang);
+    }
+    if let Some(lock) = &bar.lock {
+        answer.lock = lock.a11y.label.resolve(lang);
+        answer.lock_closed = lock.closed;
+        answer.lock_progress = u32::from(lock.progress);
+    }
+    answer.buttons = bar
+        .buttons
+        .iter()
+        .map(|b| schema::BarButton {
+            id: b.id.resource(),
+            label: b.a11y.label.resolve(lang),
+        })
+        .collect();
+    if let Some(notice) = &bar.notice {
+        answer.notice = notice.words.resolve(lang);
+        if notice.action.is_some() {
+            answer.notice_allow = Text::key(Verb::AskMicrophone.label()).resolve(lang);
+        }
+    }
+    answer
 }
 
 pub fn share_location(

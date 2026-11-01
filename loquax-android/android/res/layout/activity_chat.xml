@@ -312,7 +312,18 @@
             android:padding="10dp" />
     </LinearLayout>
 
+    <!-- The compose area (1276): the compose row, and the recording bar
+         that takes its place while a voice message records
+         (RecordingBar, made in code). The frame holds a finger that
+         landed on the microphone for the whole gesture. -->
+    <network.leviculum.loquax.RecordFrame
+        android:id="@+id/compose_frame"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
     <LinearLayout
+        android:id="@+id/compose_row"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="bottom"
@@ -416,4 +427,5 @@
             android:padding="13dp"
             android:visibility="gone" />
     </LinearLayout>
+    </network.leviculum.loquax.RecordFrame>
 </LinearLayout>

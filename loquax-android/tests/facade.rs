@@ -5006,3 +5006,292 @@ fn media_without_words_has_an_empty_body() {
         ]
     );
 }
+
+/// 1276 on the phone, against a real home node: the microphone's gestures
+/// and the recorder's levels go in as `record`, the bar's buttons as
+/// `recording`, and `Query::Recording` answers the scene's recording bar
+/// with what the recorder is to do, once.
+///
+/// - A press holds the bar up with a haptic tick and the recorder's
+///   start; the levels arrive in the wave, newest at the right.
+/// - Slid past 96 dp the hint says to release, and the release discards:
+///   nothing is sent.
+/// - A swipe up locks (a second tick), the release then does nothing;
+///   pause stands the wave still as the whole recording, play and its end
+///   swap the button, resume goes on, Send asks for the PCM. The PCM
+///   handed over is one voice message, whose bubble's levels are the
+///   recording's own track folded to 32 bars by peak.
+/// - A feed at the floor says, after 2 s and not before, that nothing is
+///   heard, offers the permission, and the dot stops pulsing; one heard
+///   window takes it back.
+/// - A voice message without a track of its own (1222's path) draws the
+///   decoded sound's once `Query::Voice` decoded it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_is_held_slid_away_locked_paused_and_sent_from_its_bar() {
+    use loquax::ui::recording::{level_of, Fold, LevelTrack, LIVE_WINDOWS};
+    use loquax::ui::voice::BARS;
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let peer = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c".to_string();
+        session
+            .request(Request::Open { peer: peer.clone() })
+            .expect("open");
+        let record = |input: &str, now: i64, dx: i32, dy: i32, rms: u32| {
+            session
+                .request(Request::Record {
+                    peer: peer.clone(),
+                    input: input.to_string(),
+                    now,
+                    dx,
+                    dy,
+                    rms,
+                })
+                .unwrap_or_else(|error| panic!("{input}: {error}"));
+        };
+        let tap = |verb: &str| {
+            session
+                .request(Request::Recording {
+                    peer: peer.clone(),
+                    verb: verb.to_string(),
+                })
+                .unwrap_or_else(|error| panic!("{verb}: {error}"));
+        };
+        let bar = || -> schema::Recording {
+            asked(&session, schema::Query::Recording { peer: peer.clone() })
+        };
+        let ids = |bar: &schema::Recording| -> Vec<String> {
+            bar.buttons.iter().map(|b| b.id.clone()).collect()
+        };
+        let chat = || -> schema::Messages {
+            asked(&session, schema::Query::Messages { peer: peer.clone() })
+        };
+        let voices = || -> Vec<schema::MessageRow> {
+            chat()
+                .messages
+                .into_iter()
+                .filter(|m| m.ours && m.voice_mode != 0)
+                .collect()
+        };
+        // Windows of `rms` from `from` on, `n` of them, 50 ms apart; their
+        // levels go into `track` too.
+        let feed = |track: &mut LevelTrack, from: i64, n: i64, rms: &dyn Fn(i64) -> u32| {
+            for w in 1..=n {
+                let r = rms(w);
+                record("level", from + w * 50, 0, 0, r);
+                track.push_rms(u16::try_from(r).expect("16 bits"));
+            }
+            from + n * 50
+        };
+
+        // Held, then slid away.
+        assert_eq!(bar().phase, "idle");
+        assert!(!bar().shown);
+        record("press", 10_000, 0, 0, 0);
+        let held = bar();
+        assert_eq!(held.effects, ["haptic_start", "start"]);
+        assert_eq!(bar().effects, Vec::<String>::new(), "handed out once");
+        assert_eq!((held.phase.as_str(), held.shown), ("held", true));
+        assert!(held.pulsing && held.moving);
+        assert_eq!(held.timer, "REC 00:00");
+        assert_eq!(held.held, "Release to send");
+        assert_eq!(held.cancel, "Slide left to cancel");
+        assert_eq!(held.lock, "Lock the recording");
+        assert!(!held.lock_closed);
+        assert!(held.buttons.is_empty());
+        assert_eq!(
+            (
+                held.cancel_dp,
+                held.lock_dp,
+                held.window_ms,
+                held.longest_ms,
+                held.wave_slots
+            ),
+            (96, 72, 50, 600_000, 60)
+        );
+        assert_eq!(chat().recording, "held");
+        let mut track = LevelTrack::default();
+        let now = feed(&mut track, 10_000, 20, &|w| 300 + 400 * (w as u32 % 5));
+        let heard = bar();
+        assert_eq!(heard.timer, "REC 00:01");
+        assert_eq!(heard.wave.0.len(), 20);
+        assert_eq!(heard.wave.0, track.levels());
+        // The newest, at the right edge: the 20th window, 20 % 5 = 0.
+        assert_eq!(heard.wave.0[19], level_of(300));
+        assert_eq!(heard.wave.0[18], level_of(300 + 400 * 4));
+        record("slide", 0, -60, 0, 0);
+        let sliding = bar();
+        assert_eq!((sliding.cancel_progress, sliding.armed), (62, false));
+        record("slide", 0, -100, 5, 0);
+        let armed = bar();
+        assert!(armed.armed);
+        assert_eq!(armed.cancel, "Release to cancel");
+        record("release", now + 10, 0, 0, 0);
+        let gone = bar();
+        assert_eq!(gone.effects, ["discard"]);
+        assert_eq!((gone.phase.as_str(), gone.shown), ("cancelled", false));
+        assert_eq!(chat().recording, "");
+        assert!(voices().is_empty(), "a slide away sends nothing");
+
+        // Locked, paused, heard back, resumed and sent.
+        record("press", 20_000, 0, 0, 0);
+        assert_eq!(bar().effects, ["haptic_start", "start"]);
+        let mut track = LevelTrack::default();
+        let now = feed(&mut track, 20_000, 30, &|w| 200 + 1_100 * (w as u32 % 7));
+        record("slide", 0, 0, -40, 0);
+        assert_eq!(bar().lock_progress, 55);
+        record("slide", 0, 3, -80, 0);
+        let locked = bar();
+        assert_eq!(locked.effects, ["haptic_lock"]);
+        assert_eq!(locked.phase, "locked");
+        assert!(locked.lock_closed);
+        assert_eq!(locked.lock, "Recording locked");
+        assert_eq!(ids(&locked), ["rec_discard", "rec_pause", "rec_send"]);
+        assert_eq!((locked.cancel.as_str(), locked.held.as_str()), ("", ""));
+        record("release", now + 5, 0, 0, 0);
+        let still = bar();
+        assert_eq!((still.phase.as_str(), still.effects.len()), ("locked", 0));
+        let now = feed(&mut track, now, 20, &|w| 50 + 700 * (w as u32 % 3));
+        tap("rec_pause");
+        let paused = bar();
+        assert_eq!(paused.effects, ["pause"]);
+        assert_eq!(paused.phase, "paused");
+        assert!(!paused.moving && !paused.pulsing);
+        assert_eq!(
+            ids(&paused),
+            ["rec_discard", "rec_play", "rec_resume", "rec_send"]
+        );
+        assert_eq!(paused.wave.0, track.bars(LIVE_WINDOWS, Fold::Peak));
+        assert_eq!(paused.timer, "REC 00:02");
+        // A level while paused is no window of the recording.
+        record("level", now + 50, 0, 0, 9_000);
+        assert_eq!(bar().wave.0, track.bars(LIVE_WINDOWS, Fold::Peak));
+        tap("rec_play");
+        let playing = bar();
+        assert_eq!(playing.effects, ["play"]);
+        assert_eq!(
+            ids(&playing),
+            ["rec_discard", "rec_stop_play", "rec_resume", "rec_send"]
+        );
+        record("played", 0, 0, 0, 0);
+        assert_eq!(
+            ids(&bar()),
+            ["rec_discard", "rec_play", "rec_resume", "rec_send"]
+        );
+        tap("rec_resume");
+        let resumed = bar();
+        assert_eq!(resumed.effects, ["resume"]);
+        assert_eq!(resumed.phase, "locked");
+        let now = feed(&mut track, now + 50, 20, &|w| 3_000 + 50 * w as u32);
+        assert_eq!(bar().timer, "REC 00:03");
+        let _ = now;
+        tap("rec_send");
+        let sent = bar();
+        assert_eq!(sent.effects, ["finish"]);
+        assert_eq!((sent.phase.as_str(), sent.shown), ("sent", false));
+        // The finish effect: Java hands the PCM over, as 1222 did.
+        session
+            .request(Request::Voice {
+                peer: peer.clone(),
+                pcm: schema::Blob(le_bytes(&loquax::voice::test_speech(16_000, 3_500))),
+                rate: 16_000,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        let ours = voices();
+        assert_eq!(ours.len(), 1, "one voice message");
+        assert_eq!(ours[0].voice_levels.0, track.bars(BARS, Fold::Peak));
+        assert_eq!(ours[0].voice_levels.0.len(), BARS);
+        // Decoding it to play keeps the recording's own track.
+        let _: schema::VoicePcm = asked(
+            &session,
+            schema::Query::Voice {
+                peer: peer.clone(),
+                key: ours[0].key,
+            },
+        );
+        assert_eq!(voices()[0].voice_levels.0, track.bars(BARS, Fold::Peak));
+
+        // Nothing heard.
+        record("press", 40_000, 0, 0, 0);
+        let mut quiet = LevelTrack::default();
+        let now = feed(&mut quiet, 40_000, 39, &|w| (w % 2) as u32);
+        let early = bar();
+        assert_eq!(early.notice, "", "not before 2 s");
+        assert!(early.pulsing);
+        let now = feed(&mut quiet, now, 1, &|_| 0);
+        let silent = bar();
+        assert_eq!(silent.timer_ms, 2_000);
+        assert_eq!(silent.notice, "Nothing heard. Is the microphone allowed?");
+        assert_eq!(silent.notice_allow, "Allow the microphone");
+        assert!(!silent.pulsing, "the dot stops pulsing");
+        assert!(silent.moving, "it still records");
+        tap("rec_allow");
+        assert_eq!(bar().effects, ["ask_microphone"]);
+        feed(&mut quiet, now, 1, &|_| 2);
+        let back = bar();
+        assert_eq!((back.notice.as_str(), back.pulsing), ("", true));
+        tap("rec_discard");
+        assert_eq!(bar().effects, ["discard"]);
+        assert_eq!(voices().len(), 1, "the discarded one went nowhere");
+
+        // Words the library does not know.
+        for (input, verb) in [("hold", "rec_send"), ("press", "rec_forward")] {
+            assert!(session
+                .request(Request::Record {
+                    peer: peer.clone(),
+                    input: input.to_string(),
+                    now: 0,
+                    dx: 0,
+                    dy: 0,
+                    rms: 0,
+                })
+                .map_or(true, |()| input == "press"));
+            assert!(session
+                .request(Request::Recording {
+                    peer: peer.clone(),
+                    verb: verb.to_string(),
+                })
+                .map_or(true, |()| verb == "rec_send"));
+        }
+        tap("rec_discard");
+
+        // 1222's path, no recording: the stream's stand-in, then the
+        // decoded sound's own track.
+        session
+            .request(Request::Voice {
+                peer: peer.clone(),
+                pcm: schema::Blob(le_bytes(&loquax::voice::test_speech(16_000, 2_000))),
+                rate: 16_000,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        let plain = voices().pop().expect("the second voice message");
+        let sound: schema::VoicePcm = asked(
+            &session,
+            schema::Query::Voice {
+                peer: peer.clone(),
+                key: plain.key,
+            },
+        );
+        let decoded = LevelTrack::from_pcm(&le_samples(&sound.pcm.0), sound.rate);
+        let drawn = voices().pop().expect("still there");
+        assert_eq!(drawn.voice_levels.0, decoded.bars(BARS, Fold::Peak));
+        session.stop();
+    })
+    .await
+    .expect("the session");
+    node.kill().await;
+}

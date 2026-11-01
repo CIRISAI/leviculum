@@ -14,8 +14,8 @@ use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Bar, BarButton, Blob, CandidateRow, Chip, ContactCopy,
     ConversationRow, Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info,
     LinkRow, Links, MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me,
-    MessageRow, Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, ShareRow,
-    Shared, SharedRow, Shares, Start, Started, SuggestionRow, Suggestions,
+    MessageRow, Messages, PositionRow, Query, Recents, Recording, RegionRow, Request, Run, RunRow,
+    ShareRow, Shared, SharedRow, Shares, Start, Started, SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -239,6 +239,17 @@ fn request() -> impl Strategy<Value = Request> {
         text().prop_map(|peer| Request::ShareFix { peer }),
         (text(), text()).prop_map(|(peer, span)| Request::StartShare { peer, span }),
         text().prop_map(|peer| Request::StopShare { peer }),
+        ((text(), text()), (i64s(), i32s(), i32s(), u32s())).prop_map(
+            |((peer, input), (now, dx, dy, rms))| Request::Record {
+                peer,
+                input,
+                now,
+                dx,
+                dy,
+                rms,
+            }
+        ),
+        (text(), text()).prop_map(|(peer, verb)| Request::Recording { peer, verb }),
     ]
 }
 
@@ -296,6 +307,7 @@ fn query() -> impl Strategy<Value = Query> {
             index
         }),
         (text(), i64s()).prop_map(|(peer, key)| Query::Voice { peer, key }),
+        text().prop_map(|peer| Query::Recording { peer }),
     ]
 }
 
@@ -503,6 +515,71 @@ fn messages() -> BoxedStrategy<Messages> {
                 fix_words: bar.fix_words,
                 share,
                 share_stop,
+                recording: bar.recording,
+            },
+        )
+        .boxed()
+}
+
+/// The recording bar (1276), boxed as [`bar`] is.
+fn recording() -> BoxedStrategy<Recording> {
+    (
+        (u32s(), any::<bool>(), text(), any::<bool>(), any::<bool>()),
+        (
+            text(),
+            u32s(),
+            any::<bool>(),
+            blob(),
+            any::<bool>(),
+            text(),
+            u32s(),
+        ),
+        (text(), u32s(), any::<bool>(), text()),
+        (text(), any::<bool>(), u32s()),
+        (
+            prop::collection::vec(bar_button(), 0..5),
+            text(),
+            text(),
+            texts(),
+        ),
+        (u32s(), u32s(), u32s(), u32s()),
+    )
+        .prop_map(
+            |(
+                (v, ok, phase, shown, pulsing),
+                (timer, timer_ms, amber, wave, moving, wave_label, wave_slots),
+                (cancel, cancel_progress, armed, held),
+                (lock, lock_closed, lock_progress),
+                (buttons, notice, notice_allow, effects),
+                (cancel_dp, lock_dp, window_ms, longest_ms),
+            )| Recording {
+                v,
+                ok,
+                phase,
+                shown,
+                pulsing,
+                timer,
+                timer_ms,
+                amber,
+                wave,
+                moving,
+                wave_label,
+                wave_slots,
+                cancel,
+                cancel_progress,
+                armed,
+                held,
+                lock,
+                lock_closed,
+                lock_progress,
+                buttons,
+                notice,
+                notice_allow,
+                effects,
+                cancel_dp,
+                lock_dp,
+                window_ms,
+                longest_ms,
             },
         )
         .boxed()
@@ -551,13 +628,13 @@ fn bar() -> BoxedStrategy<Bar> {
             text(),
         ),
         (text(), text(), prop::collection::vec(bar_button(), 0..4)),
-        (any::<bool>(), i32s(), i32s(), text()),
+        (any::<bool>(), i32s(), i32s(), text(), text()),
     )
         .prop_map(
             |(
                 (v, round, buttons, hint, staged),
                 (sheet, sheet_title, sheet_rows),
-                (has_fix, fix_lat_e6, fix_lon_e6, fix_words),
+                (has_fix, fix_lat_e6, fix_lon_e6, fix_words, recording),
             )| Bar {
                 v,
                 round,
@@ -571,6 +648,7 @@ fn bar() -> BoxedStrategy<Bar> {
                 fix_lat_e6,
                 fix_lon_e6,
                 fix_words,
+                recording,
             },
         )
         .boxed()
@@ -1062,6 +1140,11 @@ proptest! {
     #[test]
     fn the_running_shares_round_trip(shares in shares()) {
         round_trips(&shares)?;
+    }
+
+    #[test]
+    fn the_recording_bar_round_trips(recording in recording()) {
+        round_trips(&recording)?;
     }
 
     #[test]

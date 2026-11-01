@@ -180,27 +180,13 @@ public class ChatActivity extends Activity implements Events.Listener {
     private final ExecutorService voices = Executors.newSingleThreadExecutor();
     private final ExecutorService playback = Executors.newSingleThreadExecutor();
     private final Voice.Player player = new Voice.Player();
-    /** The recording while the microphone is held, else null. */
-    private Voice.Recorder recorder;
-    /** Where the finger went down on the microphone, to tell a slide to cancel. */
-    private float recordFrom;
+    /**
+     * The recording bar (1276): the compose row gives way to it while a
+     * voice message records; the library decides, it draws and records.
+     */
+    private RecordingBar recordingBar;
     /** The played part of the voice message playing, for its bar when the row is drawn again. */
     private float played;
-    private final Runnable recordTick = new Runnable() {
-        @Override
-        public void run() {
-            if (recorder == null) return;
-            long ms = recorder.ms();
-            if (ms >= Voice.LONGEST_MS) {
-                stopRecording(true);
-                return;
-            }
-            long s = ms / 1000;
-            line(String.format(Locale.ROOT, "\u25CF %d:%02d   \u2039 %s", s / 60, s % 60,
-                    getString(R.string.voice_cancel)), true);
-            ticker.postDelayed(this, 200);
-        }
-    };
     /**
      * The last search in this conversation and the key of its match shown, null for none: a key
      * has either sign (Rust's schema::wire_key), so no number stands for none.
@@ -213,6 +199,9 @@ public class ChatActivity extends Activity implements Events.Listener {
      * group and the library's words (a position's age, the day line) ripen.
      */
     private final Handler ticker = new Handler(Looper.getMainLooper());
+    /** Whether the system was asked for the microphone once (1276). */
+    private static final String MIC_ASKS = "asks";
+    private static final String MIC_ASKED = "microphone";
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
@@ -287,6 +276,42 @@ public class ChatActivity extends Activity implements Events.Listener {
         record = (ImageButton) findViewById(R.id.record);
         record.setImageDrawable(new Glyph(Glyph.Kind.MIC, secondary));
         barButtons.put("record", record);
+        // The microphone in the field (1222, 1270, 1276), as in Signal:
+        // held, the compose row is the recording bar and it records; let
+        // go, the message goes; slid left, it is gone; swiped up, it
+        // locks. It shows only while there is nothing typed.
+        recordingBar = new RecordingBar(this, (RecordFrame) findViewById(R.id.compose_frame),
+                findViewById(R.id.compose_row), record, new RecordingBar.Host() {
+                    @Override
+                    public String peer() {
+                        return peer;
+                    }
+
+                    @Override
+                    public void line(String text) {
+                        ChatActivity.this.line(text);
+                    }
+
+                    @Override
+                    public boolean mayRecord() {
+                        return microphoneAllowed();
+                    }
+
+                    @Override
+                    public void stopPlaying() {
+                        player.stop();
+                    }
+
+                    @Override
+                    public void send(byte[] pcm, int rate) {
+                        sendVoice(pcm, rate);
+                    }
+
+                    @Override
+                    public void askMicrophone() {
+                        askForMicrophone();
+                    }
+                });
         ImageButton plus = (ImageButton) findViewById(R.id.plus);
         plus.setImageDrawable(new Glyph(Glyph.Kind.PLUS, getColor(R.color.on_send)));
         plus.setOnClickListener(new View.OnClickListener() {
@@ -427,65 +452,56 @@ public class ChatActivity extends Activity implements Events.Listener {
                 send();
             }
         });
-        // The microphone in the field (1222, 1270), as in Signal: held, it
-        // records; let go, the message goes; slid left, it is gone. It
-        // shows only while there is nothing typed.
-        record.setOnTouchListener(new View.OnTouchListener() {
-            @Override
-            public boolean onTouch(View v, android.view.MotionEvent event) {
-                switch (event.getActionMasked()) {
-                    case android.view.MotionEvent.ACTION_DOWN:
-                        recordFrom = event.getRawX();
-                        startRecording();
-                        return true;
-                    case android.view.MotionEvent.ACTION_MOVE:
-                        if (recorder != null && recordFrom - event.getRawX() > dp(96)) {
-                            stopRecording(false);
-                        }
-                        return true;
-                    case android.view.MotionEvent.ACTION_UP:
-                        stopRecording(true);
-                        return true;
-                    case android.view.MotionEvent.ACTION_CANCEL:
-                        stopRecording(false);
-                        return true;
-                    default:
-                        return true;
-                }
-            }
-        });
     }
 
-    /** The microphone pressed: the permission first, at its first use. */
-    private void startRecording() {
+    /**
+     * Whether the microphone may record: at its first use the permission
+     * is asked, and the press after the grant records.
+     */
+    private boolean microphoneAllowed() {
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+        askedMicrophone();
+        requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, Voice.ASK);
+        return false;
+    }
+
+    /** Remembers that the system was asked for the microphone once. */
+    private void askedMicrophone() {
+        getSharedPreferences(MIC_ASKS, MODE_PRIVATE).edit().putBoolean(MIC_ASKED, true).apply();
+    }
+
+    /**
+     * The silence line's button (1276, `ask_microphone`), as the location's
+     * way runs (1201): ask while the system still may show its question,
+     * else (asked and refused for good, or granted and still nothing heard,
+     * the privacy switch or another app) open the app's page of the
+     * phone's settings, where the microphone is allowed.
+     */
+    private void askForMicrophone() {
+        boolean granted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        boolean asked = getSharedPreferences(MIC_ASKS, MODE_PRIVATE).getBoolean(MIC_ASKED, false);
+        if (!granted && (!asked
+                || shouldShowRequestPermissionRationale(android.Manifest.permission.RECORD_AUDIO))) {
+            recordingBar.verb("rec_discard");
+            askedMicrophone();
             requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, Voice.ASK);
             return;
         }
-        player.stop();
-        Voice.Recorder started = new Voice.Recorder(this);
-        if (!started.start()) {
+        recordingBar.verb("rec_discard");
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.fromParts("package", getPackageName(), null)));
+        } catch (RuntimeException none) {
             line(getString(R.string.voice_no_microphone));
-            return;
         }
-        recorder = started;
-        record.setPressed(true);
-        record.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-        ticker.post(recordTick);
     }
 
-    /** The microphone let go (`send`) or slid away: the recording goes to the library, or nowhere. */
-    private void stopRecording(boolean sendIt) {
-        final Voice.Recorder done = recorder;
-        if (done == null) return;
-        recorder = null;
-        ticker.removeCallbacks(recordTick);
-        record.setPressed(false);
-        final byte[] pcm = done.stop();
-        final int rate = done.rate();
-        line("");
-        if (!sendIt) return;
+    /** The recording's PCM, handed over on the library's `finish`: coded and sent off the UI thread. */
+    private void sendVoice(final byte[] pcm, final int rate) {
         voices.execute(new Runnable() {
             @Override
             public void run() {
@@ -538,7 +554,7 @@ public class ChatActivity extends Activity implements Events.Listener {
     @Override
     protected void onPause() {
         ticker.removeCallbacks(tick);
-        stopRecording(false);
+        recordingBar.leave();
         player.stop();
         Core.front(false);
         Events.listen(null);
@@ -554,6 +570,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         photos.shutdown();
         voices.shutdown();
         player.stop();
+        recordingBar.destroy();
         playback.shutdownNow();
         super.onDestroy();
     }
@@ -627,6 +644,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         showStaged(Core.str(answer, "staged"));
         showSheet(answer);
+        recordingBar.adopt(Core.str(answer, "recording"));
     }
 
     /** The staged photo's row: its thumbnail drawn off the UI thread once per photo. */
