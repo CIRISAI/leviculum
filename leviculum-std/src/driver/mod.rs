@@ -4127,6 +4127,12 @@ impl ReticulumNode {
     /// `Err(RequestTimedOut)` on the in-protocol timeout and
     /// `Err(LinkClosed)` if the link dies first — never a hang. Cancel-safe;
     /// the caller owns any additional wall-clock bound.
+    ///
+    /// A request past the link MDU travels as a request Resource, as the
+    /// reference's `Link.request()` sends it
+    /// (`reference/Reticulum/RNS/Link.py:514-517`): a photo handed to a
+    /// home node's `/send`, say. Its id is then the hash of the packed
+    /// request, and the response resolves the future the same way.
     pub async fn send_request_awaited(
         &self,
         link_id: &LinkId,
@@ -4137,9 +4143,16 @@ impl ReticulumNode {
         dispatch_committed(&self.action_dispatch_tx, || {
             let (request_id, output) = {
                 let mut inner = self.inner.lock_recover();
-                inner
-                    .send_request(link_id, path, data, timeout_ms)
-                    .map_err(Error::Request)?
+                match inner.send_request(link_id, path, data, timeout_ms) {
+                    Ok(sent) => sent,
+                    Err(leviculum_core::RequestError::PayloadTooLarge) => {
+                        let (request_id, _resource_hash, output) = inner
+                            .send_request_resource(link_id, path, data, timeout_ms)
+                            .map_err(Error::Resource)?;
+                        (request_id, output)
+                    }
+                    Err(error) => return Err(Error::Request(error)),
+                }
             };
             let response = self
                 .completions
