@@ -118,6 +118,9 @@ pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
     if model.show_places {
         render_places(model, frame, frame.area());
     }
+    if let Some(results) = &model.names {
+        render_names(model, results, frame, frame.area());
+    }
     if model.show_help {
         render_help(model, frame, frame.area());
     }
@@ -731,6 +734,61 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
             .end_symbol(None);
         frame.render_stateful_widget(scrollbar, overlay.inner(Margin::new(0, 1)), &mut state);
     }
+}
+
+/// Draw the name-search result list: one row per hit (`name ·hash4`, hops,
+/// last seen, pin mark), the selected row highlighted, and a last line that is
+/// either the key hint or, while asking, the "same name, other key" question.
+fn render_names(model: &Model, results: &NameResults, frame: &mut Frame, area: Rect) {
+    let text_style = chrome_text_style(model.no_color, model.theme);
+    let muted = chrome_muted_style(model.no_color, model.theme);
+    let selected = paint(model.tokens().selection);
+    let now = model.wall_now();
+
+    let width = 76u16.min(area.width);
+    let rows = names_viewport(model).min(results.hits.len());
+    let height = (rows as u16 + 3).min(area.height);
+    let overlay = ratatui::layout::Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let inner = overlay.width.saturating_sub(2) as usize;
+    let offset = results.sel.saturating_sub(rows.saturating_sub(1));
+
+    let mut lines: Vec<RtLine<'static>> = results
+        .hits
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(rows)
+        .map(|(i, hit)| {
+            let style = if i == results.sel {
+                selected
+            } else {
+                text_style
+            };
+            let row = format!("  {}", crate::names::result_row(hit, &model.pins, now));
+            RtLine::from(RtSpan::styled(truncate_to_cols(&row, inner), style))
+        })
+        .collect();
+    let footer = match results.hits.get(results.sel) {
+        Some(hit) if results.confirm => crate::names::conflict_prompt(hit, &model.pins),
+        _ => "Enter open · Esc close · a name is a hint, the hash is the address".to_string(),
+    };
+    let footer_style = if results.confirm { text_style } else { muted };
+    lines.push(RtLine::from(RtSpan::styled(
+        truncate_to_cols(&footer, inner),
+        footer_style,
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" sites matching \"{}\" ", results.query))
+        .style(chrome_style(model.no_color, model.theme));
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), overlay);
 }
 
 /// One places-panel row: its label, reverse-video highlighted when it is the
@@ -1427,6 +1485,13 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                     let _ = model.bookmarks.save(path);
                 }
             }
+            Effect::SavePins => {
+                // Same rule as the bookmarks: a failed write never takes the
+                // browser down, the pins then last for the session.
+                if let Some(path) = &model.pins_path {
+                    let _ = model.pins.save(path);
+                }
+            }
             Effect::Quit => model.quit = true,
         }
     }
@@ -1467,6 +1532,13 @@ pub async fn run_tui(
         .map(Bookmarks::load)
         .unwrap_or_default();
 
+    // The pins (`names.rs`), loaded the same best-effort way.
+    let pins_path = crate::names::default_path();
+    let pins = pins_path
+        .as_deref()
+        .map(crate::names::PinStore::load)
+        .unwrap_or_default();
+
     let mut model = Model {
         no_color: opts.no_color,
         no_images: opts.no_images,
@@ -1474,6 +1546,8 @@ pub async fn run_tui(
         theme,
         bookmarks,
         bookmarks_path,
+        pins,
+        pins_path,
         // The session's own fingerprint is stable for its whole life: set once.
         fingerprint: session.fingerprint_hex(),
         ..Model::default()
@@ -1906,7 +1980,9 @@ mod tests {
     fn bad_url_sets_error_and_no_navigate() {
         let mut m = model_from_sample(content_width(80), (80, 24));
         press(&mut m, KeyCode::Char(':'), KeyModifiers::NONE);
-        type_str(&mut m, "not-a-hash");
+        // A scheme form is an address, never a name search, so a bad one
+        // stays a bad URL.
+        type_str(&mut m, "nomadnet://not-a-hash");
         let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
         assert!(effects.is_empty());
         let toast = m.toast.as_ref().expect("an error toast is raised");
@@ -7304,6 +7380,185 @@ Text unter dem Bild.
         assert_eq!(
             painted, cols as usize,
             "the picture's first row must be painted across its full width"
+        );
+    }
+
+    // --- names: search and pins ----------------------------------------
+
+    const MARCEL: [u8; 16] = [
+        0xfa, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+        0xcd,
+    ];
+    const IMPOSTOR: [u8; 16] = [0x9c; 16];
+
+    /// A model with two sites heard: Marcel (pinned) and one wearing his name
+    /// under another key, plus an unrelated one.
+    fn names_model() -> Model {
+        let mut m = loaded_model((90, 24));
+        m.clock = Some(10_000);
+        m.node_registry
+            .upsert(MARCEL, Some("Marcel".to_string()), Some(3), 10_000 - 7200);
+        m.node_registry
+            .upsert(IMPOSTOR, Some("Marcel".to_string()), Some(1), 10_000 - 30);
+        m.node_registry.upsert(
+            [0x17; 16],
+            Some("Solar Nord".to_string()),
+            Some(2),
+            10_000 - 600,
+        );
+        m.pins.note_visit(Some("Marcel"), &MARCEL, 100);
+        m
+    }
+
+    fn enter_query(m: &mut Model, query: &str) -> Vec<Effect> {
+        press(m, KeyCode::Char(':'), KeyModifiers::NONE);
+        type_str(m, query);
+        press(m, KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn an_exact_unambiguous_name_opens_directly() {
+        let mut m = names_model();
+        let effects = enter_query(&mut m, "solar nord");
+        assert_eq!(
+            effects,
+            vec![Effect::Navigate(crate::app::node_target([0x17; 16]))]
+        );
+        assert!(m.names.is_none());
+        assert_eq!(m.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn a_shared_name_lists_the_pinned_site_first() {
+        let mut m = names_model();
+        let effects = enter_query(&mut m, "Marcel");
+        assert!(effects.is_empty(), "{effects:?}");
+        let results = m.names.as_ref().expect("result list open");
+        let dests: Vec<[u8; 16]> = results.hits.iter().map(|h| h.dest).collect();
+        assert_eq!(dests, vec![MARCEL, IMPOSTOR]);
+        // Enter on the pinned one opens it with no question.
+        let effects = press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            effects,
+            vec![Effect::Navigate(crate::app::node_target(MARCEL))]
+        );
+        assert!(m.names.is_none());
+    }
+
+    #[test]
+    fn the_other_key_asks_once_and_a_yes_pins_it_beside_the_first() {
+        let mut m = names_model();
+        enter_query(&mut m, "fa01");
+        // The short hash finds exactly Marcel's pinned site. It is listed, not
+        // opened: only an exact name opens directly.
+        let dests: Vec<[u8; 16]> = m
+            .names
+            .as_ref()
+            .unwrap()
+            .hits
+            .iter()
+            .map(|h| h.dest)
+            .collect();
+        assert_eq!(dests, vec![MARCEL]);
+
+        let mut m = names_model();
+        enter_query(&mut m, "marcel");
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        // Enter on the conflicting row asks instead of opening.
+        assert!(press(&mut m, KeyCode::Enter, KeyModifiers::NONE).is_empty());
+        assert!(m.names.as_ref().is_some_and(|r| r.confirm));
+        // Any key but y returns to the list, nothing pinned.
+        assert!(press(&mut m, KeyCode::Char('n'), KeyModifiers::NONE).is_empty());
+        assert!(m.names.as_ref().is_some_and(|r| !r.confirm));
+        assert_eq!(m.pins.dests_for("Marcel"), vec![MARCEL]);
+        // Asked again, a yes pins the second key and opens it.
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let effects = press(&mut m, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SavePins,
+                Effect::Navigate(crate::app::node_target(IMPOSTOR))
+            ]
+        );
+        assert_eq!(m.pins.dests_for("marcel"), vec![MARCEL, IMPOSTOR]);
+        assert_eq!(m.pins.list().len(), 2);
+    }
+
+    #[test]
+    fn a_name_nobody_announced_says_so_and_keeps_the_editor() {
+        let mut m = names_model();
+        let effects = enter_query(&mut m, "zebra");
+        assert!(effects.is_empty());
+        let toast = m.toast.as_ref().expect("a note is raised");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert!(toast.text.contains("zebra"), "{}", toast.text);
+        assert_eq!(m.mode, Mode::Address);
+    }
+
+    #[test]
+    fn a_fresh_load_pins_the_visited_site_once() {
+        let mut m = names_model();
+        enter_query(&mut m, "solar nord");
+        let effects = update(
+            &mut m,
+            AppEvent::PageLoaded {
+                doc: parse("hi"),
+                title: "Solar".to_string(),
+            },
+        );
+        assert_eq!(effects.first(), Some(&Effect::SavePins));
+        assert_eq!(m.pins.dests_for("Solar Nord"), vec![[0x17; 16]]);
+        let pin = m.pins.list().last().unwrap().clone();
+        assert_eq!((pin.first_seen, pin.last_seen), (10_000, 10_000));
+    }
+
+    #[test]
+    fn a_nururl_opens_and_names_the_ignored_hint() {
+        let mut m = names_model();
+        let hash = "0123456789abcdef0123456789abcdef";
+        let effects = enter_query(
+            &mut m,
+            &format!("nururl:{hash}/page/x.mu?nn.a=1&hint=marcel"),
+        );
+        let Some(Effect::Navigate(target)) = effects.first() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(target.path, "/page/x.mu");
+        assert_eq!(target.fields, vec![("var_a".to_string(), "1".to_string())]);
+        let toast = m.toast.as_ref().expect("the ignored hint is named");
+        assert!(toast.text.contains("hint=marcel"), "{}", toast.text);
+    }
+
+    #[test]
+    fn the_result_list_renders_its_rows_and_the_question() {
+        let mut m = names_model();
+        enter_query(&mut m, "marcel");
+        let buffer = render(&m, 90, 24);
+        let screen: Vec<String> = (0..24).map(|y| row_text(&buffer, y, 90)).collect();
+        let joined = screen.join("\n");
+        assert!(joined.contains("sites matching \"marcel\""), "{joined}");
+        let pinned = screen
+            .iter()
+            .position(|r| r.contains("Marcel ·fa01  ·  3 hops  ·  2 h ago  pinned"))
+            .expect("pinned row");
+        let other = screen
+            .iter()
+            .position(|r| r.contains("Marcel ·9c9c  ·  1 hop  ·  just now  ! name pinned to ·fa01"))
+            .expect("conflict row");
+        assert_eq!(other, pinned + 1, "{joined}");
+        assert!(joined.contains("Enter open"), "{joined}");
+
+        press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
+        press(&mut m, KeyCode::Enter, KeyModifiers::NONE);
+        let buffer = render(&m, 90, 24);
+        let joined: String = (0..24)
+            .map(|y| row_text(&buffer, y, 90))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("\"Marcel\" is pinned to ·fa01; this is ·9c9c"),
+            "{joined}"
         );
     }
 }

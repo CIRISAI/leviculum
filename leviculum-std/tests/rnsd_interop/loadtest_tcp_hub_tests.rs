@@ -1556,7 +1556,7 @@ async fn a_seventeenth_client_from_one_source_is_refused_and_the_sixteen_lose_no
         socket
             .bind((SOURCE, 0).into())
             .expect("bind the shared source");
-        socket.connect(hub_addr).await.expect("connect to the hub")
+        socket.connect(hub_addr).await
     };
     let delivered = |per_source: &HashMap<u32, (u32, Option<u32>, Option<u32>)>, id: u32| {
         per_source.get(&id).map_or(0, |(distinct, _, _)| *distinct)
@@ -1566,7 +1566,12 @@ async fn a_seventeenth_client_from_one_source_is_refused_and_the_sixteen_lose_no
     // the seventeenth connects, so the hub holds every one of them.
     let mut held = Vec::with_capacity(CAP);
     for id in 0..CAP as u32 {
-        let mut stream = connect().await;
+        let mut stream = connect().await.unwrap_or_else(|e| {
+            panic!(
+                "held client {id}: connect to the hub: {e}\n--- hub log ---\n{}",
+                read_log(&hub.log_path)
+            )
+        });
         stream.write_all(&frame_for(id, 0)).await.expect("write");
         held.push(stream);
     }
@@ -1584,9 +1589,18 @@ async fn a_seventeenth_client_from_one_source_is_refused_and_the_sixteen_lose_no
     }
 
     // The seventeenth and eighteenth: closed by the hub within the window,
-    // and the frame each wrote never arrives.
+    // and the frame each wrote never arrives. The hub refuses with a reset
+    // right after accept (`tcp.rs::refuse`), and on loopback that reset can
+    // land before the client task polls its connect: tokio then reads it from
+    // `SO_ERROR` and the connect itself fails with ECONNRESET. That is the
+    // refusal arriving early, not a fault; under a CPU quota it is the usual
+    // order (1250: 17 of 20 runs).
     for id in CAP as u32..CAP as u32 + 2 {
-        let mut stream = connect().await;
+        let mut stream = match connect().await {
+            Ok(stream) => stream,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            Err(e) => panic!("client {id} past the cap: connect to the hub: {e}"),
+        };
         let _ = stream.write_all(&frame_for(id, 0)).await;
         let closed = tokio::time::timeout(CLOSE_WINDOW, async {
             let mut buf = [0u8; 512];

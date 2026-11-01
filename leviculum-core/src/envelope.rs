@@ -381,8 +381,36 @@ pub const PN_LIST_MAX_HASHES: usize = 16;
 pub const TYPE_ACK: u8 = 0x81;
 /// Named refusal; payload is `[refused_type, reason]`.
 pub const TYPE_REFUSAL: u8 = 0x82;
-/// Capability report; payload is `[ENVELOPE_VERSION, accepted types...]`.
+/// Capability report; payload is `[ENVELOPE_VERSION, accepted types...]`,
+/// optionally followed by [`CAPABILITY_FACTS_MARKER`] and fact bytes
+/// ([`encode_capability_report_with_facts`]).
 pub const TYPE_CAPABILITY_REPORT: u8 = 0x83;
+
+/// Separates a capability report's accepted types from the facts the board
+/// states about itself. [`TYPE_UNSPECIFIED`], which no firmware accepts, so
+/// the boundary cannot be mistaken for a type.
+///
+/// Backward compatible by construction: a host from before the facts reads
+/// everything after the version as accepted types and only ever asks
+/// whether one named type is among them (periculum-wire's
+/// `capability_report_accepts`, `periculum/periculum-wire/src/envelope.rs:331-334`;
+/// lnflash's `probe_capabilities`). The marker is `0x00` and every fact
+/// lives in [`CAPABILITY_FACT_RANGE`], above any frame type, so neither can
+/// answer such a question with a false yes.
+pub const CAPABILITY_FACTS_MARKER: u8 = TYPE_UNSPECIFIED;
+
+/// The byte values a capability fact may take: `0xF0..=0xFF`, reserved here
+/// so no frame type is ever allocated among them (host commands count up
+/// from 0x01, board answers from 0x81).
+pub const CAPABILITY_FACT_RANGE: core::ops::RangeInclusive<u8> = 0xF0..=0xFF;
+
+/// Fact: the board shares one UART between its debug text and its HDLC
+/// transport under XON/XOFF flow control (`leviculum-nrf/serial-mux`, the
+/// ThinkNode M9). A host must then escape 0x11 and 0x13 in every frame and
+/// strip the board's own flow bytes; lnsd turns its mux on when it reads
+/// this (`interfaces::serial_mux` in leviculum-std). Its presence is the
+/// value: a report that carries it says `serial_mux=1`.
+pub const FACT_SERIAL_MUX: u8 = 0xF0;
 /// Radio report (Codeberg #349); payload is the same parameter block
 /// [`TYPE_RADIO_CONFIG`] carries, describing what the radio is running.
 ///
@@ -1169,16 +1197,48 @@ pub fn decode_refusal_payload(payload: &[u8]) -> Option<(u8, u8)> {
 
 /// Encode a complete capability report for the given accepted types.
 pub fn encode_capability_report(accepted: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(1 + accepted.len());
+    encode_capability_report_with_facts(accepted, &[])
+}
+
+/// Encode a complete capability report that also states `facts` about the
+/// board (each one in [`CAPABILITY_FACT_RANGE`], e.g. [`FACT_SERIAL_MUX`]).
+/// No facts gives exactly the report [`encode_capability_report`] always
+/// wrote; with facts the payload is
+/// `[ENVELOPE_VERSION, accepted..., CAPABILITY_FACTS_MARKER, facts...]`.
+pub fn encode_capability_report_with_facts(accepted: &[u8], facts: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(2 + accepted.len() + facts.len());
     payload.push(ENVELOPE_VERSION);
     payload.extend_from_slice(accepted);
+    if !facts.is_empty() {
+        payload.push(CAPABILITY_FACTS_MARKER);
+        payload.extend_from_slice(facts);
+    }
     encode_frame(TYPE_CAPABILITY_REPORT, &payload)
 }
 
 /// Decode a capability-report payload into `(version, accepted types)`.
+/// The accepted types end at [`CAPABILITY_FACTS_MARKER`] if the report
+/// carries facts ([`decode_capability_report_facts`]).
 pub fn decode_capability_report_payload(payload: &[u8]) -> Option<(u8, &[u8])> {
-    let (version, accepted) = payload.split_first()?;
+    let (version, rest) = payload.split_first()?;
+    let accepted = match rest.iter().position(|&b| b == CAPABILITY_FACTS_MARKER) {
+        Some(at) => &rest[..at],
+        None => rest,
+    };
     Some((*version, accepted))
+}
+
+/// The facts a capability-report payload states, empty for a report
+/// without any (every firmware before the facts). `None` for a payload too
+/// short to be a report.
+pub fn decode_capability_report_facts(payload: &[u8]) -> Option<&[u8]> {
+    let (_version, rest) = payload.split_first()?;
+    Some(
+        match rest.iter().position(|&b| b == CAPABILITY_FACTS_MARKER) {
+            Some(at) => &rest[at + 1..],
+            None => &[],
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -3061,6 +3121,56 @@ mod tests {
         let (version, accepted) = decode_capability_report_payload(frame.payload).unwrap();
         assert_eq!(version, ENVELOPE_VERSION);
         assert_eq!(accepted, ACCEPTED);
+        assert_eq!(decode_capability_report_facts(frame.payload), Some(&[][..]));
+    }
+
+    /// A report without facts is byte for byte the report from before them,
+    /// and a report with the serial-mux fact gives both halves back.
+    #[test]
+    fn the_capability_facts_round_trip() {
+        assert_eq!(
+            encode_capability_report_with_facts(ACCEPTED, &[]),
+            encode_capability_report(ACCEPTED)
+        );
+        let report = encode_capability_report_with_facts(ACCEPTED, &[FACT_SERIAL_MUX]);
+        let frame = decode_frame(&report).unwrap();
+        assert_eq!(
+            frame.payload.last(),
+            Some(&FACT_SERIAL_MUX),
+            "{:02x?}",
+            frame.payload
+        );
+        let (version, accepted) = decode_capability_report_payload(frame.payload).unwrap();
+        assert_eq!(version, ENVELOPE_VERSION);
+        assert_eq!(accepted, ACCEPTED);
+        assert_eq!(
+            decode_capability_report_facts(frame.payload),
+            Some(&[FACT_SERIAL_MUX][..])
+        );
+        assert_eq!(decode_capability_report_facts(&[]), None);
+    }
+
+    /// A host from before the facts reads everything after the version as
+    /// accepted types and asks `contains` (periculum-wire's
+    /// `capability_report_accepts`). For every byte that is or could become
+    /// a frame type, the fact-carrying report answers it exactly as the
+    /// plain report does.
+    #[test]
+    fn an_old_host_reads_a_fact_carrying_report_unchanged() {
+        let plain = encode_capability_report(ACCEPTED);
+        let with = encode_capability_report_with_facts(ACCEPTED, &[FACT_SERIAL_MUX]);
+        let old_accepts = |report: &[u8], t: u8| {
+            let frame = decode_frame(report).unwrap();
+            frame.payload[1..].contains(&t)
+        };
+        for t in 0x01..*CAPABILITY_FACT_RANGE.start() {
+            assert_eq!(
+                old_accepts(&plain, t),
+                old_accepts(&with, t),
+                "type {t:#04x}"
+            );
+        }
+        assert!(CAPABILITY_FACT_RANGE.contains(&FACT_SERIAL_MUX));
     }
 
     #[test]

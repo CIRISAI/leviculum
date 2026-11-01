@@ -22,9 +22,10 @@
 //!   hardware: one raw 0x13 from the host mutes it until an XON or a reset
 //!   (1238). The host senders that keep this: periculum, for every frame it
 //!   writes to an LNode (periculum 0c455f7 and 1b81660,
-//!   `periculum-wire/src/hdlc.rs`), and lnsd, for a `SerialInterface` block
-//!   with `serial_mux = yes`, which also strips the board's flow bytes on
-//!   read (`leviculum-std/src/interfaces/serial_mux.rs`, 1242, 8ed89b9b). A
+//!   `periculum-wire/src/hdlc.rs`), and lnsd, for a `SerialInterface` whose
+//!   board states `serial_mux=1` in its capability report (or whose block
+//!   says `serial_mux = yes`), which also strips the board's flow bytes on
+//!   read (`leviculum-std/src/interfaces/serial_mux.rs`, 1242, 1249). A
 //!   plain `SerialInterface` keeps its bytes: Python's reader does not undo
 //!   an escaped flow byte.
 //! * The host separates the two with [`Splitter`]: out-of-frame bytes are
