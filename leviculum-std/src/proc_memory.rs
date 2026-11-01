@@ -17,9 +17,18 @@
 //!   and thread stacks each land in a recognisable size class, and the ten
 //!   largest regions are named by address.
 //! * The `gap:` line does the subtraction a reader would otherwise do by
-//!   hand: resident plus swapped, minus the tracked total (or, in a
-//!   `heap-accounting` build, the measured live bytes instead), minus the
-//!   allocator's free bytes, minus its mmapped bytes.
+//!   hand: resident plus swapped, minus the resident file pages, minus the
+//!   tracked total (or, in a `heap-accounting` build, the measured live
+//!   bytes instead), minus the allocator's free bytes, minus its mmapped
+//!   bytes.
+//!
+//! The file pages come off because they are not the process's memory to
+//! account: they are the binary's text and the libraries, mapped from disk,
+//! and under memory pressure the kernel drops them from the resident set
+//! without swapping them and faults them back in as the code runs. Left in,
+//! they moved the line by megabytes on a host short of memory while nothing
+//! the daemon owns changed (#478, order 1253: lnpnd 10.0 to 1.9 MB resident
+//! with 0.56 MB swapped, then back up through the canary's window).
 //!
 //! Every parser here takes text, not a path, so the tests feed fixtures and
 //! the daemon feeds `/proc/self/*`.
@@ -33,6 +42,8 @@ pub struct StatusFields {
     pub threads: Option<u64>,
     /// `VmSwap:` in bytes (the file says kB).
     pub swap_bytes: Option<u64>,
+    /// `RssFile:` in bytes: resident pages mapped from files.
+    pub rss_file_bytes: Option<u64>,
 }
 
 /// Parse the fields the census needs out of `/proc/self/status` text.
@@ -46,6 +57,7 @@ pub fn parse_status(text: &str) -> StatusFields {
         match key {
             "Threads" => out.threads = value,
             "VmSwap" => out.swap_bytes = value.map(|kb: u64| kb * 1024),
+            "RssFile" => out.rss_file_bytes = value.map(|kb: u64| kb * 1024),
             _ => {}
         }
     }
@@ -248,6 +260,9 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
 /// each subtraction in turn. A term the process cannot measure is printed
 /// as `n/a` and subtracts nothing.
 ///
+/// `file` is the resident file pages (`RssFile`), taken off first: reclaim
+/// drops them without swapping (module docs).
+///
 /// `live` is the counting shim's balance ([`crate::heap_accounting`]), known
 /// only in a `heap-accounting` build. When it is known it is subtracted
 /// INSTEAD of `tracked`, which is then printed but not taken off: `tracked`
@@ -257,6 +272,7 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
 pub fn render_gap_line(
     rss: u64,
     swap: Option<u64>,
+    file: Option<u64>,
     tracked: Option<u64>,
     live: Option<u64>,
     view: Option<AllocatorView>,
@@ -278,6 +294,7 @@ pub fn render_gap_line(
         "gap: rss {rss} + swap {} = {left}",
         swap.map_or_else(|| "n/a".to_string(), |s| s.to_string())
     );
+    step(&mut out, &mut left, "file", file);
     match (live, tracked) {
         (Some(_), Some(t)) => {
             let _ = write!(out, "; tracked {t} (model, not subtracted)");
@@ -313,6 +330,7 @@ pub fn census_sections(rss: u64, tracked: Option<u64>) -> String {
     out.push_str(&render_gap_line(
         rss,
         status.swap_bytes,
+        status.rss_file_bytes,
         tracked,
         measured_live(),
         view,
@@ -342,6 +360,7 @@ mod tests {
         VmPeak:\t 1900000 kB\n\
         VmRSS:\t  907776 kB\n\
         VmData:\t 1841124 kB\n\
+        RssFile:\t    9216 kB\n\
         VmSwap:\t  893516 kB\n\
         Threads:\t13\n\
         SigQ:\t0/7000\n";
@@ -363,10 +382,11 @@ mod tests {
 ";
 
     #[test]
-    fn status_parser_reads_threads_and_swap() {
+    fn status_parser_reads_threads_swap_and_file_pages() {
         let s = parse_status(STATUS);
         assert_eq!(s.threads, Some(13));
         assert_eq!(s.swap_bytes, Some(893_516 * 1024));
+        assert_eq!(s.rss_file_bytes, Some(9_216 * 1024));
         assert_eq!(parse_status("Name:\tx\n"), StatusFields::default());
     }
 
@@ -430,13 +450,13 @@ mod tests {
             ..AllocatorView::default()
         };
         assert_eq!(
-            render_gap_line(1000, Some(500), Some(400), None, Some(view)),
-            "gap: rss 1000 + swap 500 = 1500; - tracked 400 = 1100; - live n/a; \
-             - allocator free 120 = 980; - mmapped 300 = 680; unaccounted 680\n"
+            render_gap_line(1000, Some(500), Some(100), Some(400), None, Some(view)),
+            "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; - tracked 400 = 1000; \
+             - live n/a; - allocator free 120 = 880; - mmapped 300 = 580; unaccounted 580\n"
         );
         assert_eq!(
-            render_gap_line(1000, None, Some(400), None, None),
-            "gap: rss 1000 + swap n/a = 1000; - tracked 400 = 600; - live n/a; \
+            render_gap_line(1000, None, None, Some(400), None, None),
+            "gap: rss 1000 + swap n/a = 1000; - file n/a; - tracked 400 = 600; - live n/a; \
              - allocator free n/a; - mmapped n/a; unaccounted 600\n"
         );
     }
@@ -447,13 +467,14 @@ mod tests {
     #[test]
     fn gap_line_subtracts_live_instead_of_tracked_when_measured() {
         assert_eq!(
-            render_gap_line(1000, Some(500), Some(400), Some(250), None),
-            "gap: rss 1000 + swap 500 = 1500; tracked 400 (model, not subtracted); \
-             - live 250 = 1250; - allocator free n/a; - mmapped n/a; unaccounted 1250\n"
+            render_gap_line(1000, Some(500), Some(100), Some(400), Some(250), None),
+            "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; \
+             tracked 400 (model, not subtracted); - live 250 = 1150; \
+             - allocator free n/a; - mmapped n/a; unaccounted 1150\n"
         );
         assert_eq!(
-            render_gap_line(1000, None, None, Some(250), None),
-            "gap: rss 1000 + swap n/a = 1000; tracked n/a; - live 250 = 750; \
+            render_gap_line(1000, None, None, None, Some(250), None),
+            "gap: rss 1000 + swap n/a = 1000; - file n/a; tracked n/a; - live 250 = 750; \
              - allocator free n/a; - mmapped n/a; unaccounted 750\n"
         );
     }
@@ -475,6 +496,93 @@ mod tests {
             assert!(gap.contains("; - tracked 1024 = "), "{gap}");
             assert!(gap.contains("; - live n/a;"), "{gap}");
         }
+    }
+
+    /// The `unaccounted` figure of a census line, as periculum reads it.
+    fn unaccounted_of(sections: &str) -> u64 {
+        sections
+            .lines()
+            .find(|l| l.starts_with("gap: "))
+            .and_then(|l| l.rsplit_once("; unaccounted "))
+            .and_then(|(_, v)| v.trim().parse().ok())
+            .unwrap_or_else(|| panic!("no unaccounted figure: {sections}"))
+    }
+
+    /// The resident set from `/proc/self/statm`, the source the dump uses.
+    fn statm_rss() -> u64 {
+        let statm = std::fs::read_to_string("/proc/self/statm").expect("statm");
+        let pages: u64 = statm
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.parse().ok())
+            .expect("statm rss field");
+        pages * 4096
+    }
+
+    /// Codeberg #478, order 1253: the canary went red at 15.6 MB/h on
+    /// lnpnd's unaccounted bytes while its live heap and VmData held. The
+    /// host was short of memory; reclaim took lnpnd's resident set from
+    /// 10.0 to 1.9 MB and its swap rose 0.56 MB, so ~7.5 MB of it were
+    /// file pages (the binary's text) that leave without going to swap and
+    /// fault back in as the daemon runs: 3.8 to 6.6 MB in the window.
+    ///
+    /// `MADV_DONTNEED` on a private file mapping does to this process's
+    /// resident set what reclaim does to file pages, so the test maps a
+    /// file on disk (this test binary), faults it in, drops it, and holds
+    /// the unaccounted figure to anonymous memory: it must not follow.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unaccounted_does_not_follow_file_pages_out_of_the_resident_set() {
+        use std::os::fd::AsRawFd;
+        const CAP: usize = 64 << 20;
+        let exe = std::env::current_exe().expect("test binary path");
+        let file = std::fs::File::open(&exe).expect("open test binary");
+        let len = (file.metadata().expect("metadata").len() as usize).min(CAP);
+        let page = 4096;
+        let len = len / page * page;
+        assert!(len >= 8 << 20, "test binary too small to measure: {len}");
+        // SAFETY: a fresh read-only private mapping of a file we hold open;
+        // it is only read below, and unmapped before the file is dropped.
+        let base = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED, "mmap");
+        let mut sum = 0u64;
+        for off in (0..len).step_by(page) {
+            // SAFETY: off < len, inside the mapping made above.
+            sum = sum.wrapping_add(unsafe { *(base as *const u8).add(off) } as u64);
+        }
+        std::hint::black_box(sum);
+
+        let rss_in = statm_rss();
+        let in_set = unaccounted_of(&census_sections(rss_in, None));
+        // SAFETY: the range is exactly the mapping made above.
+        let rc = unsafe { libc::madvise(base, len, libc::MADV_DONTNEED) };
+        assert_eq!(rc, 0, "madvise");
+        let rss_out = statm_rss();
+        let out_of_set = unaccounted_of(&census_sections(rss_out, None));
+        // SAFETY: unmapping the mapping made above, once.
+        unsafe { libc::munmap(base, len) };
+
+        let len = len as u64;
+        // The positive control: the resident set did lose the file pages.
+        assert!(
+            rss_in.saturating_sub(rss_out) >= len * 3 / 4,
+            "the drop did not leave the resident set: {rss_in} -> {rss_out}, mapped {len}"
+        );
+        // Other tests allocate beside this one; a quarter of the mapping is
+        // far above that and far below the pages that left.
+        assert!(
+            in_set.abs_diff(out_of_set) < len / 4,
+            "unaccounted followed {len} bytes of file pages: {in_set} -> {out_of_set}"
+        );
     }
 
     #[test]
