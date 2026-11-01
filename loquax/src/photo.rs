@@ -96,6 +96,9 @@ pub struct Pixels {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// The picture's own size, upright, before it was scaled: what the
+    /// viewer zooms to at most (1269).
+    pub full: (u32, u32),
 }
 
 fn not_a_picture(error: impl core::fmt::Display) -> PhotoError {
@@ -260,6 +263,7 @@ pub fn prepare(bytes: &[u8], size: PhotoSize) -> Result<Prepared, PhotoError> {
 /// never up: a bubble's thumbnail, the full view.
 pub fn fit(bytes: &[u8], edge: u32) -> Result<Pixels, PhotoError> {
     let image = decode(bytes)?;
+    let full = (image.width(), image.height());
     let image = match image.width().max(image.height()) > edge {
         true => image.thumbnail(edge, edge),
         false => image,
@@ -269,6 +273,7 @@ pub fn fit(bytes: &[u8], edge: u32) -> Result<Pixels, PhotoError> {
         width: rgba.width(),
         height: rgba.height(),
         rgba: rgba.into_raw(),
+        full,
     })
 }
 
