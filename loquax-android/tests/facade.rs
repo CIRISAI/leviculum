@@ -3410,3 +3410,90 @@ async fn a_draft_survives_another_chat_and_a_new_session() {
 
     node.kill().await;
 }
+
+/// 1230, against the ugly store: a read receipt from a peer turns the
+/// message of ours it names into `read` on the phone's rows, with the
+/// reader's time, adds no row, and the read and the peer's flag survive the
+/// store. An id the peer was never sent is dropped with a log line.
+#[test]
+fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
+    use leviculum_lxmf::lev::{Lev, Receipt};
+    use leviculum_ui::delivery::DeliveryState;
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEffect, UiEvent};
+    use loquax::when::WallTime;
+    use loquax_android::session;
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let mut store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    let start = ugly_store::BASE + 3 * 86_400;
+    update(
+        &mut model,
+        UiEvent::Clock(WallTime {
+            unix_secs: start,
+            offset_secs: 0,
+        }),
+    );
+    model.restore(store.restore().expect("restore"));
+    let (c, id, sent) = model
+        .conversations
+        .iter()
+        .enumerate()
+        .find_map(|(c, conversation)| {
+            conversation.messages.iter().find_map(|m| {
+                (m.outbound && m.id.is_some() && m.delivery == Some(DeliveryState::Delivered))
+                    .then(|| (c, m.id.expect("an id"), m.at.map_or(0, |at| at.unix_secs)))
+            })
+        })
+        .expect("a delivered message of ours");
+    let peer = model.conversations[c].peer;
+    assert!(!model.conversations[c].flags.receipts, "a stock store");
+    let rows_before = session::rows(&model, c, Lang::En).len();
+    let read_at = start - 30;
+    let receipt = Lev::mark_with(Receipt {
+        read_at: read_at as u32,
+        ids: vec![id, [0xee; 32]],
+    });
+    let effects = update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [0xe1; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: receipt.fields().to_vec(),
+            verified: true,
+        }),
+    );
+    assert!(
+        matches!(effects.as_slice(), [UiEffect::Log(line)] if line.starts_with("RECEIPT dropped id=eeee")),
+        "{effects:?}"
+    );
+    let want = u32::try_from(read_at.max(sent)).expect("u32");
+    let rows = session::rows(&model, c, Lang::En);
+    assert_eq!(rows.len(), rows_before, "a receipt is no row");
+    let row = rows
+        .iter()
+        .find(|r| r.id == hex(&id))
+        .expect("the row of the message read");
+    assert_eq!((row.state.as_str(), row.read_at), ("read", i64::from(want)));
+    assert!(rows.iter().filter(|r| r.state == "read").count() == 1);
+    assert!(model.conversations[c].flags.receipts);
+    store.write(&model.take_writes()).expect("written");
+    drop(store);
+    let store = loquax::store::Store::open_in(home.path(), me).expect("again");
+    let restored = store.restore().expect("restore");
+    let again = restored.iter().find(|r| r.peer == peer).expect("the peer");
+    assert!(again.flags.receipts);
+    assert_eq!(
+        again
+            .messages
+            .iter()
+            .find(|m| m.id == Some(id))
+            .and_then(|m| m.delivery),
+        Some(DeliveryState::Read { at: want })
+    );
+}

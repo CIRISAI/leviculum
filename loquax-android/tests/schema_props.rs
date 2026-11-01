@@ -285,7 +285,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         ),
         (prop::option::of(i64s()), prop::option::of(i64s()), i64s()),
         (opt_text(), prop::option::of(any::<bool>()), opt_text()),
-        (u32s(), i64s()),
+        (u32s(), i64s(), i64s()),
         (text(), u32s()),
         (any::<(bool, bool, bool, bool)>(), text(), text()),
     )
@@ -295,7 +295,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (chips, lat_e6, lon_e6, place, accuracy),
                 (fix_at, stale_at, key),
                 (quote, quote_ours, quote_to),
-                (updates, since),
+                (updates, since, read_at),
                 (liveness, cadence_s),
                 ((joins_before, joins_after, meta, newest), day, live),
             )| MessageRow {
@@ -303,6 +303,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 ours,
                 body,
                 state,
+                read_at,
                 at,
                 chips,
                 lat_e6,
@@ -345,7 +346,13 @@ fn messages() -> BoxedStrategy<Messages> {
             prop::option::of(i64s()),
             any::<bool>(),
         ),
-        (opt_text(), opt_text(), texts(), any::<bool>()),
+        (
+            opt_text(),
+            opt_text(),
+            texts(),
+            any::<bool>(),
+            any::<bool>(),
+        ),
         live(),
         (text(), text(), text()),
     )
@@ -354,7 +361,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 (v, peer, name, messages),
                 (initials, icon_fg, icon_bg, home_client, photo),
                 (linked, lookup, contact_id, ask_link),
-                (announced, petname, others, verified),
+                (announced, petname, others, verified, receipts),
                 (liveness, cadence_s, last_fix_at),
                 (ring, draft, draft_reply),
             )| Messages {
@@ -375,6 +382,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 petname,
                 others,
                 verified,
+                receipts,
                 liveness,
                 cadence_s,
                 last_fix_at,

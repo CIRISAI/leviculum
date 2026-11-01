@@ -34,6 +34,9 @@ final class Glyph extends Drawable {
         switch (state) {
             case "sent": return Kind.SENT;
             case "delivered": return Kind.DELIVERED;
+            // Read implies delivered; its own mark comes with the glyph
+            // ladder of loquax-read-receipts.md (1230).
+            case "read": return Kind.DELIVERED;
             case "failed": return Kind.FAILED;
             default: return Kind.QUEUED;
         }

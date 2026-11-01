@@ -1609,6 +1609,7 @@ impl Inner {
                 .map(|other| names.label(other))
                 .collect(),
             verified: self.model.verified(&peer),
+            receipts: index.is_some_and(|c| self.model.conversations[c].flags.receipts),
             liveness: liveness.state.word().to_string(),
             cadence_s: cadence(&liveness),
             last_fix_at: liveness.last_fix_at.unwrap_or(0),
@@ -1787,6 +1788,7 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         ours: bubble.ours,
         body: bubble.body,
         state: bubble.mark.map_or("", chat::Mark::word).to_string(),
+        read_at: bubble.read_at.map_or(0, i64::from),
         at: bubble.at.map_or(0, |at| at.unix_secs),
         chips: bubble
             .chips

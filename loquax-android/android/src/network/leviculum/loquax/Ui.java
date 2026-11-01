@@ -141,6 +141,8 @@ final class Ui {
             case "sending": return context.getString(R.string.state_sending);
             case "sent": return context.getString(R.string.state_sent);
             case "delivered": return context.getString(R.string.state_delivered);
+            // Until the glyph ladder's words land (1230).
+            case "read": return context.getString(R.string.state_delivered);
             case "failed": return context.getString(R.string.state_failed);
             default: return state;
         }

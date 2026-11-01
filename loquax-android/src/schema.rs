@@ -108,6 +108,12 @@
 //! list row's [`ConversationRow::draft`] and the chat's [`Messages::draft`]
 //! and [`Messages::draft_reply`]. An older app sends no draft, and keeps
 //! none.
+//! Read receipts (1230) came within version 1 too: the delivery word
+//! `read` on [`MessageRow::state`] and [`ConversationRow::state`], with
+//! [`MessageRow::read_at`], and the peer's flag [`Messages::receipts`]. An
+//! app that does not know `read` draws its default mark; the app of this
+//! tree draws it as `delivered` until the glyph ladder of
+//! `docs/src/concepts/loquax-read-receipts.md` lands.
 
 use serde::{Deserialize, Serialize};
 
@@ -983,8 +989,14 @@ pub struct MessageRow {
     pub id: String,
     pub ours: bool,
     pub body: String,
-    /// Ours only: `queued`, `sending`, `sent`, `delivered` or `failed`.
+    /// Ours only: `queued`, `sending`, `sent`, `delivered`, `read` or
+    /// `failed`.
     pub state: String,
+    /// Ours only, when `state` is `read` (1230): when the peer read it, by
+    /// the reader's clock kept within when it was sent and when the receipt
+    /// came, unix seconds; 0 otherwise.
+    #[serde(default)]
+    pub read_at: i64,
     pub at: i64,
     pub chips: Vec<Chip>,
     /// The fix the message carries, a report's or a text's that came with
@@ -1105,6 +1117,11 @@ pub struct Messages {
     /// header's mark.
     #[serde(default)]
     pub verified: bool,
+    /// The peer's latest message carried the read-receipt mark (1230): it
+    /// sends read receipts and is sent them. Without it, ours stay
+    /// `delivered`, and the detail view says the peer sends none.
+    #[serde(default)]
+    pub receipts: bool,
     /// The bar avatar's ring (1209), as in [`ConversationRow`].
     #[serde(default)]
     pub liveness: String,
