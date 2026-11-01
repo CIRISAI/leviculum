@@ -189,6 +189,8 @@ pub struct Session {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
     /// The mailbox, when it is on this phone.
     here: Mutex<Option<mailbox::Here>>,
+    /// The device "Link a device" waits for (1264), when one was asked.
+    linking: Mutex<Option<mailbox::Linking>>,
     address: [u8; 16],
     server: String,
     /// The list the leaf dials one at a time, [`Session::server`] first.
@@ -389,6 +391,7 @@ impl Session {
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
             here: Mutex::new(here),
+            linking: Mutex::new(None),
             address,
             server,
             servers,
@@ -608,6 +611,60 @@ impl Session {
             qr_size,
             qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
         })
+    }
+
+    /// "Link a device" (1264, [`schema::Query::LinkDevice`]): a join code
+    /// of the mailbox on this phone, kept as the one [`Session::linked`]
+    /// watches.
+    fn link_device(&self) -> Result<schema::LinkCode, String> {
+        if !self.is_here() {
+            let lang = self.lock().lang;
+            return Err(StrId::LinkOnComputer.text(lang).to_string());
+        }
+        let home = self.lock().home.clone();
+        let (admission, linking) = mailbox::link_code(&home)?;
+        let code = admission.text();
+        let (qr_size, modules) = loquax::home::qr::modules(&code)?;
+        let hours = linking.expires_at.saturating_sub(admission.issued_at) / 3600;
+        let expires_at = linking.expires_at;
+        *self.linking() = Some(linking);
+        Ok(schema::LinkCode {
+            v: VERSION,
+            code,
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            hours: u32::try_from(hours).unwrap_or(u32::MAX),
+            expires_at,
+        })
+    }
+
+    /// Whether a device came with the newest link code
+    /// ([`schema::Query::Linked`]).
+    fn linked(&self) -> Result<schema::Linked, String> {
+        let Some(linking) = self.linking().clone() else {
+            return Ok(schema::Linked {
+                v: VERSION,
+                state: "none".to_string(),
+                name: String::new(),
+            });
+        };
+        let home = self.lock().home.clone();
+        let (state, name) = match mailbox::linked(&home, &linking)? {
+            mailbox::Linked::Waiting => ("waiting", String::new()),
+            mailbox::Linked::Linked(name) => ("linked", name),
+            mailbox::Linked::Over => ("over", String::new()),
+        };
+        Ok(schema::Linked {
+            v: VERSION,
+            state: state.to_string(),
+            name,
+        })
+    }
+
+    fn linking(&self) -> MutexGuard<'_, Option<mailbox::Linking>> {
+        self.linking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Whether the mailbox is on this phone.
@@ -977,6 +1034,8 @@ impl Session {
         match query {
             schema::Query::Me => return self.me().map(|me| schema::encode(&me)),
             schema::Query::Profile => return self.profile().map(|p| schema::encode(&p)),
+            schema::Query::LinkDevice => return self.link_device().map(|c| schema::encode(&c)),
+            schema::Query::Linked => return self.linked().map(|l| schema::encode(&l)),
             schema::Query::Backup { passphrase } => {
                 return self
                     .backup(&passphrase)
@@ -1233,6 +1292,8 @@ impl Session {
             )?),
             schema::Query::Me
             | schema::Query::Profile
+            | schema::Query::LinkDevice
+            | schema::Query::Linked
             | schema::Query::Backup { .. }
             | schema::Query::MapRegions { .. }
             | schema::Query::MapTheme { .. }

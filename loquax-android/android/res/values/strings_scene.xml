@@ -188,6 +188,7 @@
     <string name="join_bad_where">Loquax cannot read where the mailbox is. It looks like 192.168.1.20:4242.</string>
     <string name="join_failed">Joining the mailbox did not work.</string>
     <string name="join_other_mailbox">This phone already reads another mailbox.</string>
+    <string name="link_on_computer">Your mailbox is on a computer. Link the other device there.</string>
     <string name="details">Details</string>
     <string name="scene_zoom_in">Zoom in</string>
     <string name="scene_zoom_out">Zoom out</string>

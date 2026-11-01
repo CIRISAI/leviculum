@@ -254,6 +254,8 @@ leviculum_ui::catalogue! {
     JoinBadWhere = "join_bad_where", "Loquax cannot read where the mailbox is. It looks like 192.168.1.20:4242.", "Loquax kann nicht lesen, wo das Postfach ist. Das sieht so aus: 192.168.1.20:4242.";
     JoinFailed = "join_failed", "Joining the mailbox did not work.", "Das Postfach ließ sich nicht verbinden.";
     JoinOtherMailbox = "join_other_mailbox", "This phone already reads another mailbox.", "Dieses Handy liest schon ein anderes Postfach.";
+    // Linking a device (1264): the phone holds no mailbox to link to.
+    LinkOnComputer = "link_on_computer", "Your mailbox is on a computer. Link the other device there.", "Dein Postfach ist auf einem Computer. Verbinde das andere Gerät dort.";
     Details = "details", "Details", "Details";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";

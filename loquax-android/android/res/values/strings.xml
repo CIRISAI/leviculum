@@ -288,6 +288,17 @@
     <string name="profile_mailbox_away">Mailbox: on %1$s, since %2$s</string>
     <string name="profile_mailbox_away_undated">Mailbox: on %1$s</string>
     <string name="profile_mailbox_change">Use another mailbox</string>
+    <!-- Linking a device to the mailbox on this phone (1264, finding 7). -->
+    <string name="profile_link_device">Link a device</string>
+    <string name="link_title">Link a device</string>
+    <string name="link_text">On your other device, install Loquax, choose \"Join an existing mailbox\" and scan this code.</string>
+    <string name="link_good_for">Good for %1$d hours, for one device.</string>
+    <string name="link_waiting">Waiting for the other device…</string>
+    <string name="link_linked">Device linked: %1$s</string>
+    <string name="link_over">This code ran out. Make a new one.</string>
+    <string name="link_share">Share the code</string>
+    <string name="join_existing">Join an existing mailbox</string>
+    <string name="join_existing_text">On the phone that holds your mailbox, tap your picture, then \"Link a device\". Scan the code it shows here, or paste it.</string>
     <string name="profile_identity">Identity hash</string>
     <string name="profile_home_node">Home node</string>
     <string name="profile_rendezvous">Rendezvous (● connected)</string>

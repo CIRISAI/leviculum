@@ -13,9 +13,10 @@
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Bar, BarButton, Blob, CandidateRow, Chip, ContactCopy,
     ConversationRow, Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info,
-    LinkRow, Links, MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me,
-    MessageRow, Messages, PositionRow, Query, Recents, Recording, RegionRow, Request, Run, RunRow,
-    ShareRow, Shared, SharedRow, Shares, Start, Started, SuggestionRow, Suggestions,
+    LinkCode, LinkRow, Linked, Links, MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown,
+    MapThemeChoice, Me, MessageRow, Messages, PositionRow, Query, Recents, Recording, RegionRow,
+    Request, Run, RunRow, ShareRow, Shared, SharedRow, Shares, Start, Started, SuggestionRow,
+    Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -287,6 +288,8 @@ fn query() -> impl Strategy<Value = Query> {
             .prop_map(|(lat_e6, lon_e6)| Query::Friends { lat_e6, lon_e6 }),
         Just(Query::Shared),
         Just(Query::Profile),
+        Just(Query::LinkDevice),
+        Just(Query::Linked),
         (text(), opt_text()).prop_map(|(text, lang)| Query::Lxma { text, lang }),
         (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
             Query::MapRegions {
@@ -1167,6 +1170,15 @@ proptest! {
         round_trips(&Recents { v, emoji: rows.clone() })?;
         round_trips(&Done { v, ok, error: error.clone() })?;
         round_trips(&Backup { v, line: line.clone(), qr_size, qr: qr.clone() })?;
+        round_trips(&LinkCode {
+            v,
+            code: line.clone(),
+            qr_size,
+            qr: qr.clone(),
+            hours: names.4,
+            expires_at: names.3,
+        })?;
+        round_trips(&Linked { v, state: names.0.clone(), name: names.1.clone() })?;
         round_trips(&Me {
             v,
             address: names.0.clone(),

@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -144,6 +144,9 @@
 //! [`Request::Voice`], which is unchanged but for its cap (10 min, was
 //! 5); its bubbles draw the levels they always drew, now the
 //! recording's own track where the model has one.
+//! Linking a device (1264) came within version 1 too: [`Query::LinkDevice`]
+//! with its [`LinkCode`] and [`Query::Linked`] with its [`Linked`]. An
+//! older app offers no "Link a device".
 
 use serde::{Deserialize, Serialize};
 
@@ -652,6 +655,13 @@ pub enum Query {
     /// contact code and its QR, where the mailbox is, and the advanced
     /// facts.
     Profile,
+    /// "Link a device" on the profile (1264): a fresh join code of the
+    /// mailbox on this phone for another device, as [`LinkCode`]; refused
+    /// on a phone whose mailbox is on a computer. Each ask opens a new
+    /// code; [`Query::Linked`] watches the newest.
+    LinkDevice,
+    /// Whether a device came with the newest [`Query::LinkDevice`] code.
+    Linked,
     /// Whether `text` is a code, which kind and whose (1187, 1263,
     /// `loquax::code::read`): what the scanner and the new conversation
     /// screen ask before the name. A text that is none is refused in one
@@ -1103,6 +1113,31 @@ pub struct Backup {
     pub line: String,
     pub qr_size: u32,
     pub qr: Blob,
+}
+
+/// What [`Query::LinkDevice`] answers: the code `loquax mailbox admit`
+/// would print for this mailbox (`lqxh1...@` and the rendezvous list), its
+/// QR as [`Backup::qr`] has a code's, and how long it is good for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkCode {
+    pub v: u32,
+    pub code: String,
+    pub qr_size: u32,
+    pub qr: Blob,
+    /// Its life in whole hours, for "Good for 24 hours".
+    pub hours: u32,
+    /// Its end, unix seconds.
+    pub expires_at: i64,
+}
+
+/// What [`Query::Linked`] answers: `state` is `waiting` (the code is
+/// open), `linked` (a device came, `name` it), `over` (the code ran out or
+/// was withdrawn and nobody came) or `none` (no code was asked for).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Linked {
+    pub v: u32,
+    pub state: String,
+    pub name: String,
 }
 
 /// What [`Query::Me`] answers: the address to give people, as text and as

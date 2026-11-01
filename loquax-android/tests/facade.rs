@@ -5295,3 +5295,125 @@ async fn a_recording_is_held_slid_away_locked_paused_and_sent_from_its_bar() {
     .expect("the session");
     node.kill().await;
 }
+
+/// Link a device (1264, finding 7): two phones, one mailbox. The first
+/// holds the mailbox, whose node dials a Rust transport node standing in
+/// for the rendezvous (its servers file names it, as `code_list` then puts
+/// it into the code); the profile's "Link a device" answers a code of the
+/// `lqxh1` form `loquax mailbox admit` prints, its QR reads back to it
+/// through the scanner's decoder, good for the default day, and `linked`
+/// waits. The second phone starts with what the scanner read, as its first
+/// start's "Join an existing mailbox" hands it over, is admitted under the
+/// name it brought, and pulls the whole ugly store from the first phone's
+/// archive; the first then says the device came, by that name. Negative:
+/// the code is single use, a third phone with it is refused at the code.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_phone_links_to_the_mailbox_on_the_first_and_gets_its_history() {
+    let rns = tempfile::tempdir().expect("rns dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let entry = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+    let mut transport = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_server_listener(listener)
+        .storage_path(rns.path().join("storage"))
+        .build_sync()
+        .expect("the transport node");
+    transport.start().await.expect("start it");
+
+    let first = tempfile::tempdir().expect("first phone");
+    let mailbox = first.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("{entry}\n"),
+    )
+    .expect("servers file");
+    ugly_store::fill_archive(&mailbox);
+    let start = Start {
+        dir: first.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let (a, code, scanned) = tokio::task::spawn_blocking(move || {
+        let a = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        let linked: schema::Linked = asked(&a, schema::Query::Linked);
+        assert_eq!(linked.state, "none");
+        let code: schema::LinkCode = asked(&a, schema::Query::LinkDevice);
+        let scanned = read_qr(code.qr_size, &code.qr.0);
+        assert_eq!(scanned.len(), 1, "{scanned:?}");
+        (a, code, scanned.into_iter().next().unwrap_or_default())
+    })
+    .await
+    .expect("the first phone");
+    let (parsed, list) =
+        loquax::home::code::HomeCode::parse_with_rendezvous(&code.code).expect("a join code");
+    assert!(
+        code.code.starts_with(loquax::home::code::PREFIX),
+        "{}",
+        code.code
+    );
+    assert_eq!(
+        loquax::home::code::HomeCode::parse_with_rendezvous(&scanned).expect("the QR's"),
+        (parsed.clone(), list.clone())
+    );
+    assert_eq!(list, std::slice::from_ref(&entry));
+    let mailbox_key = loquax_android::mailbox::identity(first.path())
+        .expect("the mailbox identity")
+        .public_key_bytes();
+    assert_eq!(parsed.public_key, mailbox_key);
+    assert_eq!(u64::from(code.hours), loquax::home::DEFAULT_TOKEN_HOURS);
+    let a = tokio::task::spawn_blocking(move || {
+        let linked: schema::Linked = asked(&a, schema::Query::Linked);
+        assert_eq!(linked.state, "waiting");
+        a
+    })
+    .await
+    .expect("waiting");
+
+    let second = tempfile::tempdir().expect("second phone");
+    let start = Start {
+        dir: second.path().display().to_string(),
+        code: Some(scanned.clone()),
+        name: Some("Pixel 8".to_string()),
+        ..Start::default()
+    };
+    let b = tokio::task::spawn_blocking(move || {
+        let b = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        ugly_in(&b);
+        b
+    })
+    .await
+    .expect("the second phone");
+    assert_eq!(b.address(), a.address());
+    let a = tokio::task::spawn_blocking(move || {
+        let linked: schema::Linked =
+            wait_for(&a, schema::Query::Linked, 10, |l: &schema::Linked| {
+                l.state == "linked"
+            });
+        assert_eq!(linked.name, "Pixel 8");
+        a
+    })
+    .await
+    .expect("linked");
+
+    let third = tempfile::tempdir().expect("third phone");
+    let start = Start {
+        dir: third.path().display().to_string(),
+        code: Some(scanned),
+        name: Some("Fairphone".to_string()),
+        ..Start::default()
+    };
+    let refused = tokio::task::spawn_blocking(move || Session::start(&start).err())
+        .await
+        .expect("the third phone")
+        .expect("a used code is refused");
+    assert_eq!(refused.need, Some("code"), "{refused:?}");
+
+    tokio::task::spawn_blocking(move || {
+        b.stop();
+        a.stop();
+    })
+    .await
+    .expect("stopped");
+    transport.stop().await.expect("stop the transport node");
+}

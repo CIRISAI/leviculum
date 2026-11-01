@@ -141,6 +141,16 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "profile"))));
     }
 
+    /** A fresh join code of the mailbox on this phone for another device (1264): `code`, `qr`, `qr_size`, `hours`; `error` when not. */
+    static Map<String, Object> linkDevice() {
+        return answer(Native.query(MsgPack.pack(map("t", "linkdevice"))));
+    }
+
+    /** Whether a device came with the newest link code: `state` waiting, linked (with `name`), over or none. */
+    static Map<String, Object> linked() {
+        return answer(Native.query(MsgPack.pack(map("t", "linked"))));
+    }
+
     /** Whose contact code `text` is (`address`, `lxma`, `known`); `error` when it is none. */
     static Map<String, Object> lxma(String text) {
         return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text, "lang", lang()))));

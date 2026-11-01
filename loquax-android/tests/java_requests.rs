@@ -561,6 +561,8 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
         ),
         ("me", t("me"), Query::Me),
         ("profile", t("profile"), Query::Profile),
+        ("linkDevice", t("linkdevice"), Query::LinkDevice),
+        ("linked", t("linked"), Query::Linked),
         (
             "lxma",
             java_map(&[

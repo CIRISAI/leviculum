@@ -260,6 +260,17 @@
     <string name="profile_mailbox_away">Postfach: auf %1$s, seit %2$s</string>
     <string name="profile_mailbox_away_undated">Postfach: auf %1$s</string>
     <string name="profile_mailbox_change">Anderes Postfach verwenden</string>
+    <!-- Ein Gerät mit dem Postfach auf diesem Handy verbinden (1264). -->
+    <string name="profile_link_device">Gerät verbinden</string>
+    <string name="link_title">Gerät verbinden</string>
+    <string name="link_text">Installiere Loquax auf deinem anderen Gerät, wähle „Einem bestehenden Postfach beitreten“ und scanne diesen Code.</string>
+    <string name="link_good_for">Gilt %1$d Stunden, für ein Gerät.</string>
+    <string name="link_waiting">Warte auf das andere Gerät…</string>
+    <string name="link_linked">Gerät verbunden: %1$s</string>
+    <string name="link_over">Dieser Code ist abgelaufen. Mach einen neuen.</string>
+    <string name="link_share">Code teilen</string>
+    <string name="join_existing">Einem bestehenden Postfach beitreten</string>
+    <string name="join_existing_text">Tippe auf dem Handy mit deinem Postfach auf dein Bild, dann auf „Gerät verbinden“. Scanne den Code, den es zeigt, hier oder füge ihn ein.</string>
     <string name="profile_identity">Identitäts-Hash</string>
     <string name="profile_home_node">Heimknoten</string>
     <string name="profile_rendezvous">Treffpunkt (● verbunden)</string>

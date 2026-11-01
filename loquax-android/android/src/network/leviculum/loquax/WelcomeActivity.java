@@ -56,6 +56,8 @@ public class WelcomeActivity extends Activity {
     private static final int STARTING = 3;
     private static final int ADDRESS = 4;
     private static final int RESTORE = 5;
+    /** Another device's mailbox (1264): a phone's "Link a device" code, or a computer's. */
+    private static final int JOINING = 6;
     private static final int ASK_NOTIFICATIONS = 1;
     private static final int ASK_BATTERY = 2;
     private static final int OPEN_BACKUP = 3;
@@ -119,6 +121,8 @@ public class WelcomeActivity extends Activity {
         if (page == RESTORE) {
             failed = null;
             show(CHOICE);
+        } else if (page == JOINING) {
+            show(CHOICE);
         } else if (page == COMPUTER || page == BACKGROUND) {
             show(page == BACKGROUND && !here ? COMPUTER : CHOICE);
         } else {
@@ -136,7 +140,10 @@ public class WelcomeActivity extends Activity {
                 choice(body);
                 break;
             case COMPUTER:
-                computer(body);
+                computer(body, false);
+                break;
+            case JOINING:
+                computer(body, true);
                 break;
             case BACKGROUND:
                 background(body);
@@ -202,6 +209,17 @@ public class WelcomeActivity extends Activity {
                 show(here ? BACKGROUND : COMPUTER);
             }
         });
+        Button join = button(getString(R.string.join_existing));
+        join.setId(R.id.where_join);
+        join.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                here = false;
+                restore = null;
+                show(JOINING);
+            }
+        });
+        body.addView(join, wrap());
         Button have = button(getString(R.string.have_address));
         have.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -279,11 +297,15 @@ public class WelcomeActivity extends Activity {
         return at < 0 ? "" : text.substring(at).trim();
     }
 
-    /** The mailbox on a computer: what to do there, and the code it shows. */
-    private void computer(LinearLayout body) {
-        body.addView(text(getString(R.string.computer_title), 22, R.color.text, true), matchWrap());
-        body.addView(gap(text(getString(R.string.computer_text), 15, R.color.text, false), 8, 16),
-                matchWrap());
+    /**
+     * The mailbox on a computer: what to do there, and the code it shows; `joining`, a mailbox that
+     * already runs on another device (1264), whose "Link a device" shows the same code.
+     */
+    private void computer(LinearLayout body, boolean joining) {
+        body.addView(text(getString(joining ? R.string.join_existing : R.string.computer_title), 22,
+                R.color.text, true), matchWrap());
+        body.addView(gap(text(getString(joining ? R.string.join_existing_text : R.string.computer_text),
+                15, R.color.text, false), 8, 16), matchWrap());
         if (ScanActivity.available(this)) {
             Button scan = button(getString(R.string.scan_code));
             scan.setOnClickListener(new View.OnClickListener() {
@@ -304,6 +326,9 @@ public class WelcomeActivity extends Activity {
             }
         });
         body.addView(paste, wrap());
+        if (joining) {
+            return;
+        }
         Button until = button(getString(R.string.phone_until_then));
         until.setOnClickListener(new View.OnClickListener() {
             @Override
