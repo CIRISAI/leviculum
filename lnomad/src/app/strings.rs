@@ -120,6 +120,15 @@ leviculum_ui::catalogue! {
     IdentifyNotSaved = "browser_identify_not_saved", "could not save identify decision: %1$s", "Identifizier-Entscheidung nicht gespeichert: %1$s";
     OpenedExternally = "browser_opened_externally", "opened externally: %1$s", "extern geöffnet: %1$s";
     FailedToOpen = "browser_failed_to_open", "failed to open: %1$s", "ließ sich nicht öffnen: %1$s";
+    // A page that did not load: the fetch's errors.
+    FetchConnect = "browser_fetch_connect", "could not connect to shared instance: %1$s", "keine Verbindung zur gemeinsamen Instanz: %1$s";
+    FetchNoPath = "browser_fetch_no_path", "no path to destination", "kein Pfad zum Ziel";
+    FetchLinkFailed = "browser_fetch_link_failed", "link failed", "Link fehlgeschlagen";
+    FetchTimeout = "browser_fetch_timeout", "request timed out", "Anfrage ohne Antwort";
+    FetchNotFound = "browser_fetch_not_found", "path not found on destination", "Pfad am Ziel nicht gefunden";
+    FetchSave = "browser_fetch_save", "could not save download: %1$s", "Download nicht gespeichert: %1$s";
+    FetchDecode = "browser_fetch_decode", "malformed response payload", "fehlerhafte Antwort";
+    FetchNode = "browser_fetch_node", "node error: %1$s", "Knotenfehler: %1$s";
     // The name search's rows (1227).
     NameRow = "browser_name_row", "%1$s  ·  %2$s  ·  %3$s%4$s", "%1$s  ·  %2$s  ·  %3$s%4$s";
     OneHop = "browser_one_hop", "1 hop", "1 Sprung";
@@ -181,6 +190,18 @@ leviculum_ui::catalogue! {
     HelpTheme = "browser_help_theme", "light / dark theme", "helles / dunkles Thema";
     HelpCloseKeys = "browser_help_close_keys", "? / Esc / click", "? / Esc / Klick";
     HelpClose = "browser_help_close", "close this help", "diese Hilfe schließen";
+}
+
+/// The language a locale names, read through `var` (`std::env::var` in the
+/// shell): the first of `LC_ALL`, `LC_MESSAGES` and `LANG` that is set and
+/// not empty, as the Loquax window reads it. German for German, English for
+/// anything else or nothing.
+pub fn locale_lang(var: impl Fn(&str) -> Option<String>) -> Lang {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|name| var(name))
+        .find(|value| !value.is_empty())
+        .map_or(Lang::En, |tag| Lang::of_tag(&tag))
 }
 
 /// `id` with one string argument.
@@ -319,6 +340,34 @@ places panel as their announces arrive.
             "[a.png: nicht geholt]"
         );
         assert_eq!(crate::names::ago_text(7200, 0).resolve(Lang::De), "vor 2 h");
+    }
+
+    /// The first locale variable that is set wins, an empty one is skipped,
+    /// and nothing set is English.
+    #[test]
+    fn the_locale_names_the_language() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(locale_lang(env(&[])), Lang::En);
+        assert_eq!(locale_lang(env(&[("LANG", "de_DE.UTF-8")])), Lang::De);
+        assert_eq!(
+            locale_lang(env(&[("LC_ALL", "en_GB.UTF-8"), ("LANG", "de_DE.UTF-8")])),
+            Lang::En
+        );
+        assert_eq!(
+            locale_lang(env(&[
+                ("LC_ALL", ""),
+                ("LC_MESSAGES", "de_AT"),
+                ("LANG", "C")
+            ])),
+            Lang::De
+        );
     }
 
     #[test]

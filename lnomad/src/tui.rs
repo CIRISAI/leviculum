@@ -887,7 +887,7 @@ enum LoadResult {
         dest: [u8; 16],
         identifying: bool,
     },
-    Err(String),
+    Err(StrText),
     /// A file download completed and was saved to disk.
     Downloaded {
         name: String,
@@ -929,7 +929,7 @@ fn spawn_fetch(
                     identifying: guard.is_identifying(&target.dest_hash),
                 }
             }
-            Err(err) => LoadResult::Err(err.to_string()),
+            Err(err) => LoadResult::Err(err.text()),
         };
         let _ = tx.send(FetchOutcome {
             generation: generation_now,
@@ -1540,6 +1540,9 @@ pub async fn run_tui(
         pins_path,
         // The session's own fingerprint is stable for its whole life: set once.
         fingerprint: session.fingerprint_hex(),
+        // Every word of the shell is in the catalogue now, so it speaks the
+        // locale's language.
+        lang: crate::app::strings::locale_lang(|name| std::env::var(name).ok()),
         ..Model::default()
     };
     let size = terminal.size()?;
@@ -1673,8 +1676,8 @@ pub async fn run_tui(
                             // identify.toml by an earlier run.
                             model.note_identify(dest, identifying);
                         }
-                        LoadResult::Err(msg) => {
-                            update(&mut model, AppEvent::LoadFailed(msg));
+                        LoadResult::Err(text) => {
+                            update(&mut model, AppEvent::LoadFailedText(text));
                         }
                         LoadResult::Downloaded { name, bytes, dir } => {
                             update(&mut model, AppEvent::DownloadDone { name, bytes, dir });
@@ -7550,5 +7553,28 @@ Text unter dem Bild.
             joined.contains("\"Marcel\" is pinned to ·fa01; this is ·9c9c"),
             "{joined}"
         );
+    }
+
+    /// In German the help, the footer and the start page are German: the
+    /// shell may follow the locale because nothing it draws is left English.
+    #[test]
+    fn the_terminal_speaks_german() {
+        let mut m = Model {
+            lang: crate::app::strings::Lang::De,
+            ..Model::default()
+        };
+        m.size = (100, 40);
+        m.relayout(content_width(100));
+        show_start_screen(&mut m);
+        m.show_places = false;
+        let start = flat(&render(&m, 100, 40));
+        assert!(start.contains("Keine Seite offen"), "{start}");
+        assert!(start.contains("beenden"), "{start}");
+        assert!(!start.contains("No page is open"), "{start}");
+        press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
+        let help = flat(&render(&m, 100, 40));
+        assert!(help.contains("Bewegen"), "{help}");
+        assert!(help.contains("Hilfe"), "{help}");
+        assert!(!help.contains("close this help"), "{help}");
     }
 }

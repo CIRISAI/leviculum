@@ -45,6 +45,8 @@ pub enum AppEvent {
     },
     /// A navigation failed with a human-readable message.
     LoadFailed(String),
+    /// A navigation failed, in the catalogue's words (the shell's fetch).
+    LoadFailedText(Text),
     /// A file download completed and was saved to disk.
     DownloadDone {
         /// The filename it was saved as.
@@ -119,6 +121,11 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         AppEvent::LoadFailed(msg) => {
             model.pending = None;
             model.set_toast(ToastKind::Error, msg);
+            Vec::new()
+        }
+        AppEvent::LoadFailedText(text) => {
+            model.pending = None;
+            model.say(ToastKind::Error, text);
             Vec::new()
         }
         AppEvent::DownloadDone { name, bytes, dir } => {
