@@ -9,7 +9,6 @@
     <string name="action_run">Alle %1$d Positionen zeigen</string>
     <string name="run_title">%1$d Positionen</string>
     <string name="new_conversation">Neue Unterhaltung</string>
-    <string name="address_label">Die LXMF-Adresse, an die du schreibst: 32 Hex-Ziffern, wie die App des Gegenübers sie zeigt.</string>
     <string name="paste">Einfügen</string>
     <string name="open">Öffnen</string>
     <string name="refresh">Aktualisieren</string>
@@ -191,6 +190,7 @@
     <string name="scan_backup">Papiersicherung scannen</string>
     <string name="scan_hint">Halte den Code vor die Kamera.</string>
     <string name="scan_no_camera">Die Kamera lässt sich nicht nutzen. Füge den Code stattdessen ein.</string>
+    <string name="scan_wrong_kind">Dieser Code ist für etwas anderes. Scanne den Code, nach dem hier gefragt wird.</string>
     <!-- The main views and the settings (1199). -->
     <string name="help">Hilfe</string>
     <string name="settings_profile">Profil</string>

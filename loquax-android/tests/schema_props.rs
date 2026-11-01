@@ -116,15 +116,16 @@ fn start() -> impl Strategy<Value = Start> {
 
 fn started() -> impl Strategy<Value = Started> {
     (
-        (u32s(), any::<bool>(), opt_text(), opt_text()),
+        (u32s(), any::<bool>(), opt_text(), opt_text(), opt_text()),
         (opt_text(), opt_text(), any::<bool>(), any::<bool>()),
     )
         .prop_map(
-            |((v, ok, error, need), (address, server, link, here))| Started {
+            |((v, ok, error, need, details), (address, server, link, here))| Started {
                 v,
                 ok,
                 error,
                 need,
+                details,
                 address,
                 server,
                 link,
@@ -256,7 +257,7 @@ fn query() -> impl Strategy<Value = Query> {
             .prop_map(|(lat_e6, lon_e6)| Query::Friends { lat_e6, lon_e6 }),
         Just(Query::Shared),
         Just(Query::Profile),
-        text().prop_map(|text| Query::Lxma { text }),
+        (text(), opt_text()).prop_map(|(text, lang)| Query::Lxma { text, lang }),
         (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
             Query::MapRegions {
                 delete,
@@ -962,6 +963,7 @@ proptest! {
             v,
             address: names.0.clone(),
             fingerprint: names.1.clone(),
+            lxma: names.2.clone().unwrap_or_default(),
             qr_size,
             qr,
             name: line.clone(),

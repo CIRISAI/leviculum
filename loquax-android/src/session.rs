@@ -30,7 +30,7 @@ use loquax::store::Store;
 use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
-use loquax::ui::strings::Lang;
+use loquax::ui::strings::{Lang, StrId};
 use loquax::ui::{chat, scene, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
@@ -69,6 +69,9 @@ pub const SHARED_SHOWN: usize = 100;
 pub struct StartError {
     pub need: Option<&'static str>,
     pub text: String,
+    /// The words behind [`StartError::text`] for the screen's Details
+    /// (1263): the mailbox's or the parser's own.
+    pub details: Option<String>,
 }
 
 impl StartError {
@@ -76,6 +79,17 @@ impl StartError {
         Self {
             need: None,
             text: text.into(),
+            details: None,
+        }
+    }
+
+    /// One plain sentence of the catalogue in `lang`, what went wrong in
+    /// `details` (1263, finding 8).
+    fn said(need: Option<&'static str>, words: StrId, lang: Lang, details: Option<String>) -> Self {
+        Self {
+            need,
+            text: words.text(lang).to_string(),
+            details: details.filter(|details| !details.is_empty()),
         }
     }
 }
@@ -193,34 +207,36 @@ impl Session {
             (start.clone(), None)
         };
         let start = &start;
+        let lang = Lang::of_tag(start.lang.as_deref().unwrap_or_default());
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
         let mut carried = Vec::new();
         let code = match (&client, start.code.as_deref().map(str::trim)) {
             (_, Some(code)) if !code.is_empty() => {
                 let (code, list) = loquax::home::code::HomeCode::parse_with_rendezvous(code)
-                    .map_err(|error| StartError {
-                        need: Some("code"),
-                        text: format!("That is not a mailbox code: {error}"),
+                    .map_err(|error| {
+                        StartError::said(
+                            Some("code"),
+                            StrId::JoinNotMailbox,
+                            lang,
+                            Some(format!("That is not a mailbox code: {error}")),
+                        )
                     })?;
                 carried = list;
                 Some(code)
             }
             (Some(_), _) => None,
             (None, _) => {
-                return Err(StartError {
-                    need: Some("code"),
-                    text: "This phone reads no mailbox yet. Paste the code \
-                           `loquax home admit` printed on the computer."
-                        .to_string(),
-                })
+                return Err(StartError::said(
+                    Some("code"),
+                    StrId::JoinNoCode,
+                    lang,
+                    Some("This phone reads no mailbox yet.".to_string()),
+                ))
             }
         };
         if let (Some(key), Some(code)) = (&client, &code) {
             if *key != code.public_key {
-                return Err(StartError {
-                    need: None,
-                    text: "This phone already reads another mailbox.".to_string(),
-                });
+                return Err(StartError::said(None, StrId::JoinOtherMailbox, lang, None));
             }
         }
         // The keepalive of the connection to the mailbox: the same `tcp_*`
@@ -229,14 +245,17 @@ impl Session {
         let config =
             loquax::config::load(&home).map_err(|error| StartError::other(error.to_string()))?;
         let servers =
-            dial_list(start.server.as_deref(), &config, carried, &home).ok_or(StartError {
-                need: Some("server"),
-                text: "Type your mailbox's address, host:port of its lnsd TCP server.".to_string(),
+            dial_list(start.server.as_deref(), &config, carried, &home).ok_or_else(|| {
+                StartError::said(
+                    Some("server"),
+                    StrId::JoinWhere,
+                    lang,
+                    Some("No server: the code carries none and none was typed.".to_string()),
+                )
             })?;
         for server in &servers {
-            loquax::engine::parse_server(server).map_err(|text| StartError {
-                need: Some("server"),
-                text,
+            loquax::engine::parse_server(server).map_err(|text| {
+                StartError::said(Some("server"), StrId::JoinBadWhere, lang, Some(text))
             })?;
         }
         let server = servers.first().cloned().unwrap_or_default();
@@ -294,10 +313,12 @@ impl Session {
                     loquax::home::client::HomeError::Refused(_) => Some("code"),
                     _ => None,
                 };
-                return Err(StartError {
+                return Err(StartError::said(
                     need,
-                    text: join_words(&error, &servers.join(", ")),
-                });
+                    join_words(&error),
+                    lang,
+                    Some(join_details(&error, &servers.join(", "))),
+                ));
             }
             loquax::home::client::save_client(&home, &code.public_key)
                 .map_err(StartError::other)?;
@@ -382,6 +403,7 @@ impl Session {
                 |text| StartError {
                     need: Some("passphrase"),
                     text,
+                    details: None,
                 },
             )?;
         }
@@ -393,8 +415,11 @@ impl Session {
         }
         let public_key = mailbox::choose_here(home).map_err(StartError::other)?;
         if joined.is_some_and(|key| key != public_key) {
-            return Err(StartError::other(
-                "This phone already reads another mailbox.",
+            return Err(StartError::said(
+                None,
+                StrId::JoinOtherMailbox,
+                Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
+                None,
             ));
         }
         let code = match joined {
@@ -424,11 +449,15 @@ impl Session {
     fn me(&self) -> Result<schema::Me, String> {
         let home = self.lock().home.clone();
         let here = self.is_here();
-        let (qr_size, modules) = loquax::home::qr::address_modules(&self.address)?;
+        // One contact code everywhere (1263, finding 1): the profile's, so
+        // a friend's scanner takes the first start's QR as well.
+        let lxma = loquax::lxma::encode(&self.lock().client.public_key)?;
+        let (qr_size, modules) = loquax::home::qr::verbatim_modules(&lxma)?;
         Ok(schema::Me {
             v: VERSION,
             address: loquax::address::to_hex(&self.address),
             fingerprint: fingerprint(&self.address),
+            lxma,
             qr_size,
             qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
             name: if here {
@@ -507,30 +536,37 @@ impl Session {
     /// cannot take the key now is said as a notice: the contact is there,
     /// and the first message waits for its announce.
     fn add_contact(&self, lxma: &str, name: Option<&str>) -> Result<(), String> {
-        let contact = loquax::lxma::parse(lxma).map_err(|error| error.to_string())?;
-        let peer = contact.address;
         let mut inner = self.lock();
+        let code = loquax::code::read(lxma).map_err(|why| why.say(inner.lang).to_string())?;
+        let (peer, key) = match code {
+            loquax::code::Code::Contact(contact) => (contact.address, Some(contact.public_key)),
+            // An old code, the address alone (1263): the contact is there,
+            // the first message waits for its announce.
+            loquax::code::Code::Address(address) => (address, None),
+            loquax::code::Code::Mailbox(_) => {
+                return Err(StrId::CodeIsMailbox.text(inner.lang).to_string())
+            }
+        };
         if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
             inner.apply(UiEvent::Rename {
                 peer,
                 name: name.to_string(),
             });
         }
+        let Some(contact_key) = key else {
+            inner.apply(UiEvent::Open { peer });
+            inner.dirty = true;
+            return Ok(());
+        };
         let node = inner.client.node.clone();
         let public_key = inner.client.public_key;
         let device = inner.client.device.clone();
         let events = inner.events.clone();
         let keys_told = Arc::clone(&inner.keys_told);
         inner.runtime.spawn(async move {
-            let told = loquax::home::client::key(
-                &node,
-                &public_key,
-                &device,
-                &peer,
-                &contact.public_key,
-                BUDGET,
-            )
-            .await;
+            let told =
+                loquax::home::client::key(&node, &public_key, &device, &peer, &contact_key, BUDGET)
+                    .await;
             if told.is_ok() {
                 keys_told.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -1078,20 +1114,18 @@ impl Session {
                 |peer| inner.photo(peer),
             )),
             schema::Query::Shared => schema::encode(&inner.shared()?),
-            schema::Query::Lxma { text } => {
-                let contact = loquax::lxma::parse(&text).map_err(|error| error.to_string())?;
-                schema::encode(&schema::Lxma {
-                    v: VERSION,
-                    address: loquax::address::to_hex(&contact.address),
-                    lxma: loquax::lxma::encode_parts(&contact.address, &contact.public_key),
-                    known: inner
+            schema::Query::Lxma { text, lang } => schema::encode(&read_code(
+                &text,
+                lang.as_deref().map_or(inner.lang, Lang::of_tag),
+                |address| {
+                    inner
                         .model
                         .names
-                        .shown(&contact.address)
+                        .shown(address)
                         .unwrap_or_default()
-                        .to_string(),
-                })
-            }
+                        .to_string()
+                },
+            )?),
             schema::Query::Me
             | schema::Query::Profile
             | schema::Query::Backup { .. }
@@ -2463,16 +2497,58 @@ pub fn share_location(
     ))
 }
 
-/// A join that failed, in words for the join screen.
-fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
+/// What [`schema::Query::Lxma`] answers for `text` ([`loquax::code::read`],
+/// 1263): its kind, whose, and the code to hand on; a text that is none
+/// refused in one sentence of `lang`. `known` names an address.
+pub fn read_code(
+    text: &str,
+    lang: Lang,
+    known: impl Fn(&[u8; 16]) -> String,
+) -> Result<schema::Lxma, String> {
+    use loquax::code::Code;
+    let code = loquax::code::read(text).map_err(|why| why.say(lang).to_string())?;
+    let address = code.address();
+    Ok(schema::Lxma {
+        v: VERSION,
+        kind: code.kind().to_string(),
+        address: address
+            .as_ref()
+            .map(|address| loquax::address::to_hex(address))
+            .unwrap_or_default(),
+        lxma: match &code {
+            Code::Contact(contact) => {
+                loquax::lxma::encode_parts(&contact.address, &contact.public_key)
+            }
+            Code::Address(address) => loquax::address::to_hex(address),
+            Code::Mailbox(text) => text.clone(),
+        },
+        known: address.as_ref().map(known).unwrap_or_default(),
+    })
+}
+
+/// A join that failed, in one plain sentence for the join screen (1263,
+/// finding 8): no daemon, no server, no TCP on the main path.
+fn join_words(error: &loquax::home::client::HomeError) -> StrId {
+    use loquax::home::client::HomeError;
+    match error {
+        HomeError::NoPath => StrId::JoinNoAnswer,
+        HomeError::Refused(_) => StrId::JoinRefused,
+        HomeError::Timeout => StrId::JoinSlow,
+        _ => StrId::JoinFailed,
+    }
+}
+
+/// The same join failure in the words of the machinery, for the screen's
+/// Details: what someone helping needs.
+fn join_details(error: &loquax::home::client::HomeError, server: &str) -> String {
     use loquax::home::client::HomeError;
     match error {
         HomeError::NoPath => format!(
-            "Your mailbox did not answer through {server}. Check the address, \
+            "No path to the mailbox through {server}: check the address, \
              that its lnsd runs a TCP server there, and that this phone can reach it."
         ),
-        HomeError::Refused(status) => format!("Your mailbox refused the code: {status}."),
-        HomeError::Timeout => "Your mailbox did not answer in time. Try again.".to_string(),
+        HomeError::Refused(status) => format!("The mailbox refused the code: {status}."),
+        HomeError::Timeout => format!("No answer through {server} in time."),
         other => format!("Joining failed: {other}."),
     }
 }
@@ -2598,6 +2674,51 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every join failure is one plain sentence of the catalogue in both
+    /// languages (1263, finding 8), and the machinery's words, the server
+    /// included, go under Details only.
+    #[test]
+    fn a_join_failure_is_one_plain_sentence_and_the_rest_is_details() {
+        use loquax::home::client::HomeError;
+        use loquax::home::wire::Status;
+        let server = "192.168.1.20:4242";
+        let cases = [
+            (
+                HomeError::NoPath,
+                "The mailbox did not answer. Is the computer on?",
+            ),
+            (
+                HomeError::Refused(Status::BadToken),
+                "The mailbox did not take this code. Make a new one on the computer.",
+            ),
+            (
+                HomeError::Timeout,
+                "The mailbox did not answer in time. Try again.",
+            ),
+            (
+                HomeError::NoLink("refused".to_string()),
+                "Joining the mailbox did not work.",
+            ),
+            (HomeError::Malformed, "Joining the mailbox did not work."),
+        ];
+        for (error, english) in cases {
+            assert_eq!(join_words(&error).text(Lang::En), english, "{error:?}");
+            for lang in Lang::ALL {
+                let said = join_words(&error).text(lang);
+                for word in ["lnsd", "TCP", "host:port", "loquax home", server] {
+                    assert!(!said.contains(word), "{lang:?} {error:?}: {said}");
+                }
+            }
+            assert!(!join_details(&error, server).is_empty());
+        }
+        assert!(join_details(&HomeError::NoPath, server).contains(server));
+        assert!(join_details(&HomeError::NoPath, server).contains("lnsd"));
+        assert_eq!(
+            join_words(&HomeError::NoPath).text(Lang::De),
+            "Das Postfach hat nicht geantwortet. Ist der Computer an?"
+        );
+    }
 
     /// The client's own periodic timers while it idles (1176), as the
     /// report lists them. Tokio exposes no list of the timers a runtime

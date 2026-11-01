@@ -64,6 +64,38 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingTop="12dp"
+            android:textColor="@color/text"
+            android:textSize="16sp"
             android:textIsSelectable="true" />
+
+        <!-- 1263: a join that failed is one sentence, Retry, and the
+             mailbox's own words behind Details. -->
+        <Button
+            android:id="@+id/join_retry"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/try_again"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/join_details_toggle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?android:attr/selectableItemBackground"
+            android:paddingTop="12dp"
+            android:paddingBottom="8dp"
+            android:textColor="@color/text_secondary"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/join_details"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textColor="@color/text_secondary"
+            android:textIsSelectable="true"
+            android:textSize="13sp"
+            android:visibility="gone" />
     </LinearLayout>
 </ScrollView>

@@ -38,15 +38,13 @@ import java.util.Map;
  * monospaced, selectable row with Copy; the QR code of the contact code
  * `lxma://<address>:<key>` that Columba and Sideband read, on a white
  * card; Share (the code as text), Share as picture, Copy address; Scan a
- * contact's code, which adds a contact from an `lxma://` code and joins a
- * mailbox from an `lqxh1` one; where the mailbox is, with the way to
+ * contact's code, which adds a contact from an `lxma://` code or an
+ * address alone and joins a mailbox from an `lqxh1` one (loquax::code); where the mailbox is, with the way to
  * another; Advanced, collapsed: identity hash, home node, propagation
  * node, backup, app version.
  */
 public class ProfileActivity extends Activity {
     private static final int SCAN = 1;
-    /** What the scanner takes here: a contact's code or a mailbox's. */
-    static final String SCAN_PREFIXES = "lxma://|lqxh1";
 
     private LinearLayout body;
     private Map<String, Object> profile;
@@ -257,7 +255,7 @@ public class ProfileActivity extends Activity {
             @Override
             public void onClick(View v) {
                 startActivityForResult(new Intent(ProfileActivity.this, ScanActivity.class)
-                        .putExtra(ScanActivity.PREFIX, SCAN_PREFIXES), SCAN);
+                        .putExtra(ScanActivity.PREFIX, ScanActivity.CODES), SCAN);
             }
         });
     }
@@ -353,14 +351,10 @@ public class ProfileActivity extends Activity {
         if (request != SCAN || result != RESULT_OK || data == null) {
             return;
         }
-        String text = String.valueOf(data.getStringExtra(ScanActivity.TEXT));
-        if (AddContact.is(text)) {
-            AddContact.ask(this, text, null);
-        } else {
-            // A mailbox's code: the join the first screen does for one.
-            startActivity(new Intent(this, MainActivity.class)
-                    .putExtra(MainActivity.JOIN, true)
-                    .putExtra(MainActivity.CODE, text));
+        // A friend's code adds them, a mailbox's joins it (1263).
+        String why = AddContact.take(this, String.valueOf(data.getStringExtra(ScanActivity.TEXT)), null);
+        if (why != null) {
+            Toast.makeText(this, why, Toast.LENGTH_LONG).show();
         }
     }
 

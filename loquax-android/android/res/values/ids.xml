@@ -36,6 +36,11 @@
     <item name="profile_address" type="id" />
     <item name="profile_copy" type="id" />
     <item name="profile_qr" type="id" />
+    <item name="welcome_qr" type="id" />
+    <item name="welcome_share" type="id" />
+    <item name="join_retry" type="id" />
+    <item name="join_details_toggle" type="id" />
+    <item name="join_details" type="id" />
     <item name="profile_share" type="id" />
     <item name="profile_share_picture" type="id" />
     <item name="profile_copy_address" type="id" />

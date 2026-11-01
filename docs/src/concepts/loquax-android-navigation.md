@@ -93,8 +93,8 @@ when it exists, never as a disabled placeholder.
 
 The list as it is now (rows, long press, pins, archive), under the common
 bar. The pencil stays the round button bottom right. It opens "New
-conversation", whose first choice becomes "Scan a QR code", then the
-address field.
+conversation": "Scan a code" first, "Paste a code" second, the typed
+address under a closed Advanced (1263).
 
 ## Map
 
@@ -260,13 +260,25 @@ parses it once for every frontend; its test pins the string byte for
 byte against Columba's encoder, and the QR code is byte mode, verbatim,
 because Columba compares the prefix case for case.
 
-A scanned or pasted code (the pencil's field takes one too) asks for the
-contact's name, keeps it as the reader's name for the address, hands the
-key to the mailbox (`/key`, docs/src/concepts/loquax-home-node.md) and
-opens the chat. The facade has `Query::Profile`, `Query::Lxma` (whose a
-code is, before the name is asked) and `Request::AddContact`. The parser
-refuses a code whose address is not the one its key makes, with words
-for the screen.
+A scanned or pasted code (the pencil's "Scan a code" and "Paste a code"
+take one too) asks for the contact's name, keeps it as the reader's name
+for the address, hands the key to the mailbox (`/key`,
+docs/src/concepts/loquax-home-node.md) and opens the chat. The facade has
+`Query::Profile`, `Query::Lxma` (what a code is and whose, before the
+name is asked) and `Request::AddContact`.
+
+One reader takes every code (1263, finding 1 of the ninety percent walk):
+`loquax::code::read`, used by the phone's scanners and pencil, the
+terminal's palette and the window's field. It takes a contact code, an
+address alone (32 hex digits, either case, groups of four, `lxmf@`; the
+first start's QR held one before 1263, and an old screenshot must still
+work) and a mailbox's `lqxh1` code, which goes to the join. A text that
+is none is said in one sentence of the catalogue: "That is not a Loquax
+code." or, for one of ours that is damaged (a contact code whose address
+is not its key's, a cut code), "This code is damaged. Ask for it again."
+The scanner shows that sentence instead of ignoring the code. The first
+start's "Your address" shows the profile's contact code as its QR, and
+its Share sends it.
 
 No new colours: the card is white because a QR code is black on white,
 and every text on the screen uses the background's text and secondary

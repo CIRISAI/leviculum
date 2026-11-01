@@ -177,6 +177,10 @@ pub struct Started {
     /// What the join screen has to ask for when `ok` is false: `code`,
     /// `server`, or nothing when the error is of another kind.
     pub need: Option<String>,
+    /// What went wrong in the mailbox's own words, behind the screen's
+    /// Details (1263); `error` is the one plain sentence.
+    #[serde(default)]
+    pub details: Option<String>,
     /// The home node's LXMF address, which is this phone's own.
     pub address: Option<String>,
     /// The server the session talks to.
@@ -325,7 +329,8 @@ pub enum Request {
         at: i64,
     },
     /// A contact from its contact code, `lxma://<address>:<key>` (1187,
-    /// `loquax::lxma`): scanned or pasted. `name`, when given, becomes the
+    /// `loquax::lxma`), or from its address alone (1263, an old code):
+    /// scanned or pasted. `name`, when given, becomes the
     /// reader's name for it; the home node is handed the key, so a message
     /// can go out before any announce was heard; the conversation opens.
     #[serde(rename = "addcontact")]
@@ -470,9 +475,17 @@ pub enum Query {
     /// contact code and its QR, where the mailbox is, and the advanced
     /// facts.
     Profile,
-    /// Whether `text` is a contact code, and whose (1187): what the scanner
-    /// and the new conversation field ask before the name.
-    Lxma { text: String },
+    /// Whether `text` is a code, which kind and whose (1187, 1263,
+    /// `loquax::code::read`): what the scanner and the new conversation
+    /// screen ask before the name. A text that is none is refused in one
+    /// sentence of `lang` (a BCP 47 tag; the session's language when
+    /// none). Answered without a session too, `known` then empty: the
+    /// first start's scanner asks before anything runs.
+    Lxma {
+        text: String,
+        #[serde(default)]
+        lang: Option<String>,
+    },
     /// The Maps page (1207): with `delete` that region file deleted
     /// ([`RegionRow::name`]), with `set_autoload` the automatic download
     /// stored, then the regions of the app's maps directory. A page's
@@ -755,8 +768,13 @@ pub struct Me {
     pub address: String,
     /// The address in groups of four, as the contact screen shows one.
     pub fingerprint: String,
+    /// The contact code, the same as [`Profile::lxma`]: what the first
+    /// start's QR holds and its Share sends (1263), one code everywhere.
+    #[serde(default)]
+    pub lxma: String,
     pub qr_size: u32,
-    /// `qr_size` squared modules, one byte each, row by row.
+    /// The QR code of [`Me::lxma`] as [`Profile::qr`] has it: `qr_size`
+    /// squared modules, one byte each, row by row.
     pub qr: Blob,
     /// The name recipients see; empty when none was given.
     pub name: String,
@@ -806,12 +824,20 @@ pub struct Profile {
     pub version: String,
 }
 
-/// What [`Query::Lxma`] answers for a contact code: whose it is, and the
-/// code as it parsed, for [`Request::AddContact`].
+/// What [`Query::Lxma`] answers for a code (`loquax::code::read`, 1263):
+/// what it is, whose, and the code as it parsed, for
+/// [`Request::AddContact`] or the join.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lxma {
     pub v: u32,
+    /// `contact` for a contact code, `address` for a friend's address
+    /// alone, `mailbox` for a mailbox's join code.
+    #[serde(default)]
+    pub kind: String,
+    /// The friend's address as lowercase hex; empty for a mailbox's code.
     pub address: String,
+    /// What [`Request::AddContact`] or the join takes: the contact code
+    /// as Columba writes it, the address, or the mailbox's code as read.
     pub lxma: String,
     /// The name every screen gives that address today: a petname or an
     /// announced name when one is known, else empty.

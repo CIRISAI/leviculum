@@ -48,7 +48,6 @@
     <string name="run_title">%1$d positions</string>
     <!-- 1209: whether a position is alive. -->
     <string name="new_conversation">New conversation</string>
-    <string name="address_label">The LXMF address to write to: 32 hex digits, as the other side\'s app shows it.</string>
     <string name="paste">Paste</string>
     <string name="stop_service">Stop the service</string>
     <string name="emoji_more">More emoji</string>
@@ -219,6 +218,7 @@
     <string name="scan_backup">Scan the paper backup</string>
     <string name="scan_hint">Hold the code in front of the camera.</string>
     <string name="scan_no_camera">The camera cannot be used. Paste the code instead.</string>
+    <string name="scan_wrong_kind">That code is for something else. Scan the code this screen asks for.</string>
     <!-- The main views and the settings (1199). -->
     <string name="help">Help</string>
     <string name="settings_profile">Profile</string>

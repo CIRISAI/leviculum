@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A new conversation (1130): the address pasted or typed; a scan comes
-     later. -->
+<!-- A new conversation (1130, 1263): scan a friend's code first, paste
+     one second; typing an address waits under Advanced. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:fitsSystemWindows="true"
     android:layout_width="match_parent"
@@ -39,25 +39,36 @@
         android:paddingStart="16dp"
         android:paddingTop="8dp"
         android:paddingEnd="16dp"
-        android:text="@string/address_label"
+        android:paddingBottom="8dp"
+        android:text="@string/new_hint"
         android:textColor="@color/text_secondary"
         android:textSize="15sp" />
 
-    <EditText
-        android:id="@+id/address"
+    <TextView
+        android:id="@+id/new_scan"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="16dp"
-        android:fontFamily="monospace"
-        android:hint="@string/address_hint"
-        android:imeOptions="actionGo"
-        android:importantForAutofill="no"
-        android:inputType="textNoSuggestions"
-        android:maxLines="2"
-        android:textColor="@color/text"
-        android:textColorHint="@color/text_secondary" />
+        android:background="?android:attr/selectableItemBackground"
+        android:minHeight="56dp"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:text="@string/new_scan"
+        android:textColor="@color/accent"
+        android:textSize="17sp" />
+
+    <TextView
+        android:id="@+id/new_paste"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:attr/selectableItemBackground"
+        android:minHeight="56dp"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:text="@string/new_paste"
+        android:textColor="@color/accent"
+        android:textSize="17sp" />
 
     <TextView
         android:id="@+id/error"
@@ -66,26 +77,59 @@
         android:paddingStart="16dp"
         android:paddingTop="4dp"
         android:paddingEnd="16dp"
-        android:textColor="@color/text_secondary"
-        android:textSize="13sp" />
+        android:textColor="@color/text"
+        android:textSize="15sp" />
 
-    <LinearLayout
+    <TextView
+        android:id="@+id/new_advanced"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="end"
-        android:orientation="horizontal"
-        android:padding="8dp">
+        android:background="?android:attr/selectableItemBackground"
+        android:paddingStart="16dp"
+        android:paddingTop="24dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="12dp"
+        android:textColor="@color/text_secondary"
+        android:textSize="15sp" />
 
-        <Button
-            android:id="@+id/paste"
-            android:layout_width="wrap_content"
+    <LinearLayout
+        android:id="@+id/new_advanced_body"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/paste" />
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:text="@string/new_typed"
+            android:textColor="@color/text_secondary"
+            android:textSize="15sp" />
+
+        <EditText
+            android:id="@+id/address"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="16dp"
+            android:fontFamily="monospace"
+            android:hint="@string/address_hint"
+            android:imeOptions="actionGo"
+            android:importantForAutofill="no"
+            android:inputType="textNoSuggestions"
+            android:maxLines="2"
+            android:textColor="@color/text"
+            android:textColorHint="@color/text_secondary" />
 
         <Button
             android:id="@+id/open"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_margin="8dp"
             android:text="@string/open" />
     </LinearLayout>
 </LinearLayout>

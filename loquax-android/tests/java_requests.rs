@@ -426,8 +426,15 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
         ("profile", t("profile"), Query::Profile),
         (
             "lxma",
-            java_map(&[("t", Java::Str("lxma")), ("text", Java::Str(LXMA))]),
-            Query::Lxma { text: s(LXMA) },
+            java_map(&[
+                ("t", Java::Str("lxma")),
+                ("text", Java::Str(LXMA)),
+                ("lang", Java::Str("de-DE")),
+            ]),
+            Query::Lxma {
+                text: s(LXMA),
+                lang: Some(s("de-DE")),
+            },
         ),
         (
             "info",

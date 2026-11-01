@@ -61,6 +61,9 @@ public class WelcomeActivity extends Activity {
     private static final int OPEN_BACKUP = 3;
     private static final int SCAN_CODE = 4;
     private static final int SCAN_BACKUP = 5;
+    /** The extra that opens a page directly; {@link #ADDRESS_PAGE} is the one there is. */
+    static final String SHOW = "show";
+    static final String ADDRESS_PAGE = "address";
 
     private ScrollView frame;
     private int page = CHOICE;
@@ -89,6 +92,11 @@ public class WelcomeActivity extends Activity {
         if (savedInstanceState != null) {
             page = savedInstanceState.getInt(PAGE, CHOICE);
             here = savedInstanceState.getBoolean(WHERE_HERE, true);
+        } else if (ADDRESS_PAGE.equals(getIntent().getStringExtra(SHOW))) {
+            // The address page of a session that runs: the device walk's
+            // way to the first start's QR (1263), in the debug APK, where
+            // this screen is exported.
+            page = ADDRESS;
         }
         // Recreated while starting or after: the session runs or ran in
         // the library; asking it again answers for the running one.
@@ -451,8 +459,11 @@ public class WelcomeActivity extends Activity {
     /** The address to give people, the name for others, the backup. */
     private void address(LinearLayout body) {
         body.addView(text(getString(R.string.address_title), 22, R.color.text, true), matchWrap());
+        // The contact code's QR, the profile's (1263): a friend's scanner
+        // takes it.
         ImageView qr = QrCode.view(this, me, dp(240), Core.str(me, "fingerprint"));
         if (qr != null) {
+            qr.setId(R.id.welcome_qr);
             LinearLayout.LayoutParams at = new LinearLayout.LayoutParams(dp(240), dp(240));
             at.gravity = Gravity.CENTER_HORIZONTAL;
             at.topMargin = dp(16);
@@ -467,12 +478,13 @@ public class WelcomeActivity extends Activity {
                 false), 4, 16), matchWrap());
         LinearLayout row = new LinearLayout(this);
         Button share = button(getString(R.string.share));
+        share.setId(R.id.welcome_share);
         share.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 Intent send = new Intent(Intent.ACTION_SEND)
                         .setType("text/plain")
-                        .putExtra(Intent.EXTRA_TEXT, Core.str(me, "address"));
+                        .putExtra(Intent.EXTRA_TEXT, Core.str(me, "lxma"));
                 startActivity(Intent.createChooser(send, getString(R.string.share)));
             }
         });

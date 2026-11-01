@@ -78,10 +78,11 @@
     </activity>
 
     <!-- The first start (1152): where the mailbox lives, the background
-         permission, the address. -->
+         permission, the address. Exported in the debug APK alone, where
+         the device walk opens its address page by `am start` (1263). -->
     <activity a:name='network.leviculum.loquax.WelcomeActivity'
               a:theme='@style/Loquax.List'
-              a:exported='false'/>
+              a:exported='{{WALK_EXPORTED}}'/>
 
     <activity a:name='network.leviculum.loquax.BackupActivity'
               a:theme='@style/Loquax.List'

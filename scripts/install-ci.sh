@@ -80,6 +80,15 @@ for cmd in opusenc opusdec c2enc c2dec; do
     fi
 done
 
+# Walk dependency: zbarimg reads the QR codes of the first start and the
+# profile off the phone's screenshots (1263, loquax-android/scripts/
+# device-walk.py step first_start_qr); without it that step fails naming
+# this hint.
+if ! command -v zbarimg >/dev/null 2>&1; then
+    echo "[install-ci] Note: device walk dependency 'zbarimg' not found"
+    echo "[install-ci] Hint: sudo apt install zbar-tools (the device walk's QR step)"
+fi
+
 # Optional test dependency: lintian is the Debian-policy authority
 # scripts/verify-deb-packaging.sh defers to. `just verify-deb` presupposes a
 # build-deb run and is not part of any tier, so warn rather than fail — but a

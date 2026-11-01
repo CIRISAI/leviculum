@@ -316,6 +316,9 @@ alone), **S** slows (completes with effort, a guess or a Reticulum word),
 
 Counts: **B 8, S 16, C 7** (31 findings).
 
+Done since: 1263 takes #1, #3, #6 and #8, and with #1 also #10 (the
+first start's Share sends the contact code).
+
 ## 6. The three worst
 
 1. **#1, the QR that scans to nothing.** The one QR a new user is shown

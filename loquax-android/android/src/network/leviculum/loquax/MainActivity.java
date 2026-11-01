@@ -41,6 +41,9 @@ public class MainActivity extends Activity {
     private EditText code;
     private EditText server;
     private Button join;
+    private Button retry;
+    private TextView detailsToggle;
+    private TextView details;
     /** The conversation an imto tap asked for, opened once started. */
     private String imto;
 
@@ -61,6 +64,21 @@ public class MainActivity extends Activity {
         code = (EditText) findViewById(R.id.code);
         server = (EditText) findViewById(R.id.server);
         join = (Button) findViewById(R.id.join);
+        retry = (Button) findViewById(R.id.join_retry);
+        detailsToggle = (TextView) findViewById(R.id.join_details_toggle);
+        details = (TextView) findViewById(R.id.join_details);
+        retry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                start(true);
+            }
+        });
+        detailsToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showDetails(details.getVisibility() != View.VISIBLE);
+            }
+        });
         // The app's files directory is its loquax home: the place
         // `home-client` and `home-cursor` live, as $LNMSG_HOME on a desktop.
         status.setText(Native.describe(home()));
@@ -160,6 +178,9 @@ public class MainActivity extends Activity {
         final String typedCode = joining ? code.getText().toString().trim() : null;
         final String typedServer = joining ? server.getText().toString().trim() : null;
         join.setEnabled(false);
+        retry.setVisibility(View.GONE);
+        detailsToggle.setVisibility(View.GONE);
+        details.setVisibility(View.GONE);
         error.setText(joining ? getString(R.string.joining) : getString(R.string.starting));
         final String home = home();
         new Thread(new Runnable() {
@@ -180,6 +201,12 @@ public class MainActivity extends Activity {
         }, "loquax-start").start();
     }
 
+    /** The mailbox's own words under Details, open or folded. */
+    private void showDetails(boolean open) {
+        detailsToggle.setText(getString(R.string.details) + (open ? "  ▴" : "  ▾"));
+        details.setVisibility(open && !details.getText().toString().isEmpty() ? View.VISIBLE : View.GONE);
+    }
+
     private void started(Map<String, Object> started) {
         join.setEnabled(true);
         if (Core.bool(started, "ok")) {
@@ -195,6 +222,11 @@ public class MainActivity extends Activity {
         }
         form.setVisibility(View.VISIBLE);
         error.setText(Core.str(started, "error"));
+        retry.setVisibility(View.VISIBLE);
+        String said = Core.str(started, "details");
+        details.setText(said);
+        detailsToggle.setVisibility(said.isEmpty() ? View.GONE : View.VISIBLE);
+        showDetails(false);
         String need = Core.str(started, "need");
         if ("server".equals(need)) {
             server.requestFocus();

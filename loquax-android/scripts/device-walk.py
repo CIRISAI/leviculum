@@ -40,6 +40,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import socket
 import struct
@@ -59,6 +60,7 @@ TARGET = "x86_64-unknown-linux-musl"
 STEPS = [
     "fixture",
     "install",
+    "join_error_words",
     "first_start",
     "list",
     "open_imported",
@@ -78,6 +80,8 @@ STEPS = [
     "settings",
     "receipts",
     "profile",
+    "first_start_qr",
+    "pencil_scan",
     "buildings",
     "teardown",
 ]
@@ -147,6 +151,30 @@ VOICE_WORDS = re.compile(r"^Voice message, (?P<m>\d+):(?P<s>\d\d)$")
 VOICE_PLAY = "Play"
 VOICE_PAUSE = "Pause"
 VOICE_FIXTURE = "voice-fixture.pcm"
+# One contact code everywhere (1263, finding 1): the first start's
+# address page, opened in the debug APK by `am start` with this extra, and
+# the start of every contact code its QR and the profile's hold.
+WELCOME_ACTIVITY = "network.leviculum.loquax.WelcomeActivity"
+LXMA_PREFIX = "lxma://"
+# The pencil (1263, finding 3): its two rows, top to bottom, the fold
+# that hides the typed address, and the sentence for a text that is no
+# code (the catalogue's code_foreign).
+PENCIL_SCAN = "new_scan"
+PENCIL_PASTE = "new_paste"
+PENCIL_ADVANCED = "new_advanced"
+CODE_FOREIGN = "That is not a Loquax code."
+# Join errors in plain words (1263, finding 8): what a code that is no
+# mailbox's says (the catalogue's join_not_mailbox), the parser's words
+# behind Details, and the ids of Retry and the fold.
+JOIN_NOT_MAILBOX = "That code is not a mailbox code."
+JOIN_DETAILS_SAY = "That is not a mailbox code"
+JOIN_RETRY = "join_retry"
+JOIN_DETAILS_TOGGLE = "join_details_toggle"
+JOIN_DETAILS = "join_details"
+BAD_MAILBOX_CODE = "lqxh1nonsense"
+# Words the 90 % never see on a main row (1263): Reticulum's and the
+# daemon's.
+DAEMON_WORDS = ["LXMF", "hex digit", "lnsd", "TCP", "host:port", "loquax home", "Reticulum"]
 # The region the walk puts on the phone for the Maps page (1207): the
 # repository's Florence fixture, and the middle the page names it by
 # (Ui.place, two decimals, either decimal mark).
@@ -550,6 +578,76 @@ def profile_problems(nodes: list[Node], want: str | None) -> tuple[str, list[str
         problems.append("no Share")
     problems += decode_problems(nodes)
     return shown, problems
+
+
+def qr_texts(zbar: str) -> list[str]:
+    """What `zbarimg --quiet --raw` read: one code a line, blank lines
+    dropped."""
+    return [line.strip() for line in zbar.splitlines() if line.strip()]
+
+
+def first_start_qr_problems(welcome: list[str], profile: list[str], address: str | None) -> list[str]:
+    """The first start's QR and the profile's (1263, finding 1): each one
+    code, a contact code, of the mailbox's address when known, and the
+    same."""
+    problems = []
+    for where, read in (("first start", welcome), ("profile", profile)):
+        if len(read) != 1:
+            problems.append(f"the {where} screen holds {len(read)} codes: {read}")
+        elif not read[0].startswith(LXMA_PREFIX):
+            problems.append(f"the {where} QR is {read[0]!r}, no contact code")
+        elif address is not None and not read[0].startswith(f"{LXMA_PREFIX}{address}:"):
+            problems.append(f"the {where} QR is {read[0]!r}, not of {address}")
+    if len(welcome) == 1 and len(profile) == 1 and welcome != profile:
+        problems.append(f"the first start's QR {welcome[0]!r} is not the profile's {profile[0]!r}")
+    return problems
+
+
+def daemon_word_problems(nodes: list[Node]) -> list[str]:
+    """A word of Reticulum or the daemon anywhere on screen."""
+    return [
+        f"on screen: {t!r} says {word!r}"
+        for t in texts(nodes)
+        for word in DAEMON_WORDS
+        if word in t
+    ]
+
+
+def pencil_problems(nodes: list[Node], camera: bool) -> list[str]:
+    """The pencil's screen (1263, finding 3): "Scan a code" first where
+    there is a camera, "Paste a code" next, the typed address folded
+    away under Advanced, no daemon word."""
+    scan = find(nodes, rid=PENCIL_SCAN)
+    paste = find(nodes, rid=PENCIL_PASTE)
+    problems = []
+    if not paste:
+        problems.append("no Paste a code")
+    if camera and not scan:
+        problems.append("a camera and no Scan a code")
+    if scan and paste and scan[0].bounds[1] >= paste[0].bounds[1]:
+        problems.append("Scan a code is not above Paste a code")
+    if not find(nodes, rid=PENCIL_ADVANCED):
+        problems.append("no Advanced")
+    if find(nodes, rid="address"):
+        problems.append("the address field shows before Advanced is opened")
+    return problems + daemon_word_problems(nodes)
+
+
+def join_error_problems(nodes: list[Node], said: str) -> list[str]:
+    """A failed join (1263, finding 8): the one sentence `said`, Retry,
+    the Details fold, no daemon word in the sentence."""
+    error = find(nodes, rid="error")
+    problems = []
+    shown = error[0].text if error else None
+    if shown != said:
+        problems.append(f"the join says {shown!r}, not {said!r}")
+    if not find(nodes, rid=JOIN_RETRY):
+        problems.append("no Retry")
+    if not find(nodes, rid=JOIN_DETAILS_TOGGLE):
+        problems.append("no Details")
+    if shown is not None:
+        problems += [f"the sentence says {word!r}" for word in DAEMON_WORDS if word in shown]
+    return problems
 
 
 def decode_problems(nodes: list[Node]) -> list[str]:
@@ -2296,6 +2394,119 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"address={shown} qr=shown share=shown back=chats"
+
+    def screen_codes(self, name: str) -> list[str]:
+        """The QR codes on screen, read by zbarimg from a screenshot kept
+        beside the log as `name`.png."""
+        path = self.out / f"{name}.png"
+        self.need_device().screenshot_png(path)
+        if shutil.which("zbarimg") is None:
+            raise StepFailed("zbarimg missing: apt install zbar-tools")
+        read = subprocess.run(
+            ["zbarimg", "--quiet", "--raw", str(path)], capture_output=True, timeout=30
+        )
+        return qr_texts(read.stdout.decode("utf-8", "replace"))
+
+    def back_to_chats(self) -> None:
+        dev = self.need_device()
+        for _ in range(4):
+            if find(dev.dump(), rid="write"):
+                return
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.wait_id("write", 10)
+
+    def step_join_error_words(self) -> str:
+        """Join errors in plain words (1263, finding 8), before the first
+        start joins: a code that is no mailbox's, typed into the join form,
+        says one sentence with Retry and a Details fold that opens on the
+        parser's words; the app is stopped again, nothing joined."""
+        dev = self.need_device()
+        dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
+        self.wait_text(WHERE_TITLE, 20)
+        self.tap_text(WHERE_COMPUTER)
+        self.tap_text(CONTINUE)
+        self.tap_text(PASTE_CODE)
+        dev.tap_node(self.wait_id("code", 10)[0])
+        dev.type_text(BAD_MAILBOX_CODE)
+        if not find(dev.dump(), text=JOIN):
+            dev.key("KEYCODE_BACK")
+        self.tap_text(JOIN)
+        self.wait_id(JOIN_RETRY, 15)
+        nodes = dev.dump()
+        problems = join_error_problems(nodes, JOIN_NOT_MAILBOX)
+        if find(nodes, rid=JOIN_DETAILS):
+            problems.append("Details open before the tap")
+        toggle = find(nodes, rid=JOIN_DETAILS_TOGGLE)
+        if toggle:
+            dev.tap_node(toggle[0])
+            details = self.wait_id(JOIN_DETAILS, 5)
+            if JOIN_DETAILS_SAY not in details[0].text:
+                problems.append(f"Details say {details[0].text!r}")
+        dev.shell(f"am force-stop {PACKAGE}", check=False)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"said={JOIN_NOT_MAILBOX!r} retry=shown details=folded,opens"
+
+    def step_first_start_qr(self) -> str:
+        """One contact code everywhere (1263, finding 1): the first start's
+        address page, opened on the running session through the debug
+        APK's exported screen, shows a QR that zbarimg reads as a contact
+        code, `lxma://` and the mailbox's address, and the profile's QR
+        reads as the same code."""
+        dev = self.need_device()
+        self.back_to_chats()
+        dev.shell(
+            f"am start -W -n {PACKAGE}/{WELCOME_ACTIVITY} --es show address", timeout=60
+        )
+        self.wait_id("welcome_qr", 20)
+        welcome = self.screen_codes("first_start_qr-welcome")
+        dev.key("KEYCODE_BACK")
+        self.back_to_chats()
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        self.wait_id("profile_qr", 10)
+        profile = self.screen_codes("first_start_qr-profile")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        want = self.fixture.manifest["address"] if self.fixture is not None else None
+        problems = first_start_qr_problems(welcome, profile, want)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"code={welcome[0][:48]}… same=profile"
+
+    def step_pencil_scan(self) -> str:
+        """The pencil (1263, finding 3): "Scan a code" first where the
+        phone has a camera, "Paste a code" next, no daemon word on screen,
+        the address field under a closed Advanced; Scan opens the scanner;
+        a typed text that is no code says so in one sentence."""
+        dev = self.need_device()
+        self.back_to_chats()
+        dev.tap_node(self.wait_id("write", 10)[0])
+        self.wait_id(PENCIL_PASTE, 10)
+        camera = "feature:android.hardware.camera" in dev.shell("pm list features", check=False)
+        nodes = dev.dump()
+        problems = pencil_problems(nodes, camera)
+        scanned = "no camera"
+        if camera and find(nodes, rid=PENCIL_SCAN):
+            dev.tap_node(find(nodes, rid=PENCIL_SCAN)[0])
+            time.sleep(2)
+            self.dismiss_dialogs(1)
+            seen = texts(dev.dump())
+            scanned = "opened" if any("camera" in t for t in seen) else f"screen {seen[:4]}"
+            dev.key("KEYCODE_BACK")
+            self.wait_id(PENCIL_PASTE, 10)
+        dev.tap_node(self.wait_id(PENCIL_ADVANCED, 10)[0])
+        dev.tap_node(self.wait_id("address", 5)[0])
+        dev.type_text("hello")
+        if not find(dev.dump(), rid="open"):
+            dev.key("KEYCODE_BACK")
+        dev.tap_node(self.wait_id("open", 5)[0])
+        # Raises with the screen when the sentence is not there.
+        self.wait_text(CODE_FOREIGN, 5)
+        self.back_to_chats()
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"camera={camera} scan={scanned} refusal={CODE_FOREIGN!r}"
 
     def step_buildings(self) -> str:
         """The buildings (1193): the walk's Frankfurt region on the phone

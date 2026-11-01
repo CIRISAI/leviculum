@@ -41,6 +41,7 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::jint;
 use jni::EnvUnowned;
 
+use loquax::ui::strings::Lang;
 use schema::{Done, Event, Started, VERSION};
 use session::Session;
 
@@ -84,6 +85,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                         ok: true,
                         error: None,
                         need: None,
+                        details: None,
                         address: Some(loquax::address::to_hex(&session.address())),
                         server: Some(session.server().to_string()),
                         link: session.link(),
@@ -95,6 +97,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                     ok: false,
                     error: Some(error.text),
                     need: error.need.map(str::to_string),
+                    details: error.details,
                     address: None,
                     server: None,
                     link: false,
@@ -122,6 +125,13 @@ pub fn command(request: &[u8]) -> Vec<u8> {
 /// One [`schema::Query`]; its answer, or a [`schema::Done`] with the error.
 pub fn query(request: &[u8]) -> Vec<u8> {
     let answer = match (current(), schema::decode::<schema::Query>(request)) {
+        // A code read before anything runs: the first start's scanner.
+        (None, Ok(schema::Query::Lxma { text, lang })) => session::read_code(
+            &text,
+            Lang::of_tag(lang.as_deref().unwrap_or_default()),
+            |_| String::new(),
+        )
+        .map(|read| schema::encode(&read)),
         (None, _) => Err("not started".to_string()),
         (_, Err(error)) => Err(error),
         (Some(session), Ok(query)) => session.query(query),

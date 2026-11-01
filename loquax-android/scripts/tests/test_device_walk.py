@@ -780,3 +780,87 @@ class Ring(unittest.TestCase):
         before = [a.pixel(x, y) for x, y in points]
         after = [b.pixel(x, y) for x, y in points]
         self.assertEqual(walk.changed_fraction(before, after), 1.0)
+
+
+def row_at(rid, top, text=""):
+    """A node `rid` at `top`, as the pencil's rows stand."""
+    pkg = "network.leviculum.loquax.debug:id/"
+    return walk.Node(text=text, desc="", rid=pkg + rid, cls="", bounds=(0, top, 100, top + 40))
+
+
+ADDRESS = "0c749148" * 4
+CODE = f"lxma://{ADDRESS}:" + "ab" * 64
+
+
+class FirstStartQr(unittest.TestCase):
+    """1263, finding 1: the first start's QR is the profile's code."""
+
+    def test_zbar_lines(self):
+        self.assertEqual(walk.qr_texts(f"{CODE}\n\n"), [CODE])
+        self.assertEqual(walk.qr_texts(""), [])
+
+    def test_the_same_contact_code_passes(self):
+        self.assertEqual(walk.first_start_qr_problems([CODE], [CODE], ADDRESS), [])
+        self.assertEqual(walk.first_start_qr_problems([CODE], [CODE], None), [])
+
+    def test_the_old_bare_address_fails(self):
+        problems = walk.first_start_qr_problems([ADDRESS.upper()], [CODE], ADDRESS)
+        self.assertTrue(any("no contact code" in p for p in problems), problems)
+        self.assertTrue(any("is not the profile's" in p for p in problems), problems)
+
+    def test_none_or_two_codes_or_another_address_fail(self):
+        self.assertTrue(walk.first_start_qr_problems([], [CODE], ADDRESS))
+        self.assertTrue(walk.first_start_qr_problems([CODE, CODE], [CODE], ADDRESS))
+        other = CODE.replace(ADDRESS, "1" * 32)
+        problems = walk.first_start_qr_problems([other], [other], ADDRESS)
+        self.assertTrue(any("not of" in p for p in problems), problems)
+
+
+class Pencil(unittest.TestCase):
+    """1263, finding 3: scan first, paste second, typing folded away."""
+
+    def test_scan_above_paste_passes(self):
+        nodes = [row_at("new_scan", 200, "Scan a code"), row_at("new_paste", 300, "Paste a code"),
+                 row_at("new_advanced", 500, "Advanced  ▾")]
+        self.assertEqual(walk.pencil_problems(nodes, camera=True), [])
+
+    def test_no_camera_needs_no_scan(self):
+        nodes = [row_at("new_paste", 300), row_at("new_advanced", 500)]
+        self.assertEqual(walk.pencil_problems(nodes, camera=False), [])
+        self.assertEqual(walk.pencil_problems(nodes, camera=True), ["a camera and no Scan a code"])
+
+    def test_the_old_screen_fails(self):
+        nodes = [
+            row_at("address", 200),
+            row_at("x", 100, "The LXMF address to write to: 32 hex digits, as the other side's app shows it."),
+            row_at("new_paste", 100), row_at("new_scan", 300), row_at("new_advanced", 500),
+        ]
+        problems = walk.pencil_problems(nodes, camera=True)
+        self.assertIn("Scan a code is not above Paste a code", problems)
+        self.assertIn("the address field shows before Advanced is opened", problems)
+        self.assertTrue(any("'LXMF'" in p for p in problems), problems)
+
+
+class JoinErrorWords(unittest.TestCase):
+    """1263, finding 8: one sentence, Retry, Details."""
+
+    SAID = "That code is not a mailbox code."
+
+    def test_the_plain_sentence_passes(self):
+        nodes = [row_at("error", 400, self.SAID), row_at("join_retry", 450), row_at("join_details_toggle", 500)]
+        self.assertEqual(walk.join_error_problems(nodes, self.SAID), [])
+
+    def test_the_daemon_sentence_fails(self):
+        old = ("Your mailbox did not answer through 10.0.0.1:4242. Check the address, "
+               "that its lnsd runs a TCP server there.")
+        problems = walk.join_error_problems([row_at("error", 400, old)], self.SAID)
+        self.assertIn("no Retry", problems)
+        self.assertIn("no Details", problems)
+        self.assertIn("the sentence says 'lnsd'", problems)
+        self.assertIn("the sentence says 'TCP'", problems)
+
+    def test_the_steps_stand_where_they_can_run(self):
+        steps = walk.STEPS
+        self.assertLess(steps.index("join_error_words"), steps.index("first_start"))
+        self.assertGreater(steps.index("first_start_qr"), steps.index("first_start"))
+        self.assertGreater(steps.index("pencil_scan"), steps.index("first_start"))

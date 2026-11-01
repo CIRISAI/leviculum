@@ -121,7 +121,7 @@ final class Core {
 
     /** Whose contact code `text` is (`address`, `lxma`, `known`); `error` when it is none. */
     static Map<String, Object> lxma(String text) {
-        return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text))));
+        return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text, "lang", lang()))));
     }
 
     /** The contact of `lxma` under `name` (none when empty), its key to the mailbox, its chat open. */

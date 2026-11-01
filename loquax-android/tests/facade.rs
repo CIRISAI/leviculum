@@ -53,17 +53,30 @@ fn a_first_start_says_what_it_needs() {
     let answer = started(&loquax_android::start(&start_bytes(&base)));
     assert!(!answer.ok);
     assert_eq!(answer.need.as_deref(), Some("code"));
-    assert!(answer.error.unwrap().contains("reads no mailbox"));
+    assert_eq!(
+        answer.error.as_deref(),
+        Some("Scan or paste the code your mailbox shows.")
+    );
+    assert!(answer.details.unwrap().contains("reads no mailbox"));
 
-    let answer = started(&loquax_android::start(&start_bytes(&Start {
-        code: Some("lqxh1nonsense".to_string()),
-        ..base.clone()
-    })));
-    assert_eq!(answer.need.as_deref(), Some("code"));
-    assert!(answer
-        .error
-        .unwrap()
-        .starts_with("That is not a mailbox code"));
+    // The sentence in the phone's language, the parser's words under
+    // Details (1263, finding 8).
+    for (lang, said) in [
+        (None, "That code is not a mailbox code."),
+        (Some("de-DE"), "Das ist kein Postfach-Code."),
+    ] {
+        let answer = started(&loquax_android::start(&start_bytes(&Start {
+            code: Some("lqxh1nonsense".to_string()),
+            lang: lang.map(str::to_string),
+            ..base.clone()
+        })));
+        assert_eq!(answer.need.as_deref(), Some("code"));
+        assert_eq!(answer.error.as_deref(), Some(said));
+        assert!(answer
+            .details
+            .unwrap()
+            .starts_with("That is not a mailbox code"));
+    }
 
     // A code without an address dials the shipped rendezvous (1196); with
     // "mesh only" in the app's config there is nothing to dial, and the
@@ -75,7 +88,10 @@ fn a_first_start_says_what_it_needs() {
         ..base.clone()
     })));
     assert_eq!(answer.need.as_deref(), Some("server"));
-    assert!(answer.error.unwrap().contains("host:port"));
+    assert_eq!(
+        answer.error.as_deref(),
+        Some("Loquax does not know where your mailbox is. Type where it is below.")
+    );
 
     let answer = started(&loquax_android::start(&start_bytes(&Start {
         code: Some(code),
@@ -83,7 +99,8 @@ fn a_first_start_says_what_it_needs() {
         ..base
     })));
     assert_eq!(answer.need.as_deref(), Some("server"));
-    assert!(answer.error.unwrap().contains("has no port"));
+    assert!(answer.error.unwrap().contains("192.168.1.20:4242"));
+    assert!(answer.details.unwrap().contains("has no port"));
 
     let answer = started(&loquax_android::start(b"\xc1"));
     assert!(!answer.ok);
@@ -99,6 +116,22 @@ fn a_first_start_says_what_it_needs() {
     )))
     .expect("a Done");
     assert_eq!(done.error.as_deref(), Some("not started"));
+    // A code is read before anything runs (1263): the first start's
+    // scanner asks, in the phone's language.
+    let read = |text: &str, lang: Option<&str>| {
+        loquax_android::query(&schema::encode(&schema::Query::Lxma {
+            text: text.to_string(),
+            lang: lang.map(str::to_string),
+        }))
+    };
+    let done: schema::Done = rmp_serde::from_slice(&read("hello", Some("de"))).expect("a Done");
+    assert_eq!(done.error.as_deref(), Some("Das ist kein Loquax-Code."));
+    let mailbox: schema::Lxma = rmp_serde::from_slice(&read(
+        &code_for(&leviculum_core::Identity::generate(&mut rand_core::OsRng)),
+        None,
+    ))
+    .expect("a mailbox code reads");
+    assert_eq!(mailbox.kind, "mailbox");
     let event: Event =
         rmp_serde::from_slice(&loquax_android::next_event(Duration::ZERO).expect("an event"))
             .expect("an Event");
@@ -695,7 +728,10 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         })
         .err()
         .expect("another home's code");
-        assert!(refused.text.contains("another mailbox"), "{refused:?}");
+        assert_eq!(
+            refused.text, "This phone already reads another mailbox.",
+            "{refused:?}"
+        );
     })
     .await
     .expect("the second session");
@@ -2933,11 +2969,18 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
         );
         assert_eq!(profile.version, loquax::VERSION);
 
+        // The first start's QR is the same code (1263, finding 1).
+        let me: schema::Me =
+            rmp_serde::from_slice(&session.query(schema::Query::Me).expect("me")).expect("me");
+        assert_eq!(me.lxma, profile.lxma);
+        assert_eq!(read_qr(me.qr_size, &me.qr.0), vec![profile.lxma.clone()]);
+
         // Our own code, parsed back: our address.
         let ours: schema::Lxma = rmp_serde::from_slice(
             &session
                 .query(schema::Query::Lxma {
                     text: profile.lxma.clone(),
+                    lang: None,
                 })
                 .expect("our code parses"),
         )
@@ -2949,10 +2992,12 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
             &session
                 .query(schema::Query::Lxma {
                     text: format!("{}\n", bob_code.to_uppercase()),
+                    lang: None,
                 })
                 .expect("bob's code parses"),
         )
         .expect("decode");
+        assert_eq!(scanned.kind, "contact");
         assert_eq!(scanned.address, bob_address);
         assert_eq!(scanned.lxma, bob_code);
         assert_eq!(scanned.known, "");
@@ -2966,6 +3011,7 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
             &session,
             schema::Query::Lxma {
                 text: bob_code.clone(),
+                lang: None,
             },
             20,
             |l: &schema::Lxma| l.known == "Bob",
@@ -2994,13 +3040,71 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
                 name: None,
             })
             .expect_err("a wrong code");
-        assert!(refused.contains("does not match"), "{refused}");
+        assert_eq!(refused, "This code is damaged. Ask for it again.");
         let refused = session
             .query(schema::Query::Lxma {
                 text: "hello".to_string(),
+                lang: None,
             })
             .expect_err("no code");
-        assert!(refused.contains("lxma://"), "{refused}");
+        assert_eq!(refused, "That is not a Loquax code.");
+
+        // An old code, the address alone in capitals as the first start's
+        // QR held it before 1263: a contact without a key, its chat open.
+        let carol = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+        let carol_address = loquax::home::lxmf_address(&carol.public_key_bytes()).expect("a");
+        let carol_hex = loquax::address::to_hex(&carol_address);
+        let old: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: carol_hex.to_uppercase(),
+                    lang: None,
+                })
+                .expect("an address reads"),
+        )
+        .expect("decode");
+        assert_eq!(
+            (old.kind.as_str(), old.address.as_str(), old.lxma.as_str()),
+            ("address", carol_hex.as_str(), carol_hex.as_str())
+        );
+        session
+            .request(Request::AddContact {
+                lxma: old.lxma,
+                name: Some("Carol".to_string()),
+            })
+            .expect("added by address");
+        wait_for(
+            &session,
+            schema::Query::Lxma {
+                text: carol_hex.clone(),
+                lang: None,
+            },
+            20,
+            |l: &schema::Lxma| l.known == "Carol",
+        );
+        // A mailbox's code reads as one, and is no contact.
+        let mailbox: schema::Lxma = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Lxma {
+                    text: code_for(&carol),
+                    lang: None,
+                })
+                .expect("a mailbox code reads"),
+        )
+        .expect("decode");
+        assert_eq!(
+            (mailbox.kind.as_str(), mailbox.address.as_str()),
+            ("mailbox", "")
+        );
+        assert_eq!(
+            session
+                .request(Request::AddContact {
+                    lxma: code_for(&carol),
+                    name: None,
+                })
+                .expect_err("no contact"),
+            "That code is for a mailbox, not for a friend."
+        );
         session
     })
     .await
