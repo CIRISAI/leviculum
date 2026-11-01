@@ -117,13 +117,38 @@ final class Core {
      * it restores the address first. Blocks: not on the UI thread.
      */
     static Map<String, Object> startHere(String dir, String restore, String passphrase) {
+        return startHere(dir, restore, passphrase, false);
+    }
+
+    /**
+     * {@link #startHere}, and with `anyway` a restore goes on though its address answers on another
+     * device right now (1281): the user saw the warning (`need` live) and chose to.
+     */
+    static Map<String, Object> startHere(String dir, String restore, String passphrase, boolean anyway) {
         Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true,
                 "camera", camera);
         if (restore != null) {
             request.put("restore", restore);
             request.put("passphrase", passphrase);
         }
+        if (anyway) request.put("anyway", true);
         return answer(Native.start(MsgPack.pack(request)));
+    }
+
+    /**
+     * Move in from the old phone (1281): the library takes the mailbox over with the code the old
+     * phone's "Move to a new phone" shows, then starts it here. `name` is how the old phone names this
+     * one. Blocks: not on the UI thread.
+     */
+    static Map<String, Object> moveIn(String dir, String code, String name) {
+        return answer(Native.start(MsgPack.pack(map("dir", dir, "offset", (long) offset(), "lang", lang(),
+                "here", true, "camera", camera, "moving", code, "name", name))));
+    }
+
+    /** "Use this phone again" on a phone whose mailbox moved away (1281). Blocks: not on the UI thread. */
+    static Map<String, Object> takeBack(String dir) {
+        return answer(Native.start(MsgPack.pack(map("dir", dir, "offset", (long) offset(), "lang", lang(),
+                "camera", camera, "take_back", true))));
     }
 
     /** The address's backup line and its paper code, sealed with `passphrase`; `error` when not. */
@@ -149,6 +174,16 @@ final class Core {
     /** Whether a device came with the newest link code: `state` waiting, linked (with `name`), over or none. */
     static Map<String, Object> linked() {
         return answer(Native.query(MsgPack.pack(map("t", "linked"))));
+    }
+
+    /** A fresh code for the new phone (1281), as {@link #linkDevice}'s; `error` when not. */
+    static Map<String, Object> movePhone() {
+        return answer(Native.query(MsgPack.pack(map("t", "movephone"))));
+    }
+
+    /** Where the newest move code stands: `state` waiting, moved (with `name`), over or none. */
+    static Map<String, Object> moving() {
+        return answer(Native.query(MsgPack.pack(map("t", "moving"))));
     }
 
     /** Whose contact code `text` is (`address`, `lxma`, `known`); `error` when it is none. */

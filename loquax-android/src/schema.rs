@@ -147,6 +147,10 @@
 //! Linking a device (1264) came within version 1 too: [`Query::LinkDevice`]
 //! with its [`LinkCode`] and [`Query::Linked`] with its [`Linked`]. An
 //! older app offers no "Link a device".
+//! Moving to a new phone (1281) came within version 1 too:
+//! [`Query::MovePhone`] answering a [`LinkCode`], [`Query::Moving`]
+//! answering a [`Linked`], and three fields of [`Start`] an older app
+//! never sends: `moving`, `take_back` and `anyway`.
 
 use serde::{Deserialize, Serialize};
 
@@ -193,6 +197,19 @@ pub struct Start {
     pub restore: Option<String>,
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// Restore even though the address answers on another device right
+    /// now (1281): the user saw the warning and chose to.
+    #[serde(default)]
+    pub anyway: bool,
+    /// The code the old phone's "Move to a new phone" shows (1281, walk
+    /// finding 24): this phone takes the mailbox over from it before the
+    /// mailbox here first starts; only with [`Start::here`].
+    #[serde(default)]
+    pub moving: Option<String>,
+    /// "Use this phone again" on a phone whose mailbox moved away (1281):
+    /// it starts here again.
+    #[serde(default)]
+    pub take_back: bool,
     /// The phone has a camera (1270, `FEATURE_CAMERA_ANY`): the compose
     /// bar gets its camera button. An older app sends none, and gets none.
     #[serde(default)]
@@ -207,7 +224,11 @@ pub struct Started {
     /// Why not, in words for the screen.
     pub error: Option<String>,
     /// What the join screen has to ask for when `ok` is false: `code`,
-    /// `server`, or nothing when the error is of another kind.
+    /// `server`, or nothing when the error is of another kind. `moved`
+    /// (1281): this phone's mailbox moved to another phone, and it starts
+    /// only with [`Start::take_back`]; `live`: the backup's address answers
+    /// elsewhere right now, and the restore goes on only with
+    /// [`Start::anyway`].
     pub need: Option<String>,
     /// What went wrong in the mailbox's own words, behind the screen's
     /// Details (1263); `error` is the one plain sentence.
@@ -662,6 +683,14 @@ pub enum Query {
     LinkDevice,
     /// Whether a device came with the newest [`Query::LinkDevice`] code.
     Linked,
+    /// "Move to a new phone" on the profile (1281): a fresh code for the
+    /// new phone, as [`LinkCode`], that also lets the device joining with
+    /// it take the mailbox over; refused on a phone whose mailbox is on a
+    /// computer. [`Query::Moving`] watches the newest.
+    MovePhone,
+    /// Where the newest [`Query::MovePhone`] stands, as [`Linked`]:
+    /// `waiting`, `moved` (with the new phone's `name`), `over` or `none`.
+    Moving,
     /// Whether `text` is a code, which kind and whose (1187, 1263,
     /// `loquax::code::read`): what the scanner and the new conversation
     /// screen ask before the name. A text that is none is refused in one

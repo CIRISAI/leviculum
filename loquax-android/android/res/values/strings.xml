@@ -299,6 +299,20 @@
     <string name="link_share">Share the code</string>
     <string name="join_existing">Join an existing mailbox</string>
     <string name="join_existing_text">On the phone that holds your mailbox, tap your picture, then \"Link a device\". Scan the code it shows here, or paste it.</string>
+    <!-- Moving to a new phone (1281, walk finding 24). -->
+    <string name="profile_move_phone">Move to a new phone</string>
+    <string name="move_title">Move to a new phone</string>
+    <string name="move_text">On your new phone, install Loquax, choose \"Move from my old phone\" and scan this code. Your address, your contacts and your messages move over, and this phone stops then.</string>
+    <string name="move_waiting">Waiting for the new phone…</string>
+    <string name="move_moved">Moved to %1$s. This phone has stopped.</string>
+    <string name="move_from_old">Move from my old phone</string>
+    <string name="move_from_old_text">On your old phone, tap your picture, then \"Move to a new phone\". Scan the code it shows here, or paste it.</string>
+    <string name="move_go">Move</string>
+    <string name="moved_title">This phone has moved</string>
+    <string name="take_back">Use this phone again</string>
+    <string name="take_back_warning">Your mailbox runs on your new phone. If this phone uses it again too, both lose messages. Do this only if the new phone is gone.</string>
+    <string name="restore_live_title">This address is in use</string>
+    <string name="restore_anyway">Restore anyway</string>
     <string name="profile_identity">Identity hash</string>
     <string name="profile_home_node">Home node</string>
     <string name="profile_rendezvous">Rendezvous (● connected)</string>

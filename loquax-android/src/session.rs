@@ -195,6 +195,8 @@ pub struct Session {
     here: Mutex<Option<mailbox::Here>>,
     /// The device "Link a device" waits for (1264), when one was asked.
     linking: Mutex<Option<mailbox::Linking>>,
+    /// The new phone "Move to a new phone" waits for (1281).
+    moving: Mutex<Option<mailbox::Linking>>,
     address: [u8; 16],
     server: String,
     /// The list the leaf dials one at a time, [`Session::server`] first.
@@ -213,6 +215,19 @@ impl Session {
             .enable_all()
             .build()
             .map_err(|error| StartError::other(format!("no runtime: {error}")))?;
+        if mailbox::has_moved(&home) {
+            // Walk finding 24 (1281): the mailbox went to the new phone,
+            // and this one sends nothing until its owner says otherwise.
+            if !start.take_back {
+                return Err(StartError::said(
+                    Some("moved"),
+                    StrId::MovedAway,
+                    Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
+                    None,
+                ));
+            }
+            mailbox::take_back(&home).map_err(StartError::other)?;
+        }
         let (start, here) = if start.here || mailbox::is_here(&home) {
             let (start, here) = Self::start_here(start, &home, runtime.handle())?;
             (start, Some(here))
@@ -396,6 +411,7 @@ impl Session {
             runtime: Mutex::new(Some(runtime)),
             here: Mutex::new(here),
             linking: Mutex::new(None),
+            moving: Mutex::new(None),
             address,
             server,
             servers,
@@ -413,14 +429,53 @@ impl Session {
         home: &Path,
         runtime: &tokio::runtime::Handle,
     ) -> Result<(schema::Start, mailbox::Here), StartError> {
+        let lang = Lang::of_tag(start.lang.as_deref().unwrap_or_default());
+        if let Some(text) = start.moving.as_deref() {
+            let name = start.name.as_deref().unwrap_or("phone");
+            mailbox::move_in(home, text, name, runtime).map_err(|failed| match failed {
+                mailbox::MoveFailed::Code(details) => {
+                    StartError::said(Some("code"), StrId::JoinNotMailbox, lang, Some(details))
+                }
+                mailbox::MoveFailed::HasAddress => {
+                    StartError::said(None, StrId::MoveHasAddress, lang, None)
+                }
+                mailbox::MoveFailed::Move(error) => {
+                    let need = match error {
+                        loquax::home::client::HomeError::Refused(_) => Some("code"),
+                        _ => None,
+                    };
+                    StartError::said(need, StrId::MoveFailed, lang, Some(error.to_string()))
+                }
+                mailbox::MoveFailed::Here(details) => StartError::other(details),
+            })?;
+        }
         if let Some(line) = start.restore.as_deref() {
-            mailbox::restore(home, line, start.passphrase.as_deref().unwrap_or_default()).map_err(
-                |text| StartError {
+            let passphrase = start.passphrase.as_deref().unwrap_or_default();
+            // The guard (1281): a fresh restore of an address that answers
+            // on another device right now warns first, since two live
+            // copies lose messages on both.
+            if !start.anyway && !home.join(mailbox::DIR).join("identity").exists() {
+                let key = mailbox::backup_key(line, passphrase).map_err(|text| StartError {
                     need: Some("passphrase"),
                     text,
                     details: None,
-                },
-            )?;
+                })?;
+                if mailbox::answers_elsewhere(home, &key, mailbox::PROBE_BUDGET, runtime)
+                    .map_err(StartError::other)?
+                {
+                    return Err(StartError::said(
+                        Some("live"),
+                        StrId::RestoreLive,
+                        lang,
+                        None,
+                    ));
+                }
+            }
+            mailbox::restore(home, line, passphrase).map_err(|text| StartError {
+                need: Some("passphrase"),
+                text,
+                details: None,
+            })?;
         }
         let joined = loquax::home::client::load_client(home).map_err(StartError::other)?;
         if joined.is_some() && !mailbox::is_here(home) {
@@ -664,6 +719,59 @@ impl Session {
             state: state.to_string(),
             name,
         })
+    }
+
+    /// "Move to a new phone" (1281, [`schema::Query::MovePhone`]): a code
+    /// for the new phone, kept as the one [`Session::moving_state`]
+    /// watches.
+    fn move_phone(&self) -> Result<schema::LinkCode, String> {
+        if !self.is_here() {
+            let lang = self.lock().lang;
+            return Err(StrId::MoveOnComputer.text(lang).to_string());
+        }
+        let home = self.lock().home.clone();
+        let (admission, linking) = mailbox::move_code(&home)?;
+        let code = admission.text();
+        let (qr_size, modules) = loquax::home::qr::modules(&code)?;
+        let hours = linking.expires_at.saturating_sub(admission.issued_at) / 3600;
+        let expires_at = linking.expires_at;
+        *self.moving_code() = Some(linking);
+        Ok(schema::LinkCode {
+            v: VERSION,
+            code,
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            hours: u32::try_from(hours).unwrap_or(u32::MAX),
+            expires_at,
+        })
+    }
+
+    /// Where the newest move code stands ([`schema::Query::Moving`]).
+    fn moving_state(&self) -> Result<schema::Linked, String> {
+        let Some(linking) = self.moving_code().clone() else {
+            return Ok(schema::Linked {
+                v: VERSION,
+                state: "none".to_string(),
+                name: String::new(),
+            });
+        };
+        let home = self.lock().home.clone();
+        let (state, name) = match mailbox::moving(&home, &linking)? {
+            mailbox::Moving::Waiting => ("waiting", String::new()),
+            mailbox::Moving::Moved(name) => ("moved", name),
+            mailbox::Moving::Over => ("over", String::new()),
+        };
+        Ok(schema::Linked {
+            v: VERSION,
+            state: state.to_string(),
+            name,
+        })
+    }
+
+    fn moving_code(&self) -> MutexGuard<'_, Option<mailbox::Linking>> {
+        self.moving
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn linking(&self) -> MutexGuard<'_, Option<mailbox::Linking>> {
@@ -1041,6 +1149,8 @@ impl Session {
             schema::Query::Profile => return self.profile().map(|p| schema::encode(&p)),
             schema::Query::LinkDevice => return self.link_device().map(|c| schema::encode(&c)),
             schema::Query::Linked => return self.linked().map(|l| schema::encode(&l)),
+            schema::Query::MovePhone => return self.move_phone().map(|c| schema::encode(&c)),
+            schema::Query::Moving => return self.moving_state().map(|l| schema::encode(&l)),
             schema::Query::Backup { passphrase } => {
                 return self
                     .backup(&passphrase)
@@ -1299,6 +1409,8 @@ impl Session {
             | schema::Query::Profile
             | schema::Query::LinkDevice
             | schema::Query::Linked
+            | schema::Query::MovePhone
+            | schema::Query::Moving
             | schema::Query::Backup { .. }
             | schema::Query::MapRegions { .. }
             | schema::Query::MapTheme { .. }

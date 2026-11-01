@@ -275,6 +275,20 @@
     <string name="link_share">Code teilen</string>
     <string name="join_existing">Einem bestehenden Postfach beitreten</string>
     <string name="join_existing_text">Tippe auf dem Handy mit deinem Postfach auf dein Bild, dann auf „Gerät verbinden“. Scanne den Code, den es zeigt, hier oder füge ihn ein.</string>
+    <!-- Auf ein neues Handy umziehen (1281). -->
+    <string name="profile_move_phone">Auf ein neues Handy umziehen</string>
+    <string name="move_title">Auf ein neues Handy umziehen</string>
+    <string name="move_text">Installiere Loquax auf deinem neuen Handy, wähle „Von meinem alten Handy umziehen“ und scanne diesen Code. Deine Adresse, deine Kontakte und deine Nachrichten ziehen mit um, und dieses Handy hört dann auf.</string>
+    <string name="move_waiting">Warte auf das neue Handy…</string>
+    <string name="move_moved">Umgezogen auf %1$s. Dieses Handy hat aufgehört.</string>
+    <string name="move_from_old">Von meinem alten Handy umziehen</string>
+    <string name="move_from_old_text">Tippe auf deinem alten Handy auf dein Bild, dann auf „Auf ein neues Handy umziehen“. Scanne den Code, den es zeigt, hier oder füge ihn ein.</string>
+    <string name="move_go">Umziehen</string>
+    <string name="moved_title">Dieses Handy ist umgezogen</string>
+    <string name="take_back">Dieses Handy wieder verwenden</string>
+    <string name="take_back_warning">Dein Postfach läuft auf deinem neuen Handy. Verwendet dieses Handy es auch wieder, verlieren beide Nachrichten. Tu das nur, wenn das neue Handy weg ist.</string>
+    <string name="restore_live_title">Diese Adresse ist in Betrieb</string>
+    <string name="restore_anyway">Trotzdem wiederherstellen</string>
     <string name="profile_identity">Identitäts-Hash</string>
     <string name="profile_home_node">Heimknoten</string>
     <string name="profile_rendezvous">Treffpunkt (● verbunden)</string>

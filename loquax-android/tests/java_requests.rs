@@ -563,6 +563,8 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
         ("profile", t("profile"), Query::Profile),
         ("linkDevice", t("linkdevice"), Query::LinkDevice),
         ("linked", t("linked"), Query::Linked),
+        ("movePhone", t("movephone"), Query::MovePhone),
+        ("moving", t("moving"), Query::Moving),
         (
             "lxma",
             java_map(&[
@@ -909,8 +911,9 @@ fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
     assert!(decode(bad).is_err());
 }
 
-/// `Core.start` (later start, and the first with server, code and name)
-/// and `Core.startHere` (with and without a restore), as Java sends them.
+/// `Core.start` (later start, and the first with server, code and name),
+/// `Core.startHere` (with and without a restore, and a restore anyway),
+/// `Core.moveIn` and `Core.takeBack` (1281), as Java sends them.
 #[test]
 fn every_start_java_builds_decodes() {
     let s = |text: &str| Some(text.to_string());
@@ -976,6 +979,60 @@ fn every_start_java_builds_decodes() {
                 here: true,
                 restore: s("lqxb1line"),
                 passphrase: s("Kastanienallee 7"),
+                ..Start::default()
+            },
+        ),
+        (
+            java_map(&[
+                ("dir", Java::Str(DIR)),
+                ("offset", Java::Long(0)),
+                ("here", Java::Bool(true)),
+                ("restore", Java::Str("lqxb1line")),
+                ("passphrase", Java::Str("Kastanienallee 7")),
+                ("anyway", Java::Bool(true)),
+            ]),
+            Start {
+                dir: DIR.to_string(),
+                here: true,
+                restore: s("lqxb1line"),
+                passphrase: s("Kastanienallee 7"),
+                anyway: true,
+                ..Start::default()
+            },
+        ),
+        (
+            java_map(&[
+                ("dir", Java::Str(DIR)),
+                ("offset", Java::Long(3_600)),
+                ("lang", Java::Str("de-DE")),
+                ("here", Java::Bool(true)),
+                ("camera", Java::Bool(true)),
+                ("moving", Java::Str("lqxh1abc@leviculum.network:4343")),
+                ("name", Java::Str("Pixel 9")),
+            ]),
+            Start {
+                dir: DIR.to_string(),
+                offset: 3_600,
+                lang: s("de-DE"),
+                here: true,
+                camera: true,
+                moving: s("lqxh1abc@leviculum.network:4343"),
+                name: s("Pixel 9"),
+                ..Start::default()
+            },
+        ),
+        (
+            java_map(&[
+                ("dir", Java::Str(DIR)),
+                ("offset", Java::Long(0)),
+                ("lang", Java::Str("en-US")),
+                ("camera", Java::Bool(false)),
+                ("take_back", Java::Bool(true)),
+            ]),
+            Start {
+                dir: DIR.to_string(),
+                lang: s("en-US"),
+                take_back: true,
                 ..Start::default()
             },
         ),

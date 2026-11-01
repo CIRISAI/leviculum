@@ -99,9 +99,15 @@ fn start() -> impl Strategy<Value = Start> {
         (text(), opt_text(), opt_text(), opt_text()),
         (i32s(), any::<bool>(), opt_text(), opt_text()),
         (opt_text(), any::<bool>()),
+        (any::<bool>(), opt_text(), any::<bool>()),
     )
         .prop_map(
-            |((dir, server, code, name), (offset, here, restore, passphrase), (lang, camera))| {
+            |(
+                (dir, server, code, name),
+                (offset, here, restore, passphrase),
+                (lang, camera),
+                (anyway, moving, take_back),
+            )| {
                 Start {
                     dir,
                     server,
@@ -112,6 +118,9 @@ fn start() -> impl Strategy<Value = Start> {
                     here,
                     restore,
                     passphrase,
+                    anyway,
+                    moving,
+                    take_back,
                     camera,
                 }
             },
@@ -290,6 +299,8 @@ fn query() -> impl Strategy<Value = Query> {
         Just(Query::Profile),
         Just(Query::LinkDevice),
         Just(Query::Linked),
+        Just(Query::MovePhone),
+        Just(Query::Moving),
         (text(), opt_text()).prop_map(|(text, lang)| Query::Lxma { text, lang }),
         (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
             Query::MapRegions {

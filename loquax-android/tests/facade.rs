@@ -5444,3 +5444,236 @@ async fn a_second_phone_links_to_the_mailbox_on_the_first_and_gets_its_history()
     .expect("stopped");
     transport.stop().await.expect("stop the transport node");
 }
+
+/// A transport node standing in for the rendezvous, and a phone directory
+/// whose mailbox dials it ([`loquax_android::mailbox::SERVERS_FILE`]).
+async fn rendezvous() -> (tempfile::TempDir, String, ReticulumNode) {
+    let rns = tempfile::tempdir().expect("rns dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let entry = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+    let mut transport = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_server_listener(listener)
+        .storage_path(rns.path().join("storage"))
+        .build_sync()
+        .expect("the transport node");
+    transport.start().await.expect("start it");
+    (rns, entry, transport)
+}
+
+fn phone_dialling(entry: &str) -> tempfile::TempDir {
+    let phone = tempfile::tempdir().expect("a phone");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("{entry}\n"),
+    )
+    .expect("servers file");
+    phone
+}
+
+/// Walk finding 24 (1281): the old phone's "Move to a new phone" code,
+/// scanned at the new phone's first start, carries the mailbox over: the
+/// identity, its name, the contacts' names, blocks and the whole ugly
+/// archive travel over the rendezvous, the new phone is the mailbox, and
+/// the old one says the move took, stops, and does not start again until
+/// its owner takes it back. Negative: the used code moves nothing to a
+/// third phone, which keeps no identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_phone_takes_the_mailbox_over_and_the_old_one_stops() {
+    let (_rns, entry, mut transport) = rendezvous().await;
+    let old = phone_dialling(&entry);
+    let mailbox = old.path().join(loquax_android::mailbox::DIR);
+    ugly_store::fill_archive(&mailbox);
+    loquax_android::mailbox::set_name(old.path(), "Anna").expect("a name");
+    let start = Start {
+        dir: old.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let (a, code) = tokio::task::spawn_blocking(move || {
+        let a = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        let moving: schema::Linked = asked(&a, schema::Query::Moving);
+        assert_eq!(moving.state, "none");
+        let code: schema::LinkCode = asked(&a, schema::Query::MovePhone);
+        let scanned = read_qr(code.qr_size, &code.qr.0);
+        assert_eq!(scanned.len(), 1, "{scanned:?}");
+        let moving: schema::Linked = asked(&a, schema::Query::Moving);
+        assert_eq!(moving.state, "waiting");
+        (a, scanned.into_iter().next().unwrap_or_default())
+    })
+    .await
+    .expect("the old phone");
+    let key = loquax_android::mailbox::identity(old.path())
+        .expect("the old identity")
+        .public_key_bytes();
+
+    let new = phone_dialling(&entry);
+    let start = Start {
+        dir: new.path().display().to_string(),
+        here: true,
+        moving: Some(code.clone()),
+        name: Some("Pixel 9".to_string()),
+        ..Start::default()
+    };
+    let b = tokio::task::spawn_blocking(move || {
+        let b = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(b.is_here());
+        ugly_in(&b);
+        b
+    })
+    .await
+    .expect("the new phone");
+    assert_eq!(b.address(), a.address());
+    assert_eq!(
+        loquax_android::mailbox::identity(new.path())
+            .expect("the moved identity")
+            .public_key_bytes(),
+        key
+    );
+    assert_eq!(loquax_android::mailbox::name(new.path()), "Anna");
+    assert!(!new
+        .path()
+        .join(loquax_android::mailbox::MOVING_DIR)
+        .exists());
+
+    let a = tokio::task::spawn_blocking(move || {
+        let moving: schema::Linked =
+            wait_for(&a, schema::Query::Moving, 10, |l: &schema::Linked| {
+                l.state == "moved"
+            });
+        assert_eq!(moving.name, "Pixel 9");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !a.is_over() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the old mailbox runs on"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        a.stop();
+    })
+    .await;
+    a.expect("the old phone stopped");
+    assert!(loquax_android::mailbox::has_moved(old.path()));
+
+    // The old phone does not start again by itself, and starts when its
+    // owner says so.
+    let again = Start {
+        dir: old.path().display().to_string(),
+        ..Start::default()
+    };
+    let refused = tokio::task::spawn_blocking(move || Session::start(&again).err())
+        .await
+        .expect("a start")
+        .expect("a moved phone does not start");
+    assert_eq!(refused.need, Some("moved"), "{refused:?}");
+    assert_eq!(
+        refused.text,
+        loquax::ui::strings::StrId::MovedAway.text(Lang::En)
+    );
+
+    let third = phone_dialling(&entry);
+    let start = Start {
+        dir: third.path().display().to_string(),
+        here: true,
+        moving: Some(code),
+        name: Some("Fairphone".to_string()),
+        ..Start::default()
+    };
+    let refused = tokio::task::spawn_blocking(move || Session::start(&start).err())
+        .await
+        .expect("the third phone")
+        .expect("a used move code moves nothing");
+    assert_eq!(refused.need, Some("code"), "{refused:?}");
+    assert!(!third
+        .path()
+        .join(loquax_android::mailbox::DIR)
+        .join("identity")
+        .exists());
+
+    let start = Start {
+        dir: old.path().display().to_string(),
+        take_back: true,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let a = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(a.is_here());
+        a.stop();
+        b.stop();
+    })
+    .await
+    .expect("taken back");
+    assert!(!loquax_android::mailbox::has_moved(old.path()));
+    transport.stop().await.expect("stop the transport node");
+}
+
+/// The restore's guard (1281, walk finding 24): a backup of an address
+/// whose mailbox answers on another phone right now is refused with
+/// `live` and the warning, and restores when the user chooses to anyway.
+/// Positive control: with that mailbox stopped the same restore goes
+/// through without a word.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_of_an_address_live_elsewhere_warns_first() {
+    let (_rns, entry, mut transport) = rendezvous().await;
+    let live = phone_dialling(&entry);
+    let start = Start {
+        dir: live.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let a = tokio::task::spawn_blocking(move || {
+        Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the live phone");
+    let line = loquax_android::mailbox::backup(live.path(), "Kastanienallee 7").expect("a backup");
+
+    let second = phone_dialling(&entry);
+    let restore = |dir: &Path, anyway: bool| Start {
+        dir: dir.display().to_string(),
+        here: true,
+        restore: Some(line.clone()),
+        passphrase: Some("Kastanienallee 7".to_string()),
+        anyway,
+        ..Start::default()
+    };
+    let warned = restore(second.path(), false);
+    let refused = tokio::task::spawn_blocking(move || Session::start(&warned).err())
+        .await
+        .expect("a start")
+        .expect("a live address warns");
+    assert_eq!(refused.need, Some("live"), "{refused:?}");
+    assert_eq!(
+        refused.text,
+        loquax::ui::strings::StrId::RestoreLive.text(Lang::En)
+    );
+    assert!(!second
+        .path()
+        .join(loquax_android::mailbox::DIR)
+        .join("identity")
+        .exists());
+    let anyway = restore(second.path(), true);
+    let address = a.address();
+    tokio::task::spawn_blocking(move || {
+        let b = Session::start(&anyway).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(b.address(), address);
+        b.stop();
+        a.stop();
+    })
+    .await
+    .expect("restored anyway");
+
+    let third = phone_dialling(&entry);
+    let quiet = restore(third.path(), false);
+    tokio::task::spawn_blocking(move || {
+        let c = Session::start(&quiet).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(c.address(), address);
+        c.stop();
+    })
+    .await
+    .expect("restored with nobody live");
+    transport.stop().await.expect("stop the transport node");
+}

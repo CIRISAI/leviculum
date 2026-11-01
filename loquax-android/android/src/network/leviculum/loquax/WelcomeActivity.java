@@ -41,7 +41,10 @@ import java.util.Map;
  *
  * Beside the choice, "I already have a Loquax address": a backup line,
  * from its file, scanned off the paper or typed, and its passphrase, then the
- * phone's mailbox with that address.
+ * phone's mailbox with that address; a warning first when that address
+ * answers on another device right now (1281). And "Move from my old phone"
+ * (1281): the code the old phone's profile shows, scanned or pasted, then
+ * the phone's mailbox with everything the old one held.
  *
  * Shown while the phone neither holds a mailbox nor reads one; the first
  * screen sends it here. A code pasted for a computer's mailbox goes to the
@@ -58,11 +61,14 @@ public class WelcomeActivity extends Activity {
     private static final int RESTORE = 5;
     /** Another device's mailbox (1264): a phone's "Link a device" code, or a computer's. */
     private static final int JOINING = 6;
+    /** The old phone's mailbox to move here (1281): its "Move to a new phone" code. */
+    private static final int MOVING_IN = 7;
     private static final int ASK_NOTIFICATIONS = 1;
     private static final int ASK_BATTERY = 2;
     private static final int OPEN_BACKUP = 3;
     private static final int SCAN_CODE = 4;
     private static final int SCAN_BACKUP = 5;
+    private static final int SCAN_MOVE = 6;
     /** The extra that opens a page directly; {@link #ADDRESS_PAGE} is the one there is. */
     static final String SHOW = "show";
     static final String ADDRESS_PAGE = "address";
@@ -77,6 +83,11 @@ public class WelcomeActivity extends Activity {
     private String restore;
     private String passphrase;
     private EditText backupLine;
+    /** The old phone's move code (1281); null for no move. */
+    private String moving;
+    /** Restore though the address answers elsewhere: the user chose to after the warning (1281). */
+    private boolean anyway;
+    private EditText moveCode;
 
     /** Whether the phone holds a mailbox or reads one: then the first start is over. */
     static boolean settled(Activity screen) {
@@ -122,7 +133,8 @@ public class WelcomeActivity extends Activity {
         if (page == RESTORE) {
             failed = null;
             show(CHOICE);
-        } else if (page == JOINING) {
+        } else if (page == JOINING || page == MOVING_IN) {
+            failed = null;
             show(CHOICE);
         } else if (page == COMPUTER || page == BACKGROUND) {
             show(page == BACKGROUND && !here ? COMPUTER : CHOICE);
@@ -145,6 +157,9 @@ public class WelcomeActivity extends Activity {
                 break;
             case JOINING:
                 computer(body, true);
+                break;
+            case MOVING_IN:
+                movingIn(body);
                 break;
             case BACKGROUND:
                 background(body);
@@ -207,6 +222,7 @@ public class WelcomeActivity extends Activity {
             @Override
             public void onClick(View v) {
                 restore = null;
+                moving = null;
                 show(here ? BACKGROUND : COMPUTER);
             }
         });
@@ -217,10 +233,22 @@ public class WelcomeActivity extends Activity {
             public void onClick(View v) {
                 here = false;
                 restore = null;
+                moving = null;
                 show(JOINING);
             }
         });
         body.addView(join, wrap());
+        Button move = button(getString(R.string.move_from_old));
+        move.setId(R.id.where_move);
+        move.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                restore = null;
+                failed = null;
+                show(MOVING_IN);
+            }
+        });
+        body.addView(move, wrap());
         Button have = button(getString(R.string.have_address));
         have.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -284,6 +312,8 @@ public class WelcomeActivity extends Activity {
                 }
                 restore = line;
                 passphrase = secret.getText().toString();
+                moving = null;
+                anyway = false;
                 failed = null;
                 here = true;
                 show(BACKGROUND);
@@ -339,6 +369,60 @@ public class WelcomeActivity extends Activity {
             }
         });
         body.addView(until, wrap());
+    }
+
+    /**
+     * Move from the old phone (1281, walk finding 24): scan or paste the code its "Move to a new
+     * phone" shows; this phone becomes the mailbox with everything the old one held.
+     */
+    private void movingIn(LinearLayout body) {
+        body.addView(text(getString(R.string.move_from_old), 22, R.color.text, true), matchWrap());
+        body.addView(gap(text(getString(R.string.move_from_old_text), 15, R.color.text, false), 8, 16),
+                matchWrap());
+        if (ScanActivity.available(this)) {
+            Button scan = button(getString(R.string.scan_code));
+            scan.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivityForResult(new Intent(WelcomeActivity.this, ScanActivity.class)
+                            .putExtra(ScanActivity.PREFIX, "lqxh1"), SCAN_MOVE);
+                }
+            });
+            body.addView(scan, wrap());
+        }
+        moveCode = new EditText(this);
+        moveCode.setId(R.id.move_paste);
+        moveCode.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        moveCode.setHint("lqxh1…");
+        if (moving != null) {
+            moveCode.setText(moving);
+        }
+        body.addView(moveCode, matchWrap());
+        if (failed != null) {
+            body.addView(gap(text(failed, 15, R.color.text, false), 8, 0), matchWrap());
+        }
+        Button go = button(getString(R.string.move_go));
+        go.setId(R.id.move_go);
+        go.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                moveWith(moveCode.getText().toString());
+            }
+        });
+        body.addView(go, wrap());
+    }
+
+    /** Move with the code `text` holds: the background page, then the start that takes it over. */
+    private void moveWith(String text) {
+        String code = text.trim();
+        if (code.isEmpty()) {
+            return;
+        }
+        moving = code;
+        restore = null;
+        failed = null;
+        here = true;
+        show(BACKGROUND);
     }
 
     /** Why the app asks to stay in the background, before Android's two dialogs. */
@@ -402,6 +486,8 @@ public class WelcomeActivity extends Activity {
         } else if (request == SCAN_BACKUP && result == RESULT_OK && data != null
                 && backupLine != null) {
             backupLine.setText(backupLine(String.valueOf(data.getStringExtra(ScanActivity.TEXT))));
+        } else if (request == SCAN_MOVE && result == RESULT_OK && data != null) {
+            moveWith(String.valueOf(data.getStringExtra(ScanActivity.TEXT)));
         } else if (request == SCAN_CODE && result == RESULT_OK && data != null) {
             // The join itself is the first screen's, as for a pasted code.
             startActivity(new Intent(this, MainActivity.class)
@@ -437,7 +523,9 @@ public class WelcomeActivity extends Activity {
             @Override
             public void run() {
                 Core.sense(getApplicationContext());
-                final Map<String, Object> started = Core.startHere(dir, restore, passphrase);
+                final Map<String, Object> started = moving != null
+                        ? Core.moveIn(dir, moving, Build.MODEL)
+                        : Core.startHere(dir, restore, passphrase, anyway);
                 final Map<String, Object> mine = Core.bool(started, "ok") ? Core.me() : null;
                 runOnUiThread(new Runnable() {
                     @Override
@@ -452,16 +540,55 @@ public class WelcomeActivity extends Activity {
     private void started(Map<String, Object> started, Map<String, Object> mine) {
         if (!Core.bool(started, "ok")) {
             failed = Core.str(started, "error");
+            String need = Core.str(started, "need");
+            if ("live".equals(need)) {
+                warnLive(failed);
+                return;
+            }
+            if (moving != null) {
+                // A move that did not take: its page again, the code kept;
+                // the old phone still has everything.
+                show(MOVING_IN);
+                return;
+            }
             // A backup that did not open: its screen again, the line kept.
-            show("passphrase".equals(Core.str(started, "need")) ? RESTORE : STARTING);
+            show("passphrase".equals(need) ? RESTORE : STARTING);
             return;
         }
         restore = null;
         passphrase = null;
+        moving = null;
+        anyway = false;
         Events.start();
         LoquaxService.start(this);
         me = mine;
         show(ADDRESS);
+    }
+
+    /**
+     * The backup's address answers on another device right now (1281): restoring it here too loses
+     * messages on both. Cancel goes back to the choice; Restore anyway starts again past the guard.
+     */
+    private void warnLive(String said) {
+        show(RESTORE);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(R.string.restore_live_title)
+                .setMessage(said)
+                .setNegativeButton(android.R.string.cancel, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface shown, int which) {
+                        failed = null;
+                        show(CHOICE);
+                    }
+                })
+                .setPositiveButton(R.string.restore_anyway, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface shown, int which) {
+                        anyway = true;
+                        start();
+                    }
+                })
+                .show();
     }
 
     /** While the mailbox starts, and why it did not. */

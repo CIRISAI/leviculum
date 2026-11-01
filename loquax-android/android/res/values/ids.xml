@@ -83,6 +83,14 @@
     <item name="link_status" type="id" />
     <item name="link_share" type="id" />
     <item name="where_join" type="id" />
+    <item name="profile_move_phone" type="id" />
+    <item name="move_qr" type="id" />
+    <item name="move_code" type="id" />
+    <item name="move_status" type="id" />
+    <item name="where_move" type="id" />
+    <item name="move_paste" type="id" />
+    <item name="move_go" type="id" />
+    <item name="take_back" type="id" />
     <item name="profile_advanced" type="id" />
     <item name="profile_advanced_body" type="id" />
 </resources>
