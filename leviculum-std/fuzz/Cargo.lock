@@ -850,6 +850,13 @@ name = "leviculum-queue-budget"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-serial-mux"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
+
+[[package]]
 name = "leviculum-std"
 version = "0.10.0-dev.1"
 dependencies = [
@@ -866,6 +873,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-queue-budget",
+ "leviculum-serial-mux",
  "libc",
  "md-5",
  "rand_core",

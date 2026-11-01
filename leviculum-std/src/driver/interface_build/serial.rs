@@ -114,6 +114,7 @@ pub(super) fn build(
             reconnect_notify: Some(ctx.reconnect_tx.clone()),
             radio_config,
             test_drop_direct_ingress: config.test_drop_direct_ingress,
+            serial_mux: config.serial_mux,
         },
     );
     handle.info.bitrate = Some(bitrate);

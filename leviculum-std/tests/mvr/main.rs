@@ -385,6 +385,8 @@ mod a_dead_sync_link_ends_the_round_beside_a_second_node;
 // to test (#463, `just lnsd-minimal`).
 #[cfg(feature = "serial")]
 mod a_frame_the_modem_consumed_without_transmitting;
+#[cfg(feature = "serial")]
+mod a_raw_xoff_mutes_a_single_uart_board;
 mod a_returning_phone_is_asked_for_its_stored_mail;
 mod a_stranger_inside_the_port_handoff_window;
 mod an_application_path_request_inside_the_interval_leaves;

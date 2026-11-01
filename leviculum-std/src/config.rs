@@ -1076,6 +1076,16 @@ pub struct InterfaceConfig {
     #[serde(default)]
     pub test_drop_direct_ingress: bool,
 
+    /// `SerialInterface` only: the board shares one UART between its debug
+    /// text and its HDLC transport under XON/XOFF flow control (the
+    /// ThinkNode M9, `leviculum-nrf/serial-mux`). Every frame then escapes
+    /// 0x11 and 0x13, and the board's own flow bytes are stripped on read
+    /// (`interfaces::serial_mux`). Off by default, because a Python
+    /// `SerialInterface` peer does not undo an escaped flow byte and a USB
+    /// CDC LNode sends them raw. No Python equivalent.
+    #[serde(default)]
+    pub serial_mux: bool,
+
     // RNodeMultiInterface only.
     /// Nested subinterface blocks (`[[[name]]]`) of an `RNodeMultiInterface`.
     /// Each becomes one vport logical interface. Empty for every other type.
@@ -1321,6 +1331,7 @@ impl Default for InterfaceConfig {
             airtime_limit_long: None,
             csma_enabled: None,
             test_drop_direct_ingress: false,
+            serial_mux: false,
             subinterfaces: Vec::new(),
             max_connections: None,
             min_rssi: None,
