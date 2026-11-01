@@ -2115,6 +2115,52 @@ async fn a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens() {
     assert!(!loquax_android::mailbox::is_here(reader.path()));
 }
 
+/// A session dropped on a runtime's own thread, as a test's async body
+/// drops it when an assertion unwinds (1274): it stops its mailbox and its
+/// runtime without blocking that thread. Before, `Session::stop` ran
+/// `block_on` there, tokio panicked inside the unwinding, and the process
+/// aborted with the assertion's message buried. Its mailbox lets go of the
+/// directory: a second session starts on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_dropped_on_a_runtime_thread_stops_its_mailbox() {
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    // An entry nobody answers: the mailbox runs without one.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free port")
+        .port();
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{port}\n"),
+    )
+    .expect("servers file");
+    let start = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let again = start.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    assert!(session.is_here());
+    let address = session.address();
+    drop(session);
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the second session");
+    assert_eq!(session.address(), address);
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

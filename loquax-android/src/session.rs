@@ -1023,10 +1023,24 @@ impl Session {
         // The mailbox closes its node before the runtime goes, so its lock
         // and its store are let go of in order.
         let here = self.here().take();
-        if let Some(mut here) = here {
-            runtime.block_on(here.stop());
+        let finish = move || {
+            if let Some(mut here) = here {
+                runtime.block_on(here.stop());
+            }
+            runtime.shutdown_timeout(Duration::from_secs(2));
+        };
+        // On a runtime's own thread, a test's async body dropping the
+        // session as an assertion unwinds, neither `block_on` nor the
+        // shutdown's wait may block: tokio panics, and a panic in a Drop
+        // during unwinding aborts the process (1274). A thread of its own
+        // may block, so the stop is done there and waited for.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            if std::thread::spawn(finish).join().is_err() {
+                tracing::warn!("loquax: the session's stop panicked on its own thread");
+            }
+        } else {
+            finish();
         }
-        runtime.shutdown_timeout(Duration::from_secs(2));
     }
 }
 
