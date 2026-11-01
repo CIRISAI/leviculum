@@ -193,6 +193,10 @@ pub struct ListRow {
     pub muted: bool,
     /// Whether the peer's position is alive (1209): the avatar's ring.
     pub liveness: Liveness,
+    /// What was typed and not sent, on one line (1219): shown as the last
+    /// line, `Draft: …`, in italics, while the conversation is not the open
+    /// one. It counts as nothing unread and moves nothing in the list.
+    pub draft: Option<String>,
 }
 
 /// The conversation list as the model orders it.
@@ -245,6 +249,9 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         pinned: conversation.is_some_and(|c| c.pinned),
         muted: model.muted(peer),
         liveness,
+        draft: conversation
+            .filter(|c| model.conversations.get(model.selected).map(|o| o.peer) != Some(c.peer))
+            .and_then(|c| c.draft.line()),
     }
 }
 
@@ -802,6 +809,7 @@ mod tests {
             pinned: false,
             muted: false,
             liveness: Liveness::default(),
+            draft: None,
         };
         assert!(row_matches(&row, ""));
         assert!(row_matches(&row, "anna"));

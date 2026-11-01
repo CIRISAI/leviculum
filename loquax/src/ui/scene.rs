@@ -316,6 +316,9 @@ pub struct Row {
     /// The map pin, for a peer whose position is fresh (1224); the row's
     /// avatar has no ring then or ever.
     pub position: Option<PositionBadge>,
+    /// `Draft: …` (1219), which stands in for the last line, in italics,
+    /// while a message typed in a conversation not open is not sent.
+    pub draft: Option<Text>,
 }
 
 /// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
@@ -376,11 +379,18 @@ pub struct Group {
 }
 
 /// The compose bar: the text field is the platform's (an `EditText` on
-/// the phone, decided 2026-10-31), the scene names its hint and its send.
+/// the phone, decided 2026-10-31), the scene names its hint and its send,
+/// and what the field holds when the chat opens: the conversation's draft
+/// (1219), which the field reports back with [`Intent::Draft`] on every
+/// change.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Compose {
     pub id: NodeId,
     pub hint: Text,
+    /// The draft's text.
+    pub text: String,
+    /// The message a reply being written answers.
+    pub reply: Option<[u8; 32]>,
     pub send: Action,
     pub a11y: A11y,
 }
@@ -655,11 +665,16 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
             confirmed: false,
         }),
     ]);
-    let spoken = match row.last.is_empty() {
-        true => row.name.clone(),
-        false => format!("{}, {}", row.name, row.last),
+    let draft = row
+        .draft
+        .as_ref()
+        .map(|line| Text::Key(StrId::DraftRow, Vec::from([Arg::Str(line.clone())])));
+    let spoken = match (&draft, row.last.is_empty()) {
+        (Some(draft), _) => Text::Join(Vec::from([Text::Raw(row.name.clone()), draft.clone()])),
+        (None, true) => Text::Raw(row.name.clone()),
+        (None, false) => Text::Raw(format!("{}, {}", row.name, row.last)),
     };
-    let mut a11y = A11y::of(id, Role::Row, Text::Raw(spoken));
+    let mut a11y = A11y::of(id, Role::Row, spoken);
     a11y.selected = selected;
     Row {
         item: ListItem {
@@ -672,6 +687,7 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         avatar,
         live,
         position,
+        draft,
         row,
     }
 }
@@ -743,20 +759,30 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         peer,
         bar,
         groups,
-        compose: Compose {
-            id: NodeId::Compose,
-            hint: Text::key(StrId::ComposeHint),
-            send: Action::of(Intent::Send {
-                to: Target::Peer(peer),
-                body: None,
-            }),
-            a11y: A11y::of(
-                NodeId::Compose,
-                Role::TextField,
-                Text::key(StrId::ComposeHint),
-            ),
-        },
+        compose: compose(model, c),
         a11y: A11y::of(NodeId::Chat, Role::Chat, Text::Raw(name)),
+    }
+}
+
+/// Conversation `c`'s compose bar, its draft in the field (1219).
+pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
+    let conversation = model.conversations.get(c);
+    let peer = conversation.map_or([0; 16], |c| c.peer);
+    let draft = conversation.map(|c| &c.draft);
+    Compose {
+        id: NodeId::Compose,
+        hint: Text::key(StrId::ComposeHint),
+        text: draft.map(|d| d.text.clone()).unwrap_or_default(),
+        reply: draft.and_then(|d| d.reply),
+        send: Action::of(Intent::Send {
+            to: Target::Peer(peer),
+            body: None,
+        }),
+        a11y: A11y::of(
+            NodeId::Compose,
+            Role::TextField,
+            Text::key(StrId::ComposeHint),
+        ),
     }
 }
 
@@ -983,6 +1009,7 @@ impl Row {
             "avatar": self.avatar.to_json(),
             "live": opt(self.live.as_ref(), Text::to_json),
             "position": opt(self.position.as_ref(), PositionBadge::to_json),
+            "draft": opt(self.draft.as_ref(), Text::to_json),
             "selected": self.item.selected,
             "activate": self.item.activate.to_json(),
             "menu": actions(&self.item.menu),
@@ -1039,6 +1066,8 @@ impl Chat {
             "compose": {
                 "id": self.compose.id.resource(),
                 "hint": self.compose.hint.to_json(),
+                "text": self.compose.text,
+                "reply": opt(self.compose.reply, |id| hex(&id)),
                 "send": self.compose.send.to_json(),
                 "a11y": self.compose.a11y.to_json(),
             },

@@ -108,6 +108,7 @@ impl<B> UiModel<B> {
             return Vec::new();
         }
         let index = self.conversation(peer);
+        self.clear_draft(peer);
         let quote = self.conversations[index]
             .messages
             .iter()

@@ -57,6 +57,12 @@
 //! pin above its rule and the reply gone. Pinned in
 //! `tests/fixtures/tui_history.frames`.
 //!
+//! The draft's session (1219) runs loquax twice over one home: a line typed
+//! to Bob and not sent stays when the reader goes on to Carol, Bob's row
+//! saying `Draft: …` where its last line would be; after the restart Bob's
+//! conversation is the store's only one, and its compose holds the line.
+//! Pinned in `tests/fixtures/tui_draft.frames`.
+//!
 //! The telemetry session (`docs/src/concepts/loquax-map.md`, slice (a)) runs
 //! at 80 x 24 and at 120 x 40: the peer writes a line, then sends two
 //! position reports with no text, as Sideband and Columba do. The header
@@ -124,6 +130,7 @@ const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
 const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
 const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
 const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
+const EXPECTED_DRAFT: &str = include_str!("fixtures/tui_draft.frames");
 const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
 const EXPECTED_LIVENESS: &str = include_str!("fixtures/tui_liveness.frames");
 const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
@@ -1656,6 +1663,72 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_history.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The draft's first run: a line typed to Bob, then on to Carol.
+const DRAFT_FIRST: &str = "\
+until ready 20
+frame attached
+key enter
+key i
+type half a thought
+frame typed
+key esc
+key alt-down
+frame left
+key alt-up
+frame back
+key alt-down
+key q
+";
+
+/// The restart, with no `--to`.
+const DRAFT_SECOND: &str = "\
+until ready 20
+frame restarted
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_stays_when_the_reader_goes_on_and_after_a_restart() {
+    let daemon = daemon("tui-draft", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+
+    let first = history_run(&daemon, home.path(), "first", DRAFT_FIRST, &[0x22, 0x33]).await;
+    let first = history_frames(first, home.path(), "first").await;
+    let typed = frame(&first, "typed");
+    assert!(!typed.contains("Draft:"), "the open one's row: {typed}");
+    let left = frame(&first, "left");
+    assert!(left.contains("Draft: half a thought"), "{left}");
+    let back = frame(&first, "back");
+    assert!(back.contains("half a thought"), "compose holds it: {back}");
+    assert!(!back.contains("Draft:"), "{back}");
+
+    // The restart: no `--to`, the store's conversations only.
+    let second = history_run(&daemon, home.path(), "second", DRAFT_SECOND, &[]).await;
+    let second = history_frames(second, home.path(), "second").await;
+    let restarted = frame(&second, "restarted");
+    assert!(restarted.contains("half a thought"), "{restarted}");
+    assert!(
+        !restarted.contains("Draft:"),
+        "open, in compose: {restarted}"
+    );
+
+    let all = format!("=== first ===\n{first}=== second ===\n{second}");
+    if all != EXPECTED_DRAFT {
+        let kept = std::env::temp_dir().join("loquax-tui-draft.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_draft.frames\n{all}",
             kept.display()
         );
     }

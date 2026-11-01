@@ -37,6 +37,7 @@
     <string name="position_of">Position of %1$s, %2$s</string>
     <string name="position_marker">⌖</string>
     <string name="no_position">No position from this friend yet</string>
+    <string name="draft_row">Draft: %1$s</string>
     <string name="reacted">reacted %1$s</string>
     <string name="you_reacted">You reacted %1$s</string>
     <string name="run_updates">%1$d updates since %2$s</string>
@@ -72,6 +73,7 @@
     <string name="scene_edit">Edit text</string>
     <string name="scene_newline">New line</string>
     <string name="scene_clear_draft">Clear draft</string>
+    <string name="scene_draft">Draft</string>
     <string name="scene_insert">Insert</string>
     <string name="scene_emoji">Emoji</string>
     <string name="scene_react">React</string>

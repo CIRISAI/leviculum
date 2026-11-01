@@ -248,6 +248,9 @@ pub trait InputBuffer {
     /// Put the cursor before the `at`th character, or at the end when the
     /// text is shorter: where a click in the field lands.
     fn set_cursor(&mut self, at: usize);
+    /// Make the field hold `text`, the cursor at its end: a draft put back
+    /// when its conversation opens again.
+    fn set_value(&mut self, text: &str);
 }
 
 /// The terminal's field: `tui-input`, edited through [`input_request`], the
@@ -287,6 +290,11 @@ impl InputBuffer for tui_input::Input {
     fn set_cursor(&mut self, at: usize) {
         let end = tui_input::Input::value(self).chars().count();
         self.handle(InputRequest::SetCursor(at.min(end)));
+    }
+
+    fn set_value(&mut self, text: &str) {
+        // The yank buffer stays: `Ctrl-y` still brings back what was cut.
+        *self = core::mem::take(self).with_value(text.to_string());
     }
 }
 

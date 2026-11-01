@@ -3207,3 +3207,206 @@ async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
     .expect("the second session");
     node.stop().await;
 }
+
+/// One answer of `session` to `query`.
+fn asked<T: serde::de::DeserializeOwned>(session: &Session, query: schema::Query) -> T {
+    rmp_serde::from_slice(&session.query(query).expect("a query")).expect("decode")
+}
+
+/// 1219, over the ugly store against a real home node: a message typed and
+/// not sent stays with its conversation. Typed in one chat, it is in the
+/// list as `Draft: …` once another opens or none, counts nothing unread,
+/// and is in the field again when its chat opens. The store holds it once
+/// typing paused, before the session ends; a new session puts it back
+/// with its reply. The reply sent takes it away.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_survives_another_chat_and_a_new_session() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    ugly(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        lang: Some("de".to_string()),
+        ..Start::default()
+    };
+    let (a, b) = (ugly_store::peer_hex(5), ugly_store::peer_hex(6));
+    let phone_dir = phone.path().to_path_buf();
+    let first_a = a.clone();
+    let (address, target) = tokio::task::spawn_blocking(move || {
+        let a = first_a;
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        ugly_in(&session);
+        let row = |session: &Session, peer: &str| -> schema::ConversationRow {
+            let list: schema::Conversations =
+                asked(session, schema::Query::Conversations { search: None });
+            list.conversations
+                .into_iter()
+                .find(|r| r.peer == peer)
+                .expect("the row")
+        };
+        let before = row(&session, &a);
+        session
+            .request(Request::Open { peer: a.clone() })
+            .expect("open");
+        let messages: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: a.clone() });
+        assert_eq!(messages.draft, "", "none yet");
+        let target = messages
+            .messages
+            .iter()
+            .rev()
+            .find(|m| !m.ours && !m.id.is_empty())
+            .expect("a message of theirs")
+            .id
+            .clone();
+        for typed in ["half", "half a thought"] {
+            session
+                .request(Request::Draft {
+                    peer: a.clone(),
+                    body: typed.to_string(),
+                    reply: target.clone(),
+                })
+                .expect("draft");
+        }
+        let messages: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: a.clone() });
+        assert_eq!(messages.draft, "half a thought");
+        assert_eq!(messages.draft_reply, target);
+        assert_eq!(
+            row(&session, &a).draft,
+            "",
+            "the open chat's row shows none"
+        );
+
+        // Another chat: its own field, and the first one's row says it.
+        session.request(Request::Close).expect("close");
+        session
+            .request(Request::Open { peer: b.clone() })
+            .expect("open the other");
+        let other: schema::Messages = asked(&session, schema::Query::Messages { peer: b.clone() });
+        assert_eq!(other.draft, "");
+        assert_eq!(other.draft_reply, "");
+        let shown = row(&session, &a);
+        assert_eq!(shown.draft, "Entwurf: half a thought");
+        assert_eq!(shown.unread, before.unread, "a draft is nothing unread");
+        assert_eq!(shown.last, before.last, "the last line is kept beside it");
+        session.request(Request::Close).expect("close");
+        let list: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        let order = |l: &schema::Conversations| {
+            l.conversations
+                .iter()
+                .map(|r| r.peer.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            list.conversations
+                .iter()
+                .filter(|r| !r.draft.is_empty())
+                .count(),
+            1
+        );
+
+        // Back: the field holds it again.
+        session
+            .request(Request::Open { peer: a.clone() })
+            .expect("open again");
+        let messages: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: a.clone() });
+        assert_eq!(messages.draft, "half a thought");
+        session.request(Request::Close).expect("close");
+        let after: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        assert_eq!(
+            order(&after),
+            order(&list),
+            "a draft moves nothing in the list"
+        );
+
+        // The store has it once typing paused, before the session ends.
+        let me = session.address();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let store = loquax::store::Store::open_read_only(
+                &phone_dir.join(loquax::store::STORE_FILE),
+                me,
+            )
+            .expect("the store")
+            .expect("it is there");
+            let kept = store
+                .restore()
+                .expect("restore")
+                .into_iter()
+                .find(|c| loquax::address::to_hex(&c.peer) == a)
+                .map(|c| c.draft.text);
+            if kept.as_deref() == Some("half a thought") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "never kept: {kept:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        drop(session);
+        (loquax::address::to_hex(&me), target)
+    })
+    .await
+    .expect("the first session");
+
+    // A new session: the field opens with it, the reply with it.
+    let again = Start {
+        dir,
+        lang: Some("en".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(loquax::address::to_hex(&session.address()), address);
+        let list: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        let row = list
+            .conversations
+            .iter()
+            .find(|r| r.peer == a)
+            .expect("the row");
+        assert_eq!(row.draft, "Draft: half a thought");
+        session
+            .request(Request::Open { peer: a.clone() })
+            .expect("open");
+        let messages: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: a.clone() });
+        assert_eq!(messages.draft, "half a thought");
+        assert_eq!(messages.draft_reply, target);
+
+        // The reply sent takes the draft with it.
+        session
+            .request(Request::Reply {
+                peer: a.clone(),
+                target: target.clone(),
+                body: "half a thought".to_string(),
+            })
+            .expect("reply");
+        let messages: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: a.clone() });
+        assert_eq!(messages.draft, "");
+        assert_eq!(messages.draft_reply, "");
+        session.request(Request::Close).expect("close");
+        let list: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        assert!(list.conversations.iter().all(|r| r.draft.is_empty()));
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+
+    node.kill().await;
+}

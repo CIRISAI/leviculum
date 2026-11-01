@@ -63,11 +63,13 @@
         "key": "compose_hint"
       },
       "id": "compose",
+      "reply": null,
       "send": {
         "enabled": true,
         "intent": "Send { to: Peer([29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149]), body: None }",
         "label_key": "send"
-      }
+      },
+      "text": ""
     },
     "groups": [
       {

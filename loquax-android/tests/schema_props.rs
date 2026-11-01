@@ -199,6 +199,11 @@ fn request() -> impl Strategy<Value = Request> {
                 at,
             }
         ),
+        (text(), text(), text()).prop_map(|(peer, body, reply)| Request::Draft {
+            peer,
+            body,
+            reply
+        }),
     ]
 }
 
@@ -342,7 +347,7 @@ fn messages() -> BoxedStrategy<Messages> {
         ),
         (opt_text(), opt_text(), texts(), any::<bool>()),
         live(),
-        text(),
+        (text(), text(), text()),
     )
         .prop_map(
             |(
@@ -351,7 +356,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 (linked, lookup, contact_id, ask_link),
                 (announced, petname, others, verified),
                 (liveness, cadence_s, last_fix_at),
-                ring,
+                (ring, draft, draft_reply),
             )| Messages {
                 v,
                 peer,
@@ -374,6 +379,8 @@ fn messages() -> BoxedStrategy<Messages> {
                 cadence_s,
                 last_fix_at,
                 ring,
+                draft,
+                draft_reply,
             },
         )
         .boxed()
@@ -391,7 +398,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
         (text(), opt_text(), opt_text(), text(), opt_text()),
         (text(), opt_text(), any::<(bool, bool, bool)>(), u32s()),
         live(),
-        (text(), text(), text(), text()),
+        (text(), text(), text(), text(), text()),
     )
         .prop_map(
             |(
@@ -399,7 +406,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (initials, icon_fg, icon_bg, kind, reaction),
                 (state, photo, (linked, pinned, muted), updates),
                 (liveness, cadence_s, last_fix_at),
-                (live, ring, pin, pin_label),
+                (live, ring, pin, pin_label, draft),
             )| ConversationRow {
                 peer,
                 name,
@@ -425,6 +432,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 ring,
                 pin,
                 pin_label,
+                draft,
             },
         )
         .boxed()

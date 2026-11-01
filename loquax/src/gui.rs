@@ -444,6 +444,9 @@ struct App {
     compose: text_editor::Content,
     /// The message a reply being written answers, with its first line.
     reply: Option<([u8; 32], String)>,
+    /// The chat whose draft the compose field holds (1219): the model
+    /// keeps it, the field is put back from the scene when another opens.
+    compose_for: Option<[u8; 16]>,
     emoji: bool,
     /// The bubble whose reactions and actions are open, and one whose
     /// delete was asked once.
@@ -515,6 +518,7 @@ impl App {
             new_address: None,
             compose: text_editor::Content::new(),
             reply: None,
+            compose_for: None,
             emoji: false,
             menu: None,
             deleting: None,
@@ -559,10 +563,63 @@ impl App {
                     Err(error) => self.seen.notice = Some(format!("'{}': {error}", typed.trim())),
                 }
             }
-            Message::Compose(action) => self.compose.perform(action),
+            Message::Compose(action) => {
+                let edit = action.is_edit();
+                self.compose.perform(action);
+                if edit {
+                    self.tell_draft();
+                }
+            }
             _ => {}
         }
         Task::none()
+    }
+
+    /// The model is told what the compose field holds, as its draft
+    /// (1219), on every change of the text or the reply.
+    fn tell_draft(&self) {
+        let Some(peer) = self.compose_for else {
+            return;
+        };
+        let typed = self.compose.text();
+        self.tell(UiEvent::Draft {
+            peer,
+            text: typed.trim_end_matches('\n').to_string(),
+            reply: self.reply.as_ref().map(|(id, _)| *id),
+        });
+    }
+
+    /// The open chat's draft into the compose field, when another chat
+    /// opened than the one the field holds (1219).
+    fn restore_draft(&mut self) {
+        let open = self.seen.scene.chat.as_ref().map(|c| c.peer);
+        if open == self.compose_for {
+            return;
+        }
+        self.compose_for = open;
+        let Some(chat) = self.seen.scene.chat.as_ref() else {
+            self.compose = text_editor::Content::new();
+            self.reply = None;
+            return;
+        };
+        self.compose = text_editor::Content::with_text(&chat.compose.text);
+        self.reply = chat.compose.reply.map(|target| {
+            let quoted = chat
+                .groups
+                .iter()
+                .flat_map(|g| &g.bubbles)
+                .find(|node| node.bubble.id == Some(target))
+                .map(|node| {
+                    node.bubble
+                        .body
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            (target, quoted)
+        });
     }
 
     /// The peer an intent's target names: the open chat's for
@@ -591,14 +648,14 @@ impl App {
                     return self.intent(intent);
                 }
             }
+            // The reply being written stays with its chat's draft: the
+            // field takes the next chat's once the scene shows it (1219).
             Intent::OpenChat { peer } => {
                 self.menu = None;
-                self.reply = None;
                 self.tell(UiEvent::Open { peer });
             }
             Intent::CloseChat => {
                 self.menu = None;
-                self.reply = None;
                 self.tell(UiEvent::Close);
             }
             Intent::Back | Intent::Dismiss => match (self.menu, self.screen) {
@@ -653,7 +710,8 @@ impl App {
                 self.compose
                     .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
                         Arc::new(emoji),
-                    )))
+                    )));
+                self.tell_draft();
             }
             Intent::ShowMap { peer } => {
                 self.screen = Screen::Map;
@@ -718,8 +776,12 @@ impl App {
                     })
                     .unwrap_or_default();
                 self.reply = Some((target, quoted));
+                self.tell_draft();
             }
-            Intent::CancelReply => self.reply = None,
+            Intent::CancelReply => {
+                self.reply = None;
+                self.tell_draft();
+            }
             Intent::Copy => {
                 let words = self
                     .menu
@@ -893,6 +955,7 @@ impl App {
                 let landed = seen.maps != self.seen.maps;
                 self.seen = *seen;
                 self.rescene();
+                self.restore_draft();
                 if landed {
                     self.regions_changed();
                 }
@@ -1781,6 +1844,17 @@ mod tests {
         events
     }
 
+    /// What the window told the model besides the drafts, and the last
+    /// draft it told (1219).
+    fn told_apart(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Want>,
+    ) -> (Vec<UiEvent>, Option<UiEvent>) {
+        let (drafts, others): (Vec<_>, Vec<_>) = told(rx)
+            .into_iter()
+            .partition(|e| matches!(e, UiEvent::Draft { .. }));
+        (others, drafts.into_iter().last())
+    }
+
     fn type_into(app: &mut App, words: &str) {
         for c in words.chars() {
             let _ = app.update(Message::Compose(text_editor::Action::Edit(
@@ -1871,11 +1945,18 @@ mod tests {
         type_into(&mut app, "on my way");
         let _ = app.update(send.clone());
         assert_eq!(
-            told(&mut rx),
-            [UiEvent::Write {
-                peer: ANNA,
-                body: "on my way".to_string()
-            }]
+            told_apart(&mut rx),
+            (
+                vec![UiEvent::Write {
+                    peer: ANNA,
+                    body: "on my way".to_string()
+                }],
+                Some(UiEvent::Draft {
+                    peer: ANNA,
+                    text: "on my way".to_string(),
+                    reply: None
+                })
+            )
         );
         assert_eq!(app.compose.text().trim(), "");
         let key = bubble_key(&app, [2; 32]);
@@ -1887,7 +1968,7 @@ mod tests {
         type_into(&mut app, "morning");
         let _ = app.update(send);
         assert_eq!(
-            told(&mut rx),
+            told_apart(&mut rx).0,
             [UiEvent::Reply {
                 peer: ANNA,
                 target: [2; 32],
@@ -1895,6 +1976,44 @@ mod tests {
             }]
         );
         assert_eq!(app.reply, None);
+    }
+
+    /// 1219: the window's field is the open chat's draft. What is typed and
+    /// the reply being written go to the model as the draft; another chat
+    /// opens with its own field, and coming back puts the text and the
+    /// reply back from the scene.
+    #[test]
+    fn the_field_tells_its_draft_and_takes_it_back_from_the_scene() {
+        let mut model = chat_model();
+        let (mut app, mut rx) = chat_window();
+        let key = bubble_key(&app, [2; 32]);
+        let reply = menu_intent(&app, key, |i| matches!(i, Intent::Reply { .. }));
+        let _ = app.update(Message::Intent(reply));
+        type_into(&mut app, "on my");
+        let told = told(&mut rx);
+        assert!(told
+            .iter()
+            .all(|e| matches!(e, UiEvent::Draft { peer: ANNA, .. })));
+        for event in told {
+            update(&mut model, event);
+        }
+        update(&mut model, UiEvent::Open { peer: BERT });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert_eq!(app.compose.text().trim(), "", "Bert's field is his own");
+        assert_eq!(app.reply, None);
+        let anna = app
+            .listed()
+            .into_iter()
+            .find(|r| r.row.peer == ANNA)
+            .expect("Anna's row");
+        assert_eq!(
+            anna.draft.as_ref().map(|d| d.resolve(Lang::En)).as_deref(),
+            Some("Draft: on my")
+        );
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert_eq!(app.compose.text().trim_end_matches('\n'), "on my");
+        assert_eq!(app.reply, Some(([2; 32], "Good morning!".to_string())));
     }
 
     /// The key of the bubble whose message is `id`, in the window's scene.

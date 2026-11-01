@@ -53,6 +53,36 @@ pub struct Flags {
     pub verified: bool,
 }
 
+/// How long typing must pause before a draft is written: a keystroke
+/// moves the write on by this much (1219).
+pub const DRAFT_DEBOUNCE_MS: u64 = 500;
+
+/// A message typed and not sent, one a conversation (1219): kept in the
+/// store beside its conversation, put back into compose when it opens
+/// again, gone once sent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Draft {
+    pub text: String,
+    /// The message a reply being written answers, by its LXMF id.
+    pub reply: Option<[u8; 32]>,
+    /// What is to go with it; empty until messages carry attachments.
+    pub attachments: Vec<String>,
+}
+
+impl Draft {
+    /// Whether there is nothing to keep.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.reply.is_none() && self.attachments.is_empty()
+    }
+
+    /// The list row's words for it (`Draft: …`): the text on one line,
+    /// none while it holds no text.
+    pub fn line(&self) -> Option<String> {
+        let line = self.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!line.is_empty()).then_some(line)
+    }
+}
+
 /// One conversation as the store hands it back at start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Restored {
@@ -65,6 +95,8 @@ pub struct Restored {
     pub messages: Vec<Message>,
     /// How many the store holds before them.
     pub earlier: usize,
+    /// What was typed and not sent.
+    pub draft: Draft,
 }
 
 /// One change for the store to make.
@@ -90,6 +122,9 @@ pub enum StoreWrite {
     /// Keep one received position; one already there for the same peer and
     /// fix time is the same fix, arrived again.
     Position(Fix),
+    /// Keep the conversation's draft as it stands, the empty one deleting
+    /// it (1219).
+    Draft { peer: [u8; 16], draft: Draft },
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -136,7 +171,7 @@ fn cut_off(message: &Message) -> bool {
         )
 }
 
-impl<B> UiModel<B> {
+impl<B: InputBuffer> UiModel<B> {
     /// The store's conversations at start, merged into those `--to` listed:
     /// each with its newest messages, its pin and its unread count, a send
     /// the restart cut off back to `○` with [`RESTARTED`] in its ledger. The
@@ -159,11 +194,20 @@ impl<B> UiModel<B> {
         // A `--to` peer the reader blocked is not the one to open.
         self.settle();
         self.off_reactions();
+        // The open conversation's draft is in compose before the first
+        // key (1219).
+        self.sync_compose();
     }
+}
 
+impl<B> UiModel<B> {
     /// One conversation the store handed back, listed as at start.
     fn restore_one(&mut self, stored: Restored) {
-        if stored.messages.is_empty() && !stored.pinned && stored.flags == Flags::default() {
+        if stored.messages.is_empty()
+            && !stored.pinned
+            && stored.flags == Flags::default()
+            && stored.draft.is_empty()
+        {
             return;
         }
         let now = self.now;
@@ -174,6 +218,7 @@ impl<B> UiModel<B> {
         conversation.flags = stored.flags;
         conversation.earlier = stored.earlier;
         conversation.unread = stored.unread;
+        conversation.draft = stored.draft;
         conversation.new_rule = conversation.rule_from_unread();
         conversation.activity = conversation.list_activity();
         for message in &mut conversation.messages {
@@ -265,8 +310,44 @@ impl<B> UiModel<B> {
                 .into_iter()
                 .map(StoreWrite::Position),
         );
+        // A draft once typing paused (1219), every one when leaving.
+        let now = self.elapsed_ms;
+        let quit = self.quit;
+        let due: Vec<[u8; 16]> = self
+            .drafts_due
+            .iter()
+            .filter(|&(_, &at)| quit || at <= now)
+            .map(|(&peer, _)| peer)
+            .collect();
+        for peer in due {
+            self.drafts_due.remove(&peer);
+            if let Some(c) = self.conversations.iter().find(|c| c.peer == peer) {
+                writes.push(StoreWrite::Draft {
+                    peer,
+                    draft: c.draft.clone(),
+                });
+            }
+        }
         writes.append(&mut self.forgotten);
         writes
+    }
+
+    /// Make every draft not yet written due now: the shell is about to end
+    /// the session.
+    pub fn flush_drafts(&mut self) {
+        for at in self.drafts_due.values_mut() {
+            *at = 0;
+        }
+    }
+
+    /// Note that `peer`'s draft changed: written once typing paused for
+    /// [`DRAFT_DEBOUNCE_MS`], or at once.
+    pub(super) fn draft_changed(&mut self, peer: [u8; 16], at_once: bool) {
+        let at = match at_once {
+            true => 0,
+            false => self.elapsed_ms.saturating_add(DRAFT_DEBOUNCE_MS),
+        };
+        self.drafts_due.insert(peer, at);
     }
 
     /// Note that message `m` of conversation `c` changed.

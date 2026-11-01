@@ -426,6 +426,8 @@ pub struct Conversation {
     /// How many older messages the store holds than the screen loaded: the
     /// top of the pane says so, and reaching it loads the next page.
     pub earlier: usize,
+    /// What was typed here and not sent (1219), kept in the store.
+    pub draft: history::Draft,
 }
 
 /// A line the conversation says between its messages, centred.
@@ -449,6 +451,7 @@ impl Conversation {
             pinned: false,
             flags: history::Flags::default(),
             earlier: 0,
+            draft: history::Draft::default(),
         }
     }
 
@@ -792,6 +795,13 @@ pub struct UiModel<B> {
     /// Regions to ask the shell for, handed out as [`UiEffect::LoadMap`]
     /// at the end of the fold.
     map_wants: Vec<map::MapWant>,
+    /// The conversation whose draft [`UiModel::compose`] holds (1219).
+    compose_for: Option<[u8; 16]>,
+    /// The draft compose holds was sent: it empties after the fold.
+    compose_cleared: bool,
+    /// Drafts the store has not taken yet, by the `elapsed_ms` from which
+    /// they are written ([`history::DRAFT_DEBOUNCE_MS`]).
+    drafts_due: BTreeMap<[u8; 16], u64>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -877,6 +887,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             map_glyph_test: false,
             map_named_until: None,
             map_wants: Vec::new(),
+            compose_for: None,
+            compose_cleared: false,
+            drafts_due: BTreeMap::new(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -885,7 +898,92 @@ impl<B: InputBuffer + Default> UiModel<B> {
     }
 }
 
+impl<B: InputBuffer> UiModel<B> {
+    /// Make compose hold the open conversation's draft (1219), after every
+    /// fold. While the same conversation stays open, what compose holds is
+    /// its draft's text, the terminal's typing written there; once another
+    /// opens, the one left keeps its text, written at once, and compose
+    /// takes the new one's.
+    pub(crate) fn sync_compose(&mut self) {
+        if core::mem::take(&mut self.compose_cleared) {
+            self.compose.set_value("");
+        }
+        let open = self.conversations.get(self.selected).map(|c| c.peer);
+        if open == self.compose_for {
+            let Some(c) = self.conversations.get_mut(self.selected) else {
+                return;
+            };
+            if c.draft.text != self.compose.value() {
+                c.draft.text = self.compose.value().to_string();
+                let peer = c.peer;
+                self.draft_changed(peer, false);
+            }
+            return;
+        }
+        if let Some(left) = self.compose_for {
+            if let Some(c) = self.conversations.iter_mut().find(|c| c.peer == left) {
+                if c.draft.text != self.compose.value() {
+                    c.draft.text = self.compose.value().to_string();
+                }
+                if self.drafts_due.contains_key(&left) {
+                    self.draft_changed(left, true);
+                }
+            }
+        }
+        let was = core::mem::replace(&mut self.compose_for, open);
+        let Some(c) = self.conversations.get_mut(self.selected) else {
+            self.compose.set_value("");
+            return;
+        };
+        // Text typed while no conversation was open, before the first one
+        // came, goes to the one that opened when it has no draft.
+        if was.is_none() && c.draft.text.is_empty() {
+            if !self.compose.value().is_empty() {
+                c.draft.text = self.compose.value().to_string();
+                let peer = c.peer;
+                self.draft_changed(peer, false);
+            }
+            return;
+        }
+        if self.compose.value() != c.draft.text {
+            self.compose.set_value(&c.draft.text);
+        }
+    }
+
+    /// [`UiEvent::Draft`]: `peer`'s draft as its frontend's field holds it,
+    /// listed if new. Compose follows when it is the open one.
+    fn set_draft(&mut self, peer: [u8; 16], text: String, reply: Option<[u8; 32]>) {
+        let index = self.conversation(peer);
+        let draft = &mut self.conversations[index].draft;
+        if draft.text == text && draft.reply == reply {
+            return;
+        }
+        if self.compose_for == Some(peer) && self.compose.value() != text {
+            self.compose.set_value(&text);
+        }
+        let draft = &mut self.conversations[index].draft;
+        draft.text = text;
+        draft.reply = reply;
+        self.draft_changed(peer, false);
+    }
+}
+
 impl<B> UiModel<B> {
+    /// `peer`'s message went out: its draft goes, from the store at once,
+    /// and compose empties with the next [`UiModel::sync_compose`].
+    pub(crate) fn clear_draft(&mut self, peer: [u8; 16]) {
+        let Some(c) = self.conversations.iter_mut().find(|c| c.peer == peer) else {
+            return;
+        };
+        if c.draft.is_empty() {
+            return;
+        }
+        c.draft = history::Draft::default();
+        // Compose empties rather than writing its text back into it.
+        self.compose_cleared = self.compose_for == Some(peer);
+        self.draft_changed(peer, true);
+    }
+
     /// The keymap's context: the terminal's keyboard protocol and the
     /// `send_on_enter` switch.
     pub fn ctx(&self) -> Ctx {
@@ -1250,6 +1348,14 @@ pub enum UiEvent {
     /// Delete `peer`'s conversation without asking, from this device or,
     /// on a client of a home node, from every device of the home.
     DeleteConversation { peer: [u8; 16], everywhere: bool },
+    /// What is typed in `peer`'s conversation and not sent, and the message
+    /// a reply being written answers (1219): a frontend's own text field
+    /// says so on every change. The store keeps it once typing paused.
+    Draft {
+        peer: [u8; 16],
+        text: String,
+        reply: Option<[u8; 32]>,
+    },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1326,6 +1432,8 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     model.settle();
     // A reaction has no block for the cursor to stand on.
     model.off_reactions();
+    // Compose holds the open conversation's draft (1219).
+    model.sync_compose();
     // The map holds the conversation's place: the focus going to the
     // conversation or compose takes it away, and without it there is no
     // map to focus.
@@ -1474,6 +1582,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::SharePosition { peer, location } => {
             let index = model.conversation(peer);
             model.send_fields(index, String::new(), position_fields(location))
+        }
+        UiEvent::Draft { peer, text, reply } => {
+            model.set_draft(peer, text, reply);
+            Vec::new()
         }
     }
 }
@@ -2934,6 +3046,7 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
         .push(Message::ours(body.clone(), model.now));
     let to = conversation.peer;
     let index = conversation.messages.len() - 1;
+    model.clear_draft(to);
     let activity = model.bump();
     model.conversations[model.selected].activity = activity;
     model.conversations[model.selected].messages[index].activity = activity;
@@ -4347,6 +4460,10 @@ mod tests {
         }
         fn set_cursor(&mut self, at: usize) {
             self.1 = Some(at.min(self.0.chars().count()));
+        }
+        fn set_value(&mut self, text: &str) {
+            self.0 = text.to_string();
+            self.1 = None;
         }
     }
 
@@ -6121,6 +6238,216 @@ mod tests {
         })
     }
 
+    /// The drafts' writes among `writes` (1219).
+    fn draft_writes(writes: &[StoreWrite]) -> Vec<([u8; 16], String)> {
+        writes
+            .iter()
+            .filter_map(|w| match w {
+                StoreWrite::Draft { peer, draft } => Some((*peer, draft.text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1219: what is typed in one conversation stays there when another
+    /// opens, its row says `Draft: …` in italics, nothing counts it unread
+    /// or moves the list, and it is back in compose when its conversation
+    /// opens again.
+    #[test]
+    fn a_draft_stays_with_its_conversation() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        model.focus = Pane::Compose;
+        typed(&mut model, "half a thought");
+        let order = model.order();
+        assert_eq!(
+            chat::list_row(&model, &PEER).draft,
+            None,
+            "the open one's row shows none"
+        );
+        update(&mut model, UiEvent::Open { peer: OTHER });
+        assert_eq!(model.compose.value(), "", "the other's compose is its own");
+        let row = chat::list_row(&model, &PEER);
+        assert_eq!(row.draft.as_deref(), Some("half a thought"));
+        assert_eq!(row.unread, 0);
+        assert_eq!(model.order(), order, "a draft moves nothing in the list");
+        let scene = model.scene(scene::LayoutClass::Wide);
+        let tabs = scene.tabs.as_ref().expect("the tabs");
+        assert_eq!(tabs.items[0].badge, None, "and counts as nothing unread");
+        let srow = scene::row(&model, &PEER);
+        let words = srow.draft.as_ref().expect("the scene's draft").clone();
+        assert_eq!(words.resolve(strings::Lang::En), "Draft: half a thought");
+        assert_eq!(words.resolve(strings::Lang::De), "Entwurf: half a thought");
+        // The terminal's row in italics, the open one's plain.
+        let rows = layout::list(&model, 30, 12);
+        let cells = |r: &RLine| r.cells.iter().map(|c| c.ch).collect::<String>();
+        let at = rows
+            .iter()
+            .position(|r| cells(r).contains("Draft: half a thought"))
+            .expect("the terminal's draft row");
+        assert!(rows[at]
+            .cells
+            .iter()
+            .filter(|c| c.ch != ' ')
+            .all(|c| c.st.italic));
+        assert!(
+            rows.iter()
+                .filter(|r| r.cells.iter().any(|c| c.st.italic))
+                .count()
+                == 1
+        );
+
+        update(&mut model, UiEvent::Open { peer: PEER });
+        assert_eq!(model.compose.value(), "half a thought");
+        assert_eq!(
+            model
+                .scene(scene::LayoutClass::Wide)
+                .chat
+                .expect("open")
+                .compose
+                .text,
+            "half a thought"
+        );
+        assert_eq!(chat::list_row(&model, &PEER).draft, None);
+    }
+
+    /// 1219: a draft is written once typing paused for half a second,
+    /// leaving its conversation writes it at once, quitting writes every
+    /// one, and a send deletes it at once.
+    #[test]
+    fn a_draft_is_written_once_typing_pauses_and_goes_with_the_send() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        update(&mut model, UiEvent::Elapsed(1_000));
+        model.take_writes();
+        update(
+            &mut model,
+            UiEvent::Draft {
+                peer: PEER,
+                text: "on my".to_string(),
+                reply: Some(ID),
+            },
+        );
+        assert_eq!(
+            model.compose.value(),
+            "on my",
+            "the open one's compose follows"
+        );
+        assert!(draft_writes(&model.take_writes()).is_empty(), "not yet");
+        update(&mut model, UiEvent::Elapsed(1_300));
+        update(
+            &mut model,
+            UiEvent::Draft {
+                peer: PEER,
+                text: "on my way".to_string(),
+                reply: Some(ID),
+            },
+        );
+        update(&mut model, UiEvent::Elapsed(1_799));
+        assert!(
+            draft_writes(&model.take_writes()).is_empty(),
+            "each key moves it on"
+        );
+        update(&mut model, UiEvent::Elapsed(1_800));
+        let writes = model.take_writes();
+        assert_eq!(draft_writes(&writes), [(PEER, "on my way".to_string())]);
+        assert!(writes.contains(&StoreWrite::Draft {
+            peer: PEER,
+            draft: history::Draft {
+                text: "on my way".to_string(),
+                reply: Some(ID),
+                attachments: Vec::new(),
+            }
+        }));
+        assert!(model.take_writes().is_empty(), "written once");
+
+        // Leaving writes at once.
+        typed(&mut model, "!");
+        assert_eq!(model.conversations[model.selected].draft.text, "on my way");
+        model.focus = Pane::Compose;
+        typed(&mut model, "!");
+        assert!(draft_writes(&model.take_writes()).is_empty());
+        update(&mut model, UiEvent::Close);
+        assert_eq!(
+            draft_writes(&model.take_writes()),
+            [(PEER, "on my way!".to_string())]
+        );
+
+        // Quitting writes what typing has not paused on.
+        update(
+            &mut model,
+            UiEvent::Draft {
+                peer: OTHER,
+                text: "later".to_string(),
+                reply: None,
+            },
+        );
+        assert!(draft_writes(&model.take_writes()).is_empty());
+        model.flush_drafts();
+        assert_eq!(
+            draft_writes(&model.take_writes()),
+            [(OTHER, "later".to_string())]
+        );
+
+        // The send takes the draft with it, from the store at once.
+        let effects = update(
+            &mut model,
+            UiEvent::Write {
+                peer: PEER,
+                body: "on my way!".to_string(),
+            },
+        );
+        assert_eq!(effects.len(), 1);
+        assert!(model.conversations[model.selected].draft.is_empty());
+        assert_eq!(model.compose.value(), "", "compose empties with it");
+        assert_eq!(draft_writes(&model.take_writes()), [(PEER, String::new())]);
+        // A reply sent does so too.
+        update(
+            &mut model,
+            UiEvent::Draft {
+                peer: OTHER,
+                text: "sure".to_string(),
+                reply: Some(ID),
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::Reply {
+                peer: OTHER,
+                target: ID,
+                body: "sure".to_string(),
+            },
+        );
+        let c = model
+            .conversations
+            .iter()
+            .find(|c| c.peer == OTHER)
+            .expect("other");
+        assert!(c.draft.is_empty());
+        assert_eq!(draft_writes(&model.take_writes()), [(OTHER, String::new())]);
+    }
+
+    /// 1219: the terminal's own send empties the draft as it empties
+    /// compose; a conversation restored with one opens with it in compose.
+    #[test]
+    fn the_terminal_sends_its_draft_and_a_restore_brings_it_back() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.focus = Pane::Compose;
+        typed(&mut model, "hello");
+        assert_eq!(model.conversations[0].draft.text, "hello");
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert!(matches!(effects.as_slice(), [UiEffect::Send { .. }]));
+        assert!(model.conversations[0].draft.is_empty());
+        assert_eq!(model.compose.value(), "");
+
+        let mut again = UiModel::<Field>::new(&[]);
+        let mut stored = restored(OTHER, Vec::new(), 0);
+        stored.draft.text = "kept".to_string();
+        again.restore(vec![stored]);
+        assert_eq!(again.compose.value(), "kept", "in compose before any key");
+        again.focus = Pane::Compose;
+        typed(&mut again, "!");
+        assert_eq!(again.conversations[again.selected].draft.text, "kept!");
+    }
+
     fn press(model: &mut UiModel<Field>, (col, row): (u16, u16)) -> Vec<UiEffect> {
         let mut effects = update(
             model,
@@ -6972,6 +7299,7 @@ mod tests {
             unread: 0,
             messages,
             earlier,
+            draft: history::Draft::default(),
         }
     }
 

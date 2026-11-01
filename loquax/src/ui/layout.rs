@@ -30,7 +30,7 @@ use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
 use super::scene::PositionBadge;
-use super::strings::{Lang, StrId};
+use super::strings::{Arg, Lang, StrId, Text};
 use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
 use crate::names::Names;
 use crate::telemetry;
@@ -569,7 +569,7 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
     for &index in &order[first..] {
         let conversation = &model.conversations[index];
         let here = index == model.selected;
-        let [top, bottom] = entry(conversation, &model.names, width, model.now);
+        let [top, bottom] = entry(conversation, &model.names, width, model.now, here);
         for mut row in [top, bottom] {
             if here {
                 if let Some(cell) = row.cells.first_mut() {
@@ -630,11 +630,14 @@ pub fn badge_cells(conversation: &Conversation, width: usize) -> Option<(usize, 
 /// One conversation's two rows, `width` cells with the bar's margin first
 /// and one blank last: the name and the last message's time, the last line's
 /// preview (`you:` when ours) and the unread count in brackets, reversed.
+/// A conversation not `open` with a message typed and not sent shows that
+/// instead of the last line, `Draft: …` in italics (1219).
 fn entry(
     conversation: &Conversation,
     names: &Names,
     width: usize,
     now: Option<WallTime>,
+    open: bool,
 ) -> [RLine; 2] {
     let room = width.saturating_sub(2);
     let last = conversation.messages.last();
@@ -694,13 +697,26 @@ fn entry(
         0 => room,
         n => room.saturating_sub(n + 1),
     };
+    let draft = conversation.draft.line().filter(|_| !open);
+    let preview = match &draft {
+        Some(line) => Text::Key(StrId::DraftRow, vec![Arg::Str(line.clone())]).resolve(Lang::En),
+        None => preview,
+    };
     let preview = leviculum_ui::text::truncate_to_cols(&preview, budget);
     let gap = room.saturating_sub(fit_width(&preview) + marks);
     let mut bottom = RLine::default();
     push(&mut bottom, " ", RStyle::default());
     push(
         &mut bottom,
-        &format!("{preview}{}{pin}", " ".repeat(gap)),
+        &preview,
+        RStyle {
+            italic: draft.is_some(),
+            ..RStyle::default()
+        },
+    );
+    push(
+        &mut bottom,
+        &format!("{}{pin}", " ".repeat(gap)),
         RStyle::default(),
     );
     push(

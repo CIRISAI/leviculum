@@ -1068,10 +1068,16 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
     let side = side.push(under);
     // A report's line is the scene's words after the pin, as the phone
     // sets it; a text of ours is said as ours.
-    let last = match (&r.live, content.ours && content.kind == "text") {
-        (Some(live), _) => format!("{} {}", chat::PIN, live.resolve(lang)),
-        (None, true) => format!("{}: {}", StrId::QuoteYou.text(lang), content.last),
-        (None, false) => content.last.clone(),
+    // A message typed and not sent stands in for it, in italics (1219).
+    let last = match (&r.draft, &r.live, content.ours && content.kind == "text") {
+        (Some(draft), _, _) => draft.resolve(lang),
+        (None, Some(live), _) => format!("{} {}", chat::PIN, live.resolve(lang)),
+        (None, None, true) => format!("{}: {}", StrId::QuoteYou.text(lang), content.last),
+        (None, None, false) => content.last.clone(),
+    };
+    let style = match r.draft {
+        Some(_) => iced::font::Style::Italic,
+        None => iced::font::Style::Normal,
     };
     let words = column![
         text(content.name.clone())
@@ -1081,6 +1087,10 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
         text(last)
             .size(size::ROW_LAST)
             .color(colour(t.text_secondary))
+            .font(iced::Font {
+                style,
+                ..iced::Font::DEFAULT
+            })
             .wrapping(text::Wrapping::None),
     ]
     .spacing(2)

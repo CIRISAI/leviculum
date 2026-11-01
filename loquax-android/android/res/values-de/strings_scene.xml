@@ -37,6 +37,7 @@
     <string name="position_of">Position von %1$s, %2$s</string>
     <string name="position_marker">⌖</string>
     <string name="no_position">Noch keine Position von diesem Freund</string>
+    <string name="draft_row">Entwurf: %1$s</string>
     <string name="reacted">hat mit %1$s reagiert</string>
     <string name="you_reacted">Du hast mit %1$s reagiert</string>
     <string name="run_updates">%1$d Meldungen seit %2$s</string>
@@ -72,6 +73,7 @@
     <string name="scene_edit">Text bearbeiten</string>
     <string name="scene_newline">Neue Zeile</string>
     <string name="scene_clear_draft">Entwurf leeren</string>
+    <string name="scene_draft">Entwurf</string>
     <string name="scene_insert">Einfügen</string>
     <string name="scene_emoji">Emoji</string>
     <string name="scene_react">Reagieren</string>

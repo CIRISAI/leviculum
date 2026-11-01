@@ -11,7 +11,7 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft` |
 //! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
@@ -104,6 +104,10 @@
 //! [`ConversationRow::ring`] empty in the list from then on. An older app
 //! draws no pin and, without the ring, no liveness in the list; the
 //! newest report's row still words it.
+//! The draft (1219) came within version 1 too: [`Request::Draft`], the
+//! list row's [`ConversationRow::draft`] and the chat's [`Messages::draft`]
+//! and [`Messages::draft_reply`]. An older app sends no draft, and keeps
+//! none.
 
 use serde::{Deserialize, Serialize};
 
@@ -280,6 +284,16 @@ pub enum Request {
         lxma: String,
         #[serde(default)]
         name: Option<String>,
+    },
+    /// What the compose field of `peer`'s chat holds now (1219), on every
+    /// change: `body`, and the id of the message a reply being written
+    /// answers in `reply`, empty for none. Kept as the conversation's
+    /// draft; the empty one clears it.
+    Draft {
+        peer: String,
+        body: String,
+        #[serde(default)]
+        reply: String,
     },
 }
 
@@ -923,6 +937,12 @@ pub struct ConversationRow {
     pub pin: String,
     #[serde(default)]
     pub pin_label: String,
+    /// What was typed in the conversation and not sent (1219), in the
+    /// phone's language, `Draft: …`: shown in italics instead of
+    /// [`ConversationRow::last`]; empty for none, and always for the open
+    /// conversation.
+    #[serde(default)]
+    pub draft: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1095,6 +1115,15 @@ pub struct Messages {
     /// The ring's colour, as [`ConversationRow::ring`].
     #[serde(default)]
     pub ring: String,
+    /// What the compose field holds when the chat opens (1219, the scene's
+    /// compose node): the conversation's draft, which the field reports
+    /// back with [`Request::Draft`] on every change.
+    #[serde(default)]
+    pub draft: String,
+    /// The message the draft's reply answers, its id in hex; empty for
+    /// none.
+    #[serde(default)]
+    pub draft_reply: String,
 }
 
 /// What happened, for the screen.

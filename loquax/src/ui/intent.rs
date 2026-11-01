@@ -67,6 +67,7 @@
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
 //! | `keys::Action::Newline`, `ClearDraft` | the same names |
+//! | `Request::Draft`, `UiEvent::Draft` | `Draft` |
 //! | `keys::Action::Copy`, `Message::Copy` | `Copy` |
 //! | `Message::Menu` | `Menu` |
 //! | (new) a tap or click on a node | `Activate` |
@@ -192,6 +193,13 @@ pub enum Intent {
     Edit,
     Newline,
     ClearDraft,
+    /// What the conversation's text field holds now, and the message a
+    /// reply being written answers (1219): kept as its draft.
+    Draft {
+        to: Target,
+        text: String,
+        reply: Option<[u8; 32]>,
+    },
     /// Put `text` into compose, an emoji from the picker.
     Insert(String),
     /// The emoji picker, open or closed.
@@ -364,6 +372,7 @@ impl Intent {
             Intent::Edit => StrId::Edit,
             Intent::Newline => StrId::Newline,
             Intent::ClearDraft => StrId::ClearDraft,
+            Intent::Draft { .. } => StrId::Draft,
             Intent::Insert(_) => StrId::Insert,
             Intent::Emoji => StrId::Emoji,
             Intent::React { .. } => StrId::React,

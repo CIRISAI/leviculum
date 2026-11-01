@@ -93,6 +93,9 @@ impl InputBuffer for Line {
         self.0.push('\n');
     }
     fn set_cursor(&mut self, _at: usize) {}
+    fn set_value(&mut self, text: &str) {
+        self.0 = text.to_string();
+    }
 }
 
 /// A runner's end, folded by the pump.
@@ -711,6 +714,11 @@ impl Session {
                 confirmed: true,
             } => UiEvent::DeleteConversation { peer, everywhere },
             Intent::Share { peer, location } => UiEvent::SharePosition { peer, location },
+            Intent::Draft {
+                to: Target::Peer(peer),
+                text,
+                reply,
+            } => UiEvent::Draft { peer, text, reply },
             other => return Err(format!("not a request of the facade: {other:?}")),
         };
         self.lock().apply(event);
@@ -915,6 +923,10 @@ impl Session {
         };
         {
             let mut inner = self.lock();
+            // A draft typing has not paused on yet is kept all the same
+            // (1219).
+            inner.model.flush_drafts();
+            inner.persist();
             inner.gone = true;
             let _ = inner.events.send(Event::Stopped {
                 v: VERSION,
@@ -1455,6 +1467,10 @@ impl Inner {
             .unwrap_or_default();
         let ring = ring(row.avatar.ring);
         let (pin, pin_label) = pin(row.position.as_ref(), self.lang);
+        let draft = row
+            .draft
+            .map(|draft| draft.resolve(self.lang))
+            .unwrap_or_default();
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
@@ -1481,6 +1497,7 @@ impl Inner {
             ring,
             pin,
             pin_label,
+            draft,
         }
     }
 
@@ -1568,6 +1585,8 @@ impl Inner {
         });
         let names = &self.model.names;
         let liveness = self.model.liveness(&peer);
+        // The field opens with the scene's compose (1219).
+        let compose = index.map(|c| scene::compose(&self.model, c));
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -1594,6 +1613,11 @@ impl Inner {
             cadence_s: cadence(&liveness),
             last_fix_at: liveness.last_fix_at.unwrap_or(0),
             ring: ring(scene::Ring::of(liveness.state)),
+            draft: compose.as_ref().map(|c| c.text.clone()).unwrap_or_default(),
+            draft_reply: compose
+                .and_then(|c| c.reply)
+                .map(|id| loquax::address::to_hex(&id))
+                .unwrap_or_default(),
         }
     }
 
@@ -2013,6 +2037,14 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
         },
         R::AddContact { lxma, name } => Intent::AddContact { lxma, name },
+        R::Draft { peer, body, reply } => Intent::Draft {
+            to: Target::Peer(parse_peer(&peer)?),
+            text: body,
+            reply: match reply.is_empty() {
+                true => None,
+                false => Some(parse_id(&reply)?),
+            },
+        },
     };
     Ok(Decoded::Intent(intent))
 }

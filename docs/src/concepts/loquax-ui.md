@@ -333,6 +333,33 @@ reader's avatar is drawn once the scene knows the link (slice three).
 Pinned by `gui-chat-{light,dark}.png` and
 `gui-chat-compact-{chat,list}.png`.
 
+### Built 2026-11-01, drafts
+
+1219 (#232): a message typed and not sent stays with its conversation,
+on every target, as the messengers do. The model keeps it
+(`Conversation::draft`, `loquax/src/ui/history.rs`: the text, the
+message a reply being written answers, and an attachment list that stays
+empty until messages carry attachments). The scene's compose node holds
+it (`Compose::text`, `Compose::reply`), so a chat opens with it in the
+field, and a field reports every change back (`Intent::Draft`,
+`UiEvent::Draft`): the phone's `EditText` mirrors the scene and keeps
+nothing in Java, the window's editor is put back from the scene when
+another chat opens, and the terminal's compose line is the draft of the
+open conversation, put back on a switch and at start. A send or a reply
+takes it away.
+
+The store keeps it beside the conversation (`drafts`, schema 8 of
+[conversation storage](loquax-storage.md)), never in the config. A
+keystroke moves the write on by half a second
+(`history::DRAFT_DEBOUNCE_MS`); leaving the conversation, quitting and the
+phone's session ending write it at once. A conversation not open shows
+it as its last line, `Draft: …` in italics, in the catalogue's words
+(`draft_row`). It counts as nothing unread, raises no badge and moves
+nothing in the list. Pinned by `a_draft_stays_with_its_conversation`, the
+terminal's `tui_draft.frames`, the facade's
+`a_draft_survives_another_chat_and_a_new_session` and the device walk's
+`draft` step.
+
 ### Pixel screens: the tokens
 
 The phone and the window draw with one table of colours and sizes,

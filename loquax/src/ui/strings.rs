@@ -76,6 +76,8 @@ leviculum_ui::catalogue! {
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
     NoPosition = "no_position", "No position from this friend yet", "Noch keine Position von diesem Freund";
+    // A row's last line while a message is typed there and not sent (1219).
+    DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";
@@ -114,6 +116,7 @@ leviculum_ui::catalogue! {
     Edit = "scene_edit", "Edit text", "Text bearbeiten";
     Newline = "scene_newline", "New line", "Neue Zeile";
     ClearDraft = "scene_clear_draft", "Clear draft", "Entwurf leeren";
+    Draft = "scene_draft", "Draft", "Entwurf";
     Insert = "scene_insert", "Insert", "Einfügen";
     Emoji = "scene_emoji", "Emoji", "Emoji";
     React = "scene_react", "React", "Reagieren";

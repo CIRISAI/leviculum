@@ -38,6 +38,9 @@ impl InputBuffer for Line {
         self.0.push('\n');
     }
     fn set_cursor(&mut self, _at: usize) {}
+    fn set_value(&mut self, text: &str) {
+        self.0 = text.to_string();
+    }
 }
 
 /// The reader: no conversation's peer.
