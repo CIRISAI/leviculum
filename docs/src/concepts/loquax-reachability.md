@@ -211,6 +211,39 @@ below is made and built.
 - **C** waits for the measurement; **D** stays under Advanced
   (`home_address` in Loquax's config).
 
+## A second device for a phone's mailbox (1264)
+
+A phone that holds the mailbox ("On this phone") links another device
+from its profile: **Link a device** shows a join code and its QR, and
+the new device scans it at its first start under **Join an existing
+mailbox** (walk finding 7, `docs/drafts/ninety-percent-walk-2026-11.md`).
+
+- **The code is the computer's.** The phone calls the function
+  `loquax mailbox admit` calls (`loquax/src/home/admit.rs`, `open`): a
+  single-use token in the mailbox's store, the `lqxh1` body, the
+  rendezvous list behind the `@`, good for `home_token_hours` (a day by
+  default). The token is issued without a name, so the device is listed
+  under the name its join brings (`Store::redeem_token_as`); the first
+  phone polls for it and says "Device linked: <name>".
+- **The list is what the phone's mailbox dials**, as another device
+  dials it (`loquax-android/src/mailbox.rs`, `code_list`): with the
+  shipped entry server (port 4242 of leviculum.network, the peer port) that is
+  the shipped list, port 4343 first; with a servers file, its entries as
+  they stand.
+- **What works today: B, the rendezvous.** The phone's mailbox is behind
+  NAT and the carrier's CGNAT; it dials the rendezvous as a peer, the
+  new device dials it on the access point port, and the join, the pull
+  of the history and the wakes run over that relay, end to end
+  encrypted. `a_second_phone_links_to_the_mailbox_on_the_first_and_gets_its_history`
+  in `loquax-android/tests/facade.rs` runs it with a Rust transport node
+  as the rendezvous; the device walk's `link_device` runs it with the
+  walk's lnsd, the host's `loquax mailbox join` as the second device.
+- **What does not work yet: E, the same WiFi.** The phone has no
+  AutoInterface until the phone full node
+  ([the phone as a full node](loquax-phone-node.md)) lands; two devices on one
+  WiFi still meet at the rendezvous. A device that has no internet and
+  no rendezvous cannot link to a phone's mailbox.
+
 ## What this page does not decide
 
 - **The rendezvous list beyond `leviculum.network`**: who else is in the

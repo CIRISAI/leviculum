@@ -317,7 +317,10 @@ alone), **S** slows (completes with effort, a guess or a Reticulum word),
 Counts: **B 8, S 16, C 7** (31 findings).
 
 Done since: 1263 takes #1, #3, #6 and #8, and with #1 also #10 (the
-first start's Share sends the contact code).
+first start's Share sends the contact code). 1264 takes #7: "Link a device"
+on the profile of a phone that holds the mailbox, "Join an existing
+mailbox" at the first start; over the rendezvous today, not yet over the
+same WiFi (`docs/src/concepts/loquax-reachability.md`).
 
 ## 6. The three worst
 
