@@ -52,7 +52,9 @@ use super::chat::{self, Bubble, ListRow, Placement};
 use super::compose::{self, Button, Round, SheetRow};
 use super::intent::{Intent, Messages, Switch, Target};
 use super::liveness::{self, Liveness};
+use super::recording::{self, Fold, LevelTrack, Phase, Verb};
 use super::strings::{Arg, StrId, Text};
+use super::voice::BARS;
 use super::UiModel;
 use crate::address::to_hex;
 use crate::when::WallTime;
@@ -118,6 +120,16 @@ pub enum NodeId {
     Send,
     /// The photo staged in the compose bar (1270).
     Staged,
+    /// The recording bar (1276) and its parts: the timer, the live
+    /// waveform, the slide-to-cancel hint, the line under the waveform
+    /// (nothing heard, the cap), and a button or the lock chip by its
+    /// verb. The microphone held keeps [`NodeId::Record`].
+    RecBar,
+    RecTimer,
+    RecWave,
+    RecCancel,
+    RecNotice,
+    Rec(Verb),
     Sheet,
     /// A row of the sheet the compose bar opened (1270).
     SheetRow(SheetRow),
@@ -160,6 +172,12 @@ impl NodeId {
             NodeId::Plus => "plus".to_string(),
             NodeId::Send => "send".to_string(),
             NodeId::Staged => "staged".to_string(),
+            NodeId::RecBar => "rec_bar".to_string(),
+            NodeId::RecTimer => "rec_timer".to_string(),
+            NodeId::RecWave => "rec_wave".to_string(),
+            NodeId::RecCancel => "rec_cancel".to_string(),
+            NodeId::RecNotice => "rec_notice".to_string(),
+            NodeId::Rec(verb) => verb.word().to_string(),
             NodeId::Sheet => "sheet".to_string(),
             NodeId::SheetRow(row) => format!("sheet_{}", row.word()),
             NodeId::Card => "card".to_string(),
@@ -556,7 +574,266 @@ pub struct Compose {
     pub buttons: Vec<ComposeButton>,
     /// The photo the camera took, waiting for Send and its caption.
     pub staged: Option<StagedNode>,
+    /// While a voice message records for this chat (1276): the bar the
+    /// renderer draws instead of the field and its buttons.
+    pub recording: Option<RecordingBar>,
     pub a11y: A11y,
+}
+
+/// The recording bar (1276, `docs/src/concepts/loquax-voice-recording.md`):
+/// the compose bar while a voice message records, held, locked, paused
+/// or stopped at the cap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordingBar {
+    pub id: NodeId,
+    pub phase: Phase,
+    /// The red dot pulses: it records and is heard, or not yet doubted.
+    pub pulsing: bool,
+    pub timer: RecTimer,
+    pub wave: RecWave,
+    /// "Slide left to cancel" while held, "Release to cancel" once past
+    /// the distance.
+    pub cancel: Option<RecHint>,
+    /// The microphone, grown and red, while held: the finger is on it.
+    pub held: Option<RecHint>,
+    /// The lock chip above the button: open while held (a tap locks),
+    /// closed once locked.
+    pub lock: Option<LockChip>,
+    /// The bin, pause or resume, play, Send, in the order drawn.
+    pub buttons: Vec<RecButton>,
+    /// The line under the waveform: nothing heard (with the way to the
+    /// permission), or the cap.
+    pub notice: Option<RecNotice>,
+    pub a11y: A11y,
+}
+
+/// `REC 00:07`, amber in the last 30 s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecTimer {
+    pub id: NodeId,
+    pub ms: u32,
+    pub words: Text,
+    pub amber: bool,
+}
+
+/// The waveform: the newest windows while it records, scrolling right to
+/// left, the whole recording folded to the same width once it stands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecWave {
+    pub id: NodeId,
+    /// Levels 0 to 100, oldest first: at most
+    /// [`recording::LIVE_WINDOWS`].
+    pub levels: Vec<u8>,
+    /// It records: the newest bar is at the right edge and moves.
+    pub moving: bool,
+    pub a11y: A11y,
+}
+
+/// A part of the bar that says something and does nothing itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecHint {
+    pub id: NodeId,
+    pub words: Text,
+    /// How far the finger is toward it, 0 to 100.
+    pub progress: u8,
+    /// Past it: a release does it.
+    pub armed: bool,
+}
+
+/// The lock chip.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LockChip {
+    pub id: NodeId,
+    pub closed: bool,
+    /// How far the finger swiped up toward it, 0 to 100.
+    pub progress: u8,
+    /// [`Verb::Lock`] while open.
+    pub action: Option<Action>,
+    pub a11y: A11y,
+}
+
+/// A button of the bar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecButton {
+    pub id: NodeId,
+    pub verb: Verb,
+    pub action: Action,
+    pub a11y: A11y,
+}
+
+/// The line under the waveform.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecNotice {
+    pub id: NodeId,
+    pub words: Text,
+    /// The way to the microphone's permission when nothing is heard.
+    pub action: Option<Action>,
+}
+
+/// `peer`'s recording bar, while one records for that chat.
+pub fn recording_bar<B>(model: &UiModel<B>, peer: [u8; 16]) -> Option<RecordingBar> {
+    let rec = &model.recording;
+    if rec.peer != peer || !rec.phase.shown() {
+        return None;
+    }
+    let verb = |verb: Verb| Action::of(Intent::Recording { peer, verb });
+    let held = matches!(rec.phase, Phase::Held { .. });
+    let levels = match rec.phase.running() {
+        true => rec.track.live(recording::LIVE_WINDOWS).to_vec(),
+        false => rec.track.bars(recording::LIVE_WINDOWS, Fold::Peak),
+    };
+    let verbs: &[Verb] = match (rec.phase, rec.previewing) {
+        (Phase::Locked { .. }, _) => &[Verb::Discard, Verb::Pause, Verb::Send],
+        (Phase::Paused, false) => &[Verb::Discard, Verb::Play, Verb::Resume, Verb::Send],
+        (Phase::Paused, true) => &[Verb::Discard, Verb::StopPlay, Verb::Resume, Verb::Send],
+        (Phase::Preview, false) => &[Verb::Discard, Verb::Play, Verb::Send],
+        (Phase::Preview, true) => &[Verb::Discard, Verb::StopPlay, Verb::Send],
+        _ => &[],
+    };
+    let notice = match (rec.silent(), rec.said) {
+        (true, _) => Some(RecNotice {
+            id: NodeId::RecNotice,
+            words: Text::key(StrId::RecSilent),
+            action: Some(verb(Verb::AskMicrophone)),
+        }),
+        (false, Some(recording::Said::Cap)) => Some(RecNotice {
+            id: NodeId::RecNotice,
+            words: Text::key(StrId::RecCap),
+            action: None,
+        }),
+        _ => None,
+    };
+    let lock = match rec.phase {
+        Phase::Held { .. } => Some(LockChip {
+            id: NodeId::Rec(Verb::Lock),
+            closed: false,
+            progress: rec.lock_progress(),
+            action: Some(verb(Verb::Lock)),
+            a11y: A11y::of(
+                NodeId::Rec(Verb::Lock),
+                Role::Button,
+                Text::key(StrId::RecLock),
+            ),
+        }),
+        Phase::Locked { .. } => Some(LockChip {
+            id: NodeId::Rec(Verb::Lock),
+            closed: true,
+            progress: 100,
+            action: None,
+            a11y: A11y::of(
+                NodeId::Rec(Verb::Lock),
+                Role::Chip,
+                Text::key(StrId::RecLocked),
+            ),
+        }),
+        _ => None,
+    };
+    let timer = rec.timer_words();
+    Some(RecordingBar {
+        id: NodeId::RecBar,
+        phase: rec.phase,
+        pulsing: rec.pulsing(),
+        timer: RecTimer {
+            id: NodeId::RecTimer,
+            ms: rec.elapsed(),
+            words: timer.clone(),
+            amber: rec.amber(),
+        },
+        wave: RecWave {
+            id: NodeId::RecWave,
+            levels,
+            moving: rec.phase.running(),
+            a11y: A11y::of(NodeId::RecWave, Role::Bar, Text::key(StrId::RecWave)),
+        },
+        cancel: held.then(|| RecHint {
+            id: NodeId::RecCancel,
+            words: Text::key(match rec.armed() {
+                true => StrId::RecReleaseCancel,
+                false => StrId::VoiceCancel,
+            }),
+            progress: rec.cancel_progress(),
+            armed: rec.armed(),
+        }),
+        held: held.then(|| RecHint {
+            id: NodeId::Record,
+            words: Text::key(StrId::RecHeld),
+            progress: 0,
+            armed: false,
+        }),
+        lock,
+        buttons: verbs
+            .iter()
+            .map(|&v| RecButton {
+                id: NodeId::Rec(v),
+                verb: v,
+                action: verb(v),
+                a11y: A11y::of(NodeId::Rec(v), Role::Button, Text::key(v.label())),
+            })
+            .collect(),
+        notice,
+        a11y: A11y::of(NodeId::RecBar, Role::Bar, timer),
+    })
+}
+
+impl RecordingBar {
+    fn to_json(&self) -> Value {
+        let hint = |h: &RecHint| {
+            json!({
+                "id": h.id.resource(),
+                "words": h.words.to_json(),
+                "progress": h.progress,
+                "armed": h.armed,
+            })
+        };
+        json!({
+            "id": self.id.resource(),
+            "phase": self.phase.word(),
+            "pulsing": self.pulsing,
+            "timer": {
+                "id": self.timer.id.resource(),
+                "ms": self.timer.ms,
+                "words": self.timer.words.to_json(),
+                "amber": self.timer.amber,
+            },
+            "wave": {
+                "id": self.wave.id.resource(),
+                "levels": self.wave.levels,
+                "moving": self.wave.moving,
+                "a11y": self.wave.a11y.to_json(),
+            },
+            "cancel": opt(self.cancel.as_ref(), hint),
+            "held": opt(self.held.as_ref(), hint),
+            "lock": opt(self.lock.as_ref(), |l| json!({
+                "id": l.id.resource(),
+                "closed": l.closed,
+                "progress": l.progress,
+                "action": opt(l.action.as_ref(), Action::to_json),
+                "a11y": l.a11y.to_json(),
+            })),
+            "buttons": self.buttons.iter().map(|b| json!({
+                "id": b.id.resource(),
+                "action": b.action.to_json(),
+                "a11y": b.a11y.to_json(),
+            })).collect::<Vec<_>>(),
+            "notice": opt(self.notice.as_ref(), |n| json!({
+                "id": n.id.resource(),
+                "words": n.words.to_json(),
+                "action": opt(n.action.as_ref(), Action::to_json),
+            })),
+            "a11y": self.a11y.to_json(),
+        })
+    }
+
+    /// The action of the part `id` names.
+    pub fn action(&self, id: NodeId) -> Option<&Action> {
+        if let Some(lock) = self.lock.as_ref().filter(|l| l.id == id) {
+            return lock.action.as_ref();
+        }
+        if matches!(id, NodeId::RecNotice | NodeId::Rec(Verb::AskMicrophone)) {
+            return self.notice.as_ref().and_then(|n| n.action.as_ref());
+        }
+        self.buttons.iter().find(|b| b.id == id).map(|b| &b.action)
+    }
 }
 
 /// A button of the compose bar (1270).
@@ -763,6 +1040,11 @@ impl Scene {
                 .as_ref()
                 .and_then(|chat| chat.compose.staged.as_ref())
                 .map(|staged| &staged.remove),
+            NodeId::Rec(_) | NodeId::RecNotice => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.compose.recording.as_ref())
+                .and_then(|bar| bar.action(id)),
             NodeId::ShareChip | NodeId::ShareStop => self
                 .chat
                 .as_ref()
@@ -1058,7 +1340,8 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
                 peer,
                 key: bubble.key,
             });
-        let node = bubble_node(peer, bubble, place, now, playing);
+        let track = model.voice_track(peer, bubble.key);
+        let node = bubble_node(peer, bubble, place, now, playing, track);
         match groups.last_mut() {
             Some(group) if place.joins_before => group.bubbles.push(node),
             _ => {
@@ -1137,6 +1420,7 @@ pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
                 remove: Action::of(Intent::Unstage { peer }),
             }
         }),
+        recording: recording_bar(model, peer),
         a11y: A11y::of(
             NodeId::Compose,
             Role::TextField,
@@ -1263,6 +1547,7 @@ fn bubble_node(
     place: Placement,
     now: Option<WallTime>,
     playing: bool,
+    track: Option<&LevelTrack>,
 ) -> BubbleNode {
     let id = NodeId::Bubble(bubble.key);
     let now_secs = now.map(|now| now.unix_secs);
@@ -1325,7 +1610,10 @@ fn bubble_node(
         bytes: voice.bytes,
         duration_ms: voice.duration_ms,
         duration: super::voice::duration_words(voice.duration_ms),
-        levels: voice.levels.clone(),
+        // The recording's own track or the decoded sound's where the
+        // model has one, the stream's packet sizes otherwise; the same
+        // resampler either way (1276).
+        levels: track.map_or_else(|| voice.levels.clone(), |t| t.bars(BARS, Fold::Peak)),
         playing,
         toggle: voice.playable().then(|| {
             let key = bubble.key;
@@ -1668,6 +1956,7 @@ impl Chat {
                     "words": st.words.to_json(),
                     "remove": st.remove.to_json(),
                 })),
+                "recording": opt(self.compose.recording.as_ref(), RecordingBar::to_json),
                 "a11y": self.compose.a11y.to_json(),
             },
             "a11y": self.a11y.to_json(),
@@ -2887,5 +3176,246 @@ mod tests {
         );
         let last = model.conversations[0].messages.len() - 1;
         assert_eq!(model.message_cursor, last);
+    }
+
+    /// The recording bar (1276): held, the bar with its timer, live
+    /// waveform, cancel hint and open lock chip; locked, the bin, pause
+    /// and Send; paused, the waveform stands and play and resume join;
+    /// nothing heard, the line and the way to the permission; sent, the
+    /// field is back and the bubble's waveform is the recording's track
+    /// through the one resampler.
+    #[test]
+    fn a_recording_shows_as_recording_and_its_track_becomes_the_bubble() {
+        use super::super::recording::{Effect, Input, LIVE_WINDOWS};
+        use super::super::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        // Out of the way of the key the model gives the one it sends.
+        model.conversations[0].messages[0].activity = 1_000;
+        let feed = |model: &mut UiModel<Line>, input| {
+            super::super::update(model, UiEvent::Record { peer, input })
+        };
+        let bar = |model: &UiModel<Line>| {
+            model
+                .scene(LayoutClass::Compact)
+                .chat
+                .expect("chat")
+                .compose
+                .recording
+        };
+        assert_eq!(bar(&model), None, "no recording, no bar");
+        assert_eq!(
+            feed(&mut model, Input::Press { now: 0 }),
+            alloc::vec![
+                UiEffect::Recording {
+                    peer,
+                    effect: Effect::Haptic(recording::Haptic::Start)
+                },
+                UiEffect::Recording {
+                    peer,
+                    effect: Effect::Start
+                },
+            ]
+        );
+        // Three seconds rising and a quiet one.
+        for w in 1..=80u64 {
+            let rms = match w {
+                ..=60 => u16::try_from(w * 200).unwrap_or(0),
+                _ => 40,
+            };
+            feed(&mut model, Input::Level { now: w * 50, rms });
+        }
+        let held = bar(&model).expect("the bar while held");
+        assert_eq!(held.phase.word(), "held");
+        assert!(held.pulsing);
+        assert_eq!(held.timer.words.resolve(Lang::En), "REC 00:04");
+        assert!(!held.timer.amber);
+        assert_eq!(held.wave.levels.len(), LIVE_WINDOWS);
+        assert_eq!(
+            held.wave.levels.as_slice(),
+            model.recording.track.live(LIVE_WINDOWS),
+            "the newest windows, the newest at the right"
+        );
+        assert!(held.wave.moving);
+        let cancel = held.cancel.as_ref().expect("the hint");
+        assert_eq!(cancel.words.resolve(Lang::En), "Slide left to cancel");
+        assert_eq!(
+            held.held.as_ref().map(|h| h.id.resource()),
+            Some("record".into()),
+            "the finger stays on the microphone"
+        );
+        let lock = held.lock.as_ref().expect("the chip");
+        assert!(!lock.closed);
+        assert!(held.buttons.is_empty());
+        let scene = model.scene(LayoutClass::Compact);
+        assert_eq!(
+            scene
+                .action(NodeId::Rec(Verb::Lock))
+                .map(|a| a.intent.clone()),
+            Some(Intent::Recording {
+                peer,
+                verb: Verb::Lock
+            })
+        );
+        let json = scene.to_json();
+        let rec = &json["chat"]["compose"]["recording"];
+        assert_eq!(rec["phase"], "held");
+        assert_eq!(rec["timer"]["words"]["args"][0], "00:04", "{rec}");
+        assert_eq!(rec["lock"]["id"], "rec_lock");
+
+        // Slid past the distance: the hint says release to cancel.
+        feed(&mut model, Input::Slide { dx: -120, dy: 0 });
+        let armed = bar(&model).and_then(|b| b.cancel).expect("hint");
+        assert!(armed.armed);
+        assert_eq!(armed.words.resolve(Lang::De), "Loslassen zum Abbrechen");
+        // Back, then the chip: locked.
+        feed(&mut model, Input::Slide { dx: 0, dy: 0 });
+        feed(&mut model, Input::Verb(Verb::Lock));
+        let locked = bar(&model).expect("the bar locked");
+        assert!(locked
+            .lock
+            .as_ref()
+            .is_some_and(|l| l.closed && l.action.is_none()));
+        assert_eq!(locked.cancel, None);
+        let ids: Vec<String> = locked.buttons.iter().map(|b| b.id.resource()).collect();
+        assert_eq!(ids, ["rec_discard", "rec_pause", "rec_send"]);
+        feed(&mut model, Input::Verb(Verb::Pause));
+        let paused = bar(&model).expect("the bar paused");
+        assert!(!paused.wave.moving && !paused.pulsing);
+        assert_eq!(
+            paused.wave.levels,
+            model.recording.track.bars(LIVE_WINDOWS, Fold::Peak),
+            "the whole recording, standing"
+        );
+        let ids: Vec<String> = paused.buttons.iter().map(|b| b.id.resource()).collect();
+        assert_eq!(ids, ["rec_discard", "rec_play", "rec_resume", "rec_send"]);
+
+        // Send: the platform finishes, hands the recording over, and the
+        // bubble draws the track.
+        assert_eq!(
+            feed(&mut model, Input::Verb(Verb::Send)),
+            alloc::vec![UiEffect::Recording {
+                peer,
+                effect: Effect::Finish
+            }]
+        );
+        assert_eq!(bar(&model), None, "the field is back");
+        let track = model.recording.track.clone();
+        assert_eq!(track.len(), 80);
+        super::super::update(
+            &mut model,
+            UiEvent::SendVoice {
+                peer,
+                data: b"OggS".to_vec(),
+            },
+        );
+        let key = model.conversations[0].messages.last().map(|m| m.activity);
+        let key = key.expect("the sent one");
+        let scene = model.scene(LayoutClass::Compact);
+        let voice = scene
+            .bubble(NodeId::Bubble(key))
+            .and_then(|n| n.voice.clone())
+            .expect("its voice node");
+        assert_eq!(voice.levels, track.bars(BARS, Fold::Peak));
+        assert!(voice.levels.len() == BARS && voice.levels[0] < voice.levels[20]);
+
+        // A received one the shell decoded draws the decoded sound's track.
+        let decoded = recording::LevelTrack::of(alloc::vec![10, 20, 90, 30]);
+        super::super::update(
+            &mut model,
+            UiEvent::VoiceTrack {
+                peer,
+                key: 1_000,
+                track: decoded.clone(),
+            },
+        );
+        assert_eq!(model.voice_track(peer, 1_000), Some(&decoded));
+    }
+
+    /// Nothing heard for two seconds: the line under the waveform, its
+    /// way to the permission, and the dot stands.
+    #[test]
+    fn a_silent_microphone_is_said() {
+        use super::super::recording::{Effect, Input};
+        use super::super::UiEffect;
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        super::super::update(
+            &mut model,
+            UiEvent::Record {
+                peer,
+                input: Input::Press { now: 0 },
+            },
+        );
+        for w in 1..=40u64 {
+            super::super::update(
+                &mut model,
+                UiEvent::Record {
+                    peer,
+                    input: Input::Level {
+                        now: w * 50,
+                        rms: 0,
+                    },
+                },
+            );
+        }
+        let scene = model.scene(LayoutClass::Compact);
+        let bar = scene
+            .chat
+            .as_ref()
+            .and_then(|c| c.compose.recording.clone())
+            .expect("the bar");
+        assert!(!bar.pulsing);
+        let notice = bar.notice.as_ref().expect("the line");
+        assert_eq!(
+            notice.words.resolve(Lang::En),
+            "Nothing heard. Is the microphone allowed?"
+        );
+        let ask = Intent::Recording {
+            peer,
+            verb: Verb::AskMicrophone,
+        };
+        assert_eq!(
+            scene.action(NodeId::RecNotice).map(|a| a.intent.clone()),
+            Some(ask)
+        );
+        assert_eq!(
+            super::super::update(
+                &mut model,
+                UiEvent::Record {
+                    peer,
+                    input: Input::Verb(Verb::AskMicrophone)
+                }
+            ),
+            alloc::vec![UiEffect::Recording {
+                peer,
+                effect: Effect::AskMicrophone
+            }]
+        );
+        // A tap is said as the hint to hold, and nothing goes.
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        model.selected = 0;
+        super::super::update(
+            &mut model,
+            UiEvent::Record {
+                peer,
+                input: Input::Press { now: 0 },
+            },
+        );
+        super::super::update(
+            &mut model,
+            UiEvent::Record {
+                peer,
+                input: Input::Release { now: 200 },
+            },
+        );
+        assert_eq!(model.conversations[0].messages.len(), 1);
+        assert!(model
+            .toasts
+            .iter()
+            .any(|t| t.text.starts_with("Hold the microphone")));
     }
 }

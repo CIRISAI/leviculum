@@ -45,12 +45,22 @@ pub const AM_CODEC2_2400: u8 = 0x08;
 pub const AM_CODEC2_3200: u8 = 0x09;
 pub const AM_OPUS_OGG: u8 = 0x10;
 
-/// The longest recording that goes: Columba's limit
-/// (`MAX_DURATION_MILLIS`, 5 min,
-/// `columba/app/src/main/java/network/columba/app/audio/VoiceMessageRecorder.kt:214`).
-/// At [`crate::voice`]'s rate it is about 450 KB, under what a receiver
-/// takes.
-pub const LONGEST_MS: u32 = 5 * 60 * 1000;
+/// The bits a second a recording is coded at, on average
+/// ([`crate::voice::BITRATE`] is this).
+pub const OPUS_BITRATE: u32 = 12_000;
+
+/// The bytes a second of a recording on the wire, counted high: the
+/// average rate and 5 % for the Ogg pages (1222 measured 4.9 %).
+pub const OPUS_BYTES_PER_S: u32 = OPUS_BITRATE / 8 * 105 / 100;
+
+/// The longest recording that goes (1276): what a receiver takes,
+/// [`super::files::LARGEST`] bytes, at [`OPUS_BYTES_PER_S`], in whole
+/// minutes. 990 000 / 1 575 is 628 s, so ten minutes, 945 KB counted
+/// high and about 720 KB at the 1 202 B/s 1222 measured. Columba stops
+/// its own at five
+/// (`columba/app/src/main/java/network/columba/app/audio/VoiceMessageRecorder.kt:214`)
+/// and plays a longer one as it plays any.
+pub const LONGEST_MS: u32 = (super::files::LARGEST as u32 / OPUS_BYTES_PER_S) / 60 * 60 * 1000;
 
 /// The shortest recording that goes: a tap on the button is no message.
 /// Sideband drops one under 0.6 s (`Sideband/sbapp/main.py:2517`).
@@ -176,7 +186,8 @@ fn codec2_ms(mode: u8, bytes: usize) -> u32 {
 /// the length from the last page's granule position less the header's
 /// pre-skip (RFC 7845, 4.2 and 4.4), the bar from the packets' sizes,
 /// which in a variable rate stream follow the speech (a pause codes in a
-/// few bytes, a word in tens). A stream that does not parse says 0 and no
+/// few bytes, a word in tens): their [`super::recording::LevelTrack`]
+/// through the one resampler. A stream that does not parse says 0 and no
 /// bar.
 pub fn ogg_shape(data: &[u8]) -> (u32, Vec<u8>) {
     let mut at = 0;
@@ -227,34 +238,8 @@ pub fn ogg_shape(data: &[u8]) -> (u32, Vec<u8>) {
     }
     let samples = u64::try_from(granule).unwrap_or(0).saturating_sub(pre_skip);
     let ms = u32::try_from(samples / 48).unwrap_or(u32::MAX);
-    (ms, levels(&sizes))
-}
-
-/// [`BARS`] heights from packet sizes: each bar the mean of its share of
-/// the packets, the loudest 100, none under 8 so a pause still shows.
-fn levels(sizes: &[usize]) -> Vec<u8> {
-    if sizes.is_empty() {
-        return Vec::new();
-    }
-    let means: Vec<usize> = (0..BARS)
-        .map(|bar| {
-            let from = bar * sizes.len() / BARS;
-            let to = ((bar + 1) * sizes.len() / BARS)
-                .max(from + 1)
-                .min(sizes.len());
-            let part = &sizes[from.min(sizes.len() - 1)..to];
-            part.iter().sum::<usize>() / part.len().max(1)
-        })
-        .collect();
-    let floor = means.iter().copied().min().unwrap_or(0);
-    let top = means.iter().copied().max().unwrap_or(0);
-    means
-        .iter()
-        .map(|&m| match top > floor {
-            true => (8 + (m - floor) * 92 / (top - floor)) as u8,
-            false => 50,
-        })
-        .collect()
+    let track = super::recording::LevelTrack::from_packets(&sizes, ms);
+    (ms, track.bars(BARS, super::recording::Fold::Peak))
 }
 
 /// `0:07`, `4:59`: a length as a player says it.
@@ -304,6 +289,22 @@ impl<B> UiModel<B> {
         }
         let index = self.conversation(peer);
         let effects = self.send_fields(index, String::new(), voice_fields(AM_OPUS_OGG, data));
+        // The recording that was just handed over keeps its track as the
+        // bubble's waveform (1276).
+        let recorded = &mut self.recording;
+        if recorded.peer == peer
+            && recorded.phase == super::recording::Phase::Sent
+            && !recorded.track.is_empty()
+        {
+            if let Some(key) = self.conversations[index]
+                .messages
+                .last()
+                .map(|m| m.activity)
+            {
+                let track = core::mem::take(&mut recorded.track);
+                self.voice_tracks.insert((peer, key), track);
+            }
+        }
         if index == self.selected {
             self.message_cursor = self.conversations[index].messages.len().saturating_sub(1);
             self.scroll_top = None;
@@ -448,7 +449,7 @@ mod tests {
     fn a_voice_message_says_its_length() {
         assert_eq!(duration_words(0), "0:00");
         assert_eq!(duration_words(6_200), "0:07");
-        assert_eq!(duration_words(LONGEST_MS), "5:00");
+        assert_eq!(duration_words(LONGEST_MS), "10:00");
         let voice = VoiceRef {
             mode: AM_OPUS_OGG,
             bytes: 9_000,
@@ -471,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_is_no_message_and_five_minutes_is_the_most() {
+    fn a_tap_is_no_message_and_ten_minutes_is_the_most() {
         assert_eq!(
             refusal(300).map(|t| t.resolve(Lang::En)),
             Some("Hold the microphone to record, release to send.".into())
@@ -480,7 +481,7 @@ mod tests {
         assert_eq!(refusal(LONGEST_MS + 1000), None);
         assert_eq!(
             refusal(LONGEST_MS + 1001).map(|t| t.resolve(Lang::De)),
-            Some("Eine Sprachnachricht dauert höchstens 5:00.".into())
+            Some("Eine Sprachnachricht dauert höchstens 10:00.".into())
         );
     }
 }

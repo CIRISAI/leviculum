@@ -372,6 +372,8 @@ impl Shell {
                     }
                 }
                 UiEffect::PauseVoice { .. } => {}
+                // The terminal records nothing yet (1276, pass two).
+                UiEffect::Recording { .. } => {}
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
                 UiEffect::Remember { key, value } => {

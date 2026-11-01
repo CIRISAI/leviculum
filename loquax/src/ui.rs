@@ -145,6 +145,7 @@ pub mod map;
 pub mod photos;
 pub mod reactions;
 pub mod receipts;
+pub mod recording;
 pub mod replies;
 pub mod scene;
 pub mod search;
@@ -825,6 +826,13 @@ pub struct UiModel<B> {
     pub playing: Option<voice::Playing>,
     /// The compose bar's buttons, sheets and staged photo (1270).
     pub bar: compose::Bar,
+    /// The voice message being recorded, or the last one (1276).
+    pub recording: recording::Recording,
+    /// The level tracks of voice messages, by peer and message key
+    /// (1276): the recording's own for one sent here, the decoded sound's
+    /// for one the shell measured. Memory only; a bubble without one
+    /// draws its stream's packet sizes.
+    pub voice_tracks: BTreeMap<([u8; 16], u64), recording::LevelTrack>,
     /// The running position shares (1273).
     pub shares: share::Shares,
 }
@@ -919,6 +927,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             photo_size: photos::PhotoSize::default(),
             playing: None,
             bar: compose::Bar::default(),
+            recording: recording::Recording::default(),
+            voice_tracks: BTreeMap::new(),
             shares: share::Shares::default(),
         };
         for peer in peers {
@@ -1488,6 +1498,20 @@ pub enum UiEvent {
     PauseVoice { peer: [u8; 16], key: u64 },
     /// The shell's player came to the end of a voice message.
     VoiceEnded { peer: [u8; 16], key: u64 },
+    /// The microphone's gestures, its level every 50 ms and the recording
+    /// bar's buttons, for `peer`'s chat (1276, [`recording::Input`]).
+    Record {
+        peer: [u8; 16],
+        input: recording::Input,
+    },
+    /// The level track of a voice message the shell decoded (1276,
+    /// [`recording::LevelTrack::from_pcm`]): its bubble draws it from
+    /// now on instead of the stream's packet sizes.
+    VoiceTrack {
+        peer: [u8; 16],
+        key: u64,
+        track: recording::LevelTrack,
+    },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1579,6 +1603,12 @@ pub enum UiEffect {
     PlayVoice { peer: [u8; 16], key: u64 },
     /// Stop the one that plays.
     PauseVoice { peer: [u8; 16], key: u64 },
+    /// What the recorder of `peer`'s chat is to do (1276): start, pause,
+    /// resume, stop, hand over, drop, play the preview, tick the haptics.
+    Recording {
+        peer: [u8; 16],
+        effect: recording::Effect,
+    },
 }
 
 /// Fold one event into the model.
@@ -1716,6 +1746,11 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::PauseVoice { peer, key } => model.pause_voice(peer, key),
         UiEvent::VoiceEnded { peer, key } => {
             model.voice_ended(peer, key);
+            Vec::new()
+        }
+        UiEvent::Record { peer, input } => model.record(peer, input),
+        UiEvent::VoiceTrack { peer, key, track } => {
+            model.voice_tracks.insert((peer, key), track);
             Vec::new()
         }
         UiEvent::MailboxChosen { node, by_user } => {

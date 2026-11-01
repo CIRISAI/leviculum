@@ -108,6 +108,7 @@
         "intent": "SendVoice { peer: [29, 10, 191, 121, 34, 150, 214, 2, 127, 156, 69, 109, 218, 138, 31, 149], pcm: [], rate: 0 }",
         "label_key": "record_voice"
       },
+      "recording": null,
       "reply": null,
       "round": "send",
       "send": {

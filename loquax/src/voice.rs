@@ -29,8 +29,9 @@ pub const RATE: u32 = 16_000;
 
 /// The bits a second a recording is coded at, on average: wideband speech
 /// in SILK (opus-pure chooses SILK below about 20 kb/s). A minute is about
-/// 90 KB, so a five minute message stays under what a receiver takes.
-pub const BITRATE: i32 = 12_000;
+/// 90 KB, and the longest message, ten minutes, stays under what a
+/// receiver takes ([`LONGEST_MS`]).
+pub const BITRATE: i32 = crate::ui::voice::OPUS_BITRATE as i32;
 
 /// The rate an Opus message is decoded at for the player: every Opus
 /// rate divides it, and it keeps all of a wideband or super-wideband

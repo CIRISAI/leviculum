@@ -35,6 +35,7 @@
 //! | (new) a tap on a file, `UiEvent::OpenFile` (1221) | `OpenFile` |
 //! | `Request::Voice`, `UiEvent::SendVoice` (1222) | `SendVoice` |
 //! | `Request::PlayVoice`, `UiEvent::PlayVoice`, `UiEvent::PauseVoice` (1222) | `PlayVoice`, `PauseVoice` |
+//! | (new) the recording bar's buttons, `UiEvent::Record` (1276) | `Recording` |
 //! | `Request::Delete`, `UiEvent::Delete`, `Message::Delete`, `Message::AskDelete`, `Command::DeleteMessage` | `Delete` (`confirmed` tells the asked from the asking) |
 //! | `Request::Used`, `Message::Insert` | `Insert` |
 //! | `Message::ToggleEmoji` | `Emoji` |
@@ -331,6 +332,14 @@ pub enum Intent {
         pcm: Vec<i16>,
         rate: u32,
     },
+    /// A button of `peer`'s recording bar (1276): lock, pause, resume,
+    /// listen, send, discard, or the way to the microphone's permission.
+    /// The gestures on the microphone are not intents but the platform's
+    /// input ([`super::recording::Input`]).
+    Recording {
+        peer: [u8; 16],
+        verb: super::recording::Verb,
+    },
     /// Play the voice message `key` of `peer`'s conversation: a tap on its
     /// play button (1222).
     PlayVoice {
@@ -532,6 +541,7 @@ impl Intent {
             Intent::OpenFile { .. } => StrId::OpenFile,
             Intent::SendVoice { .. } => StrId::RecordVoice,
             Intent::PlayVoice { .. } => StrId::PlayVoice,
+            Intent::Recording { verb, .. } => verb.label(),
             Intent::PauseVoice { .. } => StrId::PauseVoice,
             Intent::Delete { .. } => StrId::ActionDelete,
             Intent::Copy => StrId::ActionCopy,

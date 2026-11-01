@@ -186,6 +186,24 @@ leviculum_ui::catalogue! {
     VoiceCancel = "voice_cancel", "Slide left to cancel", "Zum Abbrechen nach links wischen";
     VoiceTooLong = "voice_too_long", "A voice message lasts at most %1$s.", "Eine Sprachnachricht dauert höchstens %1$s.";
     VoiceNoMicrophone = "voice_no_microphone", "Loquax needs the microphone to record a voice message.", "Loquax braucht das Mikrofon für Sprachnachrichten.";
+    // The recording bar (1276): the timer, the waveform, the hints, the
+    // lock chip, the buttons, the silence hint and the cap.
+    RecBar = "rec_bar", "Recording a voice message", "Sprachnachricht wird aufgenommen";
+    RecTimer = "rec_timer", "REC %1$s", "REC %1$s";
+    RecWave = "rec_wave", "Sound level", "Lautstärke";
+    RecHeld = "rec_held", "Release to send", "Loslassen zum Senden";
+    RecReleaseCancel = "rec_release_cancel", "Release to cancel", "Loslassen zum Abbrechen";
+    RecLock = "rec_lock", "Lock the recording", "Aufnahme feststellen";
+    RecLocked = "rec_locked", "Recording locked", "Aufnahme festgestellt";
+    RecPause = "rec_pause", "Pause recording", "Aufnahme pausieren";
+    RecResume = "rec_resume", "Continue recording", "Aufnahme fortsetzen";
+    RecPlay = "rec_play", "Listen", "Anhören";
+    RecStopPlay = "rec_stop_play", "Stop listening", "Anhören beenden";
+    RecSend = "rec_send", "Send voice message", "Sprachnachricht senden";
+    RecDiscard = "rec_discard", "Discard recording", "Aufnahme verwerfen";
+    RecSilent = "rec_silent", "Nothing heard. Is the microphone allowed?", "Nichts zu hören. Ist das Mikrofon erlaubt?";
+    RecAllow = "rec_allow", "Allow the microphone", "Mikrofon erlauben";
+    RecCap = "rec_cap", "That is as long as a voice message can be", "Länger kann eine Sprachnachricht nicht sein";
     // The compose bar after Signal (1270): the plus and its sheet, the
     // position button and its sheet, the camera and the staged photo.
     Attach = "scene_attach", "Attach", "Anhängen";
