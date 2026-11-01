@@ -4567,3 +4567,65 @@ async fn a_voice_message_travels_both_ways_with_python_lxmf() {
         .await
         .expect("stopped");
 }
+
+/// Lew's phone, 2026-11-01 (1268): a photo without words drew the picture
+/// and an empty bubble under it. The facade's rows carry the scene's
+/// words: a photo, a file or a voice message alone has an empty body
+/// (the app draws no text row then), a body of blanks is none, and a
+/// photo with words keeps them.
+#[test]
+fn media_without_words_has_an_empty_body() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let anna = ugly_store::peer(91);
+    let mut model = UiModel::<Line>::new(&[anna]);
+    let carrying = |n: u8, body: &str, fields| {
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [n; 32],
+            source: anna,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields,
+            verified: true,
+        })
+    };
+    let photo = || loquax::ui::photos::photo_fields("jpg", vec![7; 1_000]);
+    update(&mut model, carrying(1, "", photo()));
+    update(&mut model, carrying(2, " \n", photo()));
+    update(
+        &mut model,
+        carrying(3, "", loquax::ui::files::file_fields("a.txt", vec![7; 10])),
+    );
+    update(
+        &mut model,
+        carrying(
+            4,
+            "",
+            loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 90]),
+        ),
+    );
+    update(&mut model, carrying(5, "the view", photo()));
+    let rows = session::rows(&model, 0, Lang::En);
+    let shape: Vec<(&str, bool, usize, bool)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.body.as_str(),
+                !r.photo.is_empty(),
+                r.files.len(),
+                r.voice_mode != 0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("", true, 0, false),
+            ("", true, 0, false),
+            ("", false, 1, false),
+            ("", false, 0, true),
+            ("the view", true, 0, false),
+        ]
+    );
+}

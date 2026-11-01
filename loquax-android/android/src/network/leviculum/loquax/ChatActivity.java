@@ -969,9 +969,9 @@ public class ChatActivity extends Activity implements Events.Listener {
     }
 
     /**
-     * A row's files (1221): one line each, its name and size in a bubble's
-     * colours, said as the library words it; a tap opens it, a long press
-     * shares it. Gone for a row without.
+     * A row's files (1221): one line each in its bubble (1268), its name
+     * and size in the bubble's ink, said as the library words it; a tap
+     * opens it, a long press shares it. Gone for a row without.
      */
     private void files(LinearLayout box, Map<String, Object> row, boolean ours) {
         box.removeAllViews();
@@ -985,13 +985,9 @@ public class ChatActivity extends Activity implements Events.Listener {
             line.setText("\u25A4  " + Core.str(file, "name") + "\n" + Core.str(file, "size"));
             line.setTextSize(15);
             line.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
-            line.setPadding(dp(12), dp(8), dp(12), dp(8));
+            line.setPadding(0, dp(2), 0, dp(2));
             line.setMaxWidth(dp(280));
             line.setContentDescription(Core.str(file, "words"));
-            GradientDrawable shape = new GradientDrawable();
-            shape.setColor(getColor(ours ? R.color.bubble_ours : R.color.bubble_theirs));
-            shape.setCornerRadius(dp(CORNER));
-            line.setBackground(shape);
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             params.bottomMargin = dp(2);
@@ -1015,8 +1011,9 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /**
      * A row's voice message (1222): the play or pause button, the level
-     * bar and the length, in a bubble's colours, said as the library words
-     * it; a tap plays or pauses it. Gone for a row without.
+     * bar and the length in its bubble (1268), in the bubble's ink, said
+     * as the library words it; a tap plays or pauses it. Gone for a row
+     * without.
      */
     private void voice(LinearLayout box, final Map<String, Object> row, boolean ours) {
         box.removeAllViews();
@@ -1029,10 +1026,6 @@ public class ChatActivity extends Activity implements Events.Listener {
         box.setVisibility(View.VISIBLE);
         box.setTag("voice_" + key);
         int ink = getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text);
-        GradientDrawable shape = new GradientDrawable();
-        shape.setColor(getColor(ours ? R.color.bubble_ours : R.color.bubble_theirs));
-        shape.setCornerRadius(dp(CORNER));
-        box.setBackground(shape);
         box.setContentDescription(Core.str(row, "voice_words"));
         boolean playing = Core.bool(row, "voice_playing") && player.playing() == key;
         ImageButton toggle = new ImageButton(this);
@@ -1902,8 +1895,12 @@ public class ChatActivity extends Activity implements Events.Listener {
             files((LinearLayout) view.findViewById(R.id.files), row, ours);
             voice((LinearLayout) view.findViewById(R.id.voice), row, ours);
 
+            // The words under the media, none where the scene has none
+            // (1268): a photo alone is the photo and its time in one bubble.
             TextView body = (TextView) view.findViewById(R.id.body);
-            body.setText(text(row, ours, now));
+            CharSequence words = text(row, ours, now);
+            body.setText(words);
+            body.setVisibility(words.length() == 0 ? View.GONE : View.VISIBLE);
             body.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
             quote(view, row, ours);
 

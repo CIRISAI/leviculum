@@ -307,6 +307,30 @@ def photo_problems(photos: list[Node], before: int) -> list[str]:
     return problems
 
 
+def photo_bubble_problems(nodes: list[Node], photo: Node) -> list[str]:
+    """What is wrong with the bubble of a photo sent without words (1268):
+    it is in no bubble or in more than one, its bubble holds a text row,
+    a bubble on screen holds nothing, or its bubble has no delivery
+    mark."""
+    bubbles = find(nodes, rid="bubble")
+    around = [b for b in bubbles if inside(photo, b)]
+    if len(around) != 1:
+        return [f"the photo is in {len(around)} bubbles, want one"]
+    bubble = around[0]
+    problems = []
+    texts = [n for n in find(nodes, rid="body") if inside(n, bubble)]
+    if texts:
+        problems.append(f"its bubble has a text row {texts[0].text!r}")
+    # Every bubble holds something a screen shows or a reader says: a
+    # text, a photo, a file, a voice message.
+    for other in bubbles:
+        if not any(inside(n, other) for n in nodes if n.text.strip() or n.desc):
+            problems.append(f"an empty bubble at {other.bounds}")
+    if not [n for n in marks_on(nodes) if inside(n, bubble)]:
+        problems.append("its bubble has no mark")
+    return problems
+
+
 def files_on(nodes: list[Node]) -> list[Node]:
     """The bubbles' file rows on screen (1221), top first: what a screen
     reader names as a file."""
@@ -1666,7 +1690,8 @@ class Walk:
     def step_image(self) -> str:
         """A photo through the paperclip (1220): the fixture onto the
         phone's pictures, the system's picker, the bubble's thumbnail
-        with its words and a tick, the mailbox's send, the whole photo on
+        with its words and a tick, one bubble with its mark and no text
+        row (1268), the mailbox's send, the whole photo on
         a tap and Back to the chat."""
         dev = self.need_device()
         fixture = self.need_fixture()
@@ -1703,13 +1728,21 @@ class Walk:
         )
         if not accepted:
             raise StepFailed("the mailbox log has no new 'HOME send accepted'")
-        photo = photos_on(dev.dump())[-1]
+        nodes = dev.dump()
+        photo = photos_on(nodes)[-1]
+        # One bubble, the photo and its mark in it, no empty one (1268).
+        problems = photo_bubble_problems(nodes, photo)
+        if problems:
+            raise StepFailed("; ".join(problems))
         dev.tap_node(photo)
         self.wait_id(PHOTO_FULL, 10)
         dev.key("KEYCODE_BACK")
         self.wait_id("compose", 10)
         dev.shell(f"rm -f /sdcard/Pictures/{name}", check=False)
-        return f"picked_to_bubble_ms={ms} desc={photo.desc!r} mailbox=accepted full=shown"
+        return (
+            f"picked_to_bubble_ms={ms} desc={photo.desc!r} bubbles=1 mark=in "
+            "mailbox=accepted full=shown"
+        )
 
     def step_file(self) -> str:
         """A file through the paperclip (1221): a text file onto the

@@ -2105,6 +2105,9 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                 })
                 .collect();
             let mut row = row(node.bubble);
+            // The scene's words (1268): a body of blanks is none, and the
+            // app draws no text row under a photo without words.
+            row.body = node.text.unwrap_or_default();
             row.files = files;
             if let Some(voice) = &node.voice {
                 row.voice_mode = u32::from(voice.mode);

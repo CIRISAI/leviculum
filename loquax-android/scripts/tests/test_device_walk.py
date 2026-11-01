@@ -647,6 +647,44 @@ class Photo(unittest.TestCase):
         self.assertEqual(walk.photos_on([low, other, high]), [high, low])
 
 
+class PhotoBubble(unittest.TestCase):
+    """A photo without words is one bubble with its mark (1268)."""
+
+    photo = walk.Node("", "Photo, 104 KB", "network.leviculum.loquax:id/photo", "", (500, 400, 1040, 1000))
+    mark = boxed("state_ticks", (990, 1030, 1030, 1060), "Delivered")
+    bubble = boxed("bubble", (480, 380, 1060, 1080))
+
+    def test_the_photo_and_its_mark_in_one_bubble_is_right(self):
+        nodes = [self.bubble, self.photo, self.mark]
+        self.assertEqual(walk.photo_bubble_problems(nodes, self.photo), [])
+
+    def test_lews_phone_on_2026_11_01(self):
+        # The photo above, an empty bubble under it, the mark nowhere.
+        empty = boxed("bubble", (980, 1010, 1060, 1100))
+        problems = walk.photo_bubble_problems([self.photo, empty], self.photo)
+        self.assertEqual(problems, ["the photo is in 0 bubbles, want one"])
+        # Its own bubble right, an empty one beside it is still named.
+        below = boxed("bubble", (980, 1100, 1060, 1180))
+        nodes = [self.bubble, self.photo, self.mark, below]
+        self.assertEqual(
+            walk.photo_bubble_problems(nodes, self.photo),
+            ["an empty bubble at (980, 1100, 1060, 1180)"],
+        )
+
+    def test_an_empty_bubble_a_text_row_and_no_mark_are_named(self):
+        empty = boxed("bubble", (980, 1100, 1060, 1180))
+        body = walk.Node(" ", "", "network.leviculum.loquax:id/body", "", (500, 1010, 900, 1060))
+        problems = walk.photo_bubble_problems([self.bubble, self.photo, body, empty], self.photo)
+        self.assertEqual(
+            problems,
+            [
+                "its bubble has a text row ' '",
+                "an empty bubble at (980, 1100, 1060, 1180)",
+                "its bubble has no mark",
+            ],
+        )
+
+
 class File(unittest.TestCase):
     """The file step's reading of the screen (1221)."""
 
