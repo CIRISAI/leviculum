@@ -255,8 +255,10 @@ pub(crate) struct SerialInterfaceConfig {
     /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
     /// (see [`super::test_drop_direct_ingress_frame`]).
     pub test_drop_direct_ingress: bool,
-    /// The board shares one UART under XON/XOFF ([`super::serial_mux`]).
-    pub serial_mux: bool,
+    /// The board shares one UART under XON/XOFF ([`super::serial_mux`]);
+    /// `None` detects it from the board's capability report
+    /// ([`detect_serial_mux`]).
+    pub serial_mux: Option<bool>,
 }
 
 /// Spawn a serial interface with automatic reconnection.
@@ -1099,7 +1101,8 @@ async fn serial_reconnect_task(
                 // Every byte this interface writes or reads goes through
                 // here, so a single-UART board's flow contract holds for
                 // the bring-up, the queries and the data alike.
-                let mut port = super::serial_mux::SerialMuxPort::new(port, config.serial_mux);
+                // Off until `serial_mux::bring_up` below has settled it.
+                let mut port = super::serial_mux::SerialMuxPort::new(port, false);
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
                 counters.set_online(true);
@@ -1108,6 +1111,25 @@ async fn serial_reconnect_task(
                 if is_reconnect {
                     if let Some(ref notify) = config.reconnect_notify {
                         let _ = notify.try_send(id);
+                    }
+                }
+
+                // Before any other frame: the radio config below may carry
+                // a 0x13, and only the board can say whether that byte
+                // would mute it.
+                let heard = super::serial_mux::bring_up(&mut port, config.serial_mux, &name).await;
+                // A peer's packets heard during the wait are traffic like
+                // any other.
+                let ingress = Ingress {
+                    name: &name,
+                    incoming_tx: &incoming_tx,
+                    counters: &counters,
+                    drop_direct_ingress: config.test_drop_direct_ingress,
+                };
+                for data in heard {
+                    if !ingress.deliver(data).await {
+                        tracing::debug!("Serial interface {}: event loop shut down", name);
+                        return;
                     }
                 }
 
@@ -2611,7 +2633,9 @@ mod tests {
             reconnect_notify: None,
             radio_config: radio,
             test_drop_direct_ingress: false,
-            serial_mux: false,
+            // Pinned off: these tests drive their own fake boards, which
+            // would read a capability query they never asked for.
+            serial_mux: Some(false),
         }
     }
 

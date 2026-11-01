@@ -1080,11 +1080,16 @@ pub struct InterfaceConfig {
     /// text and its HDLC transport under XON/XOFF flow control (the
     /// ThinkNode M9, `leviculum-nrf/serial-mux`). Every frame then escapes
     /// 0x11 and 0x13, and the board's own flow bytes are stripped on read
-    /// (`interfaces::serial_mux`). Off by default, because a Python
-    /// `SerialInterface` peer does not undo an escaped flow byte and a USB
-    /// CDC LNode sends them raw. No Python equivalent.
+    /// (`interfaces::serial_mux`).
+    ///
+    /// Unset (`None`) detects it: the bring-up asks the board's capability
+    /// report first and turns the mux on when the report states
+    /// `envelope::FACT_SERIAL_MUX`; a Python `SerialInterface` peer, which
+    /// does not undo an escaped flow byte, and a USB CDC LNode, which sends
+    /// them raw, never state it. `Some` overrides the detection either way.
+    /// No Python equivalent.
     #[serde(default)]
-    pub serial_mux: bool,
+    pub serial_mux: Option<bool>,
 
     // RNodeMultiInterface only.
     /// Nested subinterface blocks (`[[[name]]]`) of an `RNodeMultiInterface`.
@@ -1331,7 +1336,7 @@ impl Default for InterfaceConfig {
             airtime_limit_long: None,
             csma_enabled: None,
             test_drop_direct_ingress: false,
-            serial_mux: false,
+            serial_mux: None,
             subinterfaces: Vec::new(),
             max_connections: None,
             min_rssi: None,

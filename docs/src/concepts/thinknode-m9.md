@@ -369,6 +369,16 @@ and `leviculum-esp/README.md` on that branch.
   `serial_mux = yes` on its `SerialInterface` block, which escapes 0x11 and
   0x13 in every frame and strips the board's flow bytes on read; periculum
   escapes every frame it writes to an LNode.
+- 2026-11-01 (1249, #483, #471): **plugging the M9 in is enough.** Its
+  capability report states `serial_mux=1` (fact `0xF0` behind the accepted
+  types, `docs/src/firmware/usb-control-envelope.md`), and its `[BOARD]`
+  boot line carries the same token. A `SerialInterface` block without the
+  `serial_mux` key asks for the report before any other frame and turns the
+  mux on when it reads the fact; the key is only an override. The M9 answered
+  the query in 7 ms, 6 of 6 rig runs (1238), and lnsd waits at most two
+  queries of one second each. The firmware side is a commit on the port's
+  local probe branch on the rig host (on top of f1ebf9dc), not in the port
+  yet; a build without it answers without the fact and still needs the key.
 - 2026-11-01 (1243, #483): a probe build of the port stops obeying a
   received XOFF (fork commit f1ebf9dc, a local branch on the rig host, not
   in the port yet). Software flow control stays on so the UART can still
