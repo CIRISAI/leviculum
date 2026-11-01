@@ -7,9 +7,12 @@ use crate::bookmarks::Bookmark;
 use crate::browser::{self};
 use crate::discovery::DiscoveredNode;
 use crate::image::{ImageSlot, Probe, SlotState, MAX_INLINE_IMAGES};
+use crate::names::{direct_hit, search, PinMark, VisitOutcome};
 use crate::page_cache::CacheEntry;
 use crate::render::{standalone_links, RenderedLink};
-use crate::url::{classify_link, parse_url, LinkKind, Target, UrlError, DEFAULT_PATH};
+use crate::url::{
+    classify_link, is_nururl, parse_nururl, parse_url, LinkKind, Target, UrlError, DEFAULT_PATH,
+};
 
 use super::chrome::*;
 use super::geometry::{rect_contains, regions, Rect};
@@ -159,6 +162,16 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::Mouse(mouse) => {
+            // The name-search list is keyboard driven: the wheel moves its
+            // selection, and no click or hover reaches the page underneath.
+            if model.names.is_some() {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => move_name_sel(model, ScrollCmd::LineDown),
+                    MouseEventKind::ScrollUp => move_name_sel(model, ScrollCmd::LineUp),
+                    _ => {}
+                }
+                return Vec::new();
+            }
             let vp = model.viewport();
             match mouse.kind {
                 // The wheel scrolls whichever window owns the screen: an open
@@ -258,6 +271,12 @@ pub(crate) fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String
     // Cache the freshly loaded page (overwriting any prior entry for this target,
     // as a reload does) so a later revisit renders instantly. A non-idempotent
     // form submit is never cached.
+    let mut effects = Vec::new();
+    if let Some(target) = &loaded_target {
+        if pin_visit(model, target.dest_hash) {
+            effects.push(Effect::SavePins);
+        }
+    }
     if let Some(target) = loaded_target {
         if !is_form_submit(&target) {
             model.page_cache.insert(
@@ -270,7 +289,8 @@ pub(crate) fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String
             );
         }
     }
-    plan_images(model)
+    effects.extend(plan_images(model));
+    effects
 }
 
 /// Work out which of the page's links are pictures, install a slot for each,
@@ -419,6 +439,11 @@ pub(crate) fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     // The places panel is modal like the help overlay: it owns keys until closed.
     if model.show_places {
         return update_places_key(model, key);
+    }
+
+    // So is the name-search result list.
+    if model.names.is_some() {
+        return update_names_key(model, key);
     }
 
     match model.mode {
@@ -615,12 +640,36 @@ pub(crate) fn update_address_key(model: &mut Model, key: KeyEvent) -> Vec<Effect
         }
         KeyCode::Enter => {
             let raw = model.input.value().trim().to_string();
+            if is_nururl(&raw) {
+                return match parse_nururl(&raw) {
+                    Ok(nur) => {
+                        model.mode = Mode::Browse;
+                        model.input.reset();
+                        let effects =
+                            begin_navigation(model, nur.target, HistoryAction::Push, None);
+                        // After begin_navigation, whose toast dismissal must not
+                        // clear this one.
+                        if !nur.ignored.is_empty() {
+                            model.set_toast(
+                                ToastKind::Info,
+                                format!("nururl: ignored {}", nur.ignored.join(", ")),
+                            );
+                        }
+                        effects
+                    }
+                    Err(err) => {
+                        model.set_toast(ToastKind::Error, bad_url_note("bad URL", &raw, err));
+                        Vec::new()
+                    }
+                };
+            }
             match parse_url(&raw, model.current_dest) {
                 Ok(target) => {
                     model.mode = Mode::Browse;
                     model.input.reset();
                     begin_navigation(model, target, HistoryAction::Push, None)
                 }
+                Err(_) if is_name_query(&raw) => search_names(model, &raw),
                 Err(err) => {
                     model.set_toast(ToastKind::Error, bad_url_note("bad URL", &raw, err));
                     Vec::new()
@@ -1190,15 +1239,157 @@ pub(crate) fn activate_place(model: &mut Model, idx: usize) -> Vec<Effect> {
                 return Vec::new();
             }
         },
-        Place::Node { dest_hash, .. } => Target {
-            dest_hash,
-            path: DEFAULT_PATH.to_string(),
-            fields: Vec::new(),
-            is_file: false,
-        },
+        Place::Node { dest_hash, .. } => node_target(dest_hash),
     };
     close_places(model);
     begin_navigation(model, target, HistoryAction::Push, None)
+}
+
+/// A node's default page: what opening a discovered node or a name-search hit
+/// fetches.
+pub(crate) fn node_target(dest_hash: [u8; 16]) -> Target {
+    Target {
+        dest_hash,
+        path: DEFAULT_PATH.to_string(),
+        fields: Vec::new(),
+        is_file: false,
+    }
+}
+
+/// Whether a typed address that did not parse as a URL is a name to search
+/// for ([`crate::names`]). Everything is, except what is plainly a mistyped
+/// address: a local URL or a bare path (`:`, `/`), a backtick field, any
+/// `scheme://` form (`nomadnet://`, `lxmf://`), and an `lxmf@` address.
+pub(crate) fn is_name_query(raw: &str) -> bool {
+    !raw.is_empty()
+        && !raw.starts_with([':', '/'])
+        && !raw.contains('`')
+        && !raw.contains("://")
+        && !matches!(classify_link(raw), LinkKind::Lxmf(_))
+}
+
+/// Search the announces seen and the pinned sites for a typed name. No hit
+/// says so; the one exact, unambiguous name opens directly; anything else
+/// opens the result list.
+pub(crate) fn search_names(model: &mut Model, raw: &str) -> Vec<Effect> {
+    let hits = search(&model.node_registry, &model.pins, raw);
+    if hits.is_empty() {
+        model.set_toast(
+            ToastKind::Info,
+            format!("no site named \"{raw}\" seen yet (names come from announces and pins)"),
+        );
+        return Vec::new();
+    }
+    model.mode = Mode::Browse;
+    model.input.reset();
+    if let Some(hit) = direct_hit(&hits, raw) {
+        let dest = hit.dest;
+        return begin_navigation(model, node_target(dest), HistoryAction::Push, None);
+    }
+    model.names = Some(NameResults {
+        query: raw.to_string(),
+        hits,
+        sel: 0,
+        confirm: false,
+    });
+    Vec::new()
+}
+
+/// The name-search list's viewport in rows: the overlay is at most the full
+/// terminal height, minus its border and its one hint line.
+pub(crate) fn names_viewport(model: &Model) -> usize {
+    (model.size.1 as usize).saturating_sub(3).max(1)
+}
+
+/// Move the name-search selection by a scroll motion, leaving any question.
+pub(crate) fn move_name_sel(model: &mut Model, cmd: ScrollCmd) {
+    let vp = names_viewport(model);
+    if let Some(results) = model.names.as_mut() {
+        if results.hits.is_empty() {
+            return;
+        }
+        results.confirm = false;
+        results.sel = scrolled(results.sel, cmd, vp, results.hits.len() - 1);
+    }
+}
+
+/// Fold a key while the name-search list is open. The motions are the content
+/// scroll keys; `Enter` opens the selected site, or asks first when its name
+/// is pinned to another hash; while asking, `y` opens and pins it and any other
+/// key returns to the list. `Esc` closes the list.
+pub(crate) fn update_names_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+    let Some(results) = model.names.as_mut() else {
+        return Vec::new();
+    };
+    if results.confirm {
+        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            return open_name_hit(model, true);
+        }
+        results.confirm = false;
+        return Vec::new();
+    }
+    if let Some(cmd) = key_to_scroll(&key) {
+        move_name_sel(model, cmd);
+        return Vec::new();
+    }
+    match key.code {
+        KeyCode::Esc => {
+            model.names = None;
+            Vec::new()
+        }
+        KeyCode::Enter => {
+            let conflict = results
+                .hits
+                .get(results.sel)
+                .is_some_and(|h| h.mark == PinMark::Conflict);
+            if conflict {
+                results.confirm = true;
+                return Vec::new();
+            }
+            open_name_hit(model, false)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Close the list and open its selected site. `confirmed` is the reader's
+/// yes to a site whose name is pinned to another hash: the site's hash is then
+/// pinned under that name too, beside the first, before the fetch starts.
+pub(crate) fn open_name_hit(model: &mut Model, confirmed: bool) -> Vec<Effect> {
+    let Some(results) = model.names.take() else {
+        return Vec::new();
+    };
+    let Some(hit) = results.hits.get(results.sel).cloned() else {
+        return Vec::new();
+    };
+    let mut effects = Vec::new();
+    if confirmed {
+        if let Some(name) = &hit.name {
+            let now = model.wall_now();
+            if model.pins.pin(name, &hit.dest, now) {
+                effects.push(Effect::SavePins);
+            }
+        }
+    }
+    effects.extend(begin_navigation(
+        model,
+        node_target(hit.dest),
+        HistoryAction::Push,
+        None,
+    ));
+    effects
+}
+
+/// Record a fresh load of `dest` against the pins: the first visit pins the
+/// name it announced, a later one moves its `last_seen`. Returns whether the
+/// pins changed and so need saving.
+pub(crate) fn pin_visit(model: &mut Model, dest: [u8; 16]) -> bool {
+    let name = model
+        .node_registry
+        .get_by_hash(&dest)
+        .and_then(|n| n.name.clone());
+    let now = model.wall_now();
+    model.pins.note_visit(name.as_deref(), &dest, now) != VisitOutcome::Unchanged
 }
 
 /// Delete the bookmark on places row `idx` and persist: stash it in the

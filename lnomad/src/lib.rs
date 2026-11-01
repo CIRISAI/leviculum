@@ -36,6 +36,7 @@ pub mod identify;
 pub mod identity;
 pub mod image;
 pub mod image_cache;
+pub mod names;
 pub mod page_cache;
 pub mod render;
 pub mod theme;

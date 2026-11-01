@@ -13,6 +13,7 @@ use crate::bookmarks::Bookmarks;
 use crate::color::{ColorDepth, Tier};
 use crate::discovery::NomadNodeRegistry;
 use crate::image::{ImageSlot, SlotState};
+use crate::names::{PinStore, SearchHit};
 use crate::page_cache::PageCache;
 use crate::render::{
     insert_image_rows, layout_blocks, FieldValue, RLine, RenderedField, RenderedLink,
@@ -432,6 +433,8 @@ pub enum Effect {
     Copy(String),
     /// Persist the model's bookmarks to disk (the IO shell writes the TOML).
     SaveBookmarks,
+    /// Persist the model's pins to disk (the IO shell writes the TOML).
+    SavePins,
     /// Turn identifying to `dest` on or off (the IO shell calls
     /// [`Session::set_identify`](crate::fetch::Session::set_identify), which
     /// persists the decision and closes the reused link). Always emitted
@@ -556,6 +559,19 @@ pub struct Model {
     /// Where the bookmarks are persisted, or `None` when no config dir is
     /// resolvable (the browser then runs without persistence).
     pub bookmarks_path: Option<PathBuf>,
+    /// The pinned `name -> hash` pairs ([`crate::names`]), loaded at startup
+    /// and saved on change.
+    pub pins: PinStore,
+    /// Where the pins are persisted, or `None` when no config dir is
+    /// resolvable (pins then last for the session only).
+    pub pins_path: Option<PathBuf>,
+    /// The open name-search result list, or `None`. Modal like the places
+    /// panel: it owns the keys until closed.
+    pub names: Option<NameResults>,
+    /// A fixed wall clock in Unix seconds for tests; `None` reads the system
+    /// clock ([`Model::wall_now`]). Only pins and the result list's "last
+    /// seen" read it.
+    pub clock: Option<u64>,
     /// Whether the places panel (bookmarks + discovered nodes) overlay is shown.
     pub show_places: bool,
     /// The selected row in the places panel, an index into [`places`].
@@ -617,7 +633,29 @@ pub struct Model {
     pub quit: bool,
 }
 
+/// A name search's result list ([`crate::names::search`]): what was typed,
+/// the hits in display order, the selected row, and whether the selected hit's
+/// "same name, other key" question is being asked.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NameResults {
+    /// The query as typed.
+    pub query: String,
+    /// The hits, pinned first and conflicting last.
+    pub hits: Vec<SearchHit>,
+    /// The selected row, an index into `hits`.
+    pub sel: usize,
+    /// Whether the overlay is asking to confirm opening (and pinning) the
+    /// selected hit, whose name is pinned to another hash.
+    pub confirm: bool,
+}
+
 impl Model {
+    /// The wall clock in Unix seconds: [`clock`](Model::clock) when set, else
+    /// the system time.
+    pub fn wall_now(&self) -> u64 {
+        self.clock.unwrap_or_else(crate::discovery::now_unix_secs)
+    }
+
     /// Lay a parsed document out at `width` and build a model from it, keeping
     /// the document so a later resize can re-wrap it.
     pub fn from_document(

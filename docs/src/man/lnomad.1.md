@@ -20,6 +20,18 @@ Pictures are drawn in the page. Micron has no image construct, so a page can onl
 
 With a picture focused (`Tab`), `Enter` saves it to the download directory and `o` opens it in the system viewer. Neither transfers it a second time.
 
+## NAMES
+
+The address editor (`:`) also takes a name. Anything typed there that is not an address (a 32-hex hash, a local `:` URL, a `nururl:` address, a `scheme://` form or an `lxmf@` address) is a search: a case-insensitive substring match over the names that `nomadnetwork.node` announces carried and over the four-hex-digit short hash shown after each name, so `fa01` finds `Marcel Adingbatponder ·fa01`. The result list shows each site as `name ·hash4` with its hops, when it was last heard, and its pin mark; `Enter` opens one. A name that matches exactly one site exactly opens it directly.
+
+A search is not a lookup. The names searched are the announces heard since **lnomad** started plus the sites already pinned; nothing is asked of any server. The daemon's announce cache is not searched yet: the shared-instance RPC has no query that returns the names it holds, only hashes and sizes.
+
+A pin records the name a site announced and its full hash, the first time that site is opened, in `pins.toml` (see **XDG_CONFIG_HOME**), the way SSH remembers a host key. A later hit announcing a pinned name under a different hash is marked `! name pinned to ·hash4` and listed below the pinned site; opening it asks once, and a yes pins the second hash under the same name beside the first. Nothing is replaced silently. A site that now announces another name than it was pinned under shows `pinned as` *name*.
+
+Names are hints and the hash is the address. Reticulum has no registry because a name anyone can announce cannot be owned without someone to decide who owns it, and the network is built so that nobody has to be trusted to reach anybody; the short hash beside every name is what makes the name checkable.
+
+A `nururl:<hash>[/path][?query]` address opens that page: `nn.`*k*`=`*v* query entries are carried as the request variable `var_`*k*, and any other entry (the hint among them) is dropped with a note.
+
 ## OPTIONS
 
 *url*
@@ -67,7 +79,7 @@ With a picture focused (`Tab`), `Enter` saves it to the download directory and `
 :   Set and not empty: no colour, as **--no-color**.
 
 **XDG_CONFIG_HOME**
-:   Base for **lnomad**'s own directory (`lnomad/`), holding the bookmarks (`bookmarks.toml`), the per-node identify decisions (`identify.toml`) and the identity **lnomad** reveals when identifying (`identity`). Defaults to `~/.config`.
+:   Base for **lnomad**'s own directory (`lnomad/`), holding the bookmarks (`bookmarks.toml`), the pinned site names (`pins.toml`, see **NAMES**), the per-node identify decisions (`identify.toml`) and the identity **lnomad** reveals when identifying (`identity`). Defaults to `~/.config`.
 
 **XDG_DOWNLOAD_DIR**
 :   Where a `/file/` link followed inside the UI is saved, inline pictures included. Defaults to `$HOME/Downloads`. The **--output** option covers downloads started from the command line instead.
@@ -85,6 +97,10 @@ Print a specific page without entering the UI:
 Open the start screen and pick a node from the places panel:
 
     lnomad
+
+Find a site by a name it announced, from inside the UI:
+
+    :marcel
 
 Download a file to a chosen directory:
 
