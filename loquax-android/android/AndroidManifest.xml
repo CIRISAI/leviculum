@@ -100,10 +100,13 @@
               a:exported='false'
               a:windowSoftInputMode='adjustResize'/>
 
-    <!-- The map from a chat (1199): the main views' layout as a sub view. -->
+    <!-- The map from a chat (1199): the main views' layout as a sub view.
+         Exported in the debug APK alone, where the device walk opens it on
+         a place and a zoom by `am start` (1193); the release keeps it
+         private. -->
     <activity a:name='network.leviculum.loquax.MapActivity'
               a:theme='@style/Loquax.List'
-              a:exported='false'/>
+              a:exported='{{WALK_EXPORTED}}'/>
 
     <activity a:name='network.leviculum.loquax.ContactActivity'
               a:theme='@style/Loquax.List'

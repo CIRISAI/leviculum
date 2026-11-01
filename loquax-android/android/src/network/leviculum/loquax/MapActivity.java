@@ -24,6 +24,11 @@ public class MapActivity extends Activity implements Events.Listener {
     static final String SELECTED = "selected";
     /** Open on this friend's newest fix with its card (1224, `OpenMapAt`). */
     static final String FRIEND = "friend";
+    /**
+     * Open on the place at this zoom, thousandths, with no card: the device
+     * walk's way to a view (1193). Only the debug APK exports this screen.
+     */
+    static final String ZOOM_MILLI = "zoom_milli";
 
     private MapPane map;
     private final ServiceLink link = new ServiceLink(this);
@@ -68,6 +73,10 @@ public class MapActivity extends Activity implements Events.Listener {
         });
         if (getIntent().hasExtra(FRIEND)) {
             map.openAt(getIntent().getStringExtra(FRIEND));
+        } else if (getIntent().hasExtra(LAT_E6) && getIntent().hasExtra(LON_E6)
+                && getIntent().hasExtra(ZOOM_MILLI)) {
+            map.centreAt(getIntent().getLongExtra(LAT_E6, 0), getIntent().getLongExtra(LON_E6, 0),
+                    getIntent().getLongExtra(ZOOM_MILLI, 0));
         } else if (getIntent().hasExtra(LAT_E6) && getIntent().hasExtra(LON_E6)) {
             map.centreOn(getIntent().getLongExtra(LAT_E6, 0), getIntent().getLongExtra(LON_E6, 0),
                     getIntent().getStringExtra(SELECTED));

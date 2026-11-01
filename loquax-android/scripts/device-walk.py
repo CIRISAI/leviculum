@@ -75,6 +75,7 @@ STEPS = [
     "settings",
     "receipts",
     "profile",
+    "buildings",
     "teardown",
 ]
 
@@ -157,6 +158,29 @@ MARK_WORDS = {
 }
 # A mark of ours the walk counts as a tick: anyone confirmed it.
 TICKS = {"state_tick", "state_ticks", "state_ticks_read"}
+# The buildings step (1193): the walk's region of central Frankfurt, z15
+# with its building sections, and the place the map opens on, degrees
+# times a million; the screen the debug APK exports for it.
+FRANKFURT_REGION = REPO / "leviculum-map" / "fixtures" / "frankfurt" / "roemer.lmr"
+FRANKFURT_E6 = (50107750, 8682000)
+MAP_ACTIVITY = "network.leviculum.loquax.MapActivity"
+# The building fill as the phone's frame holds it: the table's colour
+# through RGB565 (leviculum_mapfill::frame::rgb888). tests/map.rs holds
+# these to the renderer, and the shares below to its frame of this view.
+BUILDING_FILL_LIGHT = (222, 215, 206)
+BUILDING_FILL_DARK = (57, 60, 66)
+# Samples across the middle half of the screen, columns by rows.
+BUILDINGS_GRID = (32, 64)
+# At z16 at least this share of the samples is fill; at z15, where the
+# map draws no building, at most this.
+BUILDINGS_LEAST = 0.05
+BUILDINGS_Z15_MOST = 0.005
+# The frame time proxy: the time from the screen asked for to the map at
+# rest on screen, z16 with its buildings at most this many times z15's
+# plus the slack (a screencap's own while is the proxy's grain).
+SETTLE_FACTOR = 1.5
+SETTLE_SLACK_MS = 1000
+SETTLE_TIMEOUT_S = 20
 
 
 # --- Parsers: what the unit tests under scripts/tests/ pin. ---
@@ -630,6 +654,42 @@ def fling_problems(
         share = changed_fraction(a, b)
         if share < least:
             problems.append(f"{name} ({share:.3f} changed)")
+    return problems
+
+
+def middle_half(width: int, height: int) -> tuple[int, int, int, int]:
+    """The middle half of a screen in each direction: inside the map
+    whatever bars the screen has, away from the attribution."""
+    return (width // 4, height // 4, width * 3 // 4, height * 3 // 4)
+
+
+def colour_share(
+    samples: list[tuple[int, int, int]],
+    colours: list[tuple[int, int, int]],
+    tolerance: int = 3,
+) -> float:
+    """The share of `samples` within `tolerance` of any of `colours`, per channel."""
+    if not samples:
+        return 0.0
+    hits = sum(
+        1
+        for p in samples
+        if any(all(abs(a - b) <= tolerance for a, b in zip(p, c)) for c in colours)
+    )
+    return hits / len(samples)
+
+
+def buildings_problems(z16_share: float, z15_share: float, z16_ms: int, z15_ms: int) -> list[str]:
+    """The buildings step's verdict (1193): the fill on screen at z16 and
+    not at z15, and z16's time to rest within the bound of z15's."""
+    problems = []
+    if z16_share < BUILDINGS_LEAST:
+        problems.append(f"z16 fill {z16_share:.3f} under {BUILDINGS_LEAST}")
+    if z15_share > BUILDINGS_Z15_MOST:
+        problems.append(f"z15 fill {z15_share:.3f} over {BUILDINGS_Z15_MOST}")
+    bound = int(z15_ms * SETTLE_FACTOR) + SETTLE_SLACK_MS
+    if z16_ms > bound:
+        problems.append(f"z16 at rest after {z16_ms} ms, over {bound} ms (z15 {z15_ms} ms)")
     return problems
 
 
@@ -1875,15 +1935,19 @@ class Walk:
     def put_fixture_region(self) -> None:
         """The walk's region into the app's maps directory, through
         run-as (a debug APK), for the Maps page to list (1207)."""
+        self.put_region(FIXTURE_REGION, "firenze.lmr")
+
+    def put_region(self, region: Path, name: str) -> None:
+        """`region` into the app's maps directory as `name`, through run-as."""
         dev = self.need_device()
-        if not FIXTURE_REGION.is_file():
-            raise StepFailed(f"{FIXTURE_REGION} missing")
-        dev.run("push", str(FIXTURE_REGION), "/data/local/tmp/walk-firenze.lmr", timeout=60)
+        if not region.is_file():
+            raise StepFailed(f"{region} missing")
+        dev.run("push", str(region), f"/data/local/tmp/walk-{name}", timeout=60)
         dev.shell(
-            f"cat /data/local/tmp/walk-firenze.lmr | run-as {PACKAGE} sh -c "
-            "'mkdir -p files/maps && cat > files/maps/firenze.lmr'"
+            f"cat /data/local/tmp/walk-{name} | run-as {PACKAGE} sh -c "
+            f"'mkdir -p files/maps && cat > files/maps/{name}'"
         )
-        dev.shell("rm -f /data/local/tmp/walk-firenze.lmr", check=False)
+        dev.shell(f"rm -f /data/local/tmp/walk-{name}", check=False)
 
     def maps_switch(self, on: bool) -> list[Node]:
         """The Maps page's switch once it shows `on`; a line that did not
@@ -1943,6 +2007,83 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"address={shown} qr=shown share=shown back=chats"
+
+    def step_buildings(self) -> str:
+        """The buildings (1193): the walk's Frankfurt region on the phone
+        and the autoload off, so nothing else lands; the map opened on the
+        Römer at z15, then at z16, each through the debug APK's exported
+        map screen. At z16 the building fill covers at least a share of
+        the middle of the screen, at z15 next to none; the time from the
+        screen asked for to the map at rest at z16 is within the bound of
+        z15's (the frame time proxy)."""
+        dev = self.need_device()
+        self.put_region(FRANKFURT_REGION, "frankfurt-roemer.lmr")
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.tap_text(MORE)
+        self.tap_text(SETTINGS)
+        self.wait_id("settings_entry_title", 10)
+        self.tap_text("Maps")
+        nodes = self.maps_switch(True)
+        dev.tap_node(find(nodes, rid="maps_auto")[0])
+        self.maps_switch(False)
+        for _ in range(2):
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        fills = [BUILDING_FILL_LIGHT, BUILDING_FILL_DARK]
+        seen = {}
+        for zoom in (15, 16):
+            ms, screen = self.map_at_rest(zoom * 1000)
+            nodes = dev.dump()
+            if not find(nodes, rid="map"):
+                raise StepFailed(f"z{zoom}: no map on screen: {texts(nodes)[:12]}")
+            cols, rows = BUILDINGS_GRID
+            samples = sample_grid(screen, middle_half(screen.width, screen.height), cols, rows)
+            seen[zoom] = (ms, colour_share(samples, fills))
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        (z15_ms, z15_share), (z16_ms, z16_share) = seen[15], seen[16]
+        detail = (
+            f"fill z15={z15_share:.3f} z16={z16_share:.3f} "
+            f"at_rest_ms z15={z15_ms} z16={z16_ms} autoload=off"
+        )
+        problems = buildings_problems(z16_share, z15_share, z16_ms, z15_ms)
+        if problems:
+            raise StepFailed("; ".join(problems) + "; " + detail)
+        return detail
+
+    def map_at_rest(self, zoom_milli: int) -> tuple[int, Screen]:
+        """The map screen asked for on the walk's Frankfurt place at
+        `zoom_milli`; the milliseconds until two grabs in a row are the
+        same, the map at rest and not the screen before it, and a grab a
+        second later, which the colours are read from."""
+        dev = self.need_device()
+        before = dev.screen()
+        box = middle_half(before.width, before.height)
+        was = sample_grid(before, box)
+        lat, lon = FRANKFURT_E6
+        started = time.monotonic()
+        dev.shell(
+            f"am start -W -n {PACKAGE}/{MAP_ACTIVITY} "
+            f"--el lat_e6 {lat} --el lon_e6 {lon} --el zoom_milli {zoom_milli}"
+        )
+        last = None
+        while time.monotonic() - started < SETTLE_TIMEOUT_S:
+            now = sample_grid(dev.screen(), box)
+            if (
+                last is not None
+                and changed_fraction(last, now, tolerance=0) == 0
+                and changed_fraction(was, now) > 0.2
+                and not is_uniform(now)
+            ):
+                ms = int((time.monotonic() - started) * 1000)
+                time.sleep(1.0)
+                return ms, dev.screen()
+            last = now
+        raise StepFailed(f"z{zoom_milli / 1000:g}: the map not at rest within {SETTLE_TIMEOUT_S}s")
 
     def map_theme(self, choice: str) -> None:
         """From the Map tab: menu, Settings, Appearance, `choice`, and back

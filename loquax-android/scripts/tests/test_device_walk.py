@@ -504,6 +504,46 @@ class Sampling(unittest.TestCase):
         self.assertEqual(walk.mean_luma([]), 0.0)
 
 
+class Buildings(unittest.TestCase):
+    """The buildings step's reading of the screen (1193)."""
+
+    def test_the_middle_half(self):
+        self.assertEqual(walk.middle_half(1080, 2400), (270, 600, 810, 1800))
+
+    def test_the_fill_share_counts_either_table_within_the_tolerance(self):
+        light, dark = walk.BUILDING_FILL_LIGHT, walk.BUILDING_FILL_DARK
+        near = tuple(c + 3 for c in light)
+        off = tuple(c + 4 for c in light)
+        samples = [light, dark, near, off, (0, 0, 0), (255, 255, 255), (250, 250, 250), (1, 2, 3)]
+        self.assertEqual(walk.colour_share(samples, [light, dark]), 3 / 8)
+        self.assertEqual(walk.colour_share(samples, [dark]), 1 / 8)
+        self.assertEqual(walk.colour_share([], [light]), 0.0)
+
+    def test_the_fill_is_read_off_a_screencap(self):
+        fill = walk.BUILDING_FILL_LIGHT
+        # A screen whose left quarter of the middle is fill.
+        pixels = [fill if x < 10 else (240, 238, 232) for _ in range(40) for x in range(40)]
+        screen = walk.parse_screencap(screencap(40, 40, pixels))
+        samples = walk.sample_grid(screen, walk.middle_half(40, 40), 10, 10)
+        self.assertEqual(walk.colour_share(samples, [fill]), 0.0)
+        samples = walk.sample_grid(screen, (0, 0, 40, 40), 8, 8)
+        self.assertEqual(walk.colour_share(samples, [fill]), 0.25)
+
+    def test_the_verdict(self):
+        least, most = walk.BUILDINGS_LEAST, walk.BUILDINGS_Z15_MOST
+        self.assertEqual(walk.buildings_problems(0.2, 0.0, 1500, 1200), [])
+        bound = int(1200 * walk.SETTLE_FACTOR) + walk.SETTLE_SLACK_MS
+        self.assertEqual(walk.buildings_problems(0.2, 0.0, bound, 1200), [])
+        self.assertEqual(
+            walk.buildings_problems(least / 2, most * 2, bound + 1, 1200),
+            [
+                f"z16 fill {least / 2:.3f} under {least}",
+                f"z15 fill {most * 2:.3f} over {most}",
+                f"z16 at rest after {bound + 1} ms, over {bound} ms (z15 1200 ms)",
+            ],
+        )
+
+
 class Lines(unittest.TestCase):
     def test_a_step_line_round_trips(self):
         line = walk.walk_line("list", True, 1234.7, "rows=18 of 18\n named=12")

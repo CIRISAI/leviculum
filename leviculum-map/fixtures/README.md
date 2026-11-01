@@ -50,6 +50,23 @@ leviculum-map-tool cut -o firenze.lmr firenze.pmtiles \
     --locale de
 ```
 
+`frankfurt/roemer.lmr`: central Frankfurt around the Römer, zoom 15 only,
+six tiles with their names and building sections (`LMR1` version 3,
+1193), 159,451 bytes, sha256
+`e4db5f570ed9b99cc203f9927ef199e6dc57a56e4174700a3378b1f986494197`:
+5,181 footprints in 78,364 bytes, at most 1,352 in a tile. The device
+walk's `buildings` step puts it on the phone and opens the map on it at
+z15 and z16 (`docs/src/concepts/loquax-device-walk.md`). In a directory of
+its own, so the tests that read the others see none of it. Cut with
+
+```sh
+leviculum-map-tool cut -o roemer.lmr https://build.protomaps.com/20261031.pmtiles \
+    --bbox 8.6765,50.1050,8.6875,50.1165 --min-zoom 15 --max-zoom 15 --locale de
+```
+
+from the Protomaps daily build of 2026-10-31; cutting it twice gave the
+same bytes.
+
 **© OpenStreetMap contributors**, <https://www.openstreetmap.org/copyright>.
 The data is available under the Open Database License (ODbL) 1.0,
 <https://opendatacommons.org/licenses/odbl/1-0/>. These files are derived

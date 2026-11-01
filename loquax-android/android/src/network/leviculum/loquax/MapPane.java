@@ -168,6 +168,11 @@ final class MapPane implements MapView.Listener {
         cardOwed = peer;
     }
 
+    /** Open on a place at `zoomMilli`, no card: the device walk's view (1193). */
+    void centreAt(long latE6, long lonE6, long zoomMilli) {
+        map.centreAt(latE6, lonE6, zoomMilli);
+    }
+
     /**
      * Draw anew: the screen came to the front, or the pins changed. With
      * the permission there, the own position is heard of while in front.
