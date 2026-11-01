@@ -72,8 +72,9 @@ pub struct CutOptions {
     /// sections (version 3, [`leviculum_map::buildings`]); without them,
     /// or without z15 in the zooms, the section count is 0.
     pub buildings: bool,
-    /// Tiles a round ([`ROUND`]): what a reader of the file still being
-    /// written sees arrive at once. The bytes do not depend on it.
+    /// Tiles a round at most ([`ROUND`], and a round ends with its zoom,
+    /// [`rounds`]): what a reader of the file still being written sees
+    /// arrive at once. The bytes do not depend on it.
     pub round: usize,
 }
 
@@ -614,6 +615,22 @@ pub struct Progress {
     pub complete: bool,
 }
 
+/// `ids` (ascending) in rounds of at most `round` tiles, a round ending
+/// where a zoom does: the shallow zooms land each in a round of its own,
+/// so a reader draws the outline after a few kilobytes, not after the
+/// first round's worth of the deeper zooms (1291).
+pub fn rounds(ids: &[TileId], round: usize) -> Vec<&[TileId]> {
+    let mut out = Vec::new();
+    let mut rest = ids;
+    while let Some(first) = rest.first() {
+        let same = rest.iter().take_while(|t| t.z == first.z).count();
+        let (head, tail) = rest.split_at(same.min(round.max(1)));
+        out.push(head);
+        rest = tail;
+    }
+    out
+}
+
 /// Cut `src` into `out` under `opts`.
 pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
     src: &S,
@@ -696,7 +713,7 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
     let threads = opts.threads.max(1);
     let locale = opts.locale.as_deref();
     let mut done = 0;
-    for round in ids.chunks(opts.round.max(1)) {
+    for round in rounds(&ids, opts.round) {
         src.want(round)?;
         let per = round.len().div_ceil(threads);
         let results: Vec<Res<CutTile>> = std::thread::scope(|s| {

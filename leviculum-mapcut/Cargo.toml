@@ -39,3 +39,8 @@ ureq = { version = "3", default-features = false, features = ["rustls"], optiona
 
 [dev-dependencies]
 tinymvt = "0.3"
+
+# The measurement of a region arriving over a slow link (1291).
+[[example]]
+name = "arrive"
+required-features = ["http"]

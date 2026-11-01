@@ -207,3 +207,34 @@ fn a_region_cut_short_anywhere_reads_what_arrived() {
     assert!(opened > 100, "{opened} of {}", at.len());
     assert_eq!(last_pending, 0);
 }
+
+/// A round ends where its zoom does, and holds at most the round's tiles:
+/// the shallow zooms reach a reader each on their own.
+#[test]
+fn a_round_ends_with_its_zoom() {
+    use leviculum_map::region::TileId;
+    use leviculum_mapcut::cut::rounds;
+    let t = |z, x| TileId { z, x, y: 0 };
+    let ids = [
+        t(0, 0),
+        t(1, 0),
+        t(1, 1),
+        t(2, 0),
+        t(2, 1),
+        t(2, 2),
+        t(2, 3),
+    ];
+    let zooms = |r: &[TileId]| r.iter().map(|t| (t.z, t.x)).collect::<Vec<_>>();
+    let got: Vec<_> = rounds(&ids, 3).into_iter().map(zooms).collect();
+    assert_eq!(
+        got,
+        [
+            vec![(0, 0)],
+            vec![(1, 0), (1, 1)],
+            vec![(2, 0), (2, 1), (2, 2)],
+            vec![(2, 3)],
+        ]
+    );
+    assert!(rounds(&[], 3).is_empty());
+    assert_eq!(rounds(&ids, 0).len(), ids.len(), "a round of 0 is one tile");
+}
