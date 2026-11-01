@@ -61,6 +61,12 @@
 //!   the peer read is state 8 with the reader's time in `messages.read_at`,
 //!   and `conversations.receipts` says whether the peer's latest message
 //!   carried the receipt mark (`docs/src/concepts/loquax-read-receipts.md`).
+//! - **Position shares are a table** (`shares`, schema 10, 1273): a
+//!   conversation's running share, one row a conversation: its span, its
+//!   start and end in unix seconds (no end until stopped), and the last
+//!   report it sent (the fix's integers, when it went, whether it went for
+//!   a move), which is what its cadence goes on from after a restart. The
+//!   row goes when the share stops.
 //! - **Imported history sits below seq 0** (schema 6, `crate::import`): a
 //!   conversation's imported rows are older than what loquax wrote, so they
 //!   take negative keys below the store's lowest, in the source's time
@@ -75,8 +81,9 @@
 //! Schema 1 is the store of slice 6; schema 2 adds `positions`, schema 3
 //! `unverified`, schema 4 the home node's three tables, schema 5 its
 //! outbox, schema 6 the two provenance columns of imported messages, schema 7
-//! a conversation's mute, archive and verification, schema 8 the drafts, and
-//! schema 9 the two read-receipt columns, nothing else, so
+//! a conversation's mute, archive and verification, schema 8 the drafts,
+//! schema 9 the two read-receipt columns, and schema 10 the shares, nothing
+//! else, so
 //! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
@@ -108,6 +115,7 @@ use crate::home::outgoing::Change;
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
 use crate::ui::history::{Draft, Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
+use crate::ui::share::{Report, Share, Span};
 use crate::ui::{LedgerEntry, Message, Signature};
 use crate::when::WallTime;
 use leviculum_lxmf::telemetry::Location;
@@ -116,7 +124,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -289,6 +297,26 @@ ALTER TABLE messages ADD COLUMN read_at INTEGER;
 ALTER TABLE conversations ADD COLUMN receipts INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// What schema 10 adds to schema 9: a conversation's running position
+/// share (1273). `span` is [`Span::word`]; `last_*` the last report it
+/// sent, all null before the first.
+const SCHEMA_V10: &str = "
+CREATE TABLE shares(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    span TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    until INTEGER,
+    last_lat INTEGER,
+    last_lon INTEGER,
+    last_alt INTEGER,
+    last_accuracy INTEGER,
+    last_fix_at INTEGER,
+    last_at INTEGER,
+    last_moved INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (identity, peer));
+";
+
 /// The model's key of the row at seq 0. The model counts keys unsigned
 /// ([`Message::activity`]) and imported history sits below seq 0, so a key is
 /// the seq with its sign bit flipped: the same order, and every row of an
@@ -328,6 +356,9 @@ const TABLES_V5: [&str; 1] = ["home_outbox"];
 
 /// The table schema 8 adds.
 const TABLES_V8: [&str; 1] = ["drafts"];
+
+/// The table schema 10 adds.
+const TABLES_V10: [&str; 1] = ["shares"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -455,7 +486,7 @@ impl Store {
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
-             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} \
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -533,6 +564,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 10 {
+            if let Some(missing) = missing(&TABLES_V10) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate();
         }
@@ -571,7 +607,10 @@ impl Store {
                 if version < 8 {
                     batch.push_str(SCHEMA_V8);
                 }
-                batch.push_str(SCHEMA_V9);
+                if version < 9 {
+                    batch.push_str(SCHEMA_V9);
+                }
+                batch.push_str(SCHEMA_V10);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -1064,6 +1103,72 @@ impl Store {
             if out.len() == SEARCH_LIMIT {
                 break;
             }
+        }
+        Ok(out)
+    }
+
+    /// The running position shares (1273), by conversation. A row this
+    /// loquax cannot read (a span it does not know, half a last report) is
+    /// refused as corrupt, as every other row is.
+    pub fn shares(&self) -> Result<Vec<([u8; 16], Share)>, StoreError> {
+        type Row = (Vec<u8>, String, i64, Option<i64>, [Option<i64>; 6], bool);
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT peer, span, started_at, until, last_lat, last_lon, last_alt, \
+                 last_accuracy, last_fix_at, last_at, last_moved FROM shares \
+                 WHERE identity = ?1 ORDER BY peer",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows: Vec<Row> = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    [
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ],
+                    row.get(10)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let corrupt = |detail: String| StoreError::Corrupt {
+            path: self.path.clone(),
+            detail,
+        };
+        let mut out = Vec::new();
+        for (peer, span, started_at, until, last, moved) in rows {
+            let peer = self.address(&peer)?;
+            let span =
+                Span::of_word(&span).ok_or_else(|| corrupt(format!("a share's span {span:?}")))?;
+            let last = match last {
+                [None, None, None, None, None, None] => None,
+                [Some(lat), Some(lon), Some(alt), Some(accuracy), Some(fix_at), Some(at)] => {
+                    Some(Report {
+                        fix: Location::saturating(lat, lon, alt, 0, 0, accuracy, fix_at),
+                        at,
+                        moved,
+                    })
+                }
+                _ => return Err(corrupt("a share's last report is half there".to_string())),
+            };
+            out.push((
+                peer,
+                Share {
+                    span,
+                    started_at,
+                    until,
+                    last,
+                },
+            ));
         }
         Ok(out)
     }
@@ -2491,6 +2596,10 @@ fn apply(
                 params![&identity[..], &peer[..]],
             )?;
             tx.execute(
+                "DELETE FROM shares WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+            tx.execute(
                 "DELETE FROM positions WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
             )?;
@@ -2522,6 +2631,43 @@ fn apply(
                     draft.text,
                     draft.reply.as_ref().map(|id| &id[..]),
                     attachments,
+                ],
+            )?;
+        }
+        StoreWrite::Share { peer, share: None } => {
+            tx.execute(
+                "DELETE FROM shares WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Share {
+            peer,
+            share: Some(share),
+        } => {
+            let last = share.last.as_ref();
+            tx.execute(
+                "INSERT INTO shares(identity, peer, span, started_at, until, last_lat, last_lon, \
+                 last_alt, last_accuracy, last_fix_at, last_at, last_moved) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET span = excluded.span, \
+                 started_at = excluded.started_at, until = excluded.until, \
+                 last_lat = excluded.last_lat, last_lon = excluded.last_lon, \
+                 last_alt = excluded.last_alt, last_accuracy = excluded.last_accuracy, \
+                 last_fix_at = excluded.last_fix_at, last_at = excluded.last_at, \
+                 last_moved = excluded.last_moved",
+                params![
+                    &identity[..],
+                    &peer[..],
+                    share.span.word(),
+                    share.started_at,
+                    share.until,
+                    last.map(|l| l.fix.latitude_e6),
+                    last.map(|l| l.fix.longitude_e6),
+                    last.map(|l| l.fix.altitude_e2),
+                    last.map(|l| l.fix.accuracy_e2),
+                    last.map(|l| l.fix.last_update),
+                    last.map(|l| l.at),
+                    last.is_some_and(|l| l.moved),
                 ],
             )?;
         }
@@ -3497,6 +3643,118 @@ mod tests {
             )
             .expect("origin columns exist");
         assert_eq!(origins, 0);
+    }
+
+    /// A position share (1273) survives a restart as it stood: before its
+    /// first report and after one, replaced in place, gone when stopped or
+    /// with its conversation, and a row that is not whole is refused.
+    #[test]
+    fn a_share_is_kept_until_it_stops() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let fresh = Share::start(Span::UntilStopped, 1_793_500_000);
+        store
+            .write(&[StoreWrite::Share {
+                peer: BOB,
+                share: Some(fresh),
+            }])
+            .expect("write");
+        assert_eq!(store.shares().expect("shares"), [(BOB, fresh)]);
+        let mut sent = Share::start(Span::Hours8, 1_793_500_000);
+        sent.last = Some(Report {
+            fix: Location::saturating(
+                -33_868_800,
+                151_209_300,
+                -1_250,
+                0,
+                0,
+                65_535,
+                1_793_499_990,
+            ),
+            at: 1_793_500_060,
+            moved: true,
+        });
+        store
+            .write(&[
+                StoreWrite::Share {
+                    peer: BOB,
+                    share: Some(sent),
+                },
+                StoreWrite::Share {
+                    peer: ALICE,
+                    share: Some(fresh),
+                },
+            ])
+            .expect("replace");
+        assert_eq!(
+            store.shares().expect("shares"),
+            [(ALICE, fresh), (BOB, sent)],
+            "in place, every integer as it was"
+        );
+        store
+            .write(&[StoreWrite::Share {
+                peer: ALICE,
+                share: None,
+            }])
+            .expect("stop");
+        store
+            .write(&[StoreWrite::ForgetConversation { peer: BOB }])
+            .expect("forget");
+        assert!(store.shares().expect("shares").is_empty());
+        store
+            .write(&[StoreWrite::Share {
+                peer: BOB,
+                share: Some(sent),
+            }])
+            .expect("again");
+        store
+            .conn
+            .execute("UPDATE shares SET last_at = NULL", [])
+            .expect("break it");
+        assert!(matches!(store.shares(), Err(StoreError::Corrupt { .. })));
+        store
+            .conn
+            .execute("UPDATE shares SET last_at = 1, span = 'forever'", [])
+            .expect("break it");
+        assert!(matches!(store.shares(), Err(StoreError::Corrupt { .. })));
+        drop(store);
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("other");
+        assert!(other.shares().expect("shares").is_empty());
+    }
+
+    /// A schema 9 store, as 1270's loquax wrote it, gains the shares
+    /// table and nothing else.
+    #[test]
+    fn a_schema_9_store_migrates_with_no_share() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} {SCHEMA_V6} \
+             {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} PRAGMA user_version = 9; COMMIT;"
+        ))
+        .expect("schema 9");
+        drop(conn);
+        let mut store = Store::open_in(home.path(), US).expect("schema 9 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        assert!(store.shares().expect("shares").is_empty());
+        store
+            .write(&[StoreWrite::Share {
+                peer: BOB,
+                share: Some(Share::start(Span::Hour1, 5)),
+            }])
+            .expect("a share in the migrated store");
+        drop(store);
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch("DROP TABLE shares").expect("drop");
+        drop(conn);
+        let text = refused(home.path());
+        assert!(text.contains("table shares is missing"), "{text}");
     }
 
     /// 1219: a draft is kept beside its conversation, comes back at start

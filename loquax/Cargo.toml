@@ -184,6 +184,9 @@ leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # placing the pins. `no_std` with `alloc` without its `std` feature, held
 # there by `just map-core-no-std`, so the model stays core.
 leviculum-map = { path = "../leviculum-map" }
+# The cosine the position share's distance needs (`ui::share`, 1273), in
+# the core, which has no float functions of its own; leviculum-map's copy.
+libm = "0.2"
 # The terminal's map picture (`tui`): the frame the map core draws into and
 # its colours, the crates leviculum-map draws through.
 leviculum-mapfill = { path = "../leviculum-mapfill", optional = true }

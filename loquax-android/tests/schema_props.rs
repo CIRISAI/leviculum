@@ -14,8 +14,8 @@ use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Bar, BarButton, Blob, CandidateRow, Chip, ContactCopy,
     ConversationRow, Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info,
     LinkRow, Links, MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me,
-    MessageRow, Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, Shared,
-    SharedRow, Start, Started, SuggestionRow, Suggestions,
+    MessageRow, Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, ShareRow,
+    Shared, SharedRow, Shares, Start, Started, SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -237,6 +237,8 @@ fn request() -> impl Strategy<Value = Request> {
         ),
         Just(Request::NoFix),
         text().prop_map(|peer| Request::ShareFix { peer }),
+        (text(), text()).prop_map(|(peer, span)| Request::StartShare { peer, span }),
+        text().prop_map(|peer| Request::StopShare { peer }),
     ]
 }
 
@@ -287,6 +289,7 @@ fn query() -> impl Strategy<Value = Query> {
         (text(), i64s(), u32s()).prop_map(|(peer, key, edge)| Query::Photo { peer, key, edge }),
         (text(), u32s()).prop_map(|(peer, edge)| Query::Staged { peer, edge }),
         text().prop_map(|peer| Query::Bar { peer }),
+        Just(Query::Shares),
         (text(), i64s(), u32s()).prop_map(|(peer, key, index)| Query::SaveFile {
             peer,
             key,
@@ -450,6 +453,7 @@ fn messages() -> BoxedStrategy<Messages> {
         live(),
         (text(), text(), text()),
         bar(),
+        share_chip(),
     )
         .prop_map(
             |(
@@ -460,6 +464,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 (liveness, cadence_s, last_fix_at),
                 (ring, draft, draft_reply),
                 bar,
+                (share, share_stop),
             )| Messages {
                 v,
                 peer,
@@ -496,9 +501,42 @@ fn messages() -> BoxedStrategy<Messages> {
                 fix_lat_e6: bar.fix_lat_e6,
                 fix_lon_e6: bar.fix_lon_e6,
                 fix_words: bar.fix_words,
+                share,
+                share_stop,
             },
         )
         .boxed()
+}
+
+/// The chat's share chip (1273), boxed as [`bar`] is.
+fn share_chip() -> BoxedStrategy<(String, String)> {
+    (text(), text()).boxed()
+}
+
+/// Settings, Privacy's running shares (1273).
+fn shares() -> impl Strategy<Value = Shares> {
+    (
+        (u32s(), text(), text(), text()),
+        prop::collection::vec(
+            (text(), text(), text(), text(), i64s()).prop_map(|(peer, id, name, words, until)| {
+                ShareRow {
+                    peer,
+                    id,
+                    name,
+                    words,
+                    until,
+                }
+            }),
+            0..3,
+        ),
+    )
+        .prop_map(|((v, title, empty, stop), shares)| Shares {
+            v,
+            title,
+            empty,
+            stop,
+            shares,
+        })
 }
 
 /// The compose bar's fields (1270), boxed: inlined into [`messages`] the
@@ -562,6 +600,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
         ),
         live(),
         (text(), text(), text(), text(), text()),
+        any::<bool>(),
     )
         .prop_map(
             |(
@@ -570,6 +609,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (state, photo, (linked, pinned, muted), updates, read_at),
                 (liveness, cadence_s, last_fix_at),
                 (live, ring, pin, pin_label, draft),
+                sharing,
             )| ConversationRow {
                 peer,
                 name,
@@ -597,6 +637,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 pin,
                 pin_label,
                 draft,
+                sharing,
             },
         )
         .boxed()
@@ -1016,6 +1057,11 @@ proptest! {
     #[test]
     fn the_compose_bar_round_trips(bar in bar()) {
         round_trips(&bar)?;
+    }
+
+    #[test]
+    fn the_running_shares_round_trip(shares in shares()) {
+        round_trips(&shares)?;
     }
 
     #[test]

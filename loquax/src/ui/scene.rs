@@ -123,6 +123,13 @@ pub enum NodeId {
     SheetRow(SheetRow),
     Card,
     Chip(u32),
+    /// The chip at the top of a chat while its position share runs (1273),
+    /// and its Stop.
+    ShareChip,
+    ShareStop,
+    /// A running share in Settings, Privacy, by its peer (1273); its Stop.
+    ShareRow([u8; 16]),
+    ShareRowStop([u8; 16]),
 }
 
 impl NodeId {
@@ -157,6 +164,10 @@ impl NodeId {
             NodeId::SheetRow(row) => format!("sheet_{}", row.word()),
             NodeId::Card => "card".to_string(),
             NodeId::Chip(n) => format!("chip_{n}"),
+            NodeId::ShareChip => "share_chip".to_string(),
+            NodeId::ShareStop => "share_stop".to_string(),
+            NodeId::ShareRow(peer) => format!("share_{}", to_hex(peer)),
+            NodeId::ShareRowStop(peer) => format!("share_stop_{}", to_hex(peer)),
         }
     }
 }
@@ -355,6 +366,9 @@ pub struct Row {
     /// `Draft: …` (1219), which stands in for the last line, in italics,
     /// while a message typed in a conversation not open is not sent.
     pub draft: Option<Text>,
+    /// A share of our position runs in this chat (1273): the row shows a
+    /// small ⌖ in the accent colour on our side.
+    pub sharing: bool,
 }
 
 /// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
@@ -575,12 +589,37 @@ pub struct Whereabouts {
     pub words: Text,
 }
 
+/// The chip at the top of a chat while our position share runs there
+/// (1273): "Sharing your position, 42 min left" or "… until you stop",
+/// and its Stop, one tap.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareChip {
+    pub id: NodeId,
+    pub words: Text,
+    pub stop: Action,
+    pub a11y: A11y,
+}
+
+/// A running share as Settings, Privacy, "Position sharing" lists it
+/// (1273): with whom, for how long, and its Stop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShareRow {
+    pub id: NodeId,
+    pub peer: [u8; 16],
+    pub name: String,
+    pub words: Text,
+    pub stop: Action,
+    pub a11y: A11y,
+}
+
 /// The open conversation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chat {
     pub id: NodeId,
     pub peer: [u8; 16],
     pub bar: TopBar,
+    /// Our share's chip, while one runs here (1273).
+    pub share: Option<ShareChip>,
     pub groups: Vec<Group>,
     pub compose: Compose,
     pub a11y: A11y,
@@ -724,6 +763,11 @@ impl Scene {
                 .as_ref()
                 .and_then(|chat| chat.compose.staged.as_ref())
                 .map(|staged| &staged.remove),
+            NodeId::ShareChip | NodeId::ShareStop => self
+                .chat
+                .as_ref()
+                .and_then(|chat| chat.share.as_ref())
+                .map(|chip| &chip.stop),
             NodeId::SheetRow(row) => self.sheet.as_ref().and_then(|sheet| {
                 sheet
                     .actions
@@ -907,8 +951,72 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         live,
         position,
         draft,
+        sharing: model.share(peer).is_some(),
         row,
     }
+}
+
+/// How long a share has left, in the catalogue's words, rounded up: `42
+/// min`, `8 h`; none for one that runs until stopped.
+pub fn share_left(share: &super::share::Share, now: i64) -> Option<Text> {
+    let left = share.left_s(now)?;
+    Some(match left {
+        ..3600 => Text::Key(
+            StrId::MinutesAgo,
+            Vec::from([Arg::Int(((left + 59) / 60).max(1))]),
+        ),
+        _ => Text::Key(StrId::HoursAgo, Vec::from([Arg::Int((left + 3599) / 3600)])),
+    })
+}
+
+/// What a running share says: "Sharing your position, 42 min left", or
+/// "… until you stop".
+pub fn share_words(share: &super::share::Share, now: i64) -> Text {
+    match share_left(share, now) {
+        Some(left) => Text::Key(StrId::SharingLeft, Vec::from([Arg::Text(Box::new(left))])),
+        None => Text::key(StrId::SharingUntilStop),
+    }
+}
+
+/// The chip of `peer`'s chat while our share runs there (1273).
+pub fn share_chip<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Option<ShareChip> {
+    let share = model.share(peer)?;
+    let now = model.now.map_or(share.started_at, |now| now.unix_secs);
+    let words = share_words(share, now);
+    Some(ShareChip {
+        id: NodeId::ShareChip,
+        a11y: A11y::of(NodeId::ShareChip, Role::Chip, words.clone()),
+        words,
+        stop: Action::of(Intent::StopShare { peer: *peer }),
+    })
+}
+
+/// Settings, Privacy, "Position sharing" (1273): every running share, by
+/// the peer's name, each with its Stop.
+pub fn share_rows<B>(model: &UiModel<B>) -> Vec<ShareRow> {
+    model
+        .shares
+        .running
+        .iter()
+        .map(|(peer, share)| {
+            let now = model.now.map_or(share.started_at, |now| now.unix_secs);
+            let name = model.names.label(peer);
+            let words = share_words(share, now);
+            let id = NodeId::ShareRow(*peer);
+            ShareRow {
+                id,
+                peer: *peer,
+                a11y: A11y::of(
+                    id,
+                    Role::Row,
+                    Text::Join(Vec::from([Text::Raw(name.clone()), words.clone()])),
+                ),
+                name,
+                words,
+                stop: Action::of(Intent::StopShare { peer: *peer }),
+            }
+        })
+        .collect()
 }
 
 /// The open chat of conversation `c`: its bar, its bubbles grouped, its
@@ -982,6 +1090,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         id: NodeId::Chat,
         peer,
         bar,
+        share: share_chip(model, &peer),
         groups,
         compose: compose(model, c),
         a11y: A11y::of(NodeId::Chat, Role::Chat, Text::Raw(name)),
@@ -1078,6 +1187,7 @@ pub fn sheet_row(intent: &Intent) -> Option<SheetRow> {
         Intent::SendFile { .. } => Some(SheetRow::File),
         Intent::Locate { .. } => Some(SheetRow::Position),
         Intent::ShareFix { .. } => Some(SheetRow::ShareNow),
+        Intent::StartShare { span, .. } => Some(SheetRow::ShareFor(*span)),
         Intent::LocationOn => Some(SheetRow::LocationOn),
         _ => None,
     }
@@ -1111,7 +1221,7 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
             };
             (
                 StrId::Locate,
-                Vec::from([compose::position_row(fix)]),
+                compose::position_rows(fix),
                 Some(whereabouts),
             )
         }
@@ -1132,6 +1242,7 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
                 },
                 SheetRow::Position => Intent::Locate { peer },
                 SheetRow::ShareNow => Intent::ShareFix { peer },
+                SheetRow::ShareFor(span) => Intent::StartShare { peer, span },
                 SheetRow::LocationOn => Intent::LocationOn,
             })
         })
@@ -1443,6 +1554,7 @@ impl Row {
             "live": opt(self.live.as_ref(), Text::to_json),
             "position": opt(self.position.as_ref(), PositionBadge::to_json),
             "draft": opt(self.draft.as_ref(), Text::to_json),
+            "sharing": self.sharing,
             "selected": self.item.selected,
             "activate": self.item.activate.to_json(),
             "menu": actions(&self.item.menu),
@@ -1521,6 +1633,12 @@ impl Chat {
             "id": self.id.resource(),
             "peer": hex(&self.peer),
             "bar": self.bar.to_json(),
+            "share": opt(self.share.as_ref(), |chip| json!({
+                "id": chip.id.resource(),
+                "words": chip.words.to_json(),
+                "stop": chip.stop.to_json(),
+                "a11y": chip.a11y.to_json(),
+            })),
             "groups": self.groups.iter().map(|g| json!({
                 "id": g.id.resource(),
                 "ours": g.ours,
@@ -1952,6 +2070,173 @@ mod tests {
             day_words(&at(t - 365 * 86_400), Some(&now)).resolve(Lang::En),
             crate::when::date_label(&at(t - 365 * 86_400), &now)
         );
+    }
+
+    /// The position sheet's five rows (1273), a share's chip with its
+    /// Stop at the top of the chat, the ⌖ on the list's row, and
+    /// Settings, Privacy's list; the stop takes all of them away.
+    #[test]
+    fn a_share_shows_its_chip_its_sign_and_its_privacy_row_until_stopped() {
+        use super::super::share::Span;
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        model.bar.abilities = compose::Abilities::phone(true);
+        let now = 1_793_351_000;
+        crate::ui::update(
+            &mut model,
+            UiEvent::Clock(WallTime {
+                unix_secs: now,
+                offset_secs: 0,
+            }),
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::OwnFix(Some(leviculum_lxmf::telemetry::Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: now,
+            })),
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::OpenSheet(compose::Sheet::Position { peer }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let sheet = scene.sheet.as_ref().expect("the position sheet");
+        let rows: Vec<_> = sheet
+            .actions
+            .iter()
+            .map(|a| {
+                (
+                    sheet_row(&a.intent).map(|r| NodeId::SheetRow(r).resource()),
+                    Text::key(a.label_key).resolve(Lang::En),
+                    Text::key(a.label_key).resolve(Lang::De),
+                )
+            })
+            .collect();
+        let row = |id: &str, en: &str, de: &str| (Some(id.to_string()), en.into(), de.into());
+        assert_eq!(
+            rows,
+            [
+                row("sheet_share_now", "Now, once", "Jetzt, einmal"),
+                row("sheet_share_15_min", "For 15 minutes", "Für 15 Minuten"),
+                row("sheet_share_1_h", "For 1 hour", "Für 1 Stunde"),
+                row("sheet_share_8_h", "For 8 hours", "Für 8 Stunden"),
+                row(
+                    "sheet_share_until_stopped",
+                    "Until I stop",
+                    "Bis ich es beende"
+                ),
+            ]
+        );
+        assert!(scene.chat.as_ref().expect("chat").share.is_none());
+        let start = scene
+            .action(NodeId::SheetRow(SheetRow::ShareFor(Span::Hour1)))
+            .map(|a| a.intent.clone());
+        assert_eq!(
+            start,
+            Some(Intent::StartShare {
+                peer,
+                span: Span::Hour1
+            })
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::StartShare {
+                peer,
+                span: Span::Hour1,
+            },
+        );
+        crate::ui::update(
+            &mut model,
+            UiEvent::Clock(WallTime {
+                unix_secs: now + 18 * 60,
+                offset_secs: 0,
+            }),
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene.sheet.is_none(), "the row closed the sheet");
+        let chip = scene
+            .chat
+            .as_ref()
+            .and_then(|c| c.share.as_ref())
+            .expect("the chip");
+        assert_eq!(
+            chip.words.resolve(Lang::En),
+            "Sharing your position, 42 min left"
+        );
+        assert_eq!(
+            chip.words.resolve(Lang::De),
+            "Deine Position wird geteilt, noch 42 Min."
+        );
+        assert_eq!(Text::key(chip.stop.label_key).resolve(Lang::En), "Stop");
+        assert_eq!(
+            scene.action(NodeId::ShareStop).map(|a| a.intent.clone()),
+            Some(Intent::StopShare { peer })
+        );
+        let wide = model.scene(LayoutClass::Wide);
+        let listed = wide.list.as_ref().expect("list");
+        assert!(listed
+            .rows
+            .iter()
+            .all(|r| r.sharing == (r.row.peer == peer)));
+        assert_eq!(wide.to_json()["list"]["rows"][0]["sharing"], true);
+        assert_eq!(wide.to_json()["chat"]["share"]["id"], "share_chip");
+        let privacy = share_rows(&model);
+        assert_eq!(privacy.len(), 1);
+        assert_eq!(privacy[0].id.resource(), format!("share_{}", to_hex(&peer)));
+        assert_eq!(privacy[0].stop.intent, Intent::StopShare { peer });
+
+        // Until stopped, and then stopped.
+        crate::ui::update(
+            &mut model,
+            UiEvent::StartShare {
+                peer,
+                span: Span::UntilStopped,
+            },
+        );
+        let scene = model.scene(LayoutClass::Compact);
+        let chip = scene
+            .chat
+            .as_ref()
+            .and_then(|c| c.share.as_ref())
+            .expect("chip");
+        assert_eq!(
+            chip.words.resolve(Lang::En),
+            "Sharing your position until you stop"
+        );
+        crate::ui::update(&mut model, UiEvent::StopShare { peer });
+        let scene = model.scene(LayoutClass::Wide);
+        assert!(scene.chat.as_ref().expect("chat").share.is_none());
+        assert!(scene
+            .list
+            .as_ref()
+            .expect("list")
+            .rows
+            .iter()
+            .all(|r| !r.sharing));
+        assert!(share_rows(&model).is_empty());
+    }
+
+    /// The time left, rounded up: under a minute is one, an hour and a
+    /// bit are two hours.
+    #[test]
+    fn the_time_left_rounds_up() {
+        use super::super::share::{Share, Span};
+        let share = Share::start(Span::Hours8, 0);
+        let left = |at| share_left(&share, at).map(|t| t.resolve(Lang::En));
+        assert_eq!(left(0).as_deref(), Some("8 h"));
+        assert_eq!(left(8 * 3600 - 3601).as_deref(), Some("2 h"));
+        assert_eq!(left(8 * 3600 - 3600).as_deref(), Some("1 h"));
+        assert_eq!(left(8 * 3600 - 3599).as_deref(), Some("60 min"));
+        assert_eq!(left(8 * 3600 - 10).as_deref(), Some("1 min"));
+        assert_eq!(left(9 * 3600).as_deref(), Some("1 min"));
+        assert_eq!(share_left(&Share::start(Span::UntilStopped, 0), 5), None);
     }
 
     fn model_with(bodies: &[(bool, i64)]) -> UiModel<Line> {

@@ -3712,7 +3712,7 @@ async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
             (43_773_100, 11_256_000)
         );
         assert_eq!(fixed.sheet_rows[0].id, "sheet_share_now");
-        assert_eq!(fixed.sheet_rows[0].label, "Send my position now");
+        assert_eq!(fixed.sheet_rows[0].label, "Now, once");
         session
             .request(Request::ShareFix { peer: peer.clone() })
             .expect("share");
@@ -3752,6 +3752,182 @@ async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
         session.stop();
     })
     .await
+    .expect("the session");
+    node.kill().await;
+}
+
+/// 1273: a share for 15 minutes, started from the position sheet's row,
+/// sends the phone's fix at once, shows its chip in the chat, the ⌖ on
+/// the list's row and its row in Settings, Privacy; a share until stopped
+/// replaces it; Stop sends one report marked as the end, takes the chip,
+/// the sign and the row away, and the phone's store keeps no share.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_share_starts_lists_and_stops_with_its_end_report() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let phone_dir = phone.path().to_path_buf();
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let address = session.address();
+        let peer = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c".to_string();
+        session
+            .request(Request::Open { peer: peer.clone() })
+            .expect("open");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs() as i64;
+        session
+            .request(Request::Fix {
+                lat_e6: 43_773_100,
+                lon_e6: 11_256_000,
+                alt_e2: 0,
+                accuracy_e2: 500,
+                at: now,
+            })
+            .expect("fix");
+        session
+            .request(Request::Sheet {
+                peer: peer.clone(),
+                kind: "position".to_string(),
+            })
+            .expect("sheet");
+        let sheet: schema::Bar = asked(&session, schema::Query::Bar { peer: peer.clone() });
+        assert_eq!(
+            sheet
+                .sheet_rows
+                .iter()
+                .map(|r| (r.id.as_str(), r.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("sheet_share_now", "Now, once"),
+                ("sheet_share_15_min", "For 15 minutes"),
+                ("sheet_share_1_h", "For 1 hour"),
+                ("sheet_share_8_h", "For 8 hours"),
+                ("sheet_share_until_stopped", "Until I stop"),
+            ]
+        );
+        let none: schema::Shares = asked(&session, schema::Query::Shares);
+        assert!(none.shares.is_empty());
+        assert_eq!(none.title, "Position sharing");
+        // A report of ours shows its fix once the session knows its own
+        // address (`own_fix`), which the engine says when it is ready: on
+        // a loaded host after the share started, so the count is waited for.
+        let reports = |session: &Session, want: usize| -> usize {
+            let count = || {
+                let chat: schema::Messages =
+                    asked(session, schema::Query::Messages { peer: peer.clone() });
+                chat.messages
+                    .iter()
+                    .filter(|m| m.ours && m.lat_e6.is_some())
+                    .count()
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while count() < want && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            count()
+        };
+        assert!(
+            session
+                .request(Request::StartShare {
+                    peer: peer.clone(),
+                    span: "a while".to_string(),
+                })
+                .is_err(),
+            "a span the library does not know"
+        );
+        session
+            .request(Request::StartShare {
+                peer: peer.clone(),
+                span: "15_min".to_string(),
+            })
+            .expect("start");
+        let chat: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(chat.sheet, "", "the row closes the sheet");
+        assert!(
+            chat.share.starts_with("Sharing your position, ") && chat.share.ends_with(" min left"),
+            "{:?}",
+            chat.share
+        );
+        assert_eq!(chat.share_stop, "Stop");
+        assert_eq!(reports(&session, 1), 1, "the first fix at once");
+        let list: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        assert!(list
+            .conversations
+            .iter()
+            .any(|row| row.peer == peer && row.sharing));
+        let running: schema::Shares = asked(&session, schema::Query::Shares);
+        assert_eq!(running.shares.len(), 1);
+        assert_eq!(running.shares[0].peer, peer);
+        assert_eq!(running.shares[0].id, format!("share_{peer}"));
+        assert!((running.shares[0].until - (now + 900)).abs() <= 5);
+
+        session
+            .request(Request::StartShare {
+                peer: peer.clone(),
+                span: "until_stopped".to_string(),
+            })
+            .expect("until stopped");
+        let chat: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(chat.share, "Sharing your position until you stop");
+        let running: schema::Shares = asked(&session, schema::Query::Shares);
+        assert_eq!(running.shares[0].until, 0);
+
+        session
+            .request(Request::StopShare { peer: peer.clone() })
+            .expect("stop");
+        let chat: schema::Messages =
+            asked(&session, schema::Query::Messages { peer: peer.clone() });
+        assert_eq!(chat.share, "");
+        assert_eq!(reports(&session, 3), 3, "the first of each, and the end");
+        let list: schema::Conversations =
+            asked(&session, schema::Query::Conversations { search: None });
+        assert!(list.conversations.iter().all(|row| !row.sharing));
+        let none: schema::Shares = asked(&session, schema::Query::Shares);
+        assert!(none.shares.is_empty());
+        session.stop();
+        address
+    })
+    .await
+    .map(|address| {
+        let store = loquax::store::Store::open_in(&phone_dir, address).expect("the phone's store");
+        assert!(store.shares().expect("shares").is_empty(), "no share kept");
+        let restored = store.restore().expect("restore");
+        let marks: Vec<leviculum_lxmf::telemetry::ShareMark> = restored
+            .iter()
+            .flat_map(|c| &c.messages)
+            .filter(|m| m.outbound)
+            .filter_map(|m| {
+                let (_, value) = m
+                    .fields
+                    .iter()
+                    .find(|(k, _)| *k == leviculum_lxmf::constants::FIELD_TELEMETRY)?;
+                let mut p = 0;
+                let blob = leviculum_lxmf::msgpack::read_bin(value, &mut p).ok()?;
+                Some(leviculum_lxmf::telemetry::ShareMark::of_blob(blob))
+            })
+            .collect();
+        assert_eq!(marks.len(), 3, "{marks:?}");
+        assert!(marks[..2].iter().all(|m| m.every == Some(900) && !m.ended));
+        assert!(marks[2].ended, "the stop's report is the end: {marks:?}");
+    })
     .expect("the session");
     node.kill().await;
 }

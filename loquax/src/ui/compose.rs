@@ -27,6 +27,7 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::telemetry::Location;
 
+use super::share::Span;
 use super::{photos, position_fields, UiEffect, UiModel};
 
 /// What the shell around the model can do: set once by the shell, never
@@ -145,8 +146,11 @@ pub enum SheetRow {
     File,
     /// The position sheet, the same the position button opens.
     Position,
-    /// "Send my position now": the own fix goes to the chat as a report.
+    /// "Now, once": the own fix goes to the chat as a report.
     ShareNow,
+    /// "For 15 minutes", "For 1 hour", "For 8 hours", "Until I stop": a
+    /// share starts for the chat (1273).
+    ShareFor(Span),
     /// No fix known: turn location on (the 1201 permission flow).
     LocationOn,
 }
@@ -159,6 +163,10 @@ impl SheetRow {
             SheetRow::File => "file",
             SheetRow::Position => "position",
             SheetRow::ShareNow => "share_now",
+            SheetRow::ShareFor(Span::Minutes15) => "share_15_min",
+            SheetRow::ShareFor(Span::Hour1) => "share_1_h",
+            SheetRow::ShareFor(Span::Hours8) => "share_8_h",
+            SheetRow::ShareFor(Span::UntilStopped) => "share_until_stopped",
             SheetRow::LocationOn => "location_on",
         }
     }
@@ -178,11 +186,14 @@ pub fn attach_rows(abilities: Abilities) -> Vec<SheetRow> {
     rows
 }
 
-/// The position sheet's one row: the share with a fix, else location on.
-pub fn position_row(fix: Option<&Location>) -> SheetRow {
+/// The position sheet's rows: with a fix, once and the four shares
+/// (1273); without one, location on.
+pub fn position_rows(fix: Option<&Location>) -> Vec<SheetRow> {
     match fix {
-        Some(_) => SheetRow::ShareNow,
-        None => SheetRow::LocationOn,
+        Some(_) => core::iter::once(SheetRow::ShareNow)
+            .chain(Span::ALL.into_iter().map(SheetRow::ShareFor))
+            .collect(),
+        None => Vec::from([SheetRow::LocationOn]),
     }
 }
 
@@ -485,8 +496,8 @@ mod tests {
             UiEvent::OpenSheet(Sheet::Position { peer: PEER }),
         );
         assert_eq!(
-            position_row(model.bar.own_fix.as_ref()),
-            SheetRow::LocationOn
+            position_rows(model.bar.own_fix.as_ref()),
+            [SheetRow::LocationOn]
         );
         assert!(update(&mut model, UiEvent::ShareFix { peer: PEER }).is_empty());
         assert!(model.bar.sheet.is_some(), "no fix: the sheet stays");
@@ -500,7 +511,16 @@ mod tests {
             last_update: 1_000,
         };
         update(&mut model, UiEvent::OwnFix(Some(fix)));
-        assert_eq!(position_row(model.bar.own_fix.as_ref()), SheetRow::ShareNow);
+        assert_eq!(
+            position_rows(model.bar.own_fix.as_ref()),
+            [
+                SheetRow::ShareNow,
+                SheetRow::ShareFor(Span::Minutes15),
+                SheetRow::ShareFor(Span::Hour1),
+                SheetRow::ShareFor(Span::Hours8),
+                SheetRow::ShareFor(Span::UntilStopped),
+            ]
+        );
         let effects = update(&mut model, UiEvent::ShareFix { peer: PEER });
         assert!(matches!(
             effects.as_slice(),

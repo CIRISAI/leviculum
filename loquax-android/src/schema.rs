@@ -118,6 +118,12 @@
 //! [`Request::Sheet`], [`Request::Fix`], [`Request::NoFix`] and
 //! [`Request::ShareFix`], [`Query::Staged`], [`Query::Bar`] with its [`Bar`], and the chat's bar fields from
 //! [`Messages::round`] on. An older app sends none of them and reads none.
+//! Sharing a position for a while (1273) came within version 1 too:
+//! [`Request::StartShare`] and [`Request::StopShare`], the chat's
+//! [`Messages::share`] and [`Messages::share_stop`], the list row's
+//! [`ConversationRow::sharing`], and [`Query::Shares`] with its
+//! [`Shares`]. An older app offers no share and shows none; a share a
+//! newer app started keeps running in the library until its end time.
 //! The viewport (1231) came within version 1 too: [`Request::Viewport`].
 //! An app that sends none sends no read receipts.
 //! Read receipts (1230) came within version 1 too: the delivery word
@@ -461,9 +467,21 @@ pub enum Request {
         at: i64,
     },
     NoFix,
-    /// The position sheet's "Send my position now": the fix of the last
+    /// The position sheet's "Now, once": the fix of the last
     /// [`Request::Fix`] goes to `peer` as a report.
     ShareFix {
+        peer: String,
+    },
+    /// One of the position sheet's share rows (1273): a share for `peer`
+    /// starts, `span` one of `15_min`, `1_h`, `8_h`, `until_stopped`. The
+    /// library sends on the fixes [`Request::Fix`] brings.
+    StartShare {
+        peer: String,
+        span: String,
+    },
+    /// The share's Stop (the chat's chip, Settings, Privacy, the
+    /// notification): one last report marked as the end goes.
+    StopShare {
         peer: String,
     },
 }
@@ -650,6 +668,9 @@ pub enum Query {
     /// field so the plus turns into Send as the first letter is typed;
     /// answered as [`Bar`], the same fields [`Messages`] carries.
     Bar { peer: String },
+    /// The running position shares (1273), Settings, Privacy's list and
+    /// the share notification's; answered as [`Shares`].
+    Shares,
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -1326,6 +1347,10 @@ pub struct ConversationRow {
     /// conversation.
     #[serde(default)]
     pub draft: String,
+    /// A share of our position runs in this chat (1273): the row shows a
+    /// small ⌖ in the accent colour on our side.
+    #[serde(default)]
+    pub sharing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1588,6 +1613,42 @@ pub struct Messages {
     pub fix_lon_e6: i32,
     #[serde(default)]
     pub fix_words: String,
+    /// The chip at the top of the chat while our share runs there (1273),
+    /// in the phone's language: `Sharing your position, 42 min left`, or
+    /// `… until you stop`; empty for none. `share_stop` is its button's
+    /// word.
+    #[serde(default)]
+    pub share: String,
+    #[serde(default)]
+    pub share_stop: String,
+}
+
+/// What [`Query::Shares`] answers (1273): the running shares, by peer,
+/// and the page's words.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shares {
+    pub v: u32,
+    /// `Position sharing`.
+    pub title: String,
+    /// What shows with no share.
+    pub empty: String,
+    /// `Stop`.
+    pub stop: String,
+    pub shares: Vec<ShareRow>,
+}
+
+/// A running share (1273).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareRow {
+    pub peer: String,
+    /// The row's resource id, `share_<peer>`; its Stop's is
+    /// `share_stop_<peer>`.
+    pub id: String,
+    pub name: String,
+    /// `Sharing your position, 42 min left`.
+    pub words: String,
+    /// When it ends, unix seconds; 0 until stopped.
+    pub until: i64,
 }
 
 /// What [`Query::Bar`] answers: the compose bar's fields of [`Messages`].

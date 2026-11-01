@@ -195,7 +195,19 @@ leviculum_ui::catalogue! {
     Staged = "scene_staged", "Photo to send, %1$s", "Foto zum Senden, %1$s";
     Unstage = "scene_unstage", "Remove photo", "Foto entfernen";
     CaptionHint = "caption_hint", "Add a caption", "Bildunterschrift hinzufügen";
-    ShareNow = "share_now", "Send my position now", "Meine Position jetzt senden";
+    ShareNow = "share_now", "Now, once", "Jetzt, einmal";
+    // Sharing a position for a while (1273): the sheet's four rows, the
+    // chat's chip and its Stop, the list's sign, Settings, Privacy.
+    ShareFor15 = "share_15_min", "For 15 minutes", "Für 15 Minuten";
+    ShareFor1h = "share_1_h", "For 1 hour", "Für 1 Stunde";
+    ShareFor8h = "share_8_h", "For 8 hours", "Für 8 Stunden";
+    ShareUntilStopped = "share_until_stopped", "Until I stop", "Bis ich es beende";
+    SharingLeft = "sharing_left", "Sharing your position, %1$s left", "Deine Position wird geteilt, noch %1$s";
+    SharingUntilStop = "sharing_until_stop", "Sharing your position until you stop", "Deine Position wird geteilt, bis du es beendest";
+    ShareStop = "share_stop", "Stop", "Beenden";
+    SharingSign = "sharing_sign", "Sharing your position", "Du teilst deine Position";
+    PositionSharing = "position_sharing", "Position sharing", "Positionsfreigabe";
+    NoShares = "no_shares", "Your position is not shared with anyone.", "Deine Position wird mit niemandem geteilt.";
     LocationOn = "location_on", "Turn location on", "Standort einschalten";
     NoFix = "no_fix", "Loquax does not know where you are yet.", "Loquax weiß noch nicht, wo du bist.";
     FixAge = "fix_age", "Found %1$s", "Ermittelt %1$s";

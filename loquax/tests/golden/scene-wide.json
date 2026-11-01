@@ -3299,7 +3299,8 @@
       }
     ],
     "id": "chat",
-    "peer": "1d0abf792296d6027f9c456dda8a1f95"
+    "peer": "1d0abf792296d6027f9c456dda8a1f95",
+    "share": null
   },
   "chips": [],
   "class": "Wide",
@@ -3387,6 +3388,7 @@
         "position": null,
         "reaction": null,
         "selected": true,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -3457,6 +3459,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -3527,6 +3530,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -3597,6 +3601,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -3667,6 +3672,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -3737,6 +3743,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -3807,6 +3814,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -3877,6 +3885,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -3947,6 +3956,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 3,
         "updates": 0
       },
@@ -4017,6 +4027,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4087,6 +4098,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4157,6 +4169,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4227,6 +4240,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4297,6 +4311,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4367,6 +4382,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4437,6 +4453,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4507,6 +4524,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       },
@@ -4577,6 +4595,7 @@
         "position": null,
         "reaction": null,
         "selected": false,
+        "sharing": false,
         "unread": 0,
         "updates": 0
       }

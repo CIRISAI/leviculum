@@ -3299,7 +3299,8 @@
       }
     ],
     "id": "chat",
-    "peer": "1d0abf792296d6027f9c456dda8a1f95"
+    "peer": "1d0abf792296d6027f9c456dda8a1f95",
+    "share": null
   },
   "chips": [],
   "class": "Compact",

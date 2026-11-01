@@ -3312,6 +3312,7 @@ dependencies = [
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-ratatui",
+ "libm",
  "lnpnd",
  "open",
  "opus-pure",

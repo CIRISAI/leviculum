@@ -148,6 +148,7 @@ pub mod receipts;
 pub mod replies;
 pub mod scene;
 pub mod search;
+pub mod share;
 pub mod state;
 pub mod strings;
 pub mod voice;
@@ -557,16 +558,21 @@ impl Conversation {
     /// sender's clock claims the future), judged at `now`.
     pub fn liveness(&self, now: Option<i64>) -> liveness::Liveness {
         // The newest few teach the cadence; older ones say nothing.
-        let times: Vec<i64> = self
+        let fixes: Vec<Fix> = self
             .messages
             .iter()
             .rev()
             .filter(|m| m.is_report())
             .filter_map(|m| message_fix(self.peer, m))
             .take(liveness::CADENCE_GAPS + 1)
-            .map(|fix| fix.order_time())
             .collect();
-        liveness::Liveness::of(&times, now)
+        let times: Vec<i64> = fixes.iter().map(Fix::order_time).collect();
+        // The newest report's share mark (1273): its promise, or its end.
+        let mark = fixes
+            .first()
+            .map(|fix| leviculum_lxmf::telemetry::ShareMark::of_blob(&fix.telemetry))
+            .unwrap_or_default();
+        liveness::Liveness::of_marked(&times, mark, now)
     }
 
     /// The newest report with a position: the row that says whether the
@@ -819,6 +825,8 @@ pub struct UiModel<B> {
     pub playing: Option<voice::Playing>,
     /// The compose bar's buttons, sheets and staged photo (1270).
     pub bar: compose::Bar,
+    /// The running position shares (1273).
+    pub shares: share::Shares,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -911,6 +919,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             photo_size: photos::PhotoSize::default(),
             playing: None,
             bar: compose::Bar::default(),
+            shares: share::Shares::default(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1421,9 +1430,15 @@ pub enum UiEvent {
     /// The shell's newest own fix, or none (1270): the position sheet
     /// shows it and its age.
     OwnFix(Option<leviculum_lxmf::telemetry::Location>),
-    /// The position sheet's "Send my position now": the own fix goes to
-    /// `peer` as a report.
+    /// The position sheet's "Now, once": the own fix goes to `peer` as a
+    /// report.
     ShareFix { peer: [u8; 16] },
+    /// One of the position sheet's other rows (1273): a share of `span`
+    /// starts for `peer`'s chat ([`share`]).
+    StartShare { peer: [u8; 16], span: share::Span },
+    /// The share's Stop, on the chat's chip or in Settings, Privacy: one
+    /// last report marked as the end goes.
+    StopShare { peer: [u8; 16] },
     /// A tap on a photo's bubble: the shell shows it whole
     /// ([`UiEffect::ShowPhoto`]).
     ViewPhoto { peer: [u8; 16], key: u64 },
@@ -1613,7 +1628,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::Clock(now) => {
             model.now = Some(now);
-            Vec::new()
+            model.shares_due()
         }
         UiEvent::Elapsed(ms) => {
             model.elapsed_ms = ms;
@@ -1663,8 +1678,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::OwnFix(fix) => {
             model.bar.own_fix = fix;
-            Vec::new()
+            model.shares_due()
         }
+        UiEvent::StartShare { peer, span } => model.start_share(peer, span),
+        UiEvent::StopShare { peer } => model.stop_share(peer),
         UiEvent::ShareFix { peer } => model.share_fix(peer),
         UiEvent::PhotoSize(size) => {
             model.photo_size = size;

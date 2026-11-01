@@ -55,6 +55,9 @@ pub const PUMP: Duration = Duration::from_millis(100);
 /// than its link keepalive does. Before 1176 the pump ran every 100 ms for
 /// the life of the session.
 pub const IDLE_PUMP: Duration = watch::LOOK;
+/// The longest the pump sleeps while a position share runs (1273): its
+/// shortest gap, so a report and the end are at most that late.
+pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_S as u64);
 /// How long a send runner waits for its bubble to be named.
 const SETTLE: Duration = Duration::from_secs(5);
 /// How often the TCP interface is looked at while the pump runs fast.
@@ -895,8 +898,17 @@ impl Session {
             Intent::Attach { peer } => UiEvent::OpenSheet(compose::Sheet::Attach { peer }),
             Intent::Locate { peer } => UiEvent::OpenSheet(compose::Sheet::Position { peer }),
             Intent::CloseSheet => UiEvent::CloseSheet,
-            Intent::OwnFix { location } => UiEvent::OwnFix(location),
+            Intent::OwnFix { location } => {
+                // A share judges the fix at the time it came (1273).
+                let mut inner = self.lock();
+                let now = wall_now(inner.offset);
+                inner.apply(UiEvent::Clock(now));
+                drop(inner);
+                UiEvent::OwnFix(location)
+            }
             Intent::ShareFix { peer } => UiEvent::ShareFix { peer },
+            Intent::StartShare { peer, span } => UiEvent::StartShare { peer, span },
+            Intent::StopShare { peer } => UiEvent::StopShare { peer },
             other => return Err(format!("not a request of the facade: {other:?}")),
         };
         self.lock().apply(event);
@@ -1110,6 +1122,7 @@ impl Session {
             }
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
             schema::Query::Bar { peer } => schema::encode(&inner.bar(parse_peer(&peer)?)),
+            schema::Query::Shares => schema::encode(&inner.shares()),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
                 let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
@@ -1297,6 +1310,9 @@ impl Inner {
         let now = wall_now(offset);
         update(&mut model, UiEvent::Clock(now));
         model.restore(store.restore().map_err(|error| error.to_string())?);
+        // A share runs on across a restart (1273); one whose time ran out
+        // meanwhile ends at the next clock with its end report.
+        model.restore_shares(store.shares().map_err(|error| error.to_string())?);
         // The phone starts on the list, with nothing open: the model's
         // terminal habit of opening the first conversation would read what
         // arrives there before anyone looked.
@@ -1401,7 +1417,8 @@ impl Inner {
             self.say(say);
         }
         self.watched(elapsed);
-        self.quiet(UiEvent::Clock(wall_now(self.offset)));
+        // Applied, not quiet: a running share sends from the clock (1273).
+        self.apply(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
         if std::mem::take(&mut self.dirty) {
@@ -1433,7 +1450,11 @@ impl Inner {
         let until_sync = sync
             .and_then(|sync| sync.next_ms())
             .map(|next| Duration::from_millis(next.saturating_sub(now)));
-        idle_wait(until_sync)
+        // A running share's cadence and end are on the clock (1273).
+        match self.model.shares.running.is_empty() {
+            true => idle_wait(until_sync),
+            false => idle_wait(until_sync).min(SHARE_PUMP),
+        }
     }
 
     /// What the watching link said: a wake past the cursor pulls, as does
@@ -1835,6 +1856,7 @@ impl Inner {
             .draft
             .map(|draft| draft.resolve(self.lang))
             .unwrap_or_default();
+        let sharing = row.sharing;
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
@@ -1863,6 +1885,31 @@ impl Inner {
             pin,
             pin_label,
             draft,
+            sharing,
+        }
+    }
+
+    /// The running position shares (1273), Settings, Privacy's list.
+    fn shares(&self) -> schema::Shares {
+        schema::Shares {
+            v: VERSION,
+            title: Text::key(StrId::PositionSharing).resolve(self.lang),
+            empty: Text::key(StrId::NoShares).resolve(self.lang),
+            stop: Text::key(StrId::ShareStop).resolve(self.lang),
+            shares: scene::share_rows(&self.model)
+                .into_iter()
+                .map(|row| schema::ShareRow {
+                    peer: loquax::address::to_hex(&row.peer),
+                    id: row.id.resource(),
+                    name: row.name,
+                    words: row.words.resolve(self.lang),
+                    until: self
+                        .model
+                        .share(&row.peer)
+                        .and_then(|share| share.until)
+                        .unwrap_or(0),
+                })
+                .collect(),
         }
     }
 
@@ -2011,6 +2058,10 @@ impl Inner {
             fix_lat_e6: bar.fix_lat_e6,
             fix_lon_e6: bar.fix_lon_e6,
             fix_words: bar.fix_words,
+            share: scene::share_chip(&self.model, &peer)
+                .map(|chip| chip.words.resolve(self.lang))
+                .unwrap_or_default(),
+            share_stop: Text::key(StrId::ShareStop).resolve(self.lang),
         }
     }
 
@@ -2625,6 +2676,14 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         },
         R::NoFix => Intent::OwnFix { location: None },
         R::ShareFix { peer } => Intent::ShareFix {
+            peer: parse_peer(&peer)?,
+        },
+        R::StartShare { peer, span } => Intent::StartShare {
+            peer: parse_peer(&peer)?,
+            span: loquax::ui::share::Span::of_word(&span)
+                .ok_or_else(|| format!("{span:?} is not 15_min, 1_h, 8_h or until_stopped"))?,
+        },
+        R::StopShare { peer } => Intent::StopShare {
             peer: parse_peer(&peer)?,
         },
     };

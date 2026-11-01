@@ -8,6 +8,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use leviculum_lxmf::telemetry::ShareMark;
+
 /// How many of the newest gaps between reports the cadence is learned
 /// from: their median, so one late report does not move it.
 pub const CADENCE_GAPS: usize = 5;
@@ -63,6 +65,14 @@ impl Liveness {
     /// judged at `now`. Without a clock a stream is at most recent: its age
     /// is unknown.
     pub fn of(times: &[i64], now: Option<i64>) -> Self {
+        Self::of_marked(times, ShareMark::default(), now)
+    }
+
+    /// [`Liveness::of`], with the newest report's share mark (1273): a
+    /// running share's promise `every` keeps the stream live for twice
+    /// that, whatever the learned cadence says, and the share's end
+    /// report makes it no longer live at all, only as old as it is.
+    pub fn of_marked(times: &[i64], mark: ShareMark, now: Option<i64>) -> Self {
         let mut times = times.to_vec();
         times.sort_unstable();
         let Some(&newest) = times.last() else {
@@ -78,7 +88,14 @@ impl Liveness {
                 .unwrap_or_default()
                 .max(CADENCE_MIN_S)
         });
-        let live_for = cadence_s.map_or(YOUNG_S, |cadence| cadence.saturating_mul(2));
+        let learned = cadence_s.map_or(YOUNG_S, |cadence| cadence.saturating_mul(2));
+        let promised = mark
+            .every
+            .map_or(0, |every| i64::from(every).saturating_mul(2));
+        let live_for = match mark.ended {
+            true => 0,
+            false => learned.max(promised),
+        };
         let state = match now.map(|now| now.saturating_sub(newest)) {
             Some(age) if age < live_for => State::Live,
             Some(age) if age < RECENT_S => State::Recent,
@@ -203,6 +220,39 @@ mod tests {
         // Out of order is sorted first.
         let shuffled = [T + 1200, T, T + 600];
         assert_eq!(Liveness::of(&shuffled, None).cadence_s, Some(600));
+    }
+
+    /// A share's reports (1273): reports a minute apart at first teach a
+    /// cadence of a minute, but the promise of 15 min keeps the stream
+    /// live for half an hour once the phone rests; the end report makes
+    /// it recent at once, with its age.
+    #[test]
+    fn a_share_stays_live_by_its_promise_and_its_end_report_ends_it() {
+        let times = [T, T + 60, T + 120, T + 180];
+        let newest = T + 180;
+        let running = ShareMark {
+            every: Some(900),
+            ended: false,
+        };
+        let plain = Liveness::of(&times, Some(newest + 20 * 60));
+        assert_eq!(plain.state, State::Recent, "the minute cadence alone");
+        let promised = Liveness::of_marked(&times, running, Some(newest + 20 * 60));
+        assert_eq!(promised.state, State::Live);
+        assert_eq!(
+            Liveness::of_marked(&times, running, Some(newest + 30 * 60)).state,
+            State::Recent
+        );
+        let end = ShareMark {
+            every: None,
+            ended: true,
+        };
+        let ended = Liveness::of_marked(&times, end, Some(newest + 120));
+        assert_eq!(ended.state, State::Recent);
+        assert_eq!(
+            ended.row_words(Some(newest + 120)),
+            "last position 2 min ago"
+        );
+        assert_eq!(ended.list_words(Some(newest + 120)), "2 min ago");
     }
 
     #[test]

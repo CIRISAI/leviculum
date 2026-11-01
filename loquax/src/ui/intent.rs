@@ -287,6 +287,17 @@ pub enum Intent {
     ShareFix {
         peer: [u8; 16],
     },
+    /// One of the position sheet's share rows (1273): a share of `span`
+    /// starts for `peer`'s chat.
+    StartShare {
+        peer: [u8; 16],
+        span: super::share::Span,
+    },
+    /// A running share's Stop: the chat's chip, Settings, Privacy, the
+    /// phone's notification.
+    StopShare {
+        peer: [u8; 16],
+    },
     /// The position sheet without a fix: the platform turns location on
     /// (the 1201 permission flow) and answers with [`Intent::OwnFix`].
     LocationOn,
@@ -508,6 +519,13 @@ impl Intent {
             Intent::Unstage { .. } => StrId::Unstage,
             Intent::CloseSheet => StrId::Dismiss,
             Intent::ShareFix { .. } => StrId::ShareNow,
+            Intent::StartShare { span, .. } => match span {
+                super::share::Span::Minutes15 => StrId::ShareFor15,
+                super::share::Span::Hour1 => StrId::ShareFor1h,
+                super::share::Span::Hours8 => StrId::ShareFor8h,
+                super::share::Span::UntilStopped => StrId::ShareUntilStopped,
+            },
+            Intent::StopShare { .. } => StrId::ShareStop,
             Intent::LocationOn => StrId::LocationOn,
             Intent::OwnFix { .. } => StrId::Locate,
             Intent::SendFile { .. } => StrId::AttachFile,
