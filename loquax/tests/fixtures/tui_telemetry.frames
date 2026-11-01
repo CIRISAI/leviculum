@@ -27,7 +27,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
 ┌● Loquax afbda7b3───────┐┌  them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -119,7 +119,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
 ┌● Loquax afbda7b3─────────────────┐┌  them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                  no propagation node │
-│▌◎ position · live                ││ ──────────────────────────────────────────────────────────────────────────────── │
+│▌◎ position · live             ⌖  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -160,7 +160,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: detail ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                  no propagation node │
-│▌◎ position · live                ││ ──────────────────────────────────────────────────────────────────────────────── │
+│▌◎ position · live             ⌖  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │

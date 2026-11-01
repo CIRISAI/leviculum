@@ -118,11 +118,27 @@ ago` or `last position 3 h ago` (older runs keep their count), the
 list's line `📍 live` or `📍 3 h ago` (the terminal `◎ position ·
 live`), and every avatar of the peer carries a thin ring: the accent
 while live, the secondary text colour when recent, none when stale, in
-the list, the chat's bar, the Friends sheet and on the map's pin, where
+the chat's bar, the Friends sheet and on the map's pin, where
 a live ring pulses (one alpha cycle of 2 s, redrawn only while the map
 is on screen) and a stale pin is drawn grey. The phone's card says the
 row's words. The facade carries `liveness`, `cadence_s` and
 `last_fix_at` on the list's, the friends' and the chat's rows.
+
+**The list's map pin** (1224, Lew 2026-10-31). In the conversation list
+the ring gave way to a small map pin, one element with one meaning: a
+row whose peer has a fix younger than a day (the Friends sheet's rule,
+`scene::PositionBadge`) shows it under the time, left of the delivery
+mark or the unread count, tinted as the ring was (accent while live,
+the secondary text colour otherwise). A tap on it is the intent
+`OpenMapAt`: the map centred on the friend's newest fix with the card
+open, and Back returns to the list, not to the map's previous view; the
+rest of the row still opens the chat. The chat's bar and, on the phone,
+the newest report's line raise the same intent. The window draws the
+pin as a button, the terminal a `⌖` before the count with `m` on the
+highlighted entry, the phone a glyph of 18 dp in a 48 dp target
+labelled "Position of Anna, 2 min ago". Older fixes show no pin; the
+map still draws them grey. No distance is shown and there is no
+setting.
 
 **A text with a position** (1132). Sideband and a stock LXMF client can
 send a body and a telemetry field in one message. Such a message from a

@@ -1454,6 +1454,7 @@ impl Inner {
             .map(|live| live.resolve(self.lang))
             .unwrap_or_default();
         let ring = ring(row.avatar.ring);
+        let (pin, pin_label) = pin(row.position.as_ref(), self.lang);
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
@@ -1478,6 +1479,8 @@ impl Inner {
             last_fix_at: row.liveness.last_fix_at.unwrap_or(0),
             live,
             ring,
+            pin,
+            pin_label,
         }
     }
 
@@ -1738,6 +1741,15 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
 /// A ring as the facade carries it: its colour's name, empty for none.
 pub fn ring(ring: Option<scene::Ring>) -> String {
     ring.map_or("", scene::Ring::word).to_string()
+}
+
+/// A row's map pin as [`schema::ConversationRow::pin`] and `pin_label`
+/// carry it (1224): its tint's word and its content description in
+/// `lang`, both empty for none.
+pub fn pin(position: Option<&scene::PositionBadge>, lang: Lang) -> (String, String) {
+    position.map_or_else(Default::default, |pin| {
+        (pin.tint.word().to_string(), pin.a11y.label.resolve(lang))
+    })
 }
 
 /// One bubble in the facade's words, placed by [`rows`].

@@ -26,7 +26,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: before the load ---
 ┌  Loquax afbda7b3───────┐┌● map──────────────── z10 · 1 in view · loading map ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -51,7 +51,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: after the load ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
-│▌◎ position · live      ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
+│▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
 │                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
 │                        ││                       ⠈⢧             ⠘⣷⡄     ⢀⣀⣤⣶⠾⠛│
@@ -76,7 +76,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: held already ---
 ┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
-│▌◎ position · live      ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
+│▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
 │                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
 │                        ││                       ⠈⢧             ⠘⣷⡄     ⢀⣀⣤⣶⠾⠛│
@@ -101,7 +101,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: loading the area ---
 ┌  Loquax afbda7b3───────┐┌● map───────────────── z9 · 1 in view · loading map ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -126,7 +126,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 6: the area loaded ---
 ┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z9 · 1 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
-│▌◎ position · live      ││                                                    │
+│▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │

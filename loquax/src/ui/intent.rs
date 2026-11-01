@@ -58,7 +58,7 @@
 //! | `Command::Search`, `Message::Search` | `Search` (the query is the platform's text) |
 //! | `keys::Action::CloseSearch`, `OpenResult`, `Match` | the same names |
 //! | `Command::Map`, `Message::ShowMap` | `ShowMap` |
-//! | `keys::Action::PeerOnMap` | `PeerOnMap` |
+//! | `keys::Action::PeerOnMap`, a row's map pin, the chat bar's map | `OpenMapAt` |
 //! | `keys::Action::Map(MapCmd)` (but `Open`, `Close`) | `Map` |
 //! | `Message::Select` | `SelectPin` |
 //! | `Command::LoadMapArea`, `MapDrawing` | the same names |
@@ -161,8 +161,12 @@ pub enum Intent {
     ShowMap {
         peer: Option<[u8; 16]>,
     },
-    /// The open conversation's peer on the map.
-    PeerOnMap,
+    /// The map centred on a peer's newest fix with its card open (1224):
+    /// the open conversation's peer from a key, the named one from a
+    /// row's pin or the chat's bar. Back from it goes to the list.
+    OpenMapAt {
+        peer: Target,
+    },
     /// A tap or a click on a scene node: the node's own intent.
     Activate(NodeId),
     /// A long press or a right click on a node, or on none: its menu.
@@ -324,7 +328,7 @@ impl Intent {
             keys::Action::CloseSearch => Intent::CloseSearch,
             keys::Action::Map(cmd) => Intent::Map(cmd),
             keys::Action::OpenMessage => Intent::OpenMessage,
-            keys::Action::PeerOnMap => Intent::PeerOnMap,
+            keys::Action::PeerOnMap => Intent::OpenMapAt { peer: Target::Open },
         }
     }
 
@@ -339,7 +343,10 @@ impl Intent {
             Intent::OpenChat { .. } => StrId::Open,
             Intent::CloseChat => StrId::Close,
             Intent::ShowMap { .. } => StrId::Map,
-            Intent::PeerOnMap => StrId::PeerOnMap,
+            // A key's verb says whose; a named peer's button is the map
+            // (the chat bar's, 1224; the row's pin says its own words).
+            Intent::OpenMapAt { peer: Target::Open } => StrId::PeerOnMap,
+            Intent::OpenMapAt { .. } => StrId::Map,
             Intent::Activate(_) => StrId::Open,
             Intent::Menu(_) => StrId::Menu,
             Intent::Dismiss => StrId::Dismiss,

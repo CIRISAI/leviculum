@@ -99,6 +99,11 @@
 //! `joins_before`, `joins_after`, `day`, `meta`, `newest` and `live`. The
 //! app draws them and computes none of them again; an app that sends no
 //! `lang` gets English, one that sends no `search` the whole list.
+//! The list's map pin (1224) came within version 1 too:
+//! [`ConversationRow::pin`] and [`ConversationRow::pin_label`], and
+//! [`ConversationRow::ring`] empty in the list from then on. An older app
+//! draws no pin and, without the ring, no liveness in the list; the
+//! newest report's row still words it.
 
 use serde::{Deserialize, Serialize};
 
@@ -905,9 +910,19 @@ pub struct ConversationRow {
     #[serde(default)]
     pub live: String,
     /// The avatar's ring (1217, `scene::Ring`): `accent`, `secondary`, or
-    /// empty for none.
+    /// empty for none. Always empty in the list since 1224: the row's map
+    /// pin says the position there.
     #[serde(default)]
     pub ring: String,
+    /// The row's map pin (1224, `scene::PositionBadge`): its tint,
+    /// `accent` for a live position, `secondary` for a recent one, empty
+    /// for none (no position younger than a day); a tap on it opens the
+    /// map on the peer. Its content description in the phone's language,
+    /// `Position of Anna, 2 min ago`.
+    #[serde(default)]
+    pub pin: String,
+    #[serde(default)]
+    pub pin_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

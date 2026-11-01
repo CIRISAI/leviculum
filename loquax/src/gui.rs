@@ -662,6 +662,12 @@ impl App {
                 }
                 return self.paint();
             }
+            // A row's pin or the chat bar's map (1224): the map on the
+            // peer's pin, selected, its card open.
+            Intent::OpenMapAt { peer } => {
+                let peer = self.target(peer);
+                return self.intent(Intent::ShowMap { peer });
+            }
             Intent::Tab(TabId::Map) => return self.intent(Intent::ShowMap { peer: None }),
             Intent::Tab(TabId::Chats) => self.screen = Screen::Chats,
             Intent::Menu(id) => {

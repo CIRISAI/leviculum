@@ -1919,6 +1919,7 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
     let joined = |f: &str| f.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(joined(live).contains("live · every 10 min · now"), "{live}");
     assert!(live.contains("◎ position · live"), "{live}");
+    assert!(live.contains("⌖"), "the map pin\n{live}");
     assert!(
         !live.contains("[1]") && !live.contains("[6]"),
         "no badge\n{live}"
@@ -1928,9 +1929,11 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
         joined(recent).contains("last position 25 min ago"),
         "{recent}"
     );
-    assert!(recent.contains("◎ position · 25 min a…"), "{recent}");
+    // The entry's map pin (1224) stands left of where a badge would.
+    assert!(recent.contains("◎ position · 25 mi… ⌖"), "{recent}");
     let stale = frame(&frames, "stale");
     assert!(joined(stale).contains("last position 25 h ago"), "{stale}");
+    assert!(!stale.contains("⌖"), "no pin past a day\n{stale}");
     if frames != EXPECTED_LIVENESS {
         let kept = std::env::temp_dir().join("loquax-tui-liveness.frames");
         let _ = std::fs::write(&kept, &frames);

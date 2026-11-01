@@ -1027,11 +1027,21 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
         true => colour(t.accent),
         false => colour(t.text_secondary),
     };
-    let mut side = column![text(when).size(size::ROW_TIME).color(time_ink)]
+    let side = column![text(when).size(size::ROW_TIME).color(time_ink)]
         .align_x(Alignment::End)
         .spacing(8);
+    // Under the time: the map pin (1224), left of the count or the mark.
+    // A press on it is a hit on its own node, the map on the peer.
+    let mut under = row![].spacing(6).align_y(Alignment::Center);
+    if let Some(pin) = &r.position {
+        let failed = (colour(t.list_failed_ground), colour(t.list_failed_mark));
+        under = under.push(flat(
+            drawing(Icon::Map, colour(pin.tint.colour(&t)), failed, 18.0),
+            Message::Intent(Intent::Activate(pin.id)),
+        ));
+    }
     if unread {
-        side = side.push(
+        under = under.push(
             container(
                 text(content.unread.to_string())
                     .size(size::BADGE_TEXT)
@@ -1048,13 +1058,14 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
         );
     } else if let Some(mark) = content.mark {
         let failed = (colour(t.list_failed_ground), colour(t.list_failed_mark));
-        side = side.push(drawing(
+        under = under.push(drawing(
             Icon::Mark(mark),
             colour(t.text_secondary),
             failed,
             18.0,
         ));
     }
+    let side = side.push(under);
     // A report's line is the scene's words after the pin, as the phone
     // sets it; a text of ours is said as ours.
     let last = match (&r.live, content.ours && content.kind == "text") {

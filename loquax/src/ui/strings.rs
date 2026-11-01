@@ -73,6 +73,9 @@ leviculum_ui::catalogue! {
     LiveAgo = "live_ago", "%1$s ago", "vor %1$s";
     LiveNow = "live_now", "now", "gerade eben";
     LastPosition = "last_position", "last position %1$s", "letzte Position %1$s";
+    PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
+    PositionMarker = "position_marker", "⌖", "⌖";
+    NoPosition = "no_position", "No position from this friend yet", "Noch keine Position von diesem Freund";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";

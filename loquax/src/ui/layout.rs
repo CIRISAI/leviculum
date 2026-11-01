@@ -29,6 +29,8 @@ use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
+use super::scene::PositionBadge;
+use super::strings::{Lang, StrId};
 use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
 use crate::names::Names;
 use crate::telemetry;
@@ -676,17 +678,29 @@ fn entry(
         }
         None => String::new(),
     };
-    let budget = match badge.is_empty() {
-        true => room,
-        false => room.saturating_sub(badge.chars().count() + 1),
+    // The map pin (1224, `scene::PositionBadge`'s rule): left of the
+    // count, `m` on the entry opens the map on the peer.
+    let now_secs = now.map(|now| now.unix_secs);
+    let pin = PositionBadge::of(
+        &conversation.peer,
+        "",
+        &conversation.liveness(now_secs),
+        now_secs,
+    )
+    .map(|_| format!("{} ", StrId::PositionMarker.text(Lang::En)))
+    .unwrap_or_default();
+    let marks = pin.chars().count() + badge.chars().count();
+    let budget = match marks {
+        0 => room,
+        n => room.saturating_sub(n + 1),
     };
     let preview = leviculum_ui::text::truncate_to_cols(&preview, budget);
-    let gap = room.saturating_sub(fit_width(&preview) + badge.chars().count());
+    let gap = room.saturating_sub(fit_width(&preview) + marks);
     let mut bottom = RLine::default();
     push(&mut bottom, " ", RStyle::default());
     push(
         &mut bottom,
-        &format!("{preview}{}", " ".repeat(gap)),
+        &format!("{preview}{}{pin}", " ".repeat(gap)),
         RStyle::default(),
     );
     push(

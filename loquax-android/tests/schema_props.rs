@@ -391,7 +391,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
         (text(), opt_text(), opt_text(), text(), opt_text()),
         (text(), opt_text(), any::<(bool, bool, bool)>(), u32s()),
         live(),
-        (text(), text()),
+        (text(), text(), text(), text()),
     )
         .prop_map(
             |(
@@ -399,7 +399,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (initials, icon_fg, icon_bg, kind, reaction),
                 (state, photo, (linked, pinned, muted), updates),
                 (liveness, cadence_s, last_fix_at),
-                (live, ring),
+                (live, ring, pin, pin_label),
             )| ConversationRow {
                 peer,
                 name,
@@ -423,6 +423,8 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 last_fix_at,
                 live,
                 ring,
+                pin,
+                pin_label,
             },
         )
         .boxed()

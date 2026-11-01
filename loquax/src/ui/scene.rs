@@ -87,6 +87,8 @@ pub enum NodeId {
     List,
     /// A conversation's row, by its peer.
     Row([u8; 16]),
+    /// The map pin in a row, by its peer (1224).
+    Pin([u8; 16]),
     Chat,
     ChatBar,
     /// A group of bubbles, by its first bubble's key.
@@ -110,6 +112,7 @@ impl NodeId {
             NodeId::Tab(TabId::Map) => "tab_map".to_string(),
             NodeId::List => "list".to_string(),
             NodeId::Row(peer) => format!("row_{}", to_hex(peer)),
+            NodeId::Pin(peer) => format!("pin_{}", to_hex(peer)),
             NodeId::Chat => "chat".to_string(),
             NodeId::ChatBar => "chat_bar".to_string(),
             NodeId::Group(key) => format!("group_{key}"),
@@ -209,6 +212,68 @@ impl Ring {
     }
 }
 
+/// A row's map pin (1224): the peer's newest position is fresh, younger
+/// than [`liveness::RECENT_S`] (the Friends sheet's day of 1200). It
+/// stands where the avatar's ring stood in the list (one element, one
+/// meaning): tinted as the ring was, live in the accent, recent in the
+/// secondary text colour. A tap opens the map on the peer, the rest of
+/// the row still opens the chat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PositionBadge {
+    pub id: NodeId,
+    /// How old the newest fix is, seconds; none without a clock.
+    pub age_s: Option<i64>,
+    pub liveness: liveness::State,
+    pub tint: Ring,
+    /// [`Intent::OpenMapAt`] on the peer.
+    pub open: Action,
+    /// `Position of Anna, 2 min ago`.
+    pub a11y: A11y,
+}
+
+impl PositionBadge {
+    /// The pin of `peer`, named `name`, whose position is `l` at `now`;
+    /// none for a stale or an absent one. Without a clock the stream's
+    /// state decides, which is at most recent then.
+    pub fn of(peer: &[u8; 16], name: &str, l: &Liveness, now: Option<i64>) -> Option<Self> {
+        let at = l.last_fix_at?;
+        let age_s = now.map(|now| now.saturating_sub(at).max(0));
+        let fresh = match age_s {
+            Some(age) => age < liveness::RECENT_S,
+            None => l.state != liveness::State::Stale,
+        };
+        if !fresh {
+            return None;
+        }
+        // Live is a stream's word, not an age's: a stream of reports a day
+        // apart is live for two, and its pin goes after one all the same.
+        let tint = match l.state {
+            liveness::State::Live => Ring::Accent,
+            _ => Ring::Secondary,
+        };
+        let id = NodeId::Pin(*peer);
+        let words = match (age_s, l.state) {
+            (Some(age), _) => ago(age),
+            (None, liveness::State::Live) => Text::key(StrId::Live),
+            (None, _) => Text::key(StrId::Position),
+        };
+        let label = Text::Key(
+            StrId::PositionOf,
+            Vec::from([Arg::Str(name.to_string()), Arg::Text(Box::new(words))]),
+        );
+        Some(Self {
+            id,
+            age_s,
+            liveness: l.state,
+            tint,
+            open: Action::of(Intent::OpenMapAt {
+                peer: Target::Peer(*peer),
+            }),
+            a11y: A11y::of(id, Role::Button, label),
+        })
+    }
+}
+
 /// A round avatar: letters on a ground, `0xrrggbb` each.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Avatar {
@@ -248,6 +313,9 @@ pub struct Row {
     /// The last line in the catalogue's words when it is a report's
     /// (`live`, `3 h ago`); none for a text, whose line is [`ListRow::last`].
     pub live: Option<Text>,
+    /// The map pin, for a peer whose position is fresh (1224); the row's
+    /// avatar has no ring then or ever.
+    pub position: Option<PositionBadge>,
 }
 
 /// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
@@ -419,6 +487,12 @@ impl Scene {
                 .as_ref()
                 .and_then(|list| list.rows.iter().find(|row| row.item.id == id))
                 .map(|row| &row.item.activate),
+            NodeId::Pin(peer) => self
+                .list
+                .as_ref()
+                .and_then(|list| list.rows.iter().find(|row| row.row.peer == peer))
+                .and_then(|row| row.position.as_ref())
+                .map(|pin| &pin.open),
             NodeId::Tab(tab) => self
                 .tabs
                 .as_ref()
@@ -554,12 +628,9 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         .conversations
         .get(model.selected)
         .is_some_and(|c| c.peer == *peer);
-    let avatar = Avatar::of(
-        row.initials.clone(),
-        peer,
-        row.icon.as_ref(),
-        Ring::of(row.liveness.state),
-    );
+    // The pin says the position in the list (1224), the ring does not.
+    let avatar = Avatar::of(row.initials.clone(), peer, row.icon.as_ref(), None);
+    let position = PositionBadge::of(peer, &row.name, &row.liveness, now);
     let target = Target::Peer(*peer);
     let menu = Vec::from([
         Action::of(Intent::MarkUnread {
@@ -600,6 +671,7 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         },
         avatar,
         live,
+        position,
         row,
     }
 }
@@ -627,7 +699,10 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
             avatar,
         },
         title: Text::Raw(name.clone()),
-        actions: Vec::from([Action::of(Intent::ShowMap { peer: Some(peer) })]),
+        // The list's pin and the chat's bar open the map alike (1224).
+        actions: Vec::from([Action::of(Intent::OpenMapAt {
+            peer: Target::Peer(peer),
+        })]),
         a11y: A11y::of(NodeId::ChatBar, Role::Bar, Text::Raw(name.clone())),
     };
     let bubbles = chat::bubbles(model, c);
@@ -875,6 +950,19 @@ fn liveness_json(l: &Liveness) -> Value {
     })
 }
 
+impl PositionBadge {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "id": self.id.resource(),
+            "age_s": self.age_s,
+            "liveness": self.liveness.word(),
+            "tint": self.tint.word(),
+            "open": self.open.to_json(),
+            "a11y": self.a11y.to_json(),
+        })
+    }
+}
+
 impl Row {
     pub fn to_json(&self) -> Value {
         let r = &self.row;
@@ -894,6 +982,7 @@ impl Row {
             "liveness": liveness_json(&r.liveness),
             "avatar": self.avatar.to_json(),
             "live": opt(self.live.as_ref(), Text::to_json),
+            "position": opt(self.position.as_ref(), PositionBadge::to_json),
             "selected": self.item.selected,
             "activate": self.item.activate.to_json(),
             "menu": actions(&self.item.menu),
@@ -1005,6 +1094,78 @@ mod tests {
     use crate::ui::tests::Field as Line;
     use crate::ui::{Message, Signature, UiEvent};
     use leviculum_ui::delivery::DeliveryState;
+
+    /// 1224: the row's map pin is there for a fix younger than a day and
+    /// gone for an older one, tinted by the stream's state, its tap the
+    /// map on the peer, its label the catalogue's in either language.
+    #[test]
+    fn a_fix_of_23_hours_has_a_pin_and_one_of_25_hours_none() {
+        const T: i64 = 1_800_000_000;
+        let peer = [0x42; 16];
+        let one = Liveness::of(&[T], None);
+        let at = |hours: i64| PositionBadge::of(&peer, "Anna", &one, Some(T + hours * 3600));
+        let pin = at(23).expect("a pin at 23 h");
+        assert_eq!(pin.id, NodeId::Pin(peer));
+        assert_eq!(pin.id.resource(), format!("pin_{}", to_hex(&peer)));
+        assert_eq!(pin.age_s, Some(23 * 3600));
+        assert_eq!(pin.tint, Ring::Secondary);
+        assert_eq!(
+            pin.open.intent,
+            Intent::OpenMapAt {
+                peer: Target::Peer(peer)
+            }
+        );
+        assert_eq!(pin.a11y.role, Role::Button);
+        assert_eq!(
+            pin.a11y.label.resolve(Lang::En),
+            "Position of Anna, 23 h ago"
+        );
+        assert_eq!(
+            pin.a11y.label.resolve(Lang::De),
+            "Position von Anna, vor 23 Std."
+        );
+        assert!(at(25).is_none(), "older than a day");
+        assert!(at(24).is_none(), "a day is the edge");
+        // Live is the accent; no fix is no pin; without a clock the
+        // stream's state decides.
+        let live = Liveness::of(&[T], Some(T + 60));
+        let pin = PositionBadge::of(&peer, "Anna", &live, Some(T + 60)).expect("live");
+        assert_eq!(pin.tint, Ring::Accent);
+        assert!(PositionBadge::of(&peer, "Anna", &Liveness::default(), Some(T)).is_none());
+        let unclocked = PositionBadge::of(&peer, "Anna", &one, None).expect("recent");
+        assert_eq!(unclocked.age_s, None);
+        // A stream of reports a day apart is live for two; its pin goes
+        // after one all the same.
+        let slow = Liveness::of(
+            &[T, T + 86_400, T + 2 * 86_400],
+            Some(T + 3 * 86_400 + 3600),
+        );
+        assert_eq!(slow.state, liveness::State::Live);
+        assert!(PositionBadge::of(&peer, "Anna", &slow, Some(T + 3 * 86_400 + 3600)).is_none());
+    }
+
+    /// The chat's bar opens the map as the list's pin does (1224); a row
+    /// without a position has no pin and no tap on one.
+    #[test]
+    fn the_chat_bar_opens_the_map_as_the_pin_does() {
+        let mut model = model_with(&[(false, 1_793_350_800)]);
+        let peer = [0x42; 16];
+        model.selected = 0;
+        let wide = model.scene(LayoutClass::Wide);
+        let bar = wide
+            .chat
+            .as_ref()
+            .map(|chat| chat.bar.actions[0].intent.clone());
+        assert_eq!(
+            bar,
+            Some(Intent::OpenMapAt {
+                peer: Target::Peer(peer)
+            })
+        );
+        let row = wide.list.as_ref().map(|list| &list.rows[0]);
+        assert!(row.is_some_and(|row| row.position.is_none() && row.avatar.ring.is_none()));
+        assert!(wide.action(NodeId::Pin(peer)).is_none());
+    }
 
     #[test]
     fn the_liveness_words_are_the_cores_in_either_language() {

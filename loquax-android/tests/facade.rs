@@ -2337,12 +2337,14 @@ fn a_position_report_is_a_state_not_a_message() {
             .into_iter()
             .find(|r| r.row.peer == peer)
             .expect("the list's row");
+        // The list's ring is its map pin since 1224: the avatar has none.
+        assert_eq!(session::ring(list.avatar.ring), "");
         (
             row.live,
             card.live,
             card.ring,
             list.live.map(|l| l.resolve(lang)),
-            session::ring(list.avatar.ring),
+            session::pin(list.position.as_ref(), lang).0,
         )
     };
     assert_eq!(
@@ -2412,6 +2414,97 @@ fn a_position_report_is_a_state_not_a_message() {
         ),
     );
     assert_eq!(list_row(&model, &peer).unread, 2);
+}
+
+/// 1224: a chat whose peer has a position younger than a day carries the
+/// map pin in its list row, tinted as the ring was (live in the accent,
+/// recent in the secondary colour), with its content description in the
+/// phone's language; at 25 hours the pin is gone, and the avatar never
+/// rings in the list. Over the ugly store, whose own positions are months
+/// old: no other row has a pin.
+#[test]
+fn a_fresh_position_puts_the_map_pin_on_the_list_row() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent};
+    use loquax::when::WallTime;
+    use loquax_android::session;
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    model.home_client = true;
+    model.list_apart = true;
+    let clock = |at: i64| {
+        UiEvent::Clock(WallTime {
+            unix_secs: at,
+            offset_secs: 0,
+        })
+    };
+    let start = ugly_store::BASE + 3 * 86_400;
+    update(&mut model, clock(start));
+    model.restore(store.restore().expect("restore"));
+    update(&mut model, UiEvent::Close);
+    let pins = |model: &loquax::ui::UiModel<session::Line>, lang: Lang| {
+        session::found(model, model.order(), None)
+            .into_iter()
+            .filter_map(|row| {
+                assert_eq!(session::ring(row.avatar.ring), "", "{}", row.row.name);
+                row.position
+                    .as_ref()
+                    .map(|_| (row.row.peer, session::pin(row.position.as_ref(), lang)))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        pins(&model, Lang::En),
+        Vec::new(),
+        "the store's fixes are old"
+    );
+    let order = model.order();
+    let c = order[order.len() / 2];
+    let peer = model.conversations[c].peer;
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [0xc4; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: ugly_store::position(start, 52_500_000),
+            verified: true,
+        }),
+    );
+    let name = loquax::ui::chat::list_row(&model, &peer).name;
+    update(&mut model, clock(start + 120));
+    assert_eq!(
+        pins(&model, Lang::En),
+        [(
+            peer,
+            (
+                "accent".to_string(),
+                format!("Position of {name}, 2 min ago")
+            )
+        )]
+    );
+    update(&mut model, clock(start + 23 * 3600));
+    assert_eq!(
+        pins(&model, Lang::En),
+        [(
+            peer,
+            (
+                "secondary".to_string(),
+                format!("Position of {name}, 23 h ago")
+            )
+        )]
+    );
+    assert_eq!(
+        pins(&model, Lang::De)[0].1 .1,
+        format!("Position von {name}, vor 23 Std.")
+    );
+    update(&mut model, clock(start + 25 * 3600));
+    assert_eq!(pins(&model, Lang::En), Vec::new(), "older than a day");
 }
 
 /// 1217: the phone draws the chat's grouping, its day lines and the newest

@@ -512,7 +512,11 @@ pub const ROWS: &[Row<Action>] = {
             "this conversation's peer on the map",
             MAP_GROUP,
             &[
-                &[key(Char('L'), Mods::Plain, PeerOnMap, COMMAND_PANES)],
+                &[
+                    key(Char('L'), Mods::Plain, PeerOnMap, COMMAND_PANES),
+                    // The entry's map pin (1224).
+                    key(Char('m'), Mods::Plain, PeerOnMap, LIST),
+                ],
                 &[key(Char('l'), ALT, PeerOnMap, EVERY)],
             ],
         ),
