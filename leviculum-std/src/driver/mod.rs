@@ -98,7 +98,7 @@ use crate::clock::SystemClock;
 use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle, TcpTarget,
+    spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle, TcpLiveness, TcpTarget,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::{InterfaceHandle, InterfaceRegistry, InterfaceStatsMap};
@@ -2787,6 +2787,7 @@ impl ReticulumNode {
                 socks_target,
                 shutdown: Some(shutdown_rx),
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
+                liveness: TcpLiveness::default(),
             })
         };
 
@@ -5701,6 +5702,7 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             socks_target: None,
             shutdown: None,
             outbound_socket_hook: self.outbound_socket_hook.clone(),
+            liveness: TcpLiveness::default(),
         });
         // A discovered peer we dialled ourselves comes up as a gateway while
         // this node routes for others, and stays `Full` otherwise: Python

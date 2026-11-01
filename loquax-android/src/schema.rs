@@ -768,6 +768,11 @@ pub struct Profile {
     pub identity: String,
     /// Advanced: the home node's own destination, which the phone talks to.
     pub home_node: String,
+    /// Advanced: the servers the phone dials one at a time to reach it
+    /// (1196), one a line, in order, the one whose connection is up marked
+    /// `●` and the others `○`.
+    #[serde(default)]
+    pub rendezvous: String,
     /// Advanced: the propagation node the mailbox is told to use; empty
     /// when it chooses one itself.
     pub propagation_node: String,

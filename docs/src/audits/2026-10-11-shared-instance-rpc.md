@@ -347,7 +347,7 @@ uses.** Python's `path_table` rows carry `str(interface)` —
 `TCPInterface[Client on ...]`, `RNodeInterface[...]`
 (`reference/Reticulum/RNS/Reticulum.py:1534`). Ours carry the driver's
 internal name — `tcp_client_0` for a configured TCP client (the format
-lives at `leviculum-std/src/driver/interface_build/tcp.rs:44`), `udp_5`,
+lives at `leviculum-std/src/driver/interface_build/tcp.rs:45`), `udp_5`,
 `rnode_channel_2` — because the handlers read `core.interface_name`
 (`build_path_table`, `leviculum-std/src/rpc/handlers.rs:1154`;
 same in `build_transport_tables` and `get_next_hop_if_name`), while
@@ -521,10 +521,10 @@ depths, invalid lines refuse the whole file exactly as `rnsd` panics
 on them (`parse_ini`, `leviculum-std/src/ini_config.rs:214-216`,
 against `reference/Reticulum/RNS/Reticulum.py:328-333`), inline
 comments and quote stripping to ConfigObj's own rules
-(`strip_value`, `leviculum-std/src/ini_config.rs:1171`); the config
+(`strip_value`, `leviculum-std/src/ini_config.rs:1178`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1568`, against
+`leviculum-std/src/config.rs:1587`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
 with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:963-973`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
@@ -536,7 +536,7 @@ per-type default IFAC sizes pinned class by class
 MINIMUM_BITRATE (`leviculum-std/src/ini_config.rs:834-838`);
 Backbone-to-TCP normalization including the `port`/`remote`/
 `listen_on` aliases (`normalize_backbone_interface`,
-`leviculum-std/src/ini_config.rs:1086`, against
+`leviculum-std/src/ini_config.rs:1093`, against
 `reference/Reticulum/RNS/Reticulum.py:960-972`); the three UDP config
 forms of leviculum#279 — single `port`, bind-only, forward-only, plus
 the `device` broadcast fill — each built and pinned end to end from
@@ -626,7 +626,7 @@ refuses like the invalid-line arm does.
 
 *Fixed in 2d3eec85.* `parse_bool` accepts ConfigObj's eight spellings
 in any case and refuses everything else, the empty value included
-(`leviculum-std/src/ini_config.rs:1149`); the refusal stops the parse
+(`leviculum-std/src/ini_config.rs:1156`); the refusal stops the parse
 with the line, the key and the value named, as the invalid-line arm
 does: `config line 2: enable_transport = 'maybe' is neither true nor
 false (yes/no, true/false, on/off, 1/0)`. The same holds in interface
@@ -734,7 +734,7 @@ Deliberate, documented deviations, re-confirmed as stated: our
 being locally observable only (`leviculum-std/src/config.rs:246-261`);
 ingress control defaults off for dial-out point-to-point types where
 Python is flat-true (`ingress_control_default_for_type`,
-`leviculum-std/src/config.rs:1384`); the discoverable-mode promotion
+`leviculum-std/src/config.rs:1403`); the discoverable-mode promotion
 fills only an UNSET mode where Python overrides an explicit one
 (`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:387`).
 Also ignored without a current consumer: `link_mtu_discovery` (no

@@ -43,13 +43,22 @@ use crate::schema::{self, Event, VERSION};
 pub const SERVER_FILE: &str = "home-server";
 /// How long a join, a send or a mark may take; a pull gets twice this.
 pub const BUDGET: Duration = Duration::from_secs(60);
-/// How often the session takes what the engine said and runs the clock:
-/// the terminal's pump interval.
-const PUMP: Duration = Duration::from_millis(100);
+/// How often the session takes what the engine said and runs the clock
+/// while something is going on: the terminal's pump interval.
+pub const PUMP: Duration = Duration::from_millis(100);
+/// The longest the pump sleeps while the session is idle (1176): no screen
+/// in front, the watching link up, nothing sent, pulled or owed. Then
+/// nothing the pump does is due before the pull schedule's next pull, and
+/// whatever starts work wakes it at once (a request from Java, a runner's
+/// end, the watching link's word). The ceiling is the link keepalive's
+/// (`watch::LOOK`), so an idle phone's own timers wake it no more often
+/// than its link keepalive does. Before 1176 the pump ran every 100 ms for
+/// the life of the session.
+pub const IDLE_PUMP: Duration = watch::LOOK;
 /// How long a send runner waits for its bubble to be named.
 const SETTLE: Duration = Duration::from_secs(5);
-/// How many pumps between two looks at the TCP interface: a second.
-const LINK_EVERY: u32 = 10;
+/// How often the TCP interface is looked at while the pump runs fast.
+const LINK_EVERY_MS: u64 = 1_000;
 /// How many of a peer's newest positions the contact screen lists.
 const POSITIONS_SHOWN: usize = 10;
 /// How many of the positions we shared the privacy page lists (1201).
@@ -132,9 +141,11 @@ struct Inner {
     dirty: bool,
     gone: bool,
     /// Whether the TCP interface to the home node was up at the last look,
-    /// none before the first, and the pumps since that look.
+    /// none before the first, and when that look was.
     link: Option<bool>,
-    link_age: u32,
+    link_looked: Option<u64>,
+    /// Wakes the pump out of an idle sleep (1176).
+    wake: Arc<tokio::sync::Notify>,
     /// The watching link's word (`loquax::home::watch`), whether it is up,
     /// whether a screen of the app is in front, and the pull every minute
     /// while it is and the link is down.
@@ -151,12 +162,16 @@ struct Inner {
 /// A running session.
 pub struct Session {
     inner: Arc<Mutex<Inner>>,
+    /// Wakes the pump when a request may have started work (1176).
+    wake: Arc<tokio::sync::Notify>,
     events: Mutex<Receiver<Event>>,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
     /// The mailbox, when it is on this phone.
     here: Mutex<Option<mailbox::Here>>,
     address: [u8; 16],
     server: String,
+    /// The list the leaf dials one at a time, [`Session::server`] first.
+    servers: Vec<String>,
 }
 
 impl Session {
@@ -179,15 +194,15 @@ impl Session {
         };
         let start = &start;
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
-        let mut carried = None;
+        let mut carried = Vec::new();
         let code = match (&client, start.code.as_deref().map(str::trim)) {
             (_, Some(code)) if !code.is_empty() => {
-                let (code, server) = loquax::home::code::HomeCode::parse_with_server(code)
+                let (code, list) = loquax::home::code::HomeCode::parse_with_rendezvous(code)
                     .map_err(|error| StartError {
                         need: Some("code"),
                         text: format!("That is not a mailbox code: {error}"),
                     })?;
-                carried = server;
+                carried = list;
                 Some(code)
             }
             (Some(_), _) => None,
@@ -208,17 +223,23 @@ impl Session {
                 });
             }
         }
-        let server = match start.server.as_deref().map(str::trim) {
-            Some(server) if !server.is_empty() => server.to_string(),
-            _ => carried.or_else(|| load_server(&home)).ok_or(StartError {
+        // The keepalive of the connection to the mailbox: the same `tcp_*`
+        // keys as an lnsd section (1176), from this app's config file, and
+        // the rendezvous keys (1196) beside them.
+        let config =
+            loquax::config::load(&home).map_err(|error| StartError::other(error.to_string()))?;
+        let servers =
+            dial_list(start.server.as_deref(), &config, carried, &home).ok_or(StartError {
                 need: Some("server"),
                 text: "Type your mailbox's address, host:port of its lnsd TCP server.".to_string(),
-            })?,
-        };
-        loquax::engine::parse_server(&server).map_err(|text| StartError {
-            need: Some("server"),
-            text,
-        })?;
+            })?;
+        for server in &servers {
+            loquax::engine::parse_server(server).map_err(|text| StartError {
+                need: Some("server"),
+                text,
+            })?;
+        }
+        let server = servers.first().cloned().unwrap_or_default();
         let public_key = match (&code, client) {
             (Some(code), _) => code.public_key,
             (None, Some(key)) => key,
@@ -233,13 +254,19 @@ impl Session {
         std::fs::create_dir_all(&storage)
             .map_err(|error| StartError::other(format!("{}: {error}", storage.display())))?;
 
+        let tcp = config.tcp;
+        let home_destination =
+            loquax::home::destination_hash(&public_key).map_err(StartError::other)?;
         let attached = runtime.block_on(attach_leaf(
             LeafConfig {
-                server: server.clone(),
+                servers: servers.clone(),
+                home_destination: Some(home_destination),
+                timing: loquax::home::rendezvous::Timing::default(),
                 storage_dir: storage,
                 identity: device.clone(),
                 display_name: Vec::new(),
                 notices: loquax::effects::Terminal::new(home.clone()),
+                tcp,
             },
             Role::Client { address },
         ));
@@ -269,7 +296,7 @@ impl Session {
                 };
                 return Err(StartError {
                     need,
-                    text: join_words(&error, &server),
+                    text: join_words(&error, &servers.join(", ")),
                 });
             }
             loquax::home::client::save_client(&home, &code.public_key)
@@ -277,11 +304,12 @@ impl Session {
         }
         // The phone's own mailbox listens on another port at every start.
         if here.is_none() {
-            save_server(&home, &server).map_err(StartError::other)?;
+            save_servers(&home, &servers).map_err(StartError::other)?;
         }
 
         let (events_tx, events_rx) = channel();
         let (watch_tx, watch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let wake = Arc::new(tokio::sync::Notify::new());
         let watching = watch::Watch {
             node: client.node.clone(),
             public_key,
@@ -298,30 +326,43 @@ impl Session {
             events_tx,
             runtime.handle().clone(),
             watch_rx,
+            Arc::clone(&wake),
         )
         .map_err(StartError::other)?;
         // Ends with the runtime, or once the session's end of it is dropped.
-        runtime.spawn(watch::run(watching, watch_tx));
+        // The watch's word goes through a relay that wakes the pump, which
+        // may be in an idle sleep (1176).
+        let (heard_tx, heard_rx) = tokio::sync::mpsc::unbounded_channel();
+        runtime.spawn(watch::run(watching, heard_tx));
+        runtime.spawn(relay_watch(heard_rx, watch_tx, Arc::clone(&wake)));
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
+        let pump_wake = Arc::clone(&wake);
         runtime.spawn(async move {
+            let mut wait = PUMP;
             loop {
-                tokio::time::sleep(PUMP).await;
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = pump_wake.notified() => {}
+                }
                 let Ok(mut inner) = pumped.lock() else {
                     return;
                 };
                 if !inner.pump() {
                     return;
                 }
+                wait = inner.next_pump();
             }
         });
         let session = Self {
             inner,
+            wake,
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
             here: Mutex::new(here),
             address,
             server,
+            servers,
         };
         // What the home node holds since the last run, on open.
         session.lock().apply(UiEvent::Run(PaletteCommand::Fetch));
@@ -449,6 +490,12 @@ impl Session {
             since,
             identity: loquax::address::to_hex(identity.hash()),
             home_node: loquax::address::to_hex(&loquax::home::destination_hash(&public_key)?),
+            rendezvous: self
+                .rendezvous()
+                .iter()
+                .map(|(server, up)| format!("{} {server}", if *up { '●' } else { '○' }))
+                .collect::<Vec<_>>()
+                .join("\n"),
             propagation_node,
             version: loquax::VERSION.to_string(),
         })
@@ -556,9 +603,20 @@ impl Session {
         self.address
     }
 
-    /// The server the session talks to.
+    /// The server the session talks to: the first of its list.
     pub fn server(&self) -> &str {
         &self.server
+    }
+
+    /// The servers the session dials one at a time, in order, each with
+    /// whether its connection is up now: the rendezvous list Advanced
+    /// shows with the active entry marked (1196).
+    pub fn rendezvous(&self) -> Vec<(String, bool)> {
+        let state = self.lock().attached.rendezvous().unwrap_or_default();
+        self.servers
+            .iter()
+            .map(|server| (server.clone(), state.up && state.entry == *server))
+            .collect()
     }
 
     /// Whether the TCP interface to the home node is up now.
@@ -599,8 +657,16 @@ impl Session {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// What the user did.
+    /// What the user did. The pump is woken after it: whatever the request
+    /// started (a send, a pull, a screen in front) runs on the pump's turn,
+    /// and an idle pump would otherwise sleep through it (1176).
     pub fn request(&self, request: schema::Request) -> Result<(), String> {
+        let done = self.requested(request);
+        self.wake.notify_one();
+        done
+    }
+
+    fn requested(&self, request: schema::Request) -> Result<(), String> {
         let intent = match decode(request)? {
             Decoded::Intent(intent) => intent,
             Decoded::Platform(platform) => return self.platform(platform),
@@ -1074,6 +1140,7 @@ impl Inner {
         events: Sender<Event>,
         runtime: tokio::runtime::Handle,
         watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+        wake: Arc<tokio::sync::Notify>,
     ) -> Result<Self, String> {
         let store = Store::open_in(home, address).map_err(|error| error.to_string())?;
         let config = loquax::config::load(home).map_err(|error| error.to_string())?;
@@ -1133,7 +1200,8 @@ impl Inner {
             gone: false,
             link: None,
             // The first pump looks, and says what it saw.
-            link_age: LINK_EVERY,
+            link_looked: None,
+            wake,
             watch,
             watching: false,
             front: false,
@@ -1207,6 +1275,32 @@ impl Inner {
         true
     }
 
+    /// How long the pump may sleep before its next turn (1176): [`PUMP`]
+    /// while anything is going on, else until the pull schedule's next
+    /// pull, at most [`IDLE_PUMP`].
+    fn next_pump(&self) -> Duration {
+        let busy = self.front
+            || !self.watching
+            || self.sending
+            || self.pulling
+            || self.pull_owed
+            || !self.sends.is_empty()
+            || self.link.is_none()
+            || self.dirty;
+        if busy {
+            return PUMP;
+        }
+        let now = self.elapsed_ms();
+        let sync = self.model.sync.as_ref();
+        if sync.and_then(|sync| sync.due(now)).is_some() {
+            return PUMP;
+        }
+        let until_sync = sync
+            .and_then(|sync| sync.next_ms())
+            .map(|next| Duration::from_millis(next.saturating_sub(now)));
+        idle_wait(until_sync)
+    }
+
     /// What the watching link said: a wake past the cursor pulls, as does
     /// a minute in front with the link down. The pull is the one a send
     /// starts, behind a running one; its messages notify as any pull's do.
@@ -1234,14 +1328,18 @@ impl Inner {
         }
     }
 
-    /// Once a second: whether the TCP interface is up, told when it
-    /// changed and on the first look.
+    /// Once a second while the pump runs fast, on every pump while it
+    /// idles: whether the TCP interface is up, told when it changed and on
+    /// the first look.
     fn look_at_link(&mut self) {
-        self.link_age += 1;
-        if self.link_age < LINK_EVERY {
+        let now = self.elapsed_ms();
+        if self
+            .link_looked
+            .is_some_and(|at| now.saturating_sub(at) < LINK_EVERY_MS)
+        {
             return;
         }
-        self.link_age = 0;
+        self.link_looked = Some(now);
         let up = link_up(&self.client.node);
         if up && self.link == Some(false) {
             self.ask_for_home_path();
@@ -1487,11 +1585,13 @@ impl Inner {
                 let mut tap = self.fanout.tap();
                 let client = self.client.clone();
                 let done = self.finished_tx.clone();
+                let wake = Arc::clone(&self.wake);
                 self.runtime.spawn(async move {
                     let event =
                         runner::send_home(&mut tap, &client, to, body, fields, BUDGET, SETTLE)
                             .await;
                     let _ = done.send(Finished::Send(event));
+                    wake.notify_one();
                 });
             }
         }
@@ -1505,9 +1605,11 @@ impl Inner {
             let client = self.client.clone();
             let home = self.home.clone();
             let done = self.finished_tx.clone();
+            let wake = Arc::clone(&self.wake);
             self.runtime.spawn(async move {
                 let end = runner::pull(&mut tap, &client, &home, BUDGET).await;
                 let _ = done.send(Finished::Pull(end));
+                wake.notify_one();
             });
         }
     }
@@ -2295,6 +2397,33 @@ fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
 /// Whether the leaf's interface to the home node is up: its only one, the
 /// TCP client, which is down from the moment the server goes until it
 /// redials.
+/// The idle pump's sleep: until the pull schedule's next pull when there
+/// is one, never longer than [`IDLE_PUMP`], never shorter than [`PUMP`].
+fn idle_wait(until_sync: Option<Duration>) -> Duration {
+    until_sync.unwrap_or(IDLE_PUMP).clamp(PUMP, IDLE_PUMP)
+}
+
+/// Hand the watching link's word on to the session and wake its pump;
+/// ends with either side.
+async fn relay_watch(
+    mut heard: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+    session: tokio::sync::mpsc::UnboundedSender<WatchEvent>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        tokio::select! {
+            event = heard.recv() => {
+                let Some(event) = event else { return };
+                if session.send(event).is_err() {
+                    return;
+                }
+                wake.notify_one();
+            }
+            () = session.closed() => return,
+        }
+    }
+}
+
 fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
     node.interface_stats()
         .iter()
@@ -2324,15 +2453,51 @@ fn wall_now(offset: i32) -> WallTime {
     }
 }
 
-fn load_server(home: &Path) -> Option<String> {
+/// The kept list, one `host:port` a line; a file from before the list holds
+/// one line and reads as a list of one.
+fn load_servers(home: &Path) -> Vec<String> {
     std::fs::read_to_string(home.join(SERVER_FILE))
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
-fn save_server(home: &Path, server: &str) -> Result<(), String> {
-    loquax::home::client::write_atomically(&home.join(SERVER_FILE), &format!("{server}\n"))
+fn save_servers(home: &Path, servers: &[String]) -> Result<(), String> {
+    let mut text = servers.join("\n");
+    text.push('\n');
+    loquax::home::client::write_atomically(&home.join(SERVER_FILE), &text)
+}
+
+/// What the leaf dials, in order (1196): a server given beside the code
+/// wins, as a fixed address; then the config's `home_address`,
+/// `rendezvous_dial` and `rendezvous` keys; then the list the code carried,
+/// else the one kept from the last start; then the shipped rendezvous list,
+/// unless this host holds the shipped defaults back
+/// ([`loquax::home::rendezvous::defaults_held_back`], a rig or CI host).
+/// `None` when nothing is left to dial: the join screen asks for an address.
+fn dial_list(
+    given: Option<&str>,
+    config: &loquax::config::Config,
+    carried: Vec<String>,
+    home: &Path,
+) -> Option<Vec<String>> {
+    use loquax::home::rendezvous::{default_list, defaults_held_back, reach, Reach};
+    if let Some(given) = given.map(str::trim).filter(|given| !given.is_empty()) {
+        return Some(vec![given.to_string()]);
+    }
+    let known = match carried.is_empty() {
+        true => load_servers(home),
+        false => carried,
+    };
+    match reach(config, &known) {
+        Reach::Fixed(fixed) => Some(vec![fixed]),
+        Reach::MeshOnly => None,
+        Reach::List(list) if list == default_list() && defaults_held_back() => None,
+        Reach::List(list) => Some(list),
+    }
 }
 
 /// A peer's address as the app hands it back.
@@ -2345,4 +2510,33 @@ pub fn parse_peer(text: &str) -> Result<[u8; 16], String> {
 pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
     let text = text.trim();
     loquax::address::parse_id(text).ok_or_else(|| format!("'{text}' is not a message id"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The client's own periodic timers while it idles (1176), as the
+    /// report lists them. Tokio exposes no list of the timers a runtime
+    /// holds, so this pins the periods instead: the pump's idle sleep and
+    /// the watch's backstop are both the link keepalive's ceiling, and the
+    /// idle sleep ends early only for the pull schedule.
+    #[test]
+    fn an_idle_client_wakes_no_more_often_than_the_link_keepalive() {
+        let keepalive = Duration::from_secs(leviculum_core::constants::LINK_KEEPALIVE_SECS);
+        assert_eq!(IDLE_PUMP, keepalive);
+        assert_eq!(watch::LOOK, keepalive);
+        assert_eq!(idle_wait(None), keepalive, "no pull scheduled");
+        assert_eq!(
+            idle_wait(Some(Duration::from_secs(900))),
+            keepalive,
+            "a pull later than the ceiling"
+        );
+        assert_eq!(
+            idle_wait(Some(Duration::from_secs(30))),
+            Duration::from_secs(30),
+            "the pull schedule's next pull ends the sleep"
+        );
+        assert_eq!(idle_wait(Some(Duration::ZERO)), PUMP, "never a busy loop");
+    }
 }

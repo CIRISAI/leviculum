@@ -1182,6 +1182,21 @@ pub struct InterfaceConfig {
     /// Fraction of `max_connections` above which a TCP server is under
     /// pressure (1190). Absent is 0.8; outside `(0, 1]` is refused.
     pub pressure_fraction: Option<f64>,
+    /// Seconds a TCP connection stays idle before the kernel sends its
+    /// first keepalive probe, on a TCP client or server section (1176).
+    /// Absent is 5, the reference's `TCP_PROBE_AFTER`; 1 to 32767. No
+    /// reference key: Python fixes the value and ignores the key.
+    pub tcp_keepalive_idle_secs: Option<u64>,
+    /// Seconds between unanswered keepalive probes (1176). Absent is 2
+    /// (`TCP_PROBE_INTERVAL`); 1 to 32767. No reference key.
+    pub tcp_keepalive_interval_secs: Option<u64>,
+    /// Unanswered keepalive probes before the connection is dropped
+    /// (1176). Absent is 12 (`TCP_PROBES`); 1 to 127. No reference key.
+    pub tcp_keepalive_probes: Option<u32>,
+    /// Seconds sent data may stay unacknowledged before the connection is
+    /// dropped (`TCP_USER_TIMEOUT`, 1176). Absent is 24, `0` leaves the
+    /// kernel default. No reference key.
+    pub tcp_user_timeout_secs: Option<u64>,
     /// A TCP server's listener, bound by the caller and handed over instead
     /// of an address (`ReticulumNodeBuilder::add_tcp_server_listener`). Never
     /// a config-file key: a bound socket is not representable there, which is
@@ -1353,6 +1368,10 @@ impl Default for InterfaceConfig {
             silent_timeout_secs: None,
             silent_timeout_pressure_secs: None,
             pressure_fraction: None,
+            tcp_keepalive_idle_secs: None,
+            tcp_keepalive_interval_secs: None,
+            tcp_keepalive_probes: None,
+            tcp_user_timeout_secs: None,
             prebound_tcp_listener: None,
         }
     }

@@ -310,6 +310,10 @@ public class ProfileActivity extends Activity {
         });
         fact(facts, getString(R.string.profile_identity), Core.str(profile, "identity"), true);
         fact(facts, getString(R.string.profile_home_node), Core.str(profile, "home_node"), true);
+        String rendezvous = Core.str(profile, "rendezvous");
+        if (!rendezvous.isEmpty()) {
+            fact(facts, getString(R.string.profile_rendezvous), rendezvous, true);
+        }
         String node = Core.str(profile, "propagation_node");
         fact(facts, getString(R.string.propagation_node),
                 node.isEmpty() ? getString(R.string.profile_pn_chosen) : node, !node.isEmpty());

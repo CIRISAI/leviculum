@@ -77,6 +77,8 @@ use crate::outbox::{Command, MailboxInput, OutboxEvent, SendRequest, Via};
 #[cfg(feature = "std")]
 mod shell;
 #[cfg(feature = "std")]
+pub(crate) use shell::tcp_section;
+#[cfg(feature = "std")]
 pub use shell::{
     attach, attach_as, attach_leaf, attach_mesh, parse_server, AttachConfig, AttachError, Attached,
     HomeRequest, InProcessOutbox, LeafConfig, MeshConfig, Role,

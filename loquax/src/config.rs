@@ -62,6 +62,19 @@
 //! `home_wake`, `on` (the default) or `off`, whether clients that keep a
 //! link are woken when mail arrives.
 //!
+//! Three keys say how a phone and its mailbox reach each other
+//! (`docs/src/concepts/loquax-reachability.md`, 1196), all for power users:
+//! the defaults decide. `rendezvous`, the ordered list of public nodes both
+//! ends dial, one at a time with failover, `host:port` each, separated by
+//! commas and optionally in brackets (`rendezvous = ["a.example:4343",
+//! "b.example:4343"]`; unset is `leviculum.network:4343` with `:4242`
+//! behind it, `crate::home::rendezvous::DEFAULT`); the port is the phones'
+//! access point port, and a mailbox dials the ordinary one beside it.
+//! `rendezvous_dial`, `on` (the default) or `off`: off is "mesh only", no
+//! rendezvous dialled at all. And `home_address`, a fixed `host:port` the
+//! phone dials instead of any rendezvous (a mailbox with a public address
+//! or a router pinhole, "Advanced").
+//!
 //! A drawing's name is not checked here: the set is the frontend's, and a
 //! name an older loquax does not know falls back to its own choice, said
 //! once, rather than stop it from starting.
@@ -152,6 +165,37 @@ pub struct Config {
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
     pub map_drawing: Vec<(String, String)>,
+    /// The `tcp_*` keys, when the file sets them: the TCP keepalive of
+    /// the device's connection to its mailbox (1176).
+    pub tcp: TcpLiveness,
+    /// `rendezvous`, when the file sets it: the ordered list of public
+    /// nodes, `host:port` each (1196).
+    pub rendezvous: Option<Vec<String>>,
+    /// `rendezvous_dial`, when the file sets it; unset is on, off is
+    /// "mesh only".
+    pub rendezvous_dial: Option<bool>,
+    /// `home_address`, when the file sets it: the fixed `host:port` a phone
+    /// dials instead of a rendezvous.
+    pub home_address: Option<String>,
+}
+
+/// A TCP connection's keepalive and user timeout, as the file sets them
+/// (1176): the same four keys, with the same names and meaning, as an
+/// lnsd TCP interface section (`docs/src/guide/configuration.md`, "TCP
+/// server"). Unset is the reference's value; the range is checked when the
+/// node is built, which refuses a value the kernel would not take.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpLiveness {
+    /// `tcp_keepalive_idle_secs`: idle seconds before the first probe.
+    pub idle_secs: Option<u64>,
+    /// `tcp_keepalive_interval_secs`: seconds between unanswered probes.
+    pub interval_secs: Option<u64>,
+    /// `tcp_keepalive_probes`: unanswered probes before the connection
+    /// is dropped.
+    pub probes: Option<u32>,
+    /// `tcp_user_timeout_secs`: seconds sent data may stay unacknowledged;
+    /// `0` is the kernel default.
+    pub user_timeout_secs: Option<u64>,
 }
 
 /// The prefix of a remembered map drawing's key; the context follows it.
@@ -212,6 +256,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             ("home_wake", &mut config.home_wake),
             ("map_fling", &mut config.map_fling),
             ("read_receipts", &mut config.read_receipts),
+            ("rendezvous_dial", &mut config.rendezvous_dial),
         ] {
             if key.trim() == name {
                 *slot = Some(match value.trim().trim_matches('"') {
@@ -341,12 +386,72 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 }
             }
         }
+        for name in [
+            "tcp_keepalive_idle_secs",
+            "tcp_keepalive_interval_secs",
+            "tcp_keepalive_probes",
+            "tcp_user_timeout_secs",
+        ] {
+            if key.trim() != name {
+                continue;
+            }
+            let text = value.trim().trim_matches('"');
+            let Ok(n) = text.parse::<u64>() else {
+                return Err(ConfigError::BadValue {
+                    line: index + 1,
+                    key: name,
+                    detail: alloc::format!("{text:?} is not a whole number"),
+                });
+            };
+            match name {
+                "tcp_keepalive_idle_secs" => config.tcp.idle_secs = Some(n),
+                "tcp_keepalive_interval_secs" => config.tcp.interval_secs = Some(n),
+                "tcp_keepalive_probes" => {
+                    config.tcp.probes = Some(u32::try_from(n).unwrap_or(u32::MAX))
+                }
+                _ => config.tcp.user_timeout_secs = Some(n),
+            }
+        }
         if let Some(context) = key.trim().strip_prefix(MAP_DRAWING) {
             let drawing = value.trim().trim_matches('"').to_string();
             match config.map_drawing.iter_mut().find(|(c, _)| c == context) {
                 Some((_, held)) => *held = drawing,
                 None => config.map_drawing.push((context.to_string(), drawing)),
             }
+        }
+        if key.trim() == "rendezvous" {
+            let inner = value.trim();
+            let inner = inner
+                .strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(inner);
+            let mut list = Vec::new();
+            for entry in inner.split(',') {
+                let entry = entry.trim().trim_matches('"').trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                if !is_host_port(entry) {
+                    return Err(ConfigError::BadValue {
+                        line: index + 1,
+                        key: "rendezvous",
+                        detail: alloc::format!("{entry:?} is not host:port"),
+                    });
+                }
+                list.push(entry.to_string());
+            }
+            config.rendezvous = Some(list);
+        }
+        if key.trim() == "home_address" {
+            let entry = value.trim().trim_matches('"').trim();
+            if !is_host_port(entry) {
+                return Err(ConfigError::BadValue {
+                    line: index + 1,
+                    key: "home_address",
+                    detail: alloc::format!("{entry:?} is not host:port"),
+                });
+            }
+            config.home_address = Some(entry.to_string());
         }
         if key.trim() == "propagation_node" {
             let value = value.trim().trim_matches('"');
@@ -363,6 +468,14 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         }
     }
     Ok(config)
+}
+
+/// Whether `text` reads as `host:port`, a port from 1 to 65535 behind the
+/// last colon and a host before it; the dialler says what else is wrong.
+fn is_host_port(text: &str) -> bool {
+    text.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0)
+    })
 }
 
 /// Why `home/config` could not be used, with the file named.
@@ -711,6 +824,61 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).expect("read");
         assert_eq!(text, "map_drawing.local:foot = blocks\n");
         assert!(!dir.path().join(".config.new").exists());
+    }
+
+    /// The four TCP keys (1176) parse under the names an lnsd section
+    /// uses, and a word where a number belongs is an error naming the key.
+    #[test]
+    fn the_rendezvous_keys_parse_and_a_bad_entry_is_an_error() {
+        let config = parse_str(
+            "rendezvous = [\"a.example:4343\", b.example:4343 , [fd00::1]:4343]\n\
+             rendezvous_dial = off\nhome_address = 10.0.0.2:4242\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            config.rendezvous,
+            Some(vec![
+                "a.example:4343".to_string(),
+                "b.example:4343".to_string(),
+                "[fd00::1]:4343".to_string()
+            ])
+        );
+        assert_eq!(config.rendezvous_dial, Some(false));
+        assert_eq!(config.home_address.as_deref(), Some("10.0.0.2:4242"));
+        let none = parse_str("").expect("empty");
+        assert_eq!(
+            (none.rendezvous, none.rendezvous_dial, none.home_address),
+            (None, None, None)
+        );
+        assert!(parse_str("rendezvous = a.example\n").is_err());
+        assert!(parse_str("rendezvous = a.example:0\n").is_err());
+        assert!(parse_str("home_address = :4242\n").is_err());
+    }
+
+    #[test]
+    fn the_tcp_liveness_keys_parse_and_a_word_is_an_error() {
+        let config = parse_str(
+            "tcp_keepalive_idle_secs = 600\ntcp_keepalive_interval_secs = 30\n\
+             tcp_keepalive_probes = 4\ntcp_user_timeout_secs = 0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.tcp,
+            TcpLiveness {
+                idle_secs: Some(600),
+                interval_secs: Some(30),
+                probes: Some(4),
+                user_timeout_secs: Some(0),
+            }
+        );
+        assert_eq!(parse_str("").unwrap().tcp, TcpLiveness::default());
+        assert!(matches!(
+            parse_str("tcp_keepalive_idle_secs = long\n"),
+            Err(ConfigError::BadValue {
+                key: "tcp_keepalive_idle_secs",
+                ..
+            })
+        ));
     }
 
     #[test]

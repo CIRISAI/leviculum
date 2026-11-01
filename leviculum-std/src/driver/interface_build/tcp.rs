@@ -8,8 +8,9 @@ use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::inventory::{self, InterfaceIdentity};
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpServerConfig, TcpTarget,
-    DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
+    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpLiveness,
+    TcpServerConfig, TcpTarget, DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT,
+    TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::tcp_admission::{
     AdmissionConfig, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_SOURCE,
@@ -45,6 +46,7 @@ pub(super) fn build_client(
     let id = InterfaceId(idx);
     let buffer_size = config.buffer_size.unwrap_or(TCP_DEFAULT_BUFFER_SIZE);
     let reconnect_interval = Duration::from_secs(config.reconnect_interval_secs.unwrap_or(5));
+    let liveness = liveness_config(config)?;
 
     // TCP interfaces don't register a bitrate cap (bitrate=0 means unlimited).
     // Future LoRa/serial interfaces should call register_interface_bitrate(id,
@@ -68,6 +70,7 @@ pub(super) fn build_client(
         socks_target: None,
         shutdown: None,
         outbound_socket_hook: ctx.outbound_socket_hook.clone(),
+        liveness,
     });
     // The reference names this interface `TCPInterface[<name>/<host>:<port>]`
     // in every answer (D8 of the 2026-10-11 shared-instance audit); the
@@ -163,6 +166,10 @@ pub(super) fn build_server(
             &ctx.default_announce_rate,
         ),
         admission: admission_config(config)?,
+        // Every accepted connection takes the listener's liveness, as it
+        // takes its mode: the section is the only place a config file has
+        // for an accepted connection (1176).
+        liveness: liveness_config(config)?,
     })?;
     Ok(Built::SelfManaged)
 }
@@ -198,4 +205,73 @@ pub(super) fn admission_config(config: &InterfaceConfig) -> Result<AdmissionConf
         ),
         pressure_fraction,
     })
+}
+
+/// A TCP client's or server's keepalive and user timeout (1176), today's
+/// defaults for every key the section leaves out. A value the kernel would
+/// refuse is an error here: at the socket it would fail silently.
+pub(super) fn liveness_config(config: &InterfaceConfig) -> Result<TcpLiveness, Error> {
+    TcpLiveness::from_keys(
+        config.tcp_keepalive_idle_secs,
+        config.tcp_keepalive_interval_secs,
+        config.tcp_keepalive_probes,
+        config.tcp_user_timeout_secs,
+    )
+    .map_err(|detail| Error::Config(format!("interface '{}': {detail}", config.name)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(lines: &str) -> InterfaceConfig {
+        let config = crate::ini_config::parse_ini(&format!(
+            "[interfaces]\n  [[Phones]]\n    type = TCPServerInterface\n    \
+             listen_port = 4243\n{lines}"
+        ))
+        .expect("config parses");
+        config.interfaces.get("Phones").expect("section").clone()
+    }
+
+    /// The four liveness keys (1176) survive the round trip from the config
+    /// file through `InterfaceConfig` and its serde form to the socket
+    /// settings, and a section without them keeps today's values.
+    #[test]
+    fn liveness_keys_round_trip_from_the_config_file() {
+        let section = parsed(
+            "    tcp_keepalive_idle_secs = 600\n    tcp_keepalive_interval_secs = 30\n    \
+             tcp_keepalive_probes = 4\n    tcp_user_timeout_secs = 90\n",
+        );
+        assert_eq!(section.tcp_keepalive_idle_secs, Some(600));
+        assert_eq!(section.tcp_keepalive_interval_secs, Some(30));
+        assert_eq!(section.tcp_keepalive_probes, Some(4));
+        assert_eq!(section.tcp_user_timeout_secs, Some(90));
+        let json = serde_json::to_string(&section).expect("serialises");
+        let back: InterfaceConfig = serde_json::from_str(&json).expect("deserialises");
+        let liveness = liveness_config(&back).expect("in range");
+        assert_eq!(
+            liveness,
+            TcpLiveness {
+                idle: Duration::from_secs(600),
+                interval: Duration::from_secs(30),
+                probes: 4,
+                user_timeout: Some(Duration::from_secs(90)),
+            }
+        );
+        assert_eq!(
+            liveness_config(&parsed("")).expect("defaults"),
+            TcpLiveness::default()
+        );
+    }
+
+    /// A value the kernel would refuse stops the start with the section's
+    /// name, instead of failing silently at the socket.
+    #[test]
+    fn an_out_of_range_liveness_key_is_a_config_error() {
+        let error =
+            liveness_config(&parsed("    tcp_keepalive_idle_secs = 0\n")).expect_err("zero idle");
+        let text = error.to_string();
+        assert!(text.contains("Phones"), "{text}");
+        assert!(text.contains("tcp_keepalive_idle_secs"), "{text}");
+    }
 }

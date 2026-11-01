@@ -11,10 +11,15 @@ use leviculum_std::ReticulumNode;
 
 use super::wire::{self, Entry, Status};
 
-/// How often the path to the home destination is asked for again while
-/// none has come: the reference's wait between a path request and the next
-/// attempt (`leviculum_lxmf::router::PATH_REQUEST_WAIT_MS`).
+/// How long after a path request the next one goes while no path has come:
+/// first the reference's wait between a path request and the next attempt
+/// (`leviculum_lxmf::router::PATH_REQUEST_WAIT_MS`), doubled on each one
+/// unanswered up to [`PATH_RETRY_MAX`]. A mailbox behind a third party's
+/// plain port whose announce has not reached the entry node yet is found by
+/// a later request, or by its next announce (1196).
 const PATH_RETRY: Duration = Duration::from_millis(leviculum_lxmf::router::PATH_REQUEST_WAIT_MS);
+/// The longest wait between two path requests within one attempt.
+const PATH_RETRY_MAX: Duration = Duration::from_secs(60);
 /// How often a waiting path is looked for.
 const PATH_POLL: Duration = Duration::from_millis(100);
 
@@ -304,19 +309,50 @@ pub(crate) async fn open(
     let destination =
         DestinationHash::new(super::destination_hash(public_key).map_err(HomeError::NoLink)?);
     let mut asked: Option<tokio::time::Instant> = None;
+    let mut retry = PATH_RETRY;
+    let mut requests = 0u32;
     while !node.has_path(&destination) {
         let now = tokio::time::Instant::now();
         if now >= deadline {
+            tracing::info!(
+                "HOME no path to the mailbox after {requests} path request(s); the next \
+                 attempt asks again"
+            );
             return Err(HomeError::NoPath);
         }
-        if asked.is_none_or(|at| now.duration_since(at) >= PATH_RETRY) {
+        if let Some(at) = asked {
+            if now.duration_since(at) >= retry {
+                retry = (retry * 2).min(PATH_RETRY_MAX);
+                asked = None;
+            }
+        }
+        if asked.is_none() {
             asked = Some(now);
+            requests += 1;
+            if requests > 1 {
+                tracing::info!(
+                    "HOME looking for the mailbox: path request {requests}, the next in {} s",
+                    retry.as_secs()
+                );
+            }
             node.request_path(&destination)
                 .await
                 .map_err(|e| HomeError::NoLink(e.to_string()))?;
         }
         tokio::time::sleep(PATH_POLL).await;
     }
+    // Rule 3 (1196): a link over a long path may take the transport's own
+    // establishment time, per hop as the reference reckons it
+    // (`ESTABLISHMENT_TIMEOUT_PER_HOP`, `reference/Reticulum/RNS/Link.py:284`),
+    // however short the caller's budget was set on a TCP round trip's
+    // reckoning.
+    let hops = u64::from(node.hops_to(&destination).unwrap_or(1).max(1));
+    let deadline = deadline.max(
+        tokio::time::Instant::now()
+            + Duration::from_millis(
+                leviculum_core::constants::ESTABLISHMENT_TIMEOUT_PER_HOP_MS.saturating_mul(hops),
+            ),
+    );
     let mut signing_key = [0u8; 32];
     signing_key.copy_from_slice(&public_key[32..]);
     let (handle, established) = node

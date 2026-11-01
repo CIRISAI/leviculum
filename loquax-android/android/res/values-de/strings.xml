@@ -262,6 +262,7 @@
     <string name="profile_mailbox_change">Anderes Postfach verwenden</string>
     <string name="profile_identity">Identitäts-Hash</string>
     <string name="profile_home_node">Heimknoten</string>
+    <string name="profile_rendezvous">Treffpunkt (● verbunden)</string>
     <string name="profile_pn_chosen">Von deinem Postfach gewählt</string>
     <string name="profile_version">App-Version</string>
     <string name="add_contact">Kontakt hinzufügen</string>

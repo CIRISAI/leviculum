@@ -18,6 +18,8 @@
 //! - `client`: how a client asks, over the driver's link API.
 //! - `daemon`: `loquax --daemon`, the home node itself.
 //! - `lock`: one registrar of the delivery destination per home.
+//! - `rendezvous`: the public node both ends dial, one at a time, with
+//!   failover (`docs/src/concepts/loquax-reachability.md`).
 
 use alloc::string::String;
 
@@ -36,8 +38,12 @@ pub mod client;
 pub mod daemon;
 #[cfg(feature = "std")]
 pub mod lock;
+#[cfg(feature = "std")]
+pub mod phone_server;
 #[cfg(feature = "qr")]
 pub mod qr;
+#[cfg(feature = "std")]
+pub mod rendezvous;
 #[cfg(feature = "history")]
 pub mod runner;
 #[cfg(feature = "history")]
@@ -46,8 +52,18 @@ pub mod server;
 pub mod watch;
 
 /// The home destination's app name and aspect: `loquax.home`, a SINGLE
-/// destination of the home identity. It is never announced; a client learns
-/// its key from the admission code and asks for its path.
+/// destination of the home identity. A client learns its key from the
+/// admission code and asks for its path on every connect.
+///
+/// It is announced, on the delivery destination's cadence (1196). Until
+/// then it was not, and that cost reachability: a relay searches for a path
+/// it does not know only when the request came in on an access point,
+/// gateway or roaming interface (`reference/Reticulum/RNS/Transport.py:2918`),
+/// so a mailbox two relays behind the phone's entry node was out of reach.
+/// With the announce every relay on the way holds the path. It tells the
+/// network no more than the identity's public key, which the delivery
+/// announce publishes already, and that this identity runs a Loquax
+/// mailbox.
 pub const APP_NAME: &str = "loquax";
 /// See [`APP_NAME`].
 pub const ASPECT: &str = "home";

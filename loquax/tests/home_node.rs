@@ -731,11 +731,14 @@ async fn a_leaf_with_its_own_tcp_interface_joins_pulls_and_marks() {
     node.wait_for("HOME archived message=", 10).await;
 
     let leaf = |server: String, storage: std::path::PathBuf| LeafConfig {
-        server,
+        servers: vec![server],
+        home_destination: None,
+        timing: Default::default(),
         storage_dir: storage,
         identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
         display_name: Vec::new(),
         notices: loquax::effects::Terminal::new(std::env::temp_dir()),
+        tcp: Default::default(),
     };
     let phone = tempfile::tempdir().expect("phone home");
     let storage = phone.path().join("storage");
@@ -867,11 +870,14 @@ async fn watching_leaf(
     let storage = phone.path().join("storage");
     std::fs::create_dir_all(&storage).expect("storage dir");
     let config = LeafConfig {
-        server: format!("127.0.0.1:{port}"),
+        servers: vec![format!("127.0.0.1:{port}")],
+        home_destination: None,
+        timing: Default::default(),
         storage_dir: storage,
         identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
         display_name: Vec::new(),
         notices: loquax::effects::Terminal::new(std::env::temp_dir()),
+        tcp: Default::default(),
     };
     let device = config.identity.clone();
     let attached = attach_leaf(config, Role::Client { address })

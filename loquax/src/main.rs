@@ -160,8 +160,9 @@ enum MailboxCommand {
         #[arg(long)]
         name: Option<String>,
         /// The mailbox's TCP server as a phone reaches it, `host:port`:
-        /// written into the code (`lqxh1...@host:port`), so the phone needs
-        /// one scan or one paste.
+        /// written into the code (`lqxh1...@host:port`) ahead of the
+        /// rendezvous list the mailbox dials itself, so the phone needs one
+        /// scan or one paste and tries this address first.
         #[arg(long)]
         server: Option<String>,
     },
@@ -1558,6 +1559,8 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         Some(Ok(bound)) => bound,
         Some(Err(error)) => return usage(format!("--sync-interval {error}")),
     };
+    // A mailbox with no identity yet is a new install (1176).
+    let first_start = !home.join("identity").exists();
     let identity = match identity::load_or_create(&home.join("identity")) {
         Ok(identity) => identity,
         Err(error) => return failure(error, "no-identity"),
@@ -1567,6 +1570,12 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         Err(error) => return usage(error),
     };
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+    // The phones' port, in access point mode, on a new install only: a
+    // config that already runs is never rewritten (1176).
+    if first_start {
+        let added = loquax::home::phone_server::add(&config_dir);
+        println!("{}", loquax::home::phone_server::first_start_lines(&added));
+    }
     let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
     let storage_dir = match storage_dir(&home) {
         Ok(dir) => dir,
@@ -1584,12 +1593,24 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
             })
         })
     };
+    // The rendezvous the phones meet the mailbox on (1196): dialled from
+    // the mailbox's own node, one at a time, as a peer.
+    let (rendezvous, from) = loquax::home::rendezvous::mailbox_list(&config);
+    tracing::warn!(
+        "HOME rendezvous list={} from={from}",
+        match rendezvous.is_empty() {
+            true => "none".to_string(),
+            false => rendezvous.join(","),
+        }
+    );
     let outcome = loquax::home::daemon::run(loquax::home::daemon::DaemonOptions {
         home,
         upstream: loquax::home::daemon::DaemonUpstream::Shared {
             instance,
             config_dir,
             mailbox,
+            rendezvous,
+            tcp: config.tcp,
         },
         storage_dir,
         identity,
@@ -1683,21 +1704,34 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
                 Err(error) => return failure(error, "no-identity"),
             };
             let code = loquax::home::code::HomeCode { public_key, token };
-            let text = match server {
-                Some(server) => code.encode_with_server(server),
-                None => code.encode(),
+            // The rendezvous list the phone tries in order (1196): this
+            // mailbox's own phone port first when --server names it, then
+            // the list the mailbox dials itself, on the phones' ports.
+            let config = match loquax::config::load(&home) {
+                Ok(config) => config,
+                Err(error) => return usage(error.to_string()),
             };
+            let shared: Vec<String> = match loquax::home::rendezvous::mailbox_list(&config) {
+                (_, "config") => config.rendezvous.clone().unwrap_or_default(),
+                (_, "default") => loquax::home::rendezvous::default_list(),
+                _ => Vec::new(),
+            };
+            let list = match server {
+                Some(server) => loquax::home::rendezvous::with_first(server, &shared),
+                None => shared,
+            };
+            let text = code.encode_with_rendezvous(&list);
             println!("Admission code for {name:?}, good for one device, once:\n\n{text}\n");
             match loquax::home::qr::lines(&text) {
                 Ok(lines) => println!("{}\n", lines.join("\n")),
                 Err(error) => eprintln!("loquax: no QR code: {error}"),
             }
-            match server {
-                Some(_) => println!(
+            match server.is_some() || !list.is_empty() {
+                true => println!(
                     "On a phone: scan it with a QR reader and share it to Loquax, or paste it \
                      into Loquax's join screen."
                 ),
-                None => println!(
+                false => println!(
                     "On a phone: paste it, with this node's address; --server puts that in the \
                      code."
                 ),

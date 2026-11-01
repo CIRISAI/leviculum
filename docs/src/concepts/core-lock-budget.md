@@ -33,7 +33,7 @@ Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:3803`).
+(`leviculum-std/src/driver/mod.rs:3804`).
 
 `NodeCore::send_resource` still exists as the composed single call
 (`leviculum-core/src/node/mod.rs:1652`) because no_std and FFI callers
@@ -258,7 +258,7 @@ check is worth.
 
 53 of them are on `ReticulumNode` — plain synchronous `pub fn`s that
 open by locking the core, of which `has_path`
-(`leviculum-std/src/driver/mod.rs:3268`) is
+(`leviculum-std/src/driver/mod.rs:3269`) is
 `self.inner.lock_recover().has_path(dest_hash)` and entirely typical.
 The other five are on `PacketSender` and `LinkHandle`, which matters
 more than the count suggests: those are the two handles a callee is
@@ -369,7 +369,7 @@ The rule that follows is the CPU rule's sibling:
 > worse bug than the missing diagnostic.**
 
 The event log now inverts the trade (`FileSink`,
-`leviculum-std/src/event_log.rs:1698`): the emitting thread does a
+`leviculum-std/src/event_log.rs:1709`): the emitting thread does a
 bounded enqueue and returns, one writer thread owns the file, and an
 overrun drops lines and says so with `EVENT_LOG_DROPPED` rather than
 blocking the mesh. `LEVICULUM_EVENT_LOG_SYNC=1` restores the old

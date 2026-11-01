@@ -24,7 +24,13 @@
 //!   beside it, seen within [`OUTSIDE_LOOK`] (1164);
 //! - archives the announced name of a peer the user has a relation to
 //!   ([`super::relation`]), and of no other, and wakes nobody for it: a
-//!   name rides along with the next pull (1136).
+//!   name rides along with the next pull (1136);
+//! - announces its `loquax.home` destination with every delivery announce,
+//!   so every relay between a phone and the mailbox holds its path (1196,
+//!   [`super::APP_NAME`] says why);
+//! - keeps a peer connection to one rendezvous at a time, the first of its
+//!   list that answers ([`super::rendezvous`]), so a phone on the same
+//!   rendezvous reaches it with no configuration.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -105,6 +111,13 @@ pub enum DaemonUpstream {
         instance: String,
         config_dir: PathBuf,
         mailbox: MailboxSource,
+        /// The rendezvous the mailbox's own node dials as a peer, on their
+        /// ordinary ports, one at a time ([`super::rendezvous::peer_list`]);
+        /// empty for none, the daemon's own interfaces then being its only
+        /// way out.
+        rendezvous: Vec<String>,
+        /// The rendezvous connection's keepalive, from the `tcp_*` keys.
+        tcp: crate::config::TcpLiveness,
     },
     /// A node of its own, for a device with no daemon: the phone's mailbox
     /// (1152). It dials the entry servers, `host:port` each, and serves its
@@ -113,6 +126,10 @@ pub enum DaemonUpstream {
     Mesh {
         servers: Vec<String>,
         screens: std::net::TcpListener,
+        /// The entry connections' keepalive, from the `tcp_*` keys (1176).
+        tcp: crate::config::TcpLiveness,
+        /// How the failover between the servers waits.
+        timing: super::rendezvous::Timing,
     },
 }
 
@@ -179,6 +196,20 @@ impl Effects for Quiet {
     }
 }
 
+/// Announce the home destination (1196): with no app data, the identity's
+/// public key is all it carries, which the delivery announce publishes
+/// already. A failure is said and passed over; the next period tries again.
+async fn announce_home(node: &ReticulumNode, home_destination: &[u8; 16]) {
+    let hash = leviculum_core::DestinationHash::new(*home_destination);
+    match node.announce_destination(&hash, None).await {
+        Ok(()) => tracing::info!(
+            "HOME announced home={}",
+            crate::address::to_hex(home_destination)
+        ),
+        Err(error) => tracing::warn!("HOME announce of the home destination: {error}"),
+    }
+}
+
 /// Run the home node until SIGINT or SIGTERM, or until `stop` says so.
 pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let DaemonOptions {
@@ -223,8 +254,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             instance,
             config_dir,
             mailbox,
+            rendezvous,
+            tcp,
         } => {
-            let attached = attach_as(
+            let mut attached = attach_as(
                 AttachConfig {
                     instance: instance.clone(),
                     config_dir: Some(config_dir),
@@ -237,17 +270,34 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             )
             .await
             .map_err(|e| e.to_string())?;
+            attached
+                .dial(
+                    &rendezvous,
+                    super::rendezvous::Side::Peer(Some(leviculum_core::DestinationHash::new(
+                        home_destination,
+                    ))),
+                    tcp,
+                    super::rendezvous::Timing::default(),
+                )
+                .map_err(|e| e.to_string())?;
             (instance, attached, mailbox)
         }
-        DaemonUpstream::Mesh { servers, screens } => {
+        DaemonUpstream::Mesh {
+            servers,
+            screens,
+            tcp,
+            timing,
+        } => {
             let attached = attach_mesh(
                 MeshConfig {
                     servers,
+                    timing,
                     screens,
                     storage_dir,
                     identity,
                     display_name,
                     notices: Terminal::new(home.clone()),
+                    tcp,
                 },
                 role,
             )
@@ -315,6 +365,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         );
     }
     let mut next_announce = tokio::time::Instant::now() + announce_period(moved_at, unix_now());
+    // The delivery announce went out with the registration; the home
+    // destination's goes beside it, and beside every one that follows.
+    announce_home(&node, &home_destination).await;
     // A home node inside an app leaves the process's signals to the app.
     let mut terminate = match stop {
         Some(_) => None,
@@ -466,6 +519,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 if attached.outbox.submit(Command::Announce).is_err() {
                     break Err("the message engine stopped".to_string());
                 }
+                announce_home(&node, &home_destination).await;
             }
             _ = signalled(terminate.as_mut()) => break Ok(()),
             _ = stopped(stop.as_mut()) => break Ok(()),
