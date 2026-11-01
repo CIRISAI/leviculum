@@ -33,7 +33,7 @@ import java.util.Map;
  * Privacy holds the blocked contacts (1146), each with its avatar, name
  * and an "Unblock" that brings its conversation back on every device of
  * the home. Backup is the mailbox's backup when the mailbox is on this
- * phone (1152). Advanced names the Propagation Node, the only place the
+ * phone (1152). Advanced names the relay (the propagation node), the only place the
  * app does, and ends the service.
  *
  * Chats holds the photo size (1220): small, phone (the default) or the
@@ -660,7 +660,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    /** The Propagation Node, the map's fling, and the service's end. */
+    /** The relay (the propagation node), the map's fling, and the service's end. */
     private void advanced() {
         mapFling(null);
         TextView node = text(getString(R.string.propagation_node), 16, R.color.text);

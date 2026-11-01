@@ -29,9 +29,10 @@ import java.util.Map;
  * name or avatar opens, and the chat menu's "Contact info": the avatar
  * and the name, which opens the linked contact; round buttons to mute,
  * search the conversation, open the map at the newest position and share
- * the address; rows for the nickname, the notifications, the phone
- * contact and the identity to compare in person; what this phone knows of
- * reaching the peer; its positions; block and delete at the bottom.
+ * the address; rows for the nickname, the notifications and the phone
+ * contact; Advanced, collapsed (1283, walk finding 29): the identity to
+ * compare in person and what this phone knows of reaching the peer; its
+ * positions; block and delete at the bottom.
  *
  * Pin, mute, archive and block reach every device of the home through the
  * home node; verified stays on this phone. What the chat itself has to do
@@ -50,6 +51,8 @@ public class ContactActivity extends Activity implements Events.Listener {
     private String peer;
     private Map<String, Object> detail = Core.map();
     private LinearLayout body;
+    /** Whether Advanced is open, kept across a refresh. */
+    private boolean advancedOpen;
     private final ServiceLink link = new ServiceLink(this);
 
     @Override
@@ -78,6 +81,7 @@ public class ContactActivity extends Activity implements Events.Listener {
         screen.addView(bar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(56)));
         ScrollView scroll = new ScrollView(this);
+        scroll.setId(R.id.contact_scroll);
         body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(0, 0, 0, dp(32));
@@ -136,7 +140,7 @@ public class ContactActivity extends Activity implements Events.Listener {
         head();
         actions();
         settings();
-        network();
+        advanced();
         positions();
         bottom();
     }
@@ -203,7 +207,7 @@ public class ContactActivity extends Activity implements Events.Listener {
         body.addView(row, matchWrap());
     }
 
-    /** Nickname, notifications, phone contact, identity. */
+    /** Nickname, notifications, phone contact. */
     private void settings() {
         String petname = Core.str(detail, "petname");
         setting("✏️", getString(R.string.nickname),
@@ -227,7 +231,38 @@ public class ContactActivity extends Activity implements Events.Listener {
                         phoneContact();
                     }
                 });
-        identity();
+    }
+
+    /** Advanced, collapsed: the identity and the network, which need Reticulum words. */
+    private void advanced() {
+        final TextView header = text(getString(R.string.advanced) + (advancedOpen ? "  ▴" : "  ▾"),
+                16, R.color.text);
+        header.setId(R.id.contact_advanced);
+        header.setPadding(dp(16), dp(24), dp(16), dp(12));
+        header.setBackgroundResource(android.R.drawable.list_selector_background);
+        body.addView(header, matchWrap());
+        final LinearLayout fold = new LinearLayout(this);
+        fold.setId(R.id.contact_advanced_body);
+        fold.setOrientation(LinearLayout.VERTICAL);
+        fold.setVisibility(advancedOpen ? View.VISIBLE : View.GONE);
+        body.addView(fold, matchWrap());
+        header.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                advancedOpen = !advancedOpen;
+                fold.setVisibility(advancedOpen ? View.VISIBLE : View.GONE);
+                header.setText(getString(R.string.advanced) + (advancedOpen ? "  ▴" : "  ▾"));
+            }
+        });
+        // The rows add themselves to `body`: point it at the fold meanwhile.
+        LinearLayout outer = body;
+        body = fold;
+        try {
+            identity();
+            network();
+        } finally {
+            body = outer;
+        }
     }
 
     /** The address in groups, its QR code, why to compare, and the verified switch. */

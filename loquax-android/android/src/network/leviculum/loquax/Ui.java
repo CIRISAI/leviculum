@@ -1,6 +1,7 @@
 package network.leviculum.loquax;
 
 import android.content.Context;
+import android.util.Log;
 import android.view.View;
 import android.widget.TextView;
 import java.text.DateFormat;
@@ -203,12 +204,21 @@ final class Ui {
                 return context.getString(R.string.pulling);
             }
             if ("done".equals(state)) {
-                String detail = Core.str(event, "detail");
-                return "0".equals(detail)
+                // The count comes as its digits (Event::Sync's detail).
+                int count;
+                try {
+                    count = Integer.parseInt(Core.str(event, "detail"));
+                } catch (NumberFormatException none) {
+                    count = 0;
+                }
+                return count == 0
                         ? context.getString(R.string.pulled_nothing)
-                        : context.getString(R.string.pulled, detail);
+                        : context.getResources().getQuantityString(R.plurals.pulled, count, count);
             }
-            return context.getString(R.string.pull_failed, Core.str(event, "detail"));
+            // The library's words are for the log; the line says it tries again
+            // (a down link in front pulls every minute, a wake pulls at once).
+            Log.i(PhotoView.TAG, "pull failed: " + Core.str(event, "detail"));
+            return context.getString(R.string.pull_failed);
         }
         if ("stopped".equals(kind)) {
             String detail = Core.str(event, "detail");

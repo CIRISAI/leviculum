@@ -11,6 +11,10 @@
     <item name="state_ticks_read" type="id" />
     <item name="state_failed" type="id" />
     <item name="friends_sheet" type="id" />
+    <!-- The contact screen's Advanced fold (1283), which the walk opens. -->
+    <item name="contact_scroll" type="id" />
+    <item name="contact_advanced" type="id" />
+    <item name="contact_advanced_body" type="id" />
     <!-- The recording bar (1276), by the scene's ids (NodeId::resource and
          recording::Verb::word); rec_dot is the pulsing dot, selected while
          it pulses, rec_held the microphone under the finger. -->

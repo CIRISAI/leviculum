@@ -993,12 +993,11 @@ public class ChatActivity extends Activity implements Events.Listener {
         });
     }
 
-    /** The bar's menu: pull now, the map, the address book and the name. */
+    /** The bar's menu: the contact, search, the map, the address book and the name. */
     private void showMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
         popup.getMenu().add(0, R.string.contact_info, 0, R.string.contact_info);
         popup.getMenu().add(0, R.string.chat_search, 0, R.string.chat_search);
-        popup.getMenu().add(0, R.string.refresh, 0, R.string.refresh);
         popup.getMenu().add(0, R.string.map, 1, R.string.map);
         if (Core.bool(header, "linked")) {
             popup.getMenu().add(0, R.string.open_contact, 2, R.string.open_contact);
@@ -1019,8 +1018,6 @@ public class ChatActivity extends Activity implements Events.Listener {
                     openContact();
                 } else if (id == R.string.chat_search) {
                     search();
-                } else if (id == R.string.refresh) {
-                    say(Core.pull());
                 } else if (id == R.string.map) {
                     startActivity(new Intent(ChatActivity.this, MapActivity.class));
                 } else if (id == R.string.open_contact) {
