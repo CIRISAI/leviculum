@@ -470,6 +470,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             };
                             sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, selected_pn);
                         }
+                        OutboxEvent::State { message_id, .. } => {
+                            // A sign of the leg: the stall bound counts from now.
+                            outgoing.heard(&message_id, unix_now());
+                        }
                         OutboxEvent::Unsent { message_id, detail } => {
                             tracing::info!(
                                 "HOME outbox unsent message={} reason={detail}",
@@ -882,7 +886,7 @@ impl Sender {
                 crate::address::to_hex(id)
             );
         }
-        let acts = outgoing.left(id, outcome);
+        let acts = outgoing.left(id, outcome, unix_now());
         self.carry_out(engine, store, outgoing, acts, selected_pn);
     }
 
@@ -901,6 +905,18 @@ impl Sender {
         while let Some(act) = acts.pop_front() {
             match act {
                 Act::Record { id, change } => self.record(store, &id, change),
+                Act::GiveUp { id, leg } => {
+                    tracing::info!(
+                        "HOME outbox {} stalled message={}: no end after {} s, trying again",
+                        leg_word(leg),
+                        crate::address::to_hex(&id),
+                        super::outgoing::STALL_SECS
+                    );
+                    // The router's end of it comes back as a Left the outbox
+                    // ignores; an engine that went away is said by the next
+                    // pump.
+                    let _ = engine.submit(Command::Cancel { message_id: id });
+                }
                 Act::Send { id, leg } => {
                     let Some(packed) = outgoing.packed(&id).map(<[u8]>::to_vec) else {
                         continue;
@@ -962,7 +978,7 @@ impl Sender {
                             crate::address::to_hex(&id)
                         );
                     } else {
-                        acts.extend(outgoing.left(&id, Outcome::Failed));
+                        acts.extend(outgoing.left(&id, Outcome::Failed, unix_now()));
                     }
                 }
             }

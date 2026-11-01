@@ -2077,15 +2077,21 @@ impl Store {
             .map_err(|e| failed(&path, e))?;
         let update = match change {
             Change::Propagated => {
-                "UPDATE home_outbox SET propagated = 1 WHERE identity = ?1 AND id = ?2"
+                Some("UPDATE home_outbox SET propagated = 1 WHERE identity = ?1 AND id = ?2")
             }
-            Change::Delivered => "UPDATE home_outbox SET state = 1 WHERE identity = ?1 AND id = ?2",
+            Change::Delivered => {
+                Some("UPDATE home_outbox SET state = 1 WHERE identity = ?1 AND id = ?2")
+            }
             Change::Ended { .. } => {
-                "UPDATE home_outbox SET state = 2 WHERE identity = ?1 AND id = ?2"
+                Some("UPDATE home_outbox SET state = 2 WHERE identity = ?1 AND id = ?2")
             }
+            // Still open: the row keeps no leg, so a restart tries it anew.
+            Change::Stalled => None,
         };
-        tx.execute(update, params![&identity[..], &id[..]])
-            .map_err(|e| failed(&path, e))?;
+        if let Some(update) = update {
+            tx.execute(update, params![&identity[..], &id[..]])
+                .map_err(|e| failed(&path, e))?;
+        }
         // A state entry's bytes are the message id, which is all a client
         // needs to find the message the change is of.
         let seq = append_in(&tx, &identity, change.kind(), id, &id[..], at, cap_bytes)

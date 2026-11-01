@@ -3583,6 +3583,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
         }
         OutboxEvent::State { message_id, state } => apply_state(model, message_id, state),
+        OutboxEvent::HomeStalled { message_id } => home_stalled(model, message_id),
         OutboxEvent::HomeSent {
             message_id,
             destination,
@@ -4029,6 +4030,24 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
         }
     }
 }
+
+/// The home node gave up a leg of `id` that went without an end (1293):
+/// the ledger says so, and the bubble keeps its state, since the message
+/// is tried again.
+fn home_stalled<B>(model: &mut UiModel<B>, id: [u8; 32]) {
+    let now = model.now;
+    for conversation in &mut model.conversations {
+        for message in &mut conversation.messages {
+            if message.outbound && message.id == Some(id) {
+                message.note(now, STALLED_NOTE);
+                model.changed.insert((conversation.peer, message.activity));
+            }
+        }
+    }
+}
+
+/// The ledger line of a leg the home node gave up (1293).
+pub const STALLED_NOTE: &str = "sending stopped without an answer, trying again";
 
 /// A message one of the home's devices sent through the home node: the
 /// bubble this device has for it says sent, and a device without one gets
@@ -5675,6 +5694,32 @@ mod tests {
         let m = model.conversations[0].messages.len() - 1;
         let rows = detail_view(model, 0, m).expect("a detail view").rows;
         (last.mark, rows)
+    }
+
+    /// 1293: a leg the home node gave up is a ledger line in the detail
+    /// view, and the bubble keeps its state, since the message is tried
+    /// again; a message of another id hears nothing.
+    #[test]
+    fn a_stalled_leg_is_said_in_the_ledger_and_keeps_the_state() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, 1_800_000_000);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Sent);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        let before = last_delivery(&model);
+        engine(
+            &mut model,
+            OutboxEvent::HomeStalled {
+                message_id: [0x77; 32],
+            },
+        );
+        let (_, rows) = shown_last(&model);
+        assert!(!rows.iter().any(|r| r.contains(STALLED_NOTE)), "{rows:?}");
+        engine(&mut model, OutboxEvent::HomeStalled { message_id: ID });
+        assert_eq!(last_delivery(&model), before);
+        let (_, rows) = shown_last(&model);
+        assert!(rows.iter().any(|r| r.contains(STALLED_NOTE)), "{rows:?}");
     }
 
     /// 1233, reciprocity: with the switch off a receipt received changes

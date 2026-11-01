@@ -630,6 +630,10 @@ async fn take_in(
                     packed: entry.packed.clone(),
                 })
                 .map_err(gone)?;
+        } else if entry.kind == super::KIND_STALLED {
+            outbox
+                .submit(Command::HomeStalled { message_id: id })
+                .map_err(gone)?;
         } else if let Some(state) = super::shown_state(entry.kind) {
             outbox
                 .submit(Command::HomeState {
@@ -898,6 +902,29 @@ mod tests {
                     state: blocked
                 },
                 Command::Fence { token: 9 },
+            ]
+        );
+    }
+
+    /// 1293: a stalled entry reaches the engine as the message it names,
+    /// counted as a state change.
+    #[tokio::test]
+    async fn a_stalled_entry_reaches_the_engine() {
+        let pulled = Pulled {
+            entries: vec![entry(3, super::super::KIND_STALLED, vec![7; 32])],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 3 }]);
+        let pull = take_in(&mut outbox, 2, pulled).await.expect("pull");
+        assert_eq!(pull.sent, [([7; 32], super::super::KIND_STALLED)]);
+        assert_eq!(pull.states(), 1);
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [
+                Command::HomeStalled {
+                    message_id: [7; 32]
+                },
+                Command::Fence { token: 3 },
             ]
         );
     }

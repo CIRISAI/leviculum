@@ -146,6 +146,11 @@ pub enum Command {
     /// On a client: a mark one of the home's devices set, pulled from the
     /// archive; reported as [`OutboxEvent::HomeMarked`].
     HomeMark { mark: crate::home::wire::Mark },
+    /// On a client: the home node gave up a leg of a message sent through
+    /// it that went without an end, and tries again
+    /// ([`crate::home::KIND_STALLED`]); reported as
+    /// [`OutboxEvent::HomeStalled`].
+    HomeStalled { message_id: [u8; 32] },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
@@ -217,6 +222,9 @@ pub enum OutboxEvent {
     },
     /// A mark one of the home's devices set ([`Command::HomeMark`]).
     HomeMarked { mark: crate::home::wire::Mark },
+    /// The home node gave up a silent leg of a message and tries again
+    /// ([`Command::HomeStalled`]).
+    HomeStalled { message_id: [u8; 32] },
     /// The reader's name for a peer, set on one of the home's devices
     /// ([`Command::HomePetname`]).
     HomePetname {
