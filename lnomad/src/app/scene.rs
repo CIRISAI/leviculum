@@ -301,7 +301,7 @@ impl Model {
     }
 }
 
-fn top_bar(model: &Model) -> TopBar {
+pub(crate) fn top_bar(model: &Model) -> TopBar {
     let lead = match model.history.can_back() {
         true => Lead::Back {
             back: Action::of(Intent::Back),
@@ -351,7 +351,7 @@ fn top_bar(model: &Model) -> TopBar {
     }
 }
 
-fn address(model: &Model) -> AddressField {
+pub(crate) fn address(model: &Model) -> AddressField {
     let editing = model.mode == Mode::Address;
     let value = match (editing, model.history.current()) {
         (true, _) => model.input.value().to_string(),
@@ -381,7 +381,7 @@ fn chip(id: ChipId, text: Text) -> Chip {
     }
 }
 
-fn state(model: &Model) -> Vec<Chip> {
+pub(crate) fn state(model: &Model) -> Vec<Chip> {
     let mut out = Vec::new();
     if model.identifying && !model.fingerprint.is_empty() {
         let fp8: String = model.fingerprint.chars().take(8).collect();

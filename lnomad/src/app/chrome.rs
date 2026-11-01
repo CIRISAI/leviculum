@@ -7,7 +7,12 @@ use unicode_width::UnicodeWidthStr;
 use super::event::*;
 use super::geometry::Rect;
 use super::input::KeyCode;
+use super::intent::Intent;
 use super::model::*;
+use super::scene::{
+    address as scene_address, state as scene_state, top_bar as scene_top_bar, Chip, ChipId, NodeId,
+    TopBar as SceneTopBar,
+};
 use super::strings::{Arg, Lang, StrId, Text};
 
 /// The ` · ` separator drawn between the title and the address on the top bar.
@@ -42,52 +47,68 @@ pub struct TopBar {
     pub hops: Option<(String, u16)>,
 }
 
-/// The bookmark-star glyph for the current page: filled when bookmarked, hollow
-/// when not, or `None` when no page is loaded (nothing to bookmark).
-pub(crate) fn star_glyph(model: &Model) -> Option<&'static str> {
-    let url = current_url(model)?;
-    Some(if model.bookmarks.contains(&url) {
-        STAR_ON
-    } else {
-        STAR_OFF
+/// The bookmark-star glyph of the scene's top bar: filled when the page is
+/// bookmarked (its star's action takes the bookmark off), hollow when not, or
+/// `None` when the bar has no star (no page loaded, nothing to bookmark).
+fn star_of(bar: &SceneTopBar) -> Option<&'static str> {
+    bar.actions.iter().find_map(|action| match action.intent {
+        Intent::Bookmark { on: true } => Some(STAR_OFF),
+        Intent::Bookmark { on: false } => Some(STAR_ON),
+        _ => None,
     })
 }
 
-/// The identity-marker cluster text: the key glyph plus the first 8 hex chars
-/// of the session's own fingerprint, or `None` when not identifying to the
-/// current node (or the fingerprint is unset, as in a bare test model).
-pub(crate) fn identity_text(model: &Model) -> Option<String> {
-    if !model.identifying || model.fingerprint.is_empty() {
-        return None;
+/// The scene chip `id`, if the top bar's state has it.
+fn chip_of(chips: &[Chip], id: ChipId) -> Option<&Chip> {
+    chips.iter().find(|chip| chip.id == NodeId::Chip(id))
+}
+
+/// The identity chip as the one-row bar draws it: the key glyph in place of
+/// the chip's words, then the fingerprint prefix the chip names.
+fn identity_of(chips: &[Chip]) -> Option<String> {
+    match &chip_of(chips, ChipId::Identity)?.text {
+        Text::Key(_, args) => match args.first() {
+            Some(Arg::Str(fp8)) => Some(format!("{IDENTIFY_GLYPH} {fp8}")),
+            _ => None,
+        },
+        _ => None,
     }
-    let fp8: String = model.fingerprint.chars().take(8).collect();
-    Some(format!("{IDENTIFY_GLYPH} {fp8}"))
 }
 
-/// The hop-count cluster text for the current destination: `N hops` when the
-/// destination is a known announced node with a hop count, `unknown` when it is
-/// not in the registry, or `None` when no page is loaded.
+/// The bookmark-star glyph for the current page, from the scene's top bar.
+#[cfg(test)]
+pub(crate) fn star_glyph(model: &Model) -> Option<&'static str> {
+    star_of(&scene_top_bar(model))
+}
+
+/// The hop-count cluster text for the current destination, the scene's hops
+/// chip in the model's language: `N hops` when the destination is a known
+/// announced node with a hop count, `unknown` when it is not in the registry,
+/// or `None` when no page is loaded.
+#[cfg(test)]
 pub(crate) fn hops_text(model: &Model) -> Option<String> {
-    let dest = model.current_dest?;
-    Some(
-        match model.node_registry.get_by_hash(&dest).and_then(|n| n.hops) {
-            Some(h) => Text::Key(StrId::Hops, vec![Arg::Int(h.into())]),
-            None => Text::key(StrId::HopsUnknown),
-        }
-        .resolve(model.lang),
-    )
+    let chips = scene_state(model);
+    Some(chip_of(&chips, ChipId::Hops)?.text.resolve(model.lang))
 }
 
+/// The top bar laid out in cells over the scene's words: its title, its
+/// address field and its state chips are what the cluster and the left side
+/// show, so the terminal draws the scene and the hit tests read the same
+/// geometry.
 pub(crate) fn topbar_layout(model: &Model, area: Rect) -> TopBar {
     let y = area.y;
     let right = area.right();
 
+    let bar = scene_top_bar(model);
+    let field = scene_address(model);
+    let chips = scene_state(model);
+
     // Right-aligned status cluster: star, identity marker, cache bolt, hop
     // count, each present only when it applies, separated by a single column.
-    let star = star_glyph(model);
-    let identity = identity_text(model);
-    let mut cached = model.cached_view;
-    let mut hops = hops_text(model);
+    let star = star_of(&bar);
+    let identity = identity_of(&chips);
+    let mut cached = chip_of(&chips, ChipId::Cached).is_some();
+    let mut hops = chip_of(&chips, ChipId::Hops).map(|chip| chip.text.resolve(model.lang));
     let seg_w = |g: &str| UnicodeWidthStr::width(g) as u16;
     let cluster_width = |cached: bool, hops: &Option<String>| -> u16 {
         let mut w = 0u16;
@@ -161,8 +182,12 @@ pub(crate) fn topbar_layout(model: &Model, area: Rect) -> TopBar {
         right
     };
     let left_w = left_end.saturating_sub(area.x);
-    let title_full = model.title.trim().to_string();
-    let addr_full = breadcrumb(model);
+    let title_full = bar.title.resolve(model.lang);
+    // An empty field shows its hint, as a platform's text field does.
+    let addr_full = match field.value.is_empty() {
+        true => field.hint.resolve(model.lang),
+        false => field.value,
+    };
     let sep_w = UnicodeWidthStr::width(TOPBAR_SEP) as u16;
     let tw = UnicodeWidthStr::width(title_full.as_str()) as u16;
 

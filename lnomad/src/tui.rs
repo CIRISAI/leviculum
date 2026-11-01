@@ -81,7 +81,7 @@ use crate::theme::{resolve_theme, ThemeFlag};
 use crate::url::Target;
 use leviculum_micron::FieldKind;
 
-use crate::app::scene::{Chip, Page, Row as SceneRow, SceneToast, Sheet};
+use crate::app::scene::{AddressField, Chip, Page, Row as SceneRow, SceneToast, Sheet};
 use crate::app::strings::{with, with_args, Arg, StrId, Text as StrText};
 use crate::app::*;
 
@@ -96,7 +96,7 @@ fn regions(area: Rect) -> [Rect; 3] {
 pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
     let scene = model.scene();
     let [topbar, content, status] = regions(frame.area());
-    render_topbar(model, frame, topbar);
+    render_topbar(model, &scene.address, frame, topbar);
     render_content(&scene.page, frame, content);
     // Pictures go over the reserved rows, before every other overlay: a toast,
     // the help or the places panel must be able to cover one.
@@ -108,9 +108,9 @@ pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
     // Overlays drawn on top of the laid-out page: the form-field input boxes, the
     // search-match highlights, the focus highlight, the mouse-hover highlight, and
     // the hint badges while hint mode is active.
-    render_fields(model, frame);
-    render_search_matches(model, frame);
-    render_focus(model, frame);
+    render_fields(model, scene.page.focus, frame);
+    render_search_matches(model, &scene.page, frame, content);
+    render_focus(model, scene.page.focus, frame);
     render_hover(model, frame);
     if model.mode == Mode::Hint {
         render_hints(model, frame);
@@ -135,9 +135,11 @@ pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
 
 /// Draw the form-field input boxes over the laid-out page: every field's cells
 /// get an input style (a distinct chrome-slate box, or an underline box under
-/// `no_color`); the focused field is reversed on top so it stands out. A focused
-/// TEXT field also places the hardware cursor at its edit position.
-fn render_fields(model: &Model, frame: &mut Frame) {
+/// `no_color`); the scene's focused field is reversed on top so it stands out.
+/// A focused TEXT field also places the hardware cursor at its edit position.
+/// The boxes are the hit-test geometry ([`visible_fields`]), so a click and the
+/// box agree.
+fn render_fields(model: &Model, focus: Option<Focus>, frame: &mut Frame) {
     let visible = visible_fields(model);
     if visible.is_empty() {
         return;
@@ -157,7 +159,7 @@ fn render_fields(model: &Model, frame: &mut Frame) {
     {
         let buf = frame.buffer_mut();
         for vf in &visible {
-            let is_focused = model.field_focus == Some(vf.index);
+            let is_focused = focus == Some(Focus::Field(vf.index));
             let style = if is_focused { focused } else { base };
             for x in vf.col_start..vf.col_end {
                 if x >= area.width || vf.row >= area.height {
@@ -187,10 +189,12 @@ fn render_fields(model: &Model, frame: &mut Frame) {
     }
 }
 
-/// Highlight the focused link's cells (reverse video) so Tab navigation is
-/// visible. A no-op when nothing is focused or the focus is off-screen.
-fn render_focus(model: &Model, frame: &mut Frame) {
-    let Some(idx) = model.focus else {
+/// Highlight the scene's focused link (reverse video) so Tab navigation is
+/// visible, over the link's hit-test span ([`visible_links`]): the cells a
+/// click on it lands on. A no-op when no link is focused or the focus is
+/// off-screen.
+fn render_focus(model: &Model, focus: Option<Focus>, frame: &mut Frame) {
+    let Some(Focus::Link(idx)) = focus else {
         return;
     };
     let area = frame.area();
@@ -241,39 +245,38 @@ fn render_hover(model: &Model, frame: &mut Frame) {
     }
 }
 
-/// Highlight the on-screen search matches: every match wears a theme-aware
-/// background tint, and the current match a stronger reversed highlight on top.
-/// Off-viewport matches are skipped. A no-op when there are no matches.
-fn render_search_matches(model: &Model, frame: &mut Frame) {
-    if model.matches.is_empty() {
-        return;
-    }
+/// Highlight the on-screen search matches from the scene's runs: a matched run
+/// wears a theme-aware background tint, the current match a stronger reversed
+/// highlight. The page window is what the screen shows, so nothing off it is
+/// painted.
+fn render_search_matches(model: &Model, page: &Page, frame: &mut Frame, content: Rect) {
     let area = frame.area();
-    let viewport = model.viewport();
-    let scroll = model.scroll;
     let match_style = Style::default()
         .fg(rgb(model.theme.search_match_fg()))
         .bg(rgb(model.theme.search_match_bg()));
     let current_style = Style::default().add_modifier(Modifier::REVERSED);
     let buf = frame.buffer_mut();
-    for (i, m) in model.matches.iter().enumerate() {
-        if m.line_idx < scroll || m.line_idx >= scroll + viewport {
-            continue;
-        }
-        let row = TOPBAR_ROWS + (m.line_idx - scroll) as u16;
-        let style = if model.current_match == Some(i) {
-            current_style
-        } else {
-            match_style
-        };
-        for col in m.col_start..m.col_end {
-            let x = col as u16;
-            if x >= area.width || row >= area.height {
-                continue;
+    for (row, line) in page.lines.iter().enumerate() {
+        let y = content.y.saturating_add(row as u16);
+        let mut x = content.x;
+        for run in &line.runs {
+            let width = UnicodeWidthStr::width(run.text.as_str()) as u16;
+            let style = match run.matched {
+                Some(true) => Some(current_style),
+                Some(false) => Some(match_style),
+                None => None,
+            };
+            if let Some(style) = style {
+                for cx in x..x.saturating_add(width) {
+                    if cx >= area.width || y >= area.height {
+                        continue;
+                    }
+                    if let Some(cell) = buf.cell_mut((cx, y)) {
+                        cell.set_style(style);
+                    }
+                }
             }
-            if let Some(cell) = buf.cell_mut((x, row)) {
-                cell.set_style(style);
-            }
+            x = x.saturating_add(width);
         }
     }
 }
@@ -408,8 +411,10 @@ fn render_images(model: &Model, images: &ImageStore, frame: &mut Frame, area: Re
 
 /// Draw the one-row top bar: the page title, a `·`, and the address on the left,
 /// then the right-aligned status cluster (bookmark star, cache bolt, hop count).
-/// In address mode the address slot becomes the live editor.
-fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
+/// The words are the scene's top bar, address field and state chips, laid out
+/// by [`topbar_layout`]. While the field is edited the address slot becomes the
+/// live editor.
+fn render_topbar(model: &Model, field: &AddressField, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
@@ -450,8 +455,8 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
 
     // The address slot: the live editor in address mode, else the address text
     // with an input-field look (underlined) so it reads as editable.
-    if model.mode == Mode::Address {
-        render_address_editor(model, frame, to_ratatui(tb.address_rect));
+    if field.editing {
+        render_address_editor(model, field, frame, to_ratatui(tb.address_rect));
     } else if !tb.address.is_empty() {
         let style =
             chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::UNDERLINED);
@@ -509,8 +514,9 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 /// Draw the live address editor over the address slot: a `:` prompt, then the
-/// tui-input value with its cursor.
-fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
+/// field's value with its caret. The window over a long value is the editor's
+/// own scroll, so the caret stays where the keys put it.
+fn render_address_editor(model: &Model, field: &AddressField, frame: &mut Frame, area: Rect) {
     if area.width == 0 {
         return;
     }
@@ -531,11 +537,11 @@ fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
     let w = inner.width as usize;
     let scroll = model.input.visual_scroll(w.saturating_sub(1));
     frame.render_widget(
-        Paragraph::new(RtSpan::styled(model.input.value().to_string(), style))
-            .scroll((0, scroll as u16)),
+        Paragraph::new(RtSpan::styled(field.value.clone(), style)).scroll((0, scroll as u16)),
         inner,
     );
-    let cx = inner.x + (model.input.visual_cursor().saturating_sub(scroll)) as u16;
+    let caret = field.cursor.unwrap_or_default();
+    let cx = inner.x + (caret.saturating_sub(scroll)) as u16;
     frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
 }
 
