@@ -47,13 +47,13 @@ lnomad-core-no-tui` (`Justfile:628`) and stated in the module doc of
 - **The core speaks cells.** Events arrive as raw keys and cell-addressed
   mouse events (`AppEvent`, `lnomad/src/app/event.rs:29`). The key handlers
   are hand-written `match`es per mode (`update_browse_key`,
-  `lnomad/src/app/event.rs:703`; `update_address_key`,
-  `lnomad/src/app/event.rs:640`; `update_places_key`,
-  `lnomad/src/app/event.rs:1035`), and only the scroll keys come from the
-  shared table (`keymap::best` at `lnomad/src/app/event.rs:2134`). The top
-  bar is a cell layout (`TopBar`, `lnomad/src/app/chrome.rs:21`), and the
+  `lnomad/src/app/event.rs:713`; `update_address_key`,
+  `lnomad/src/app/event.rs:650`; `update_places_key`,
+  `lnomad/src/app/event.rs:1045`), and only the scroll keys come from the
+  shared table (`keymap::best` at `lnomad/src/app/event.rs:2144`). The top
+  bar is a cell layout (`TopBar`, `lnomad/src/app/chrome.rs:26`), and the
   click and hover tests run against it (`handle_click`,
-  `lnomad/src/app/event.rs:2033`). There is no intent and no scene.
+  `lnomad/src/app/event.rs:2043`). There is no intent and no scene.
 - **The core is `std`.** `PathBuf` (`lnomad/src/app/model.rs:5`, for
   `bookmarks_path`), `SystemTime` in discovery, and the parser crate uses
   `std::collections::BTreeMap` (`leviculum-micron/src/model.rs:10`) and
@@ -63,10 +63,12 @@ lnomad-core-no-tui` (`Justfile:628`) and stated in the module doc of
   ([A messenger whose core runs anywhere](handheld-messenger.md) says the
   same).
 
-The user-visible words are literals: 37 `set_toast(` calls (23 in
-`app/event.rs`, 1 in `app/model.rs`, 13 in `tui.rs`), the start page
-(`START_PAGE`, `lnomad/src/app/event.rs:369`) and the help groups
-(`help_groups`, `lnomad/src/app/chrome.rs:430`). Nothing is translated.
+The user-visible words were literals: 37 `set_toast(` calls (23 in
+`app/event.rs`, 1 in `app/model.rs`, 13 in `tui.rs`), the start page and
+the help groups. Nothing was translated. Slice 1 moved them into the
+catalogue; the start page is now `start_page`
+(`lnomad/src/app/event.rs:376`) and the help groups `help_groups_in`
+(`lnomad/src/app/chrome.rs:471`), both in the reader's language.
 
 ### 1.2 What lnomad shares with Loquax today
 
@@ -103,20 +105,20 @@ means only the browser has it. Catalogue keys named `browser_*` are new.
 
 | lnomad concept, today | Scene node | Intent | Catalogue | Status |
 |---|---|---|---|---|
-| Top bar: title, address, star, identity, cache bolt, hops (`topbar_layout`, `lnomad/src/app/chrome.rs:81`) | `TopBar` (`leviculum-ui/src/scene.rs:203`) with `Lead::Back` while history has a past, title, and `actions` (star, identify, reload) | `Back`, `Bookmark{on}`, `Identify{on}`, `Reload` | `browser_bookmark`, `browser_identify`, `browser_reload`, `browser_hops` | shared, moved; the actions browser |
+| Top bar: title, address, star, identity, cache bolt, hops (`topbar_layout`, `lnomad/src/app/chrome.rs:98`) | `TopBar` (`leviculum-ui/src/scene.rs:203`) with `Lead::Back` while history has a past, title, and `actions` (star, identify, reload) | `Back`, `Bookmark{on}`, `Identify{on}`, `Reload` | `browser_bookmark`, `browser_identify`, `browser_reload`, `browser_hops` | shared, moved; the actions browser |
 | Address field (the `Address` arm of `Mode`, `lnomad/src/app/model.rs:96`) | a field node: the platform's text field, the scene names its hint and its go, as `Compose` does (`loquax/src/ui/scene.rs:497`) | `Go` (the URL is the platform's text, as Loquax's `Search` is) | `browser_address_hint` | browser node, shared shape |
 | Page view (`model.page`, laid out by `layout`, `lnomad/src/render.rs:182`) | `Page`: a window of `PageLine`s, each a list of runs (see 2.2) | `Scroll(ScrollCmd)` (exists) | none: page text is `Text::Raw` | browser |
 | Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:911`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:158`); the link node browser |
 | Form fields (`RenderedField`, `lnomad/src/render.rs:109`) | a run carries its field index; the edited field is a platform text field like the address | `Edit`, `Toggle(field)`, `Submit` | `browser_submit` | browser |
-| Back and forward (`go_back`, `lnomad/src/app/event.rs:1732`; `go_forward`, `lnomad/src/app/event.rs:1742`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
+| Back and forward (`go_back`, `lnomad/src/app/event.rs:1742`; `go_forward`, `lnomad/src/app/event.rs:1752`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
 | History (`History`, `lnomad/src/app/model.rs:298`) | a `Sheet` of rows | `Activate(row)` | `browser_history` | sheet exists, rows browser |
-| Places: bookmarks and discovered nodes (`Place`, `lnomad/src/app/event.rs:953`; `places`, `lnomad/src/app/event.rs:991`) | `Sheet` (`leviculum-ui/src/scene.rs:286`) of list rows | `Activate(row)`, `Menu(row)` → `Rename`, `Forget` | `browser_places`, `browser_nodes` | sheet exists; `Rename` and `Forget` exist |
+| Places: bookmarks and discovered nodes (`Place`, `lnomad/src/app/event.rs:963`; `places`, `lnomad/src/app/event.rs:1001`) | `Sheet` (`leviculum-ui/src/scene.rs:286`) of list rows | `Activate(row)`, `Menu(row)` → `Rename`, `Forget` | `browser_places`, `browser_nodes` | sheet exists; `Rename` and `Forget` exist |
 | The name search of 1227 (not in this tree: no `1227` in `lnomad/` or `docs/src/` at `af8fa5c1`) | the address field's results: the places `Sheet`, rows from 1227's announce search | `Search` (exists), `Bookmark{on}` for its pinning | `browser_find_name` | lands with 1227 into the shapes above, no new node |
 | In-page search (`Mode::Search`, matches as `Match`, `lnomad/src/app/model.rs:168`) | the shared search field; matches as a run flag | `Search`, `Match(next)` (both exist) | `search` | exists |
-| Images (`SlotState`, `lnomad/src/image.rs:212`) | `Image` node in the page window: name, state, the decoded picture by reference (pixels never enter the scene, as for the map) | `Activate` opens, `Menu` saves | `browser_image_loading`, `_failed`, `_too_many` | browser |
-| Downloads (`Effect::Download`, `Effect`, `lnomad/src/app/model.rs:396`) | `Chip` (`leviculum-ui/src/scene.rs:296`) while one runs, a toast when done | `Download` | `browser_downloaded` (the toast of `lnomad/src/app/event.rs:124`) | chip exists |
+| Images (`SlotState`, `lnomad/src/image.rs:214`) | `Image` node in the page window: name, state, the decoded picture by reference (pixels never enter the scene, as for the map) | `Activate` opens, `Menu` saves | `browser_image_loading`, `_failed`, `_too_many` | browser |
+| Downloads (`Effect::Download`, `Effect`, `lnomad/src/app/model.rs:396`) | `Chip` (`leviculum-ui/src/scene.rs:296`) while one runs, a toast when done | `Download` | `browser_downloaded` (the toast of `lnomad/src/app/event.rs:131`) | chip exists |
 | Identify (`IdentifyStore`, `lnomad/src/identify.rs:28`) | the marker as a `TopBar` action whose state is on or off | `Identify{on}` | `browser_identify_on`, `_off` | browser |
-| Status line: focused link target, footer (`footer_items`, `lnomad/src/app/chrome.rs:316`) | no node of its own: the footer is the renderer's way to show `Action`s with chords (study, table 3.5); the link target is the focused link's text | none | the actions' labels | exists as a rule |
+| Status line: focused link target, footer (`footer_items`, `lnomad/src/app/chrome.rs:341`) | no node of its own: the footer is the renderer's way to show `Action`s with chords (study, table 3.5); the link target is the focused link's text | none | the actions' labels | exists as a rule |
 | Toast (`Toast`, `leviculum-ui/src/toast.rs:23`) | the scene's toast | none | per message | shared already |
 | Help overlay | the renderer draws the keymap rows | `Help` (exists) | row labels | shared mechanism |
 
@@ -214,7 +216,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
   2026-10-25 that the two "stay two programs with shared widgets"
   ([A messenger whose core runs anywhere](handheld-messenger.md), "One
   interaction model"). On a PC both talk to the one `lnsd` as clients
-  (`connect_to_shared_instance`, `lnomad/src/fetch.rs:167`), so a second
+  (`connect_to_shared_instance`, `lnomad/src/fetch.rs:185`), so a second
   program costs no second node. The Debian package is separate on
   purpose (`lnomad/Cargo.toml:20`: a browser-only user must not get the
   `lnsd` service pulled in), and that stays true.
@@ -249,7 +251,7 @@ is "a destination on the network, not a transport node"
 (`loquax/src/engine/shell.rs:670`) has no route through it to a NomadNet
 node. So the browser on the phone
 fetches through the mailbox's node itself: `fetch::Session` (`Session`,
-`lnomad/src/fetch.rs:102`) gains a constructor over a node the host hands
+`lnomad/src/fetch.rs:120`) gains a constructor over a node the host hands
 it, beside today's shared-instance one. One node, no new transport role.
 
 **Lew decides:**
@@ -349,12 +351,45 @@ branch; pass two starts where the last list below ends.
   host in the unoptimised test profile (`a_readme_scene_is_built_in_well_under_a_frame`,
   200 builds).
 
-Pass two: the top bar, the footer, the help and the cell overlays
-(focus, hover, hints, fields, matches) drawn from the scene; the help
-groups, the start page, the image status lines and the result rows'
-words (`lnomad/src/names.rs`) into the catalogue; then the shell follows
-the locale (`LC_ALL`, `LC_MESSAGES`, `LANG`, as the Loquax window does),
-not before, so no reader sees half a translation.
+**Slice 1, pass two built 2026-11-01 (1255b).** Five commits on this
+branch close the slice.
+
+- **The top bar from the scene.** `topbar_layout`
+  (`lnomad/src/app/chrome.rs`) lays out the scene's top bar, address field
+  and state chips: the title, the address or its hint, the star from the
+  bookmark action, the identity, cache and hops chips. The hit tests read the
+  same layout, so a click and the drawing agree. The one-row bar draws the
+  identity and cache chips as glyphs and the hops chip in its words.
+- **The overlays.** The search highlight is painted from the runs' match
+  state. The focus and the field boxes take *which* node is focused from
+  `Page.focus` and keep the cell spans the clicks land on: a link's span is
+  its first line only, and drawing its runs would also light a wrapped second
+  line, which changes frames. The hover (pointer state, which a window and a
+  phone keep themselves) and the hint labels (a keyboard affordance of the
+  terminal) stay the terminal's own.
+- **The catalogue is complete for the shell.** The help (group titles,
+  descriptions, and the key column's words such as "click"), the start page,
+  the image status lines, the result rows' words of `lnomad/src/names.rs`
+  and the fetch's errors joined it: 152 strings in English and German. The
+  shared scroll rows keep their English in `leviculum-ui`, and lnomad maps
+  each one to its own key, with a test that none is left untranslated.
+  `run_tui` now sets the language from `LC_ALL`, `LC_MESSAGES` or `LANG`, the
+  first one set, as the Loquax window does. A German frame test renders the
+  start page and the help and finds no English sentence.
+- **Unchanged frames.** The 248 tests of `tui.rs` pass without a change.
+  Two tests were added: German, and italic. Mutating the scene's title, a
+  run's match state, the hops chip, the focus or the star fails frames
+  (1, 3, 1, 2 and 2). The new italic frame test closes the gap pass one's
+  control found: dropping the runs' italic flag fails it and nothing else.
+- **The names list as a scene list, pinned.**
+  `lnomad/tests/golden/scene-names.json` holds the 1227 result list for
+  "marcel" over three sites at a fixed clock: catalogue keys per row, the
+  selection, the key hint. Swapping two rows or changing one row's words
+  fails it. The README goldens did not move.
+
+Left for slice 1b, by the plan's own row: the footer. Its buttons are chords
+(`Alt-←`, `d`, `?`) with drop ranks, and 1b derives the footer and the help's
+key column from the key table. Its words already come from the catalogue.
 
 ## 6. What not to do
 
