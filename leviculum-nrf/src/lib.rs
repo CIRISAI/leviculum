@@ -499,6 +499,7 @@ pub fn log_stack(tag: &str) {
 pub async fn stack_watermark_task() {
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(2)).await;
+        leviculum_firmware::thread_watch::beat_now();
         log_stack("tick");
     }
 }

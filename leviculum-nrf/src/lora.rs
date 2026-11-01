@@ -1437,7 +1437,7 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
                 ),
             );
             leviculum_firmware::iface_bytes::note_rx(leviculum_firmware::iface_bytes::LORA, plen);
-            self.incoming_tx.send(data).await;
+            leviculum_firmware::thread_watch::send_watched(self.incoming_tx, data, "lora").await;
         } else if len >= 2 && (frame[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
             crate::log::log_fmt(
                 "[LORA] ",
