@@ -848,6 +848,13 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (row.get("lat_e6") == null || row.get("lon_e6") == null) {
             return;
         }
+        if (!Core.str(row, "live").isEmpty()) {
+            // The newest report's line, which says whether the position is
+            // alive (1209), opens the map as the list's pin does (1224):
+            // the Map tab on the friend, Back to the chats.
+            ConversationsActivity.openMapAt(this, peer);
+            return;
+        }
         startActivity(new Intent(this, MapActivity.class)
                 .putExtra(MapActivity.LAT_E6, Core.num(row, "lat_e6"))
                 .putExtra(MapActivity.LON_E6, Core.num(row, "lon_e6"))

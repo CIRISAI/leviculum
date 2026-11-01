@@ -143,6 +143,25 @@ final class MapPane implements MapView.Listener {
         refresh();
     }
 
+    /**
+     * Open on `peer`, as a row's pin does (1224): centred on its newest fix
+     * at a zoom that shows the pin and its streets, its card opened once
+     * the map has drawn there. A friend without a fix says so.
+     */
+    void openAt(String peer) {
+        refresh();
+        Map<String, Object> row = people.get(peer);
+        if (row == null || row.get("lat_e6") == null || row.get("lon_e6") == null) {
+            say(activity.getString(R.string.no_position));
+            return;
+        }
+        if (carded != null && !carded.equals(peer)) {
+            closeCard();
+        }
+        map.flyTo(Core.num(row, "lat_e6"), Core.num(row, "lon_e6"));
+        cardOwed = peer;
+    }
+
     /** Open on a place, as a message's fix does, with `peer`'s card open. */
     void centreOn(long latE6, long lonE6, String peer) {
         map.centreOn(latE6, lonE6, peer);

@@ -42,10 +42,18 @@ import java.util.Map;
  * menu: read or unread, pin, mute, archive, delete. The archived
  * conversations are this screen again with ARCHIVED, a sub view with the
  * back arrow and no tabs, reached from the list's last row.
+ *
+ * A row whose peer has a position younger than a day carries the map pin
+ * (1224, the library's `pin`): a tap on it is the core's `OpenMapAt`, the
+ * Map tab centred on that friend with the friend's card open, and Back
+ * returns to the chats, not to the map's previous view. A chat's newest
+ * report raises the same through {@link #MAP_AT}.
  */
 public class ConversationsActivity extends Activity implements Events.Listener {
     /** The extra that makes this screen the archived view. */
     static final String ARCHIVED = "archived";
+    /** The extra that opens the Map tab on a friend (1224): its address. */
+    static final String MAP_AT = "map_at";
     /** The saved state's key of the selected tab. */
     private static final String TAB = "tab";
     /** Help (1199): the book, until the app has a page of its own. */
@@ -64,6 +72,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     /** The map tab is selected; its pane is made on first selection. */
     private boolean onMap;
     private MapPane mapPane;
+    /** The map was opened on a friend from a pin: Back goes to the chats. */
+    private boolean mapFromPin;
     /** The list's last row: the archived view, with how many. */
     private TextView archivedRow;
     private final ServiceLink link = new ServiceLink(this);
@@ -138,6 +148,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         } else {
             tabs(savedInstanceState != null && savedInstanceState.getBoolean(TAB, false));
         }
+        if (savedInstanceState == null) {
+            mapAt(getIntent());
+        }
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, text));
         search.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -203,12 +216,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.tab_chats).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                mapFromPin = false;
                 select(false);
             }
         });
         findViewById(R.id.tab_map).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                mapFromPin = false;
                 select(true);
             }
         });
@@ -245,6 +260,51 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             // The map's position is read only while it is shown (1201).
             mapPane.pause();
         }
+    }
+
+    /**
+     * The core's `OpenMapAt` (1224): the Map tab centred on `peer`'s
+     * newest fix with its card open; Back returns to the chats. The
+     * archived view has no tabs: the map opens as a sub view there.
+     */
+    private void openMapAt(String peer) {
+        if (archivedView) {
+            startActivity(new Intent(this, MapActivity.class).putExtra(MapActivity.FRIEND, peer));
+            return;
+        }
+        if (query.getVisibility() == View.VISIBLE) {
+            searching(false);
+        }
+        select(true);
+        mapPane.openAt(peer);
+        mapFromPin = true;
+    }
+
+    /** A screen asked for the map on a friend with {@link #MAP_AT}. */
+    private void mapAt(Intent intent) {
+        String peer = intent == null ? null : intent.getStringExtra(MAP_AT);
+        if (peer != null && !peer.isEmpty()) {
+            intent.removeExtra(MAP_AT);
+            openMapAt(peer);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        mapAt(intent);
+    }
+
+    /**
+     * Raise the core's `OpenMapAt` from another screen (the chat's newest
+     * report, 1224): the main views come to the top with the Map tab on
+     * `peer`, the screens above them closed, so Back goes to the chats.
+     */
+    static void openMapAt(Activity from, String peer) {
+        from.startActivity(new Intent(from, ConversationsActivity.class)
+                .putExtra(MAP_AT, peer)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
     }
 
     @Override
@@ -376,6 +436,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     public void onBackPressed() {
         if (query.getVisibility() == View.VISIBLE) {
             searching(false);
+            return;
+        }
+        if (onMap && mapFromPin) {
+            // Opened on a friend from a pin (1224): back to the chats, the
+            // card closed with it.
+            mapFromPin = false;
+            mapPane.back();
+            select(false);
             return;
         }
         if (onMap && mapPane.back()) {
@@ -562,7 +630,26 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             TextView at = (TextView) view.findViewById(R.id.at);
             at.setText(Ui.listTime(ConversationsActivity.this, Core.num(row, "at"), Ui.nowSecs()));
             at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));
-            ((AvatarView) view.findViewById(R.id.avatar)).show(Core.str(row, "peer"), row);
+            final String peer = Core.str(row, "peer");
+            ((AvatarView) view.findViewById(R.id.avatar)).show(peer, row);
+            // The map pin (1224) in the library's tint: the map on the peer.
+            String tint = Core.str(row, "pin");
+            ImageView pin = (ImageView) view.findViewById(R.id.pin);
+            pin.setVisibility(tint.isEmpty() ? View.GONE : View.VISIBLE);
+            if (!tint.isEmpty()) {
+                int colour = getColor("accent".equals(tint) ? R.color.accent : R.color.text_secondary);
+                pin.setImageDrawable(new Glyph(Glyph.Kind.PIN, colour));
+                pin.setContentDescription(Core.str(row, "pin_label"));
+                pin.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        openMapAt(peer);
+                    }
+                });
+            } else {
+                pin.setOnClickListener(null);
+                pin.setClickable(false);
+            }
             TextView badge = (TextView) view.findViewById(R.id.unread);
             badge.setVisibility(unread > 0 ? View.VISIBLE : View.GONE);
             badge.setText(String.valueOf(unread));

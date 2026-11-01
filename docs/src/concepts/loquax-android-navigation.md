@@ -178,6 +178,10 @@ Bottom right, stacked, in the one round button style:
   the phone's navigation app; Loquax builds no routing.
 - **From a chat**, a tap on a position bubble opens the map focused on
   that friend with the card open. Back returns to the chat.
+- **From the list** (1224), a row whose friend has a position younger
+  than a day carries a small map pin under the time; a tap on it switches
+  to the Map tab centred on that friend with the card open, and Back
+  returns to the chats. The newest report's line in a chat does the same.
 - **Empty map**: one line and one button, "No friends on the map yet" and
   "Share my position".
 

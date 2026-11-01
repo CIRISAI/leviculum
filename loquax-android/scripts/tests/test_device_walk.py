@@ -485,6 +485,36 @@ class Notifications(unittest.TestCase):
         self.assertEqual(walk.conversation_notifications(other, walk.PACKAGE), {})
 
 
+def boxed(rid, bounds, desc=""):
+    return walk.Node(text="", desc=desc, rid="network.leviculum.loquax.debug:id/" + rid, cls="", bounds=bounds)
+
+
+class Pin(unittest.TestCase):
+    """Where the receive_report and position_pin steps find a row's map pin
+    (1224), and what they refuse."""
+
+    def test_the_density_is_the_override_when_set(self):
+        self.assertEqual(walk.parse_density("Physical density: 420\n"), 420)
+        self.assertEqual(walk.parse_density("Physical density: 420\nOverride density: 480\n"), 480)
+        self.assertIsNone(walk.parse_density(""))
+
+    def test_the_pin_is_the_one_beside_the_rows_avatar(self):
+        avatar = boxed("avatar", (42, 300, 189, 447))
+        mine = boxed("pin", (900, 380, 1026, 506), "Position of Anna, now")
+        other = boxed("pin", (900, 590, 1026, 716), "Position of Bo, now")
+        self.assertEqual(walk.pin_in_row([other, mine], avatar), mine)
+        self.assertIsNone(walk.pin_in_row([other], avatar))
+
+    def test_a_pin_under_48dp_or_without_its_label_is_refused(self):
+        good = boxed("pin", (900, 380, 1026, 506), "Position of Anna, now")
+        self.assertEqual(walk.pin_problems(good, 420), [])
+        small = boxed("pin", (900, 380, 947, 427), "Position of Anna, now")
+        self.assertEqual(len(walk.pin_problems(small, 420)), 1)
+        bare = boxed("pin", (900, 380, 1026, 506))
+        self.assertEqual(len(walk.pin_problems(bare, 420)), 1)
+        self.assertEqual(walk.pin_problems(None, 420), ["no map pin in the row"])
+
+
 class Ring(unittest.TestCase):
     """Where the receive_report step looks for the avatar's ring (1209)."""
 

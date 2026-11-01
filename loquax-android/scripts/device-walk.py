@@ -66,6 +66,7 @@ STEPS = [
     "reply_send",
     "receive_wake",
     "receive_report",
+    "position_pin",
     "map",
     "fling",
     "friends",
@@ -126,6 +127,10 @@ DIALOG_BUTTONS = ["Allow", "ALLOW", "Not now"]
 LIVE_LINE = "\U0001f4cd live"
 # The liveness ring's width as a share of the avatar (AvatarView.RING).
 RING = 0.06
+# The list row's map pin (1224): its content description begins so
+# (the catalogue's position_of), and its tap target is at least 48dp.
+PIN_LABEL = "Position of "
+PIN_DP = 48
 # A delivery mark of ours the walk counts as a tick (Ui.state's words).
 TICKS = {"sent", "delivered ✓"}
 
@@ -572,6 +577,43 @@ def ring_points(
         )
         for i in range(count)
     ]
+
+
+def parse_density(text: str) -> int | None:
+    """The screen's density from `wm density`: the override when one is
+    set, else the physical one; None when neither is said."""
+    found = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*(Physical|Override) density:\s*(\d+)", line)
+        if m:
+            found[m.group(1)] = int(m.group(2))
+    return found.get("Override", found.get("Physical"))
+
+
+def pin_in_row(nodes: list[Node], avatar: Node) -> Node | None:
+    """The map pin of the list row whose avatar is `avatar` (1224): the pin
+    whose middle lies within the avatar's height."""
+    top, bottom = avatar.bounds[1], avatar.bounds[3]
+    for node in find(nodes, rid="pin"):
+        if top <= node.center[1] <= bottom:
+            return node
+    return None
+
+
+def pin_problems(pin: Node | None, density: int | None) -> list[str]:
+    """What is wrong with a row's map pin: none there, no label of the
+    catalogue's, a tap target under 48dp."""
+    if pin is None:
+        return ["no map pin in the row"]
+    problems = []
+    if not pin.desc.startswith(PIN_LABEL):
+        problems.append(f"the pin says {pin.desc!r}, not {PIN_LABEL!r}...")
+    if density:
+        least = PIN_DP * density / 160 - 1
+        x1, y1, x2, y2 = pin.bounds
+        if x2 - x1 < least or y2 - y1 < least:
+            problems.append(f"the pin's target is {x2 - x1}x{y2 - y1} px, under {PIN_DP}dp at {density} dpi")
+    return problems
 
 
 def conversation_notifications(dumpsys: str, package: str) -> dict[str, str]:
@@ -1270,7 +1312,9 @@ class Walk:
     def step_receive_report(self) -> str:
         """A position report from the open conversation's peer, with the
         conversation closed (1209): it raises no notification, the list's
-        line says `📍 live`, and the row's avatar gains its ring."""
+        line says `📍 live`, and the row gains its map pin (1224), which
+        stands in the place of the avatar's ring: the avatar stays as it
+        was."""
         dev = self.need_device()
         fixture = self.need_fixture()
         peer = fixture.manifest["sender_peer"]
@@ -1316,12 +1360,50 @@ class Walk:
             raise StepFailed(
                 f"a notification for {peer[:8]}: before={told.get(peer)!r} after={after_told.get(peer)!r}"
             )
-        avatar = self.row_avatar(dev.dump(), shown)
+        nodes = dev.dump()
+        avatar = self.row_avatar(nodes, shown)
+        problems = pin_problems(pin_in_row(nodes, avatar), self.density())
+        if problems:
+            raise StepFailed("; ".join(problems))
         after = [dev.screen().pixel(x, y) for x, y in ring_points(avatar.bounds)]
         ring = changed_fraction(before, after)
-        if ring < 0.5:
-            raise StepFailed(f"the avatar's ring did not change: {ring:.2f} of its points")
-        return f"live_line_ms={seen_ms} notified=no ring_changed={ring:.2f}"
+        if ring >= 0.5:
+            raise StepFailed(f"the avatar gained a ring in the list: {ring:.2f} of its points changed")
+        return f"live_line_ms={seen_ms} notified=no pin=shown ring_changed={ring:.2f}"
+
+    def density(self) -> int | None:
+        return parse_density(self.need_device().shell("wm density"))
+
+    def step_position_pin(self) -> str:
+        """The list row's map pin (1224), after receive_report gave the
+        peer a fresh position: a tap lands on the Map tab with that
+        friend's card open; Back returns to the chats, the card closed."""
+        dev = self.need_device()
+        shown = self.need_fixture().manifest["open"]["shown"]
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        nodes = dev.dump()
+        pin = pin_in_row(nodes, self.row_avatar(nodes, shown))
+        problems = pin_problems(pin, self.density())
+        if problems or pin is None:
+            raise StepFailed("; ".join(problems))
+        start = time.monotonic()
+        dev.tap_node(pin)
+        card = self.wait_id("card_name", 10)
+        card_ms = int((time.monotonic() - start) * 1000)
+        if card[0].text != shown:
+            raise StepFailed(f"the card says {card[0].text!r}, the row {shown!r}")
+        nodes = dev.dump()
+        if find(nodes, rid="write") or find(nodes, rid="compose"):
+            raise StepFailed(f"not on the Map tab: {texts(nodes)[:12]}")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        if find(dev.dump(), rid="card_name"):
+            raise StepFailed("back left the card open")
+        return f"pin={pin.desc!r} card_ms={card_ms} card={card[0].text!r} back=chats"
 
     def row_avatar(self, nodes: list[Node], shown: str) -> Node:
         """The list row's avatar beside the name `shown`."""
