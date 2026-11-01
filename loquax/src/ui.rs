@@ -152,6 +152,7 @@ pub mod search;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod viewload;
 pub mod voice;
 pub mod zoom;
 

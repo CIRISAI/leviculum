@@ -480,6 +480,13 @@ impl Frames {
         self.motion.asked(now_ms);
     }
 
+    /// The way the view last moved, screen pixels a second, while it
+    /// still moves: what the autoload orders the cells next to the screen
+    /// by (1292).
+    pub fn heading(&self, now_ms: u64) -> Option<(f64, f64)> {
+        self.motion.heading(now_ms)
+    }
+
     /// The motion a frontend kept itself, where a pan cannot wait for
     /// the frame being drawn (the window's worker holds the frames).
     pub fn set_motion(&mut self, motion: Motion) {
