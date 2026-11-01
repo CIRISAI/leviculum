@@ -47,6 +47,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -95,6 +96,7 @@ STEPS = [
     "pencil_scan",
     "share_in_contact",
     "buildings",
+    "pan_into_empty",
     "first_start_name",
     "link_device",
     "move_phone",
@@ -510,6 +512,78 @@ def chip_problems(nodes: list[Node], words) -> list[str]:
     elif not (stop[0].desc or stop[0].text):
         problems.append("the Stop has no words for a screen reader")
     return problems
+
+
+# The map chip's words for a load for the screen (strings.xml map_loading,
+# 1199; since 1292 only for the area on screen).
+MAP_LOADING = "Loading the map of this area"
+# How long after the pan's last swipe ended the load for the screen may
+# reach the source: the scheduler's bound (300 ms from the uncovered
+# frame, 1292) and a frame's draw and the network's way on top.
+PAN_LOAD_SLACK_MS = 700
+
+
+def map_chip(nodes: list[Node]) -> str:
+    """The map chip's words, empty when none shows."""
+    chips = find(nodes, rid="chip")
+    return chips[0].text if chips else ""
+
+
+def pan_into_empty_problems(
+    before_chip: str,
+    after_chip: str,
+    connects_before: int,
+    connect_ms: list[int],
+    pan_end_ms: int,
+) -> list[str]:
+    """What is wrong with a pan from the walk's region into the empty
+    (1292): the chip said a load for the screen before the pan, no load
+    reached the source after it, the first one only later than
+    `PAN_LOAD_SLACK_MS` after the pan ended, or the chip did not say it
+    loads here afterwards. `connect_ms` are the source's connections since
+    the pan began, in milliseconds from it; `connects_before` those before,
+    the loads next to the screen."""
+    problems = []
+    if before_chip.startswith(MAP_LOADING):
+        problems.append(f"the chip said {before_chip!r} before the pan, over a held view")
+    if not connect_ms:
+        problems.append(f"no load reached the source after the pan ({connects_before} before it)")
+    elif connect_ms[0] > pan_end_ms + PAN_LOAD_SLACK_MS:
+        problems.append(
+            f"the first load reached the source {connect_ms[0]} ms after the pan began, "
+            f"later than {pan_end_ms} + {PAN_LOAD_SLACK_MS}"
+        )
+    if not after_chip.startswith(MAP_LOADING):
+        problems.append(f"the chip says {after_chip!r} after the pan, want {MAP_LOADING!r}")
+    return problems
+
+
+class StallingSource:
+    """A map source on the walk's host that takes every connection and
+    never answers (1292): a load that starts stays running, and its
+    connection's time is the load's start as the host sees it."""
+
+    def __init__(self, host: str) -> None:
+        self.server = socket.create_server((host, 0))
+        self.port = self.server.getsockname()[1]
+        self.times: list[float] = []
+        self.held: list[socket.socket] = []
+        self.thread = threading.Thread(target=self.accept, daemon=True)
+        self.thread.start()
+
+    def accept(self) -> None:
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            self.times.append(time.monotonic())
+            self.held.append(conn)
+
+    def close(self) -> None:
+        self.server.close()
+        for conn in self.held:
+            conn.close()
 
 
 def end_reports(store: Path, peer: str) -> int:
@@ -3795,6 +3869,73 @@ class Walk:
             f"at_rest_ms z15={z15_ms} z16={z16_ms} autoload=off"
         )
         problems = buildings_problems(z16_share, z15_share, z16_ms, z15_ms)
+        if problems:
+            raise StepFailed("; ".join(problems) + "; " + detail)
+        return detail
+
+    def step_pan_into_empty(self) -> str:
+        """A pan out of the walk's region into the empty starts the load
+        for the screen at once and the chip says so (1292). The walk's
+        Frankfurt region, the autoload on, the source a socket on this
+        host that never answers; the map opened on the Römer at z18,
+        where the region holds the screen, then panned east a screen and
+        a half in two swipes of 400 ms. The source's connections are the
+        loads' starts: the first after the pan must come within
+        `PAN_LOAD_SLACK_MS` of its end, and the chip must say
+        "Loading the map of this area". The config is put back after."""
+        dev = self.need_device()
+        host = self.args.server.rpartition(":")[0]
+        self.put_region(FRANKFURT_REGION, "frankfurt-roemer.lmr")
+        source = StallingSource(host)
+        url = f"http://{host}:{source.port}/planet.pmtiles"
+        keep = "grep -v -e '^map_source' -e '^map_autoload' files/config 2>/dev/null"
+        dev.shell(
+            f"run-as {PACKAGE} sh -c \"{keep} > files/config.walk; "
+            f"echo 'map_autoload = on' >> files/config.walk; "
+            f"echo 'map_source = \\\"{url}\\\"' >> files/config.walk; "
+            f"cp files/config files/config.before 2>/dev/null; "
+            f"mv files/config.walk files/config\""
+        )
+        try:
+            # A new process reads the config afresh.
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+            self.map_at_rest(18_000)
+            time.sleep(1.0)
+            nodes = dev.dump()
+            box = self.map_box(nodes)
+            before_chip = map_chip(nodes)
+            connects_before = len(source.times)
+            x1, y1, x2, y2 = box
+            cy = (y1 + y2) // 2
+            reach = (x2 - x1) * 3 // 4
+            began = time.monotonic()
+            for _ in range(2):
+                dev.swipe(x2 - (x2 - x1) // 8, cy, x2 - (x2 - x1) // 8 - reach, cy, 400)
+            pan_end_ms = int((time.monotonic() - began) * 1000)
+            after_chip = ""
+
+            def loading():
+                nonlocal after_chip
+                after_chip = map_chip(dev.dump())
+                return after_chip.startswith(MAP_LOADING) or None
+
+            wait_for(loading, 10, every=0.5)
+            connect_ms = [int((t - began) * 1000) for t in source.times if t >= began]
+        finally:
+            source.close()
+            dev.shell(
+                f"run-as {PACKAGE} sh -c 'if [ -f files/config.before ]; then "
+                f"mv files/config.before files/config; else rm -f files/config; fi'",
+                check=False,
+            )
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+        detail = (
+            f"connects before={connects_before} after_ms={connect_ms} pan_end_ms={pan_end_ms} "
+            f"chip before={before_chip!r} after={after_chip!r}"
+        )
+        problems = pan_into_empty_problems(
+            before_chip, after_chip, connects_before, connect_ms, pan_end_ms
+        )
         if problems:
             raise StepFailed("; ".join(problems) + "; " + detail)
         return detail

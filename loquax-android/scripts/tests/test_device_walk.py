@@ -617,6 +617,63 @@ class Buildings(unittest.TestCase):
         )
 
 
+class PanIntoEmpty(unittest.TestCase):
+    """The pan_into_empty step's reading (1292)."""
+
+    LOADING = walk.MAP_LOADING + "\u2026"
+
+    def test_the_chip_is_read_by_its_id(self):
+        self.assertEqual(walk.map_chip([node("chip", self.LOADING)]), self.LOADING)
+        self.assertEqual(walk.map_chip([node("map")]), "")
+
+    def test_a_load_on_time_with_its_chip_passes(self):
+        self.assertEqual(walk.pan_into_empty_problems("", self.LOADING, 1, [650], 820), [])
+        late = 820 + walk.PAN_LOAD_SLACK_MS
+        self.assertEqual(walk.pan_into_empty_problems("", self.LOADING, 0, [late], 820), [])
+
+    def test_no_load_a_late_one_and_a_wrong_chip_fail(self):
+        self.assertEqual(
+            walk.pan_into_empty_problems("", "No map here yet", 2, [], 820),
+            [
+                "no load reached the source after the pan (2 before it)",
+                f"the chip says 'No map here yet' after the pan, want {walk.MAP_LOADING!r}",
+            ],
+        )
+        late = 820 + walk.PAN_LOAD_SLACK_MS + 1
+        self.assertEqual(
+            walk.pan_into_empty_problems("", self.LOADING, 0, [late, late + 5], 820),
+            [
+                f"the first load reached the source {late} ms after the pan began, "
+                f"later than 820 + {walk.PAN_LOAD_SLACK_MS}"
+            ],
+        )
+
+    def test_a_loading_chip_over_the_held_view_fails(self):
+        problems = walk.pan_into_empty_problems(self.LOADING, self.LOADING, 0, [300], 820)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("before the pan", problems[0])
+
+    def test_the_source_counts_its_connections_and_never_answers(self):
+        source = walk.StallingSource("127.0.0.1")
+        try:
+            with walk.socket.create_connection(("127.0.0.1", source.port), timeout=2) as conn:
+                conn.sendall(b"GET /planet.pmtiles HTTP/1.1\r\n\r\n")
+                conn.settimeout(0.3)
+                with self.assertRaises(walk.socket.timeout):
+                    conn.recv(1)
+            deadline = walk.time.monotonic() + 2
+            while not source.times and walk.time.monotonic() < deadline:
+                walk.time.sleep(0.01)
+            self.assertEqual(len(source.times), 1)
+        finally:
+            source.close()
+
+    def test_the_step_runs_after_the_buildings_and_before_the_phone_is_cleared(self):
+        steps = walk.STEPS
+        self.assertGreater(steps.index("pan_into_empty"), steps.index("buildings"))
+        self.assertLess(steps.index("pan_into_empty"), steps.index("first_start_name"))
+
+
 class Lines(unittest.TestCase):
     def test_a_step_line_round_trips(self):
         line = walk.walk_line("list", True, 1234.7, "rows=18 of 18\n named=12")
