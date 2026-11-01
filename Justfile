@@ -2548,13 +2548,14 @@ loquax-tui:
 # display. With them the library's tests under the feature, whose
 # `screenmap` the tui feature leaves out: the map's frames and names
 # (`mapframe`, `mapnames`), among them 1154's frames of the fast paths
-# against the old ones. The tests build for the host's own triple, not the
-# workspace's musl-static default: winit opens X11 and Wayland with dlopen,
-# which a musl-static binary cannot link. Not in `standard`: nothing ships
-# it yet.
+# against the old ones. The lint and the tests build for the host's own
+# triple, not the workspace's musl-static default: winit opens X11 and
+# Wayland with dlopen, which a musl-static binary cannot link, and the
+# window widgets (leviculum-ui-iced) are empty there. Not in `standard`:
+# nothing ships it yet.
 [doc('Lint and test loquax with its gui feature (#474)')]
 loquax-gui:
-    cargo clippy -p loquax --features gui --all-targets -- -D warnings
+    cargo clippy -p loquax --features gui --all-targets --target "$(rustc -vV | sed -n 's/^host: //p')" -- -D warnings
     {{manifest}} loquax-gui -- cargo test -p loquax --features gui --lib --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
 
 # 1217, #232: the phone's strings of the list and the chat come from the core's

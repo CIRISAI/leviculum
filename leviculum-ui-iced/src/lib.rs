@@ -14,6 +14,11 @@
 //! drawn into pixels for the goldens, clicked for the tests.
 //!
 //! Generic over the program's message: a press is the `M` it was given.
+//!
+//! Empty on a musl target, where the window's crates do not link (see the
+//! manifest).
+
+#![cfg(not(target_env = "musl"))]
 
 pub mod avatar;
 pub mod chrome;
