@@ -117,6 +117,12 @@
     <string name="photo_phone">Phone (recommended)</string>
     <string name="photo_original">Original size</string>
     <string name="photo_unreadable">This photo could not be shown.</string>
+    <string name="scene_file">File %1$s, %2$s</string>
+    <string name="attach_file">File</string>
+    <string name="scene_open_file">Open file</string>
+    <string name="file_too_large">This file is %1$s. A message carries at most %2$s.</string>
+    <string name="file_unreadable">This file could not be read.</string>
+    <string name="file_no_app">No app here opens this file.</string>
     <string name="scene_zoom_in">Zoom in</string>
     <string name="scene_zoom_out">Zoom out</string>
     <string name="scene_pan">Move the map</string>

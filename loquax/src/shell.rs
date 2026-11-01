@@ -264,6 +264,9 @@ pub(crate) enum Output {
     MapDrawing(usize),
     /// Show this photo's file whole in the system's viewer (1220).
     Photo(std::path::PathBuf),
+    /// Open this received file with the system's handler for its kind
+    /// (1221).
+    File(std::path::PathBuf),
 }
 
 impl Shell {
@@ -325,6 +328,25 @@ impl Shell {
                     Ok(path) => self.outputs.push(Output::Photo(path)),
                     Err(line) => answers.push(UiEvent::Notice(line)),
                 },
+                // A file (1221): saved under the home's files/, as the
+                // phone keeps it under its app files, then the system's
+                // handler opens it.
+                UiEffect::OpenFile { peer, key, index } => {
+                    let saved = self
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .ok_or_else(|| "that message is gone".to_string())
+                        .and_then(|m| {
+                            loquax::file_save::save(&self.context.home, peer, key, index, &m.fields)
+                        });
+                    match saved {
+                        Ok(path) => self.outputs.push(Output::File(path)),
+                        Err(line) => answers.push(UiEvent::Notice(line)),
+                    }
+                }
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
                 UiEffect::Remember { key, value } => {

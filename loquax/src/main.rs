@@ -362,6 +362,13 @@ struct SendArgs {
     #[arg(long, value_name = "LAT,LON", allow_hyphen_values = true)]
     position: Option<String>,
 
+    /// Send this file with it, as Columba and Sideband attach one (1221):
+    /// the LXMF file attachments field, its name and bytes unchanged. A
+    /// file over 990 KB is refused, the most a receiver takes. Without a
+    /// body the message is the file alone and stdin is not read.
+    #[arg(long, value_name = "FILE")]
+    file: Option<PathBuf>,
+
     /// Send this picture with it, as Columba and Sideband send a photo
     /// (1220): turned upright, scaled by `--photo-size`, its EXIF (the
     /// place, the camera) removed. Without a body the message is the
@@ -1050,17 +1057,25 @@ async fn run(args: SendArgs) -> ExitCode {
     };
     #[cfg(not(feature = "photos"))]
     let photo: Option<Vec<leviculum_lxmf::Field>> = None;
-    let fields = match (fields, photo) {
-        (None, None) => None,
-        (position, photo) => Some(
+    let file = match args.file.as_deref() {
+        None => None,
+        Some(path) => match send_file(path) {
+            Ok(fields) => Some(fields),
+            Err(error) => return usage(error),
+        },
+    };
+    let fields = match (fields, photo, file) {
+        (None, None, None) => None,
+        (position, photo, file) => Some(
             position
                 .into_iter()
                 .chain(photo)
+                .chain(file)
                 .flatten()
                 .collect::<Vec<_>>(),
         ),
     };
-    // A report or a photo has no body, and reads none from stdin.
+    // A report, a photo or a file has no body, and reads none from stdin.
     let body = match (&fields, args.body.as_deref()) {
         (Some(_), None) => Vec::new(),
         (_, body) => match body::resolve(body, &mut std::io::stdin().lock()) {
@@ -1327,6 +1342,24 @@ struct ClientMessage {
     title: Vec<u8>,
     body: Vec<u8>,
     fields: Vec<leviculum_lxmf::Field>,
+}
+
+/// `--file`'s name and bytes as the file attachments field, refused past
+/// [`loquax::ui::files::LARGEST`] with both sizes said.
+fn send_file(path: &std::path::Path) -> Result<Vec<leviculum_lxmf::Field>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("--file {}: {e}", path.display()))?;
+    if let Some(why) = loquax::ui::files::refusal(bytes.len()) {
+        return Err(format!(
+            "--file {}: {}",
+            path.display(),
+            why.resolve(loquax::ui::strings::Lang::En)
+        ));
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(loquax::ui::files::file_fields(&name, bytes))
 }
 
 /// `--photo`'s picture prepared at `size`, else at the config's

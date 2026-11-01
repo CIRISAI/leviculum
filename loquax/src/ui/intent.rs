@@ -31,6 +31,8 @@
 //! | `Request::Photo`, `UiEvent::SendPhoto` (1220) | `SendPhoto` |
 //! | `Request::PhotoSize`, `UiEvent::PhotoSize` (1220) | `PhotoSize` |
 //! | (new) a tap on a photo, `UiEvent::ViewPhoto` (1220) | `ViewPhoto` |
+//! | `Request::File`, `UiEvent::SendFile` (1221) | `SendFile` |
+//! | (new) a tap on a file, `UiEvent::OpenFile` (1221) | `OpenFile` |
 //! | `Request::Delete`, `UiEvent::Delete`, `Message::Delete`, `Message::AskDelete`, `Command::DeleteMessage` | `Delete` (`confirmed` tells the asked from the asking) |
 //! | `Request::Used`, `Message::Insert` | `Insert` |
 //! | `Message::ToggleEmoji` | `Emoji` |
@@ -250,6 +252,22 @@ pub enum Intent {
     },
     /// The reader's photo size: the settings' row (1220).
     PhotoSize(super::photos::PhotoSize),
+    /// Send the file the user picked to `peer` (1221): the paperclip's
+    /// "File", its name and bytes as picked. `size` is the whole file's
+    /// bytes where the shell stopped reading one too large to go, else 0.
+    SendFile {
+        peer: [u8; 16],
+        name: String,
+        data: Vec<u8>,
+        size: u64,
+    },
+    /// Save and open the `index`th file of the message `key` of `peer`'s
+    /// conversation: a tap on its row (1221).
+    OpenFile {
+        peer: [u8; 16],
+        key: u64,
+        index: usize,
+    },
     /// Delete messages: `confirmed` once the user said yes, else ask.
     Delete {
         messages: Messages,
@@ -420,6 +438,8 @@ impl Intent {
             Intent::ViewPhoto { .. } => StrId::ViewPhoto,
             Intent::SendPhoto { .. } => StrId::AttachPhoto,
             Intent::PhotoSize(_) => StrId::PhotoSize,
+            Intent::SendFile { .. } => StrId::AttachFile,
+            Intent::OpenFile { .. } => StrId::OpenFile,
             Intent::Delete { .. } => StrId::ActionDelete,
             Intent::Copy => StrId::ActionCopy,
             Intent::Share { .. } => StrId::Share,

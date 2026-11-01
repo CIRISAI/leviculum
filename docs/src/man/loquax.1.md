@@ -56,6 +56,9 @@ loquax -- terminal LXMF messenger for Reticulum
 **--title** *text*, **--from** *name*
 :   **send** only: the LXMF title, and the name recipients see as the sender (default: `LNMSG_DISPLAY_NAME`, then the account name).
 
+**--file** *file*
+:   **send** only: attach this file to the message, as Columba and Sideband attach one (see FILES ATTACHED). Its name and bytes go unchanged. A file past 990 KB is a usage error and nothing is sent, since receivers take at most 1000 KB a message. Without a body the message is the file alone and stdin is not read.
+
 **--photo** *file*, **--photo-size** **small**|**phone**|**original**
 :   **send** only: send this picture with the message, as Columba and Sideband send a photo (see PHOTOS). It is turned upright and scaled by **--photo-size**, else by the config's `photo_size`, else to **phone**; its EXIF (the place it was taken, the camera) never goes. Without a body the message is the photo alone and stdin is not read. A file that is no picture this build reads (JPEG, PNG, WebP, GIF) is a usage error and nothing is sent.
 
@@ -205,6 +208,10 @@ The open conversation's title carries the peer's latest position. A wide screen 
 Every position is kept in the history with the message it came in; one fix that arrives twice, directly and again in a collector's stream, is kept once. Deleting a conversation deletes the positions its peer reported.
 
 Loquax sends no telemetry: it never sends your position and answers no request for it.
+
+## FILES ATTACHED
+
+A file travels in the LXMF file attachments field, `[[name, bytes], ...]` under field 5, the name a string, as Columba and Sideband write and read it, so a file from either shows in Loquax and one from Loquax shows in either. In **tui** a message with a file carries a line `▤ report.pdf · 312 KB` (`[f] report.pdf - 312 KB` with **--ascii**) for each, under its text or alone; `Enter` on it, or a press on it in **gui**, saves the first file as `$LNMSG_HOME/files/`*address*`-`*key*`-`*n*`/`*name* and hands it to the system's handler for its kind. The name is the sender's with every path separator, control character and leading dot made harmless, so a file never lands outside its folder. A file goes as a message of its own and may hold at most 990 KB: a receiver refuses a message past 1000 KB. A stock propagation node takes at most 256 KB a message, so a larger file reaches a peer that is offline only through a Loquax Mailbox, whose archive keeps 1024 MB by default (`archive_cap_mb`).
 
 ## PHOTOS
 

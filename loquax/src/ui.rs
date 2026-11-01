@@ -134,6 +134,7 @@ use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
 pub mod chat;
 pub mod contacts;
+pub mod files;
 pub mod history;
 pub mod hit;
 pub mod intent;
@@ -1396,6 +1397,22 @@ pub enum UiEvent {
     /// A tap on a photo's bubble: the shell shows it whole
     /// ([`UiEffect::ShowPhoto`]).
     ViewPhoto { peer: [u8; 16], key: u64 },
+    /// Send a file to `peer` (1221): its name as picked and its bytes. It
+    /// goes as one message with the attachments field alone
+    /// ([`files::file_fields`]); one past [`files::LARGEST`] is refused
+    /// with a toast.
+    SendFile {
+        peer: [u8; 16],
+        name: String,
+        data: Vec<u8>,
+    },
+    /// A tap on a bubble's `index`th file: the shell saves and opens it
+    /// ([`UiEffect::OpenFile`]).
+    OpenFile {
+        peer: [u8; 16],
+        key: u64,
+        index: usize,
+    },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1472,6 +1489,15 @@ pub enum UiEffect {
     /// (1220): the phone's viewer, the window's overlay. Its bytes are in
     /// the message's fields ([`photos::photo_bytes`]).
     ShowPhoto { peer: [u8; 16], key: u64 },
+    /// Save the `index`th file of the message `key` of `peer`'s
+    /// conversation under the app's files and open it (1221): the
+    /// system's handler for its kind, the phone's chooser. Its bytes are
+    /// in the message's fields ([`files::file_at`]).
+    OpenFile {
+        peer: [u8; 16],
+        key: u64,
+        index: usize,
+    },
 }
 
 /// Fold one event into the model.
@@ -1579,6 +1605,8 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             }]
         }
         UiEvent::ViewPhoto { peer, key } => model.view_photo(peer, key),
+        UiEvent::SendFile { peer, name, data } => model.send_file(peer, &name, data),
+        UiEvent::OpenFile { peer, key, index } => model.open_file(peer, key, index),
         UiEvent::MailboxChosen { node, by_user } => {
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
@@ -2020,7 +2048,8 @@ fn act<B: InputBuffer + Default>(
 
 /// `Enter` on a message: one that carries a position, a report or a text
 /// with a telemetry field, opens the map at the fix its line names, one
-/// with a photo shows it whole (1220), any other message (and a report
+/// with a photo shows it whole (1220), one with a file opens its first
+/// (1221), any other message (and a report
 /// without a position) its detail view, which `v` opens for every
 /// message. A folded run of reports is drawn as its latest, which is
 /// where the cursor stands, so its line opens the latest fix of the run.
@@ -2033,6 +2062,15 @@ fn open_message<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         .map(|(peer, m)| (peer, m.activity));
     if let Some((peer, key)) = photo {
         return model.view_photo(peer, key);
+    }
+    let file = model
+        .conversations
+        .get(model.selected)
+        .and_then(|c| Some((c.peer, c.messages.get(model.message_cursor)?)))
+        .filter(|(_, m)| !files::files_of(&m.fields).is_empty())
+        .map(|(peer, m)| (peer, m.activity));
+    if let Some((peer, key)) = file {
+        return model.open_file(peer, key, 0);
     }
     match model.message_fix(model.selected, model.message_cursor) {
         Some(fix) => {
@@ -11087,6 +11125,79 @@ mod tests {
             [UiEffect::ShowPhoto {
                 peer: PEER,
                 key: photo_key
+            }]
+        );
+    }
+
+    /// A received file in the terminal (1221): its name, made safe, and
+    /// size alone or under its text, ASCII where the screen is; `Enter`
+    /// on it asks the shell to save and open it.
+    #[test]
+    fn the_terminal_says_a_file_and_enter_opens_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        let file = files::file_fields("../notes.txt", vec![1; 1_400]);
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: Vec::new(),
+                fields: file.clone(),
+                verified: true,
+            },
+        );
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"the minutes".to_vec(),
+                fields: file,
+                verified: true,
+            },
+        );
+        let shown = |model: &UiModel<Field>| -> Vec<String> {
+            view(model).messages.iter().map(text_of).collect()
+        };
+        let rows = shown(&model);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.contains("▤ notes.txt · 2 KB"))
+                .count(),
+            2,
+            "{rows:#?}"
+        );
+        let text = rows
+            .iter()
+            .position(|r| r.contains("the minutes"))
+            .expect("the text");
+        assert!(
+            rows[text + 1].contains("▤ notes"),
+            "under its text: {rows:#?}"
+        );
+        model.ascii = true;
+        assert!(shown(&model)
+            .iter()
+            .any(|r| r.contains("[f] notes.txt - 2 KB")));
+        model.focus = Pane::Messages;
+        model.message_cursor = 0;
+        let file_key = model.conversations[0].messages[0].activity;
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::OpenFile {
+                peer: PEER,
+                key: file_key,
+                index: 0
             }]
         );
     }

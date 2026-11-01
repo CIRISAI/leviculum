@@ -470,6 +470,25 @@ fn block(
         }
         None => body,
     };
+    // A file (1221) says its name and size under its text, or alone:
+    // `Enter` on it saves it under the home and opens it.
+    let body = super::files::files_of(&message.fields)
+        .into_iter()
+        .fold(body, |body, file| {
+            let (glyph, dot) = match draw.ascii {
+                true => ("[f]", "-"),
+                false => ("▤", "·"),
+            };
+            let line = format!(
+                "{glyph} {} {dot} {}",
+                super::files::safe_name(&file.name),
+                super::photos::size_words(file.bytes)
+            );
+            match body.trim().is_empty() {
+                true => line,
+                false => format!("{body}\n{line}"),
+            }
+        });
     // A reaction drawn as a block, its signature broken: what it claims.
     let body = match (body.trim().is_empty(), message.reaction()) {
         (true, Some((_, content))) => format!("reacted {content}"),

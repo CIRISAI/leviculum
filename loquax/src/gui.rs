@@ -172,7 +172,7 @@ async fn drive(
         // model asks of a terminal has no meaning in the window yet, but a
         // photo's file, which the system's viewer shows (1220).
         for output in shell.outputs.drain(..) {
-            if let shell::Output::Photo(path) = output {
+            if let shell::Output::Photo(path) | shell::Output::File(path) = output {
                 if let Err(error) = open::that(&path) {
                     tracing::warn!("could not open {}: {error}", path.display());
                 }
@@ -814,6 +814,9 @@ impl App {
             }
             Intent::SendAgain { peer, key } => self.tell(UiEvent::SendAgain { peer, key }),
             Intent::ViewPhoto { peer, key } => self.tell(UiEvent::ViewPhoto { peer, key }),
+            Intent::OpenFile { peer, key, index } => {
+                self.tell(UiEvent::OpenFile { peer, key, index })
+            }
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed,

@@ -99,6 +99,9 @@ pub enum NodeId {
     Mark(u64),
     /// A bubble's photo, by its message's key (1220).
     Photo(u64),
+    /// A bubble's file, by its message's key and its place among the
+    /// message's files (1221).
+    File(u64, usize),
     Compose,
     Sheet,
     Card,
@@ -123,6 +126,7 @@ impl NodeId {
             NodeId::Bubble(key) => format!("bubble_{key}"),
             NodeId::Mark(key) => format!("mark_{key}"),
             NodeId::Photo(key) => format!("photo_{key}"),
+            NodeId::File(key, index) => format!("file_{key}_{index}"),
             NodeId::Compose => "compose".to_string(),
             NodeId::Sheet => "sheet".to_string(),
             NodeId::Card => "card".to_string(),
@@ -372,6 +376,9 @@ pub struct BubbleNode {
     /// The photo it carries (1220): the renderer draws its thumbnail
     /// (`crate::photo::thumbnail`), a tap shows it whole.
     pub photo: Option<PhotoNode>,
+    /// The files it carries (1221): a row each, its name, size and the
+    /// tap that saves and opens it.
+    pub files: Vec<FileNode>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
@@ -397,6 +404,24 @@ pub struct PhotoNode {
     /// `Photo, 312 KB`.
     pub words: Text,
     /// [`Intent::ViewPhoto`].
+    pub open: Action,
+}
+
+/// A bubble's file: its name, size, what a screen reader says, and the
+/// tap (1221).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileNode {
+    pub id: NodeId,
+    /// The name the sender wrote, as [`super::files::safe_name`] makes it
+    /// safe to show and save: a renderer never sees a path or a control
+    /// character of a stranger's.
+    pub name: String,
+    pub bytes: usize,
+    /// `312 KB`: the row's second line.
+    pub size: String,
+    /// `File report.pdf, 312 KB`.
+    pub words: Text,
+    /// [`Intent::OpenFile`].
     pub open: Action,
 }
 
@@ -572,6 +597,10 @@ impl Scene {
                 .bubble(NodeId::Bubble(key))
                 .and_then(|node| node.photo.as_ref())
                 .map(|photo| &photo.open),
+            NodeId::File(key, index) => self
+                .bubble(NodeId::Bubble(key))
+                .and_then(|node| node.files.get(index))
+                .map(|file| &file.open),
             _ => None,
         }
     }
@@ -891,9 +920,27 @@ fn bubble_node(
             key: bubble.key,
         }),
     });
-    let spoken = match (&live, &photo, bubble.body.is_empty()) {
-        (Some(live), _, true) => live.clone(),
-        (_, Some(photo), true) => photo.words.clone(),
+    let files: Vec<FileNode> = bubble
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| FileNode {
+            id: NodeId::File(bubble.key, index),
+            name: super::files::safe_name(&file.name),
+            bytes: file.bytes,
+            size: super::photos::size_words(file.bytes),
+            words: super::files::file_words(file),
+            open: Action::of(Intent::OpenFile {
+                peer,
+                key: bubble.key,
+                index,
+            }),
+        })
+        .collect();
+    let spoken = match (&live, &photo, files.first(), bubble.body.is_empty()) {
+        (Some(live), _, _, true) => live.clone(),
+        (_, Some(photo), _, true) => photo.words.clone(),
+        (_, _, Some(file), true) => file.words.clone(),
         _ => Text::Raw(bubble.body.clone()),
     };
     let mark = bubble.mark.map(|mark| MarkNode {
@@ -914,6 +961,7 @@ fn bubble_node(
         live,
         mark,
         photo,
+        files,
         actions,
     }
 }
@@ -1143,6 +1191,14 @@ impl BubbleNode {
                 "words": p.words.to_json(),
                 "open": p.open.to_json(),
             })),
+            "files": self.files.iter().map(|f| json!({
+                "id": f.id.resource(),
+                "name": f.name,
+                "bytes": f.bytes,
+                "size": f.size,
+                "words": f.words.to_json(),
+                "open": f.open.to_json(),
+            })).collect::<Vec<_>>(),
             "actions": actions(&self.actions),
             "a11y": self.a11y.to_json(),
         })
@@ -1703,6 +1759,129 @@ mod tests {
                 key: "photo_size",
                 value: "small"
             }]
+        );
+    }
+
+    /// A file is a row of its bubble (1221): its name, size and words, a
+    /// resource the walk finds, a tap that asks the shell to save and open
+    /// it; a file too large for a receiver is refused before it is a
+    /// message.
+    #[test]
+    fn a_file_has_its_row_its_words_and_a_tap_that_opens_it() {
+        use crate::ui::files::{file_fields, LARGEST};
+        use crate::ui::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(false, t), (false, t + 60)]);
+        let peer = [0x42; 16];
+        model.conversations[0].messages[1].body = String::new();
+        model.conversations[0].messages[1].fields =
+            file_fields("report.pdf", alloc::vec![7; 312_400]);
+        model.selected = 0;
+        let scene = model.scene(LayoutClass::Compact);
+        assert!(scene
+            .bubble(NodeId::Bubble(1))
+            .expect("text")
+            .files
+            .is_empty());
+        let node = scene.bubble(NodeId::Bubble(2)).expect("the file's bubble");
+        let file = node.files.first().expect("a file row");
+        assert_eq!(file.id.resource(), "file_2_0");
+        assert_eq!(
+            (file.name.as_str(), file.bytes, file.size.as_str()),
+            ("report.pdf", 312_400, "313 KB")
+        );
+        assert_eq!(file.words.resolve(Lang::En), "File report.pdf, 313 KB");
+        assert_eq!(file.words.resolve(Lang::De), "Datei report.pdf, 313 KB");
+        assert_eq!(node.a11y.label, file.words, "the screen reader says it");
+        let json = node.to_json();
+        assert_eq!(json["files"][0]["id"], "file_2_0");
+        assert_eq!(json["files"][0]["name"], "report.pdf");
+        assert_eq!(json["files"][0]["bytes"], 312_400);
+        assert_eq!(
+            scene.action(NodeId::File(2, 0)).map(|a| a.intent.clone()),
+            Some(Intent::OpenFile {
+                peer,
+                key: 2,
+                index: 0
+            })
+        );
+        assert_eq!(scene.action(NodeId::File(2, 1)), None);
+        assert_eq!(scene.action(NodeId::File(1, 0)), None);
+        let opened = super::super::update(
+            &mut model,
+            UiEvent::OpenFile {
+                peer,
+                key: 2,
+                index: 0,
+            },
+        );
+        assert_eq!(
+            opened,
+            alloc::vec![UiEffect::OpenFile {
+                peer,
+                key: 2,
+                index: 0
+            }]
+        );
+        assert!(super::super::update(
+            &mut model,
+            UiEvent::OpenFile {
+                peer,
+                key: 2,
+                index: 1
+            }
+        )
+        .is_empty());
+        assert!(super::super::update(
+            &mut model,
+            UiEvent::OpenFile {
+                peer,
+                key: 1,
+                index: 0
+            }
+        )
+        .is_empty());
+        assert_eq!(
+            chat::preview(&model.conversations[0].messages[1]),
+            "report.pdf"
+        );
+        assert_eq!(chat::kind(&model.conversations[0].messages[1]), "file");
+
+        // Sending one: a message of its own, the attachments field alone,
+        // the view on it.
+        let sent = super::super::update(
+            &mut model,
+            UiEvent::SendFile {
+                peer,
+                name: "/sdcard/Download/notes.txt".into(),
+                data: b"hello".to_vec(),
+            },
+        );
+        let fields = file_fields("notes.txt", b"hello".to_vec());
+        assert!(
+            matches!(sent.as_slice(), [UiEffect::Send { to, body, fields: f }] if *to == peer && body.is_empty() && f.starts_with(&fields)),
+            "{sent:?}"
+        );
+        let last = model.conversations[0].messages.len() - 1;
+        assert_eq!(model.message_cursor, last);
+        assert!(model.conversations[0].messages[last].outbound);
+
+        // Too large: nothing goes, nothing is added, the toast says why.
+        let before = model.conversations[0].messages.len();
+        let refused = super::super::update(
+            &mut model,
+            UiEvent::SendFile {
+                peer,
+                name: "big.iso".into(),
+                data: alloc::vec![0; LARGEST + 1],
+            },
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(model.conversations[0].messages.len(), before);
+        let toast = model.current_toast().expect("a toast").text.clone();
+        assert_eq!(
+            toast,
+            "This file is 991 KB. A message carries at most 990 KB."
         );
     }
 }

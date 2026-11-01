@@ -166,6 +166,14 @@ leviculum_ui::catalogue! {
     PhotoPhone = "photo_phone", "Phone (recommended)", "Handy (empfohlen)";
     PhotoOriginal = "photo_original", "Original size", "Originalgröße";
     PhotoUnreadable = "photo_unreadable", "This photo could not be shown.", "Dieses Foto ließ sich nicht zeigen.";
+    // Files (1221): the bubble's row, the paperclip's entry, the cap's
+    // refusal with both sizes, and what the phone says when it cannot.
+    File = "scene_file", "File %1$s, %2$s", "Datei %1$s, %2$s";
+    AttachFile = "attach_file", "File", "Datei";
+    OpenFile = "scene_open_file", "Open file", "Datei öffnen";
+    FileTooLarge = "file_too_large", "This file is %1$s. A message carries at most %2$s.", "Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.";
+    FileUnreadable = "file_unreadable", "This file could not be read.", "Diese Datei ließ sich nicht lesen.";
+    FileNoApp = "file_no_app", "No app here opens this file.", "Keine App hier öffnet diese Datei.";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";
     Pan = "scene_pan", "Move the map", "Karte verschieben";

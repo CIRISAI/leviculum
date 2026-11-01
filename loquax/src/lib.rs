@@ -77,6 +77,8 @@ pub mod export;
 #[cfg(feature = "std")]
 pub mod fanout;
 pub mod fetch;
+#[cfg(feature = "std")]
+pub mod file_save;
 pub mod home;
 #[cfg(feature = "std")]
 pub mod identity;

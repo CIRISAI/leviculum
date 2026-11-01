@@ -552,7 +552,7 @@ fn run_output(output: Output) -> Result<(), String> {
                 .map_err(|e| format!("copy: {e}"))
         }
         Output::Open(url) => open::that(&url).map_err(|e| format!("could not open {url}: {e}")),
-        Output::Photo(path) => {
+        Output::Photo(path) | Output::File(path) => {
             open::that(&path).map_err(|e| format!("could not open {}: {e}", path.display()))
         }
         Output::Mouse(on) => set_mouse_capture(on).map_err(|e| format!("mouse: {e}")),
@@ -1242,6 +1242,7 @@ async fn run_script(
                 Output::Copy(text) => format!("osc52 {}", osc52(&text).replace('\x1b', "\\e")),
                 Output::Open(url) => format!("open {url}"),
                 Output::Photo(path) => format!("photo {}", path.display()),
+                Output::File(path) => format!("file {}", path.display()),
                 Output::Mouse(on) => format!("mouse {}", if on { "on" } else { "off" }),
             };
             dump(&mut terminal, &mut painter, None, &line)?;

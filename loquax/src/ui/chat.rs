@@ -314,6 +314,8 @@ pub fn kind(message: &Message) -> &'static str {
         "position"
     } else if super::photos::photo_of(&message.fields).is_some() {
         "photo"
+    } else if !super::files::files_of(&message.fields).is_empty() {
+        "file"
     } else {
         "text"
     }
@@ -332,6 +334,11 @@ pub fn preview(message: &Message) -> String {
     }
     if message.body.trim().is_empty() && super::photos::photo_of(&message.fields).is_some() {
         return "photo".to_string();
+    }
+    if message.body.trim().is_empty() {
+        if let Some(file) = super::files::files_of(&message.fields).into_iter().next() {
+            return file.name;
+        }
     }
     message.body.lines().next().unwrap_or_default().to_string()
 }
@@ -504,6 +511,9 @@ pub struct Bubble {
     /// The photo it carries (1220): the bubble draws its thumbnail, a tap
     /// shows it whole.
     pub photo: Option<super::photos::PhotoRef>,
+    /// The files it carries (1221), in the sender's order: the bubble
+    /// draws a row for each, a tap saves and opens it.
+    pub files: Vec<super::files::FileRef>,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -565,6 +575,7 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 since,
                 liveness: liveness.filter(|_| newest_report == Some(m)),
                 photo: super::photos::photo_of(&message.fields),
+                files: super::files::files_of(&message.fields),
             }
         })
         .collect()
@@ -961,6 +972,7 @@ mod tests {
             since: None,
             liveness: None,
             photo: None,
+            files: Vec::new(),
         }
     }
 

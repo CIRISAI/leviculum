@@ -843,6 +843,16 @@ impl App {
                 Message::Intent(photo.open.intent.clone()),
             ));
         }
+        // A file (1221): its name and size, a press saves it under the
+        // home and opens it with the system's handler.
+        for file in &node.files {
+            inside = inside.push(flat(
+                text(format!("▤ {} · {}", file.name, file.size))
+                    .size(size::BODY - 2.0)
+                    .color(ink),
+                Message::Intent(file.open.intent.clone()),
+            ));
+        }
         if let Some(fix) = &bubble.fix {
             let mut words = loquax::telemetry::coordinates(&fix.location);
             if let Some(accuracy) = loquax::telemetry::accuracy(&fix.location) {
