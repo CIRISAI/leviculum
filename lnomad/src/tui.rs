@@ -7383,7 +7383,7 @@ Text unter dem Bild.
         );
     }
 
-    // --- names: search and pins (Codeberg 1227) --------------------------
+    // --- names: search and pins ----------------------------------------
 
     const MARCEL: [u8; 16] = [
         0xfa, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
