@@ -30,7 +30,7 @@ loquax -- terminal LXMF messenger for Reticulum
 
 **fetch** collects what the propagation node holds for you and prints what is new on standard output. On a client of a Loquax Mailbox it pulls from the mailbox instead (see LOQUAX MAILBOX).
 
-**address** prints this machine's LXMF address.
+**address** prints this machine's LXMF address. At a terminal the contact code follows on a second line (`lxma://`*address*`:`*key*), the text a friend pastes to add you; a script reading the output gets the address alone, as before. The TUI's palette `my code` shows the same code with its QR.
 
 **import** and **export** bring a user's identity, contacts and history over from another messenger, and take them out again (see IMPORT AND EXPORT).
 
@@ -127,7 +127,7 @@ In the compose line, keys type. `Enter` sends to the open conversation (an empty
 
 **send_on_enter**: with `send_on_enter = false` in `$LNMSG_HOME/config`, or after the palette's `send on enter`, `Enter` breaks the line and `Alt-Enter` sends (`Ctrl-Enter` too, where the terminal can send it).
 
-Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `new conversation`, `add contact`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, `mouse`, `theme`, `search`, `delete message`, `delete conversation`, `pin`, `rename`, `react`, `block`, `unblock`, `blocked`, `map drawing`, `read receipts`, ...); a name typed whole, or its start, is offered first. `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `Ctrl-s` opens the search, or goes back to its field. `F5` checks the propagation node, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
+Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `new conversation`, `add contact`, `my code`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, `mouse`, `theme`, `search`, `delete message`, `delete conversation`, `pin`, `rename`, `react`, `block`, `unblock`, `blocked`, `map drawing`, `read receipts`, ...); a name typed whole, or its start, is offered first. `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `Ctrl-s` opens the search, or goes back to its field. `F5` checks the propagation node, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
 
 ## PROPAGATION NODE
 
@@ -137,7 +137,7 @@ A propagation node is somebody else's machine that holds mail for you while you 
 
 ## THE SCREEN
 
-**The list.** Two rows a conversation, the most recent first: its name (see NAMES), the time of its last message (`14:05` today, the weekday this week, else the date), then the last line, `you:` before it when it was yours, and in brackets the count of messages not yet read. The selected conversation has a bar in the margin, reversed while the list has the focus. Pinned conversations (see HISTORY) stand first, above a dotted rule. The conversation's title says the peer, its trust in words (see NAMES) and the propagation node: the selected node, how it was chosen and when this session last fetched from it.
+**The list.** Two rows a conversation, the most recent first: its name (see NAMES), the time of its last message (`14:05` today, the weekday this week, else the date), then the last line, `you:` before it when it was yours, and in brackets the count of messages not yet read. The selected conversation has a bar in the margin, reversed while the list has the focus. Pinned conversations (see HISTORY) stand first, above a dotted rule. The conversation's title says the peer, its trust in words (see NAMES) and the propagation node: the selected node, how it was chosen and when this session last fetched from it. Without a propagation node the title says nothing of it until a send needs one, then `no relay`: while your newest message there waits or was not sent. A send that failed says `Not sent. Its details say why.`; its details (`Enter` on it, or the palette's `details`) carry each way's reason.
 
 **A message** is a block: yours flush right, theirs flush left, at most three quarters of the pane wide, the text wrapped at a space and a line break kept, and the time closing the last line, for yours with its delivery mark (see DELIVERY MARKS). A centred date separates the days, and the top of the conversation says `nothing earlier on this device` where the history begins, or how many older messages it holds above what is loaded (see HISTORY). On a pane narrower than 40 cells yours are drawn flush left too, with `you` before the time. A message is drawn selected behind a bar while the conversation has the focus and the cursor is on it.
 
@@ -155,7 +155,7 @@ A name off the network is drawn sanitised: control characters, direction overrid
 
 Two peers whose names look alike (the same letters ignoring case, full-width forms, and the Cyrillic, Greek and digit letters that look like Latin ones) both carry `≈` after the hash, and the title of an open one says `same name as ·b7d0`. A peer that announces a different name than before says so once in its conversation: `── was Alice, now announces Ally ──`.
 
-The title's trust state is one of three words: `known`, a peer you named; `blocked`, one you blocked; else `unknown`. Beside a petname the title also says what the peer announces (`known · announces Alice`).
+The title's trust state is `known` for a peer you named and `blocked` for one you blocked; a peer you have not named, the default, takes no word. Beside a petname the title also says what the peer announces (`known · announces Alice`).
 
 The palette's `new conversation` asks for a friend's code: a contact code (`lxma://`, as Columba, Sideband and the Loquax app show it), an address alone (32 hex digits, either case, spaces between groups allowed, or `lxmf@` before it), and `Enter` opens that conversation with the cursor in the compose line. `add contact` does the same, then asks your name for the friend as `rename` does. A text that is no friend's code is said in one sentence (`That is not a Loquax code.`, `This code is damaged. Ask for it again.`, and for a mailbox's code `That code is for a mailbox, not for a friend.`), the same the phone says; the window's new conversation field reads codes the same way. While the list is empty it names `:new conversation`.
 

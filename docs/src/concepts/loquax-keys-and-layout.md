@@ -722,7 +722,9 @@ the propagation node page's decision, or fills a gap they leave:
   section 2, "Blocking, and names from the palette".)
 - **Trust** is the three words of the propagation node page in the header:
   `known` with a petname, `blocked` with a block (over a petname),
-  `unknown` else. Beside a petname that differs from what the peer
+  `unknown` else; since 1279 (the ninety percent walk, finding 21) the
+  default `unknown` is not drawn, and the header says nothing of a missing
+  propagation node until a send needs one (`no relay`). Beside a petname that differs from what the peer
   announces the header adds `announces Ally`, the provenance of option C.
   `blocked` was only said until Lew decided what it does on 2026-10-28
   (1082): stored silently, see the propagation node page, section 2.

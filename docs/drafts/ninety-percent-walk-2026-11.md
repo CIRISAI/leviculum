@@ -331,6 +331,16 @@ connected, trying again") and #20 (no status line on the join form). #14
 (the name set from the phone through a computer mailbox) went back to the
 pool: it needs a new request path to the mailbox and a rename of the
 running mailbox's announce.
+1279 takes #22 (the toast "Not sent. Its details say why.", the legs in
+the detail view; not "Loquax tries again", since the terminal does not
+retry a send its runner gave up), #23 (the palette's `my code` with the
+`lxma://` code and its QR; `loquax address` prints the code under the hex
+at a terminal) and #21 in part (no trust word for the default state; no
+relay words without a relay until a send needs one, then `no relay`). The
+rest of #21, a nameless peer's form `<61ddb79a…>`, went back to the pool:
+`names::address_form` is shared with the phone, whose device walk matches
+that form as its raw-hash check, and "the way the list does" names no other
+form the list draws today.
 
 ## 6. The three worst
 
