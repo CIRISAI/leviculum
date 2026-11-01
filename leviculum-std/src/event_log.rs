@@ -459,6 +459,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_QUEUE_STALE",
         required_keys: &["dst", "hops", "iface", "age_ms"],
     },
+    // A received announce that found a targeted path response still in its
+    // grace (1262): the response stays, carrying this newer emission, and
+    // the announce's rebroadcast waits in the held slot until the response
+    // fired. `iface_out` is the requester's interface.
+    EventSchema {
+        name: "ANN_HELD_FOR_RESPONSE",
+        required_keys: &["dst", "iface_out"],
+    },
     // An operator emptying the announce-cap queues (`rnpath -D`, the
     // `drop: announce_queues` RPC verb), one line per interface that held
     // any, as Python logs "Dropped N announces on <interface>"

@@ -7693,7 +7693,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let announce_table_took_it =
                 (!rate_blocked && !rate_limited && !is_path_response) || forwards_pending_response;
             if announce_table_took_it {
-                self.storage.set_announce(
+                self.insert_received_announce(
                     dest_hash,
                     AnnounceEntry {
                         timestamp_ms: now,
@@ -7762,8 +7762,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // above.
                         block_rebroadcasts: false,
                     },
+                    forwards_pending_response,
                 );
-
                 // Log when an announce is queued for rebroadcast (aids collision diagnosis)
                 if let Some(entry) = self.storage.get_announce(&dest_hash) {
                     if entry.retransmit_at_ms.is_some() {
@@ -37264,3 +37264,5 @@ mod table_export_tests {
         assert_eq!(links[0].destination_hash, [0x03u8; TRUNCATED_HASHBYTES]);
     }
 }
+
+mod received_announce;
