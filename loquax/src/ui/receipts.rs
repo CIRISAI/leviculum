@@ -57,7 +57,7 @@
 //!   up: the reply is signed by the home node, which keeps no draft.
 //! - The first device to see a message wins: the home node keeps the seen
 //!   mark of the new ids only, every device applies it on its next pull
-//!   ([`UiModel::home_seen`]), and a message seen on one device owes no
+//!   (`UiModel::home_seen`), and a message seen on one device owes no
 //!   receipt on another. A receipt that comes back to the home node is a
 //!   received message every device pulls, and turns our message read as
 //!   it does on a device of its own.
