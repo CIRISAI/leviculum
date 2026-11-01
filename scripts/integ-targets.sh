@@ -43,12 +43,17 @@ INTEG_PREREQUISITES="scripts/integ-prerequisites.txt"
 
 # One line per declared prerequisite that is ABSENT on this host:
 # `<dir>/<target><TAB><exact test name, or ->><TAB><missing path>`.
-# Format and reasons: scripts/integ-prerequisites.txt.
+# A prerequisite written `command:<name>` is a program looked up on PATH
+# rather than a path in the tree (1256: javac). Format and reasons:
+# scripts/integ-prerequisites.txt.
 integ_unmet_prerequisites() {
     local path target test
     while read -r path target test; do
-        case "$path" in '' | '#'*) continue ;; esac
-        [ -e "$path" ] && continue
+        case "$path" in
+            '' | '#'*) continue ;;
+            command:*) command -v "${path#command:}" >/dev/null 2>&1 && continue ;;
+            *) [ -e "$path" ] && continue ;;
+        esac
         printf '%s\t%s\t%s\n' "$target" "${test:--}" "$path"
     done <"$INTEG_PREREQUISITES"
 }

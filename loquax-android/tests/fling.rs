@@ -1,6 +1,7 @@
 //! The map's fling (1188): `Fling.java`, the part of the phone's coast
-//! that is plain Java, compiled with the JDK the APK's build needs
-//! (`install-toolchain.sh`) and run with `tests/java/FlingTest.java`: which
+//! that is plain Java, compiled with the JDK the APK's build needs (a
+//! `default-jdk-headless` that `install-toolchain.sh` asks for, it does not
+//! install it) and run with `tests/java/FlingTest.java`: which
 //! gestures fling by a held clock (the minimum velocity, a pinch, a second
 //! finger, a finger that stopped), the room a coast has to the world's
 //! edge, and a coast frame by frame that slows down, converges, stops at
@@ -21,7 +22,7 @@ fn the_fling_decides_and_coasts_as_the_phone_does() {
         .arg(manifest.join("android/src/network/leviculum/loquax/Fling.java"))
         .arg(manifest.join("tests/java/FlingTest.java"))
         .output()
-        .expect("javac runs (install-toolchain.sh installs the JDK)");
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
     assert!(
         compiled.status.success(),
         "javac:\n{}",
@@ -33,7 +34,7 @@ fn the_fling_decides_and_coasts_as_the_phone_does() {
         .arg(&classes)
         .arg("network.leviculum.loquax.FlingTest")
         .output()
-        .expect("java runs");
+        .expect("java runs (the same JDK)");
     let out = String::from_utf8_lossy(&ran.stdout);
     assert!(
         ran.status.success(),
