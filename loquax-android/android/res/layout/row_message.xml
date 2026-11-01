@@ -51,7 +51,8 @@
                 android:textSize="12sp" />
 
             <ImageView
-                android:id="@+id/mark"
+                android:id="@+id/state_clock"
+                android:tag="mark"
                 android:layout_width="16dp"
                 android:layout_height="16dp"
                 android:layout_marginStart="4dp" />

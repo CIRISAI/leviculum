@@ -175,6 +175,11 @@ final class Core {
         return command(map("t", "forward", "peer", peer, "key", key, "to", to));
     }
 
+    /** Send the message `key`, one of ours not sent, again: its red mark's tap (1232). */
+    static String sendAgain(String peer, long key) {
+        return command(map("t", "sendagain", "peer", peer, "key", key));
+    }
+
     /** Delete the messages `keys`, asked already. */
     static String delete(String peer, List<Long> keys) {
         return command(map("t", "delete", "peer", peer, "keys", keys));

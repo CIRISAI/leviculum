@@ -172,41 +172,42 @@ impl canvas::Program<Message> for Drawing {
         let s = bounds.width.min(bounds.height);
         let p = |x: f32, y: f32| Point::new(x * s, y * s);
         let line = Stroke::default().with_color(self.ink).with_width(s / 10.0);
-        let tick = |frame: &mut Frame, dx: f32| {
-            let path = Path::new(|b| {
-                b.move_to(p(0.12 + dx, 0.55));
-                b.line_to(p(0.32 + dx, 0.75));
-                b.line_to(p(0.72 + dx, 0.3));
-            });
-            frame.stroke(&path, line);
-        };
         match self.icon {
-            Icon::Mark(Mark::Queued) => {
-                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
-                let hands = Path::new(|b| {
-                    b.move_to(p(0.5, 0.25));
-                    b.line_to(p(0.5, 0.5));
-                    b.line_to(p(0.68, 0.6));
-                });
-                frame.stroke(&hands, line);
-            }
-            Icon::Mark(Mark::Sending) => {
-                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
-            }
-            Icon::Mark(Mark::Sent) => tick(&mut frame, 0.08),
-            // Read draws as delivered until the glyph ladder of
-            // loquax-read-receipts.md lands (1230).
-            Icon::Mark(Mark::Delivered | Mark::Read) => {
-                tick(&mut frame, -0.06);
-                tick(&mut frame, 0.18);
-            }
-            Icon::Mark(Mark::Failed) => {
-                frame.fill(&Path::circle(p(0.5, 0.5), s * 0.45), self.failed.0);
-                let sign = Stroke::default()
-                    .with_color(self.failed.1)
-                    .with_width(s / 8.0);
-                frame.stroke(&Path::line(p(0.5, 0.25), p(0.5, 0.58)), sign);
-                frame.fill(&Path::circle(p(0.5, 0.74), s * 0.07), self.failed.1);
+            // The ladder (1232) from the shape the phone draws too.
+            Icon::Mark(mark) => {
+                let shape = mark.shape();
+                let u = s / chat::GRID;
+                let at = |(x, y): (f32, f32)| Point::new(x * u, y * u);
+                let sign = match mark {
+                    Mark::Failed => self.failed.1,
+                    _ => self.ink,
+                };
+                if let Some(disc) = shape.disc {
+                    let path = Path::circle(at((disc.x, disc.y)), disc.r * u);
+                    frame.fill(&path, self.failed.0);
+                }
+                let pen = Stroke::default()
+                    .with_color(sign)
+                    .with_width(shape.width * u)
+                    .with_line_cap(canvas::LineCap::Round)
+                    .with_line_join(canvas::LineJoin::Round);
+                if let Some(ring) = shape.ring {
+                    frame.stroke(&Path::circle(at((ring.x, ring.y)), ring.r * u), pen);
+                }
+                for line in shape.lines {
+                    let path = Path::new(|b| {
+                        if let Some((&first, rest)) = line.split_first() {
+                            b.move_to(at(first));
+                            for &point in rest {
+                                b.line_to(at(point));
+                            }
+                        }
+                    });
+                    frame.stroke(&path, pen);
+                }
+                if let Some(dot) = shape.dot {
+                    frame.fill(&Path::circle(at((dot.x, dot.y)), dot.r * u), sign);
+                }
             }
             Icon::Send => {
                 let arrow = Path::new(|b| {
@@ -781,9 +782,18 @@ impl App {
             if let Some(at) = bubble.at {
                 line = line.push(text(at.hh_mm()).size(size::META).color(meta));
             }
-            if let Some(mark) = bubble.mark {
+            if let Some(mark) = &node.mark {
                 let failed = (colour(t.failed_ground), colour(t.failed_mark));
-                line = line.push(drawing(Icon::Mark(mark), meta, failed, 16.0));
+                let ink = colour(chat::bubble_ink(mark.mark, &t));
+                let face = drawing(Icon::Mark(mark.mark), ink, failed, 16.0);
+                // A failed one sends again on a press (1232).
+                line = match mark.activate.is_some() {
+                    true => line.push(flat(
+                        face,
+                        Message::Intent(Intent::Activate(scene::NodeId::Mark(bubble.key))),
+                    )),
+                    false => line.push(face),
+                };
             }
             inside = inside.push(container(line).align_right(Length::Shrink));
         }
@@ -1062,7 +1072,7 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
         let failed = (colour(t.list_failed_ground), colour(t.list_failed_mark));
         under = under.push(drawing(
             Icon::Mark(mark),
-            colour(t.text_secondary),
+            colour(chat::list_ink(mark, &t)),
             failed,
             18.0,
         ));

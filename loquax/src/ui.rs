@@ -1216,6 +1216,7 @@ impl<B> UiModel<B> {
                     selected,
                     tokens: self.tokens(),
                     mark: self.query(),
+                    home_client: self.home_client,
                 },
             ),
             None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
@@ -1322,6 +1323,10 @@ pub enum UiEvent {
         key: u64,
         to: [u8; 16],
     },
+    /// Send the message `key` of `peer`'s conversation again, which was
+    /// not sent (its mark's tap, 1232): the failed one goes, a new one with
+    /// its text and fields takes its place at the end.
+    SendAgain { peer: [u8; 16], key: u64 },
     /// Delete the messages `keys` of `peer`'s conversation without asking,
     /// as `y` after `d` does for one: a frontend that asked already.
     Delete { peer: [u8; 16], keys: Vec<u64> },
@@ -1609,6 +1614,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         } => model.react(peer, target, &content),
         UiEvent::Reply { peer, target, body } => model.reply_to(peer, target, body),
         UiEvent::Forward { from, key, to } => model.forward(from, key, to),
+        UiEvent::SendAgain { peer, key } => model.send_again(peer, key),
         UiEvent::Delete { peer, keys } => {
             model.delete_messages(peer, &keys);
             Vec::new()
@@ -2892,6 +2898,41 @@ fn state_words(state: DeliveryState) -> &'static str {
     }
 }
 
+/// The state a sent message is shown in (1232): on a client of a home
+/// node the home node is the reader's mailbox, so its `Sent` (the home
+/// took the message, `home::shown_state`) is the mailbox's tick, not the
+/// clock of a send nobody confirmed. Elsewhere the state itself.
+pub fn shown_delivery(state: DeliveryState, home_client: bool) -> DeliveryState {
+    match state {
+        DeliveryState::Sent if home_client => DeliveryState::InMailbox,
+        other => other,
+    }
+}
+
+/// A sent message's state in the detail view's words (1232,
+/// loquax-read-receipts.md, section 3): the ladder's clock covers both
+/// waiting and sent without proof, one tick is the mailbox, so the words
+/// say which it is; `who` is the peer as the screen names them.
+fn detail_words(state: DeliveryState, who: &str, offset_secs: i32) -> String {
+    match state {
+        DeliveryState::Queued => "waiting to be sent".into(),
+        DeliveryState::Stamping => "being sent: computing its stamp".into(),
+        DeliveryState::InFlight => "being sent now".into(),
+        DeliveryState::Sent => "sent; nobody has confirmed it arrived yet".into(),
+        DeliveryState::InMailbox => format!("in the mailbox, delivered once {who} is online"),
+        DeliveryState::Delivered => format!("delivered: it arrived on {who}'s device"),
+        DeliveryState::Read { at } => {
+            let at = WallTime {
+                unix_secs: i64::from(at),
+                offset_secs,
+            };
+            format!("read {}, delivered before", at.hh_mm())
+        }
+        DeliveryState::Rejected => "not sent: refused; its mark sends it again".into(),
+        DeliveryState::Failed => "not sent: given up; its mark sends it again".into(),
+    }
+}
+
 /// `Enter` on a message: its detail view, with what this device saw
 /// happen to it (loquax-keys-and-layout.md, section 7, slice 2).
 fn details<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
@@ -4020,6 +4061,7 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
     let conversation = model.conversations.get(c)?;
     let message = conversation.messages.get(m)?;
     let who = model.names.label(&conversation.peer);
+    let offset = message.at.or(model.now).map_or(0, |at| at.offset_secs);
     let mut rows = vec![
         match message.outbound {
             true => format!("from you to {who}"),
@@ -4032,13 +4074,15 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
         },
         format!("size   {} bytes", message.size),
         match (message.delivery, message.signature) {
-            (Some(state), _) => format!("state  {}", state_words(state)),
+            (Some(state), _) => {
+                let state = shown_delivery(state, model.home_client);
+                format!("state  {}", detail_words(state, &who, offset))
+            }
             (None, Signature::Verified) => "signature verified".to_string(),
             (None, Signature::Unverified) => "signature NOT verified".to_string(),
             (None, Signature::Invalid) => "signature INVALID".to_string(),
         },
     ];
-    let offset = message.at.or(model.now).map_or(0, |at| at.offset_secs);
     let received = message.at.map(|at| at.unix_secs);
     let sensors = telemetry::detail_rows(&conversation.peer, &message.fields, offset, received);
     if !sensors.is_empty() {
@@ -4385,7 +4429,7 @@ pub fn detail_layout(detail: &DetailView, screen: Rect) -> (Rect, Vec<String>) {
 
 /// `direct 12 s` or `via propagation node 40 s`: which leg a waiting send is on and
 /// for how long, while its mark still says it is waiting. Gone the moment it
-/// is handed on, so the label never sits beside a `◇` or a `✓`.
+/// is handed on, so the label never sits beside a tick.
 fn leg_label(message: &Message, state: DeliveryState, tick: u64) -> Option<String> {
     let (leg, since) = message.leg?;
     if !matches!(
@@ -5228,9 +5272,9 @@ mod tests {
     }
 
     /// The policy half of leviculum 1002 on the screen: a message the runner
-    /// left on a link without a proof is `◇` and stays `◇` through the
+    /// left on a link without a proof shows the clock and keeps it through the
     /// router's retries and its giving up, with no red cross; a late proof
-    /// still turns it `✓`.
+    /// still gives it two ticks.
     #[test]
     fn an_unproven_send_stays_sent_until_a_proof_and_never_turns_red() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -5288,19 +5332,19 @@ mod tests {
         for _ in 0..12 {
             update(&mut model, UiEvent::Tick);
         }
-        assert!(text(&model) == "hi  direct 3 s ○", "{}", text(&model));
+        assert!(text(&model) == "hi  direct 3 s ◷", "{}", text(&model));
         update(&mut model, UiEvent::SendLeg(Leg::Propagated));
         for _ in 0..8 {
             update(&mut model, UiEvent::Tick);
         }
         assert!(
-            text(&model) == "hi  via propagation node 2 s ○",
+            text(&model) == "hi  via propagation node 2 s ◷",
             "{}",
             text(&model)
         );
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
         state(&mut model, ID, MessageState::AwaitingCollection);
-        assert_eq!(text(&model), "hi  ⌂");
+        assert_eq!(text(&model), "hi  ✓");
     }
 
     #[test]
@@ -5753,7 +5797,9 @@ mod tests {
         assert_eq!(model.focus, Pane::Messages, "Enter no longer composes");
         let detail = view(&model).detail.expect("the detail view");
         assert!(
-            detail.rows.contains(&"state  queued".to_string()),
+            detail
+                .rows
+                .contains(&"state  waiting to be sent".to_string()),
             "{detail:?}"
         );
         update(&mut model, key(KeyCode::Esc));
@@ -6010,6 +6056,59 @@ mod tests {
             .collect()
     }
 
+    /// The terminal's column of the ladder (1232), a snapshot: five
+    /// messages, one per rung, in Unicode and in ASCII, each glyph two
+    /// cells, read and failed bold, read in its own tone.
+    #[test]
+    fn the_terminal_column_draws_the_ladder() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        for body in ["a", "b", "c", "d", "e"] {
+            let body = body.to_string();
+            update(&mut model, UiEvent::Write { peer: PEER, body });
+        }
+        let states = [
+            DeliveryState::InFlight,
+            DeliveryState::InMailbox,
+            DeliveryState::Delivered,
+            DeliveryState::Read { at: 1_800_000_000 },
+            DeliveryState::Failed,
+        ];
+        for (message, state) in model.conversations[0].messages.iter_mut().zip(states) {
+            message.delivery = Some(state);
+        }
+        model.sending.clear();
+        let column = |model: &UiModel<Field>| -> Vec<String> {
+            view(model)
+                .messages
+                .iter()
+                .map(text)
+                .filter(|row| row.trim().len() == 1 || row.contains("  "))
+                .filter_map(|row| {
+                    let row = row.trim().to_string();
+                    (row.len() <= 12 && !row.is_empty()).then_some(row)
+                })
+                .collect()
+        };
+        assert_eq!(column(&model), ["a  ⠋", "b  ✓", "c  ✓✓", "d  ✔✔", "e  !"]);
+        model.ascii = true;
+        assert_eq!(column(&model), ["a  *", "b  v", "c  vv", "d  VV", "e  !"]);
+        model.ascii = false;
+        let rows = view(&model).messages;
+        let cell = |glyph: char| {
+            rows.iter()
+                .flat_map(|row| &row.cells)
+                .find(|c| c.ch == glyph)
+                .map(|c| c.st)
+                .expect("the glyph")
+        };
+        let tokens = model.tokens();
+        assert!(cell('✔').bold && cell('!').bold);
+        assert!(!cell('✓').bold);
+        assert_eq!(cell('✔').fg, tokens.tones.read);
+        assert_eq!(cell('✓').fg, tokens.tones.pending);
+        assert_eq!(cell('!').fg, tokens.tones.failed);
+    }
+
     #[test]
     fn the_view_draws_the_glyph_and_says_nothing_is_earlier() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -6017,11 +6116,11 @@ mod tests {
         assert_eq!(view(&model).messages_title, "<abababab…>  unknown");
         sent(&mut model, "hi");
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
-        assert_eq!(shown(&model), [layout::EARLIEST, "hi  ○"]);
+        assert_eq!(shown(&model), [layout::EARLIEST, "hi  ◷"]);
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(shown(&model)[1], "hi  ✓");
+        assert_eq!(shown(&model)[1], "hi  ✓✓");
         model.ascii = true;
-        assert_eq!(shown(&model)[1], "hi  v");
+        assert_eq!(shown(&model)[1], "hi  vv");
         assert_eq!(
             text(&view(&model).conversations[0]).trim_end(),
             "▌<abababab…>"
@@ -6080,7 +6179,7 @@ mod tests {
         );
         assert_eq!(
             shown(&model),
-            [layout::EARLIEST, "first", "second  ○", "back", "again"]
+            [layout::EARLIEST, "first", "second  ◷", "back", "again"]
         );
     }
 
@@ -6188,7 +6287,7 @@ mod tests {
         // past it, as long as the row keeps its margin cells.
         let body_rows = |rows: &[&String]| -> Vec<String> {
             rows.iter()
-                .map(|r| r.replace("  14:02", "").replace(" ○", ""))
+                .map(|r| r.replace("  14:02", "").replace(" ◷", ""))
                 .collect()
         };
         for row in body_rows(ours) {
@@ -6221,7 +6320,7 @@ mod tests {
         assert_eq!(words, expected);
         assert!(ours
             .last()
-            .is_some_and(|r| r.trim_end().ends_with("14:02 ○")));
+            .is_some_and(|r| r.trim_end().ends_with("14:02 ◷")));
         assert!(theirs
             .last()
             .is_some_and(|r| r.trim_end().ends_with("14:02")));
@@ -6373,7 +6472,7 @@ mod tests {
             .find(|r| r.contains("on my way"))
             .expect("row");
         assert_eq!(extent(&narrow).0, 1, "{narrow:?}");
-        assert_eq!(narrow.trim(), "on my way  you 09:12 ○");
+        assert_eq!(narrow.trim(), "on my way  you 09:12 ◷");
         update(
             &mut model,
             UiEvent::Resize {
@@ -6386,8 +6485,9 @@ mod tests {
             .into_iter()
             .find(|r| r.contains("on my way"))
             .expect("row");
-        assert_eq!(extent(&wide).1, 38, "{wide:?}");
-        assert_eq!(wide.trim(), "on my way  09:12 ○");
+        // The glyph's column is two cells (1232): its padding takes 38.
+        assert_eq!(extent(&wide).1, 37, "{wide:?}");
+        assert_eq!(wide.trim(), "on my way  09:12 ◷");
     }
 
     /// The selected block, under focus, is reversed behind the bar; nothing
@@ -6437,7 +6537,7 @@ mod tests {
                 "peer   abababababababababababababababab",
                 &format!("id     {}", "11".repeat(32)),
                 "size   5 bytes",
-                "state  delivered",
+                "state  delivered: it arrived on <abababab…>'s device",
                 "",
                 "on this device",
                 "14:02:00  queued",
@@ -7146,7 +7246,7 @@ mod tests {
         let mark = cells(&model, |t| {
             matches!(t, hit::Target::Block { mark: true, .. })
         });
-        assert_eq!(mark.len(), 1, "one cell, the glyph: {mark:?}");
+        assert_eq!(mark.len(), 2, "two cells, the glyph's column: {mark:?}");
         // A message up the screen, selected where it is: the view stays.
         let older = cell_of(&model, "message 10", 2);
         press(&mut model, older);
@@ -7770,7 +7870,7 @@ mod tests {
             shown(&model),
             [
                 layout::EARLIEST,
-                "hi  ○",
+                "hi  ◷",
                 "── was Alice, now announces Ally ──"
             ]
         );
@@ -7886,7 +7986,7 @@ mod tests {
             .collect()
     }
 
-    /// The restart, said honestly: what was in flight comes back `○` with
+    /// The restart, said honestly: what was in flight comes back on the clock with
     /// the reason in its ledger, and is written back so; what was proven
     /// stays proven; new messages are keyed after the store's last.
     #[test]

@@ -662,13 +662,15 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             // Under the time either the count or, ours being the last, its
             // mark: the ticks cut into the list's ground.
             String state = Core.bool(row, "ours") ? Core.str(row, "state") : "";
-            ImageView mark = (ImageView) view.findViewById(R.id.mark);
+            ImageView mark = (ImageView) view.findViewWithTag("mark");
             mark.setVisibility(unread == 0 && !state.isEmpty() ? View.VISIBLE : View.GONE);
             if (!state.isEmpty()) {
-                mark.setImageDrawable(new Glyph(Glyph.mark(state), getColor(R.color.text_secondary),
-                        getColor(R.color.background), getColor(R.color.list_failed_ground),
+                Glyph.Kind kind = Glyph.mark(state);
+                int ink = getColor(kind == Glyph.Kind.TICKS_READ ? R.color.accent : R.color.text_secondary);
+                mark.setImageDrawable(new Glyph(kind, ink, getColor(R.color.list_failed_ground),
                         getColor(R.color.list_failed_mark)));
-                mark.setContentDescription(Ui.state(ConversationsActivity.this, state));
+                mark.setId(Glyph.resource(kind));
+                mark.setContentDescription(Ui.state(ConversationsActivity.this, state, Core.num(row, "read_at")));
             }
             return view;
         }

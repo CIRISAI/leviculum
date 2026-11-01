@@ -85,11 +85,16 @@ leviculum_ui::catalogue! {
     // The chat: compose, the marks, a bubble's menu.
     ComposeHint = "compose_hint", "Message", "Nachricht";
     Send = "send", "Send", "Senden";
-    StateQueued = "state_queued", "queued", "wartet";
-    StateSending = "state_sending", "sending", "wird gesendet";
-    StateSent = "state_sent", "sent", "gesendet";
-    StateDelivered = "state_delivered", "delivered ✓", "zugestellt ✓";
-    StateFailed = "state_failed", "failed ✗", "fehlgeschlagen ✗";
+    // The ladder's words for a screen reader (1232,
+    // loquax-read-receipts.md, section 6): the clock twice, one tick, two,
+    // two in the accent, the red circle.
+    StateSending = "state_sending", "Sending", "Wird gesendet";
+    StateUnconfirmed = "state_unconfirmed", "Sent, not confirmed yet", "Gesendet, noch nicht bestätigt";
+    StateMailbox = "state_mailbox", "Waiting in the mailbox", "Wartet im Postfach";
+    StateDelivered = "state_delivered", "Delivered", "Zugestellt";
+    StateRead = "state_read", "Read at %1$s", "Gelesen um %1$s";
+    StateFailed = "state_failed", "Not sent. Double tap to send again", "Nicht gesendet. Doppeltippen, um es erneut zu senden";
+    SendAgain = "scene_send_again", "Send again", "Erneut senden";
     ActionReply = "action_reply", "Reply", "Antworten";
     ActionCopy = "action_copy", "Copy", "Kopieren";
     ActionForward = "action_forward", "Forward", "Weiterleiten";

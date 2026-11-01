@@ -163,7 +163,7 @@ In:
   on the first row only and the rest set in by four.
 - `loquax --script <file>` runs a key script against the real engine and
   writes the frames it asks for to a file; `loquax/tests/tui_snapshot.rs`
-  pins a session (open, type two lines, send, `○` to `✓`, a two-line
+  pins a session (open, type two lines, send, `◷` to `✓✓`, a two-line
   reply) that way; a script's `newline` step is `Alt-Enter`. A script
   ticks only when it says so: `tick [n]`, or `sleep <ms>` (up to 60000),
   which reads the engine every 20 ms as the idle terminal does and applies
@@ -274,7 +274,7 @@ where it differs from the decision in [the mailbox page](loquax-mailbox.md).
 section 7: conversations, their messages with their marks and ledgers, the
 pins, the unread counts and the names heard outlive the process in the
 SQLite store of [storage](loquax-storage.md). A send cut off by quitting is
-`○` again after the restart, with the reason in its ledger. `d` then `y`
+`◷` again after the restart, with the reason in its ledger. `d` then `y`
 deletes a message from the device, the palette deletes a conversation or
 pins one above the list's rule, and the search reaches older messages
 through the store's FTS5 index. Its section 5, "Built 2026-10-27, history",
@@ -443,7 +443,7 @@ three that must never be collapsed:
 - **arrived at the destination** (`Delivered`).
 
 columba collapses the first two into one check mark; NomadNet gives them
-different colours but never words. Three visually distinct marks, and,
+different colours but never words. Words for each, and,
 crucially, **a per-message detail view** (columba's best idea) showing
 delivery method with a one-sentence explanation, attempt count, hop count,
 and the error string when there is one. In a terminal that is a key press
@@ -489,45 +489,53 @@ per message) and share the message's retention
 ([storage](loquax-storage.md)).
 
 **Decided with it: one coloured glyph per message in the conversation
-view**, occupying a single cell, carrying the delivery state at a glance.
+view**, carrying the delivery state at a glance. Since 2026-11-01 (1232) the
+glyph is the tick ladder of [read receipts](loquax-read-receipts.md),
+section 3, two cells wide, and it replaces the 2026-08-10 table, which drew
+unproven, mailbox and proof as three distinct one-cell marks. The words
+still keep them apart: the detail view and the screen reader say "sent, not
+confirmed", "in the mailbox" and "delivered" for what the glyph draws as a
+clock, one tick and two.
 The glyph is the compact face of the same state machine the detail view
 explains; both render from **one shared state-mapping table** (the keymap
 discipline above, applied again — the glyph, the detail view and the ledger
 can never disagree).
 
-The glyph language, chosen so the colours carry the meaning even before the
-shapes are learned:
+The ladder, one shape per rung, each carried by its shape before its
+colour:
 
-| state | glyph | colour | motion |
-|---|---|---|---|
-| queued, nothing transmitted | `○` | dim gray | static |
-| computing proof-of-work | braille spinner `⠋⠙⠹⠸⠼⠴` | dim yellow | animated on the tick |
-| in flight (link building, bytes out) | braille spinner | yellow | animated on the tick |
-| handed to the network, unproven (opportunistic `Sent`) | `◇` | amber | static |
-| left at a propagation node (propagated `Sent`) | `⌂` | blue | static |
-| arrived (`Delivered`) | `✓` | green | static, terminal |
-| refused (`Rejected`, either kind) | `✗` | red | static |
-| given up (`Failed`) | `✗` | dim red | static |
+| state | glyph | ASCII | tone | weight |
+|---|---|---|---|---|
+| queued, or sent with no proof (opportunistic `Sent`) | `◷` | `.` | grey | normal |
+| computing proof-of-work, in flight | braille spinner `⠋⠙⠹⠸⠼⠴` | `*` | grey | normal, animated on the tick |
+| left at a mailbox (propagated `Sent`; on a client of a home node, the home's `Sent`) | `✓` | `v` | grey | normal |
+| arrived (`Delivered`) | `✓✓` | `vv` | grey | normal |
+| read (the peer's receipt, `Read`) | `✔✔` | `VV` | green, the accent | bold |
+| refused (`Rejected`) or given up (`Failed`) | `!` | `!` | red | bold |
 
-The rules the table encodes: **green and a check mark appear only on
-proof** — the propagation node's state is a blue house, deliberately not a second
-check, because "at a node the recipient may never collect from" must not read as
-progress toward delivered; amber `◇` (hollow) against green `✓` (solid)
-mirrors unproven-versus-proven; animation means "the machine is working
-right now" and nothing else, driven by the
+The rules it encodes: **a tick only for what someone else confirmed**, one
+from the mailbox, two from the recipient's device; **green only for read**,
+and read is also heavier, so a reader who cannot tell green from grey, or a
+monochrome terminal, still sees it; the clock means nobody confirmed it yet,
+whether it waits here or left without a proof; animation means "the machine
+is working right now" and nothing else, driven by the
 [event-loop tick](loquax-architecture.md) so it freezes honestly if the
-program hangs. An ASCII fallback set (`. * o ^ v x`) ships behind the same
-table for terminals that mangle the glyphs.
+program hangs. Every glyph is padded to two cells, so the text before it
+never moves when the state changes. The phone draws the same ladder as bare
+ticks on a 24-unit grid (`loquax::ui::chat::Shape`, read by `Glyph.java`);
+a failed mark is a red circle with `!`, and its tap sends the message again.
 
 The table's code home is `DELIVERY_GLYPHS` in `leviculum-ui`
 (`leviculum-ui/src/delivery.rs`, since 2026-10-25, 984), one row per state
-with its glyph, tone, dimming and ASCII fallback; its tests hold the rules
-above (green and `✓` only on proof, only the working states animate). The
+with its glyph, tone, weight and ASCII fallback; its tests hold the rules
+above (a tick only on a confirmation, green only on read, every glyph two
+cells, only the working states animate). The
 spinner rows draw the shared loading spinner of `leviculum-ui/src/spinner.rs`,
 the one `lnomad` shows, so its frames are the ones the table lists. The
 tones are resolved against the palette by the frontend. Since 1042 that
 palette is the token table of `leviculum-ui/src/tokens.rs`, a colour per
-tone for each theme and tier, measured against our own block's tint and
+tone for each theme and tier (since 1232 three: pending grey, read green,
+failed red), measured against our own block's tint and
 its selected tint because a mark only ever sits in our own block: the one
 dark-pane palette before it put the yellow at 1.7:1 on a white pane. In
 16 colours a mark takes its block's text colour, and the glyph alone
@@ -535,13 +543,14 @@ carries the state, as it does in monochrome.
 
 `loquax` draws it since 2026-10-25 (994), and maps the router's states
 onto the rows in `loquax::ui::delivery_of`: `Generating` and `Outbound` are
-queued `○`, `Sending` is in flight, `Sent` is `◇`, `AwaitingCollection` is
-`⌂`, `Delivered` is `✓`, `Rejected` is the red `✗`, `Failed` and
-`Cancelled` the dim one. The stamping row has no router state yet: the
+queued `◷`, `Sending` is in flight, `Sent` is `◷` (on a client of a home
+node `✓`, `loquax::ui::shown_delivery`: the home is the reader's mailbox),
+`AwaitingCollection` is `✓`, `Delivered` is `✓✓`, `Rejected`, `Failed` and
+`Cancelled` are the red `!`. The stamping row has no router state yet: the
 engine mines without saying so. While a send's runner is still working, a
 giving-up state of one of its legs is not drawn, because `--via auto`
 cancels a stranded direct leg and carries the same text to a propagation node; the
-`✗` appears when the runner reports it gave up.
+`!` appears when the runner reports it gave up.
 
 A direct leg whose message went onto a link to the peer (`Sending`) and
 got no proof inside the leg's time is *unproven*, not failed (1002): the
@@ -549,8 +558,8 @@ peer answered the link, so it is reachable, and a propagation node's copy would 
 it a second time. The reference never re-sends such a message through a
 propagation node on its own either; it waits for the proof and retries on
 a new link (`reference/LXMF/LXMF/LXMRouter.py:2796`,
-`reference/LXMF/LXMF/LXMessage.py:616-621`). So the row shows `◇` and
-stays there: only a proof (`✓`) or a refusal (`✗`) moves it, while the
+`reference/LXMF/LXMF/LXMessage.py:616-621`). So the row shows the clock
+and stays there: only a proof (`✓✓`) or a refusal (`!`) moves it, while the
 router's own retries go on underneath. Lew's test against a third-party
 client that receives and never proves turned a delivered message red and
 uploaded it to a foreign node before this.

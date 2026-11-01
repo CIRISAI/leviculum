@@ -43,8 +43,8 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                              hello from the tui    │
-│                        ││                              on two lines  12:00 ○ │
+│                        ││                             hello from the tui     │
+│                        ││                             on two lines  12:00 ◷  │
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -60,8 +60,8 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                              hello from the tui    │
-│                        ││                              on two lines  12:00 ✓ │
+│                        ││                             hello from the tui     │
+│                        ││                             on two lines  12:00 ✓✓ │
 │                        │├● to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -74,8 +74,8 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                              hello from the tui    │
-│                        ││                              on two lines  12:00 ✓ │
+│                        ││                             hello from the tui     │
+│                        ││                             on two lines  12:00 ✓✓ │
 │                        ││                         ┌─────────────────────────┐│
 │                        ││ hello back              │✓ message from them ·61dd││
 │                        ││ also on two lines  12:00└─────────────────────────┘│

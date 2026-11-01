@@ -95,6 +95,8 @@ pub enum NodeId {
     Group(u64),
     /// A bubble, by its message's key on this device.
     Bubble(u64),
+    /// The delivery mark of one of ours, by its message's key (1232).
+    Mark(u64),
     Compose,
     Sheet,
     Card,
@@ -117,6 +119,7 @@ impl NodeId {
             NodeId::ChatBar => "chat_bar".to_string(),
             NodeId::Group(key) => format!("group_{key}"),
             NodeId::Bubble(key) => format!("bubble_{key}"),
+            NodeId::Mark(key) => format!("mark_{key}"),
             NodeId::Compose => "compose".to_string(),
             NodeId::Sheet => "sheet".to_string(),
             NodeId::Card => "card".to_string(),
@@ -360,9 +363,42 @@ pub struct BubbleNode {
     pub place: Placement,
     /// The newest report's words (`live · every 10 min · 2 min ago`).
     pub live: Option<Text>,
+    /// Ours only: the ladder's mark, what a screen reader says for it,
+    /// and for a failed one the tap that sends it again (1232).
+    pub mark: Option<MarkNode>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
+}
+
+/// A sent message's mark on the ladder of loquax-read-receipts.md,
+/// section 3.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkNode {
+    pub mark: chat::Mark,
+    /// `Sending`, `Read at 10:32`, `Not sent. Double tap to send again`.
+    pub words: Text,
+    /// [`Intent::SendAgain`] on [`chat::Mark::Failed`], else none.
+    pub activate: Option<Action>,
+}
+
+/// The screen reader's words for `mark`; `read_at` is the reader's time
+/// for [`chat::Mark::Read`], shown in the zone `now` is in.
+pub fn mark_words(mark: chat::Mark, read_at: Option<u32>, now: Option<WallTime>) -> Text {
+    match mark {
+        chat::Mark::Sending => Text::key(StrId::StateSending),
+        chat::Mark::Unconfirmed => Text::key(StrId::StateUnconfirmed),
+        chat::Mark::Mailbox => Text::key(StrId::StateMailbox),
+        chat::Mark::Delivered => Text::key(StrId::StateDelivered),
+        chat::Mark::Read => {
+            let at = WallTime {
+                unix_secs: i64::from(read_at.unwrap_or(0)),
+                offset_secs: now.map_or(0, |now| now.offset_secs),
+            };
+            Text::Key(StrId::StateRead, Vec::from([Arg::Str(at.hh_mm())]))
+        }
+        chat::Mark::Failed => Text::key(StrId::StateFailed),
+    }
 }
 
 /// Bubbles of one sender, minutes apart, on one day ([`chat::joins`]).
@@ -511,6 +547,9 @@ impl Scene {
             NodeId::ChatBar => self.chat.as_ref().and_then(|chat| back(&chat.bar)),
             NodeId::TopBar => back(&self.top),
             NodeId::Compose => self.chat.as_ref().map(|chat| &chat.compose.send),
+            NodeId::Mark(key) => self
+                .bubble(NodeId::Bubble(key))
+                .and_then(|node| node.mark.as_ref()?.activate.as_ref()),
             _ => None,
         }
     }
@@ -821,12 +860,23 @@ fn bubble_node(
         (Some(live), true) => live.clone(),
         _ => Text::Raw(bubble.body.clone()),
     };
+    let mark = bubble.mark.map(|mark| MarkNode {
+        mark,
+        words: mark_words(mark, bubble.read_at, now),
+        activate: (mark == chat::Mark::Failed).then(|| {
+            Action::of(Intent::SendAgain {
+                peer,
+                key: bubble.key,
+            })
+        }),
+    });
     BubbleNode {
         id,
         a11y: A11y::of(id, Role::Bubble, spoken),
         bubble,
         place,
         live,
+        mark,
         actions,
     }
 }
@@ -1043,6 +1093,12 @@ impl BubbleNode {
                 "meta": self.place.meta,
             },
             "live": opt(self.live.as_ref(), Text::to_json),
+            "mark_node": opt(self.mark.as_ref(), |m| json!({
+                "mark": m.mark.word(),
+                "resource": m.mark.resource(),
+                "words": m.words.to_json(),
+                "activate": opt(m.activate.as_ref(), Action::to_json),
+            })),
             "actions": actions(&self.actions),
             "a11y": self.a11y.to_json(),
         })
@@ -1288,6 +1344,134 @@ mod tests {
             });
         }
         model
+    }
+
+    /// The ladder in the scene (1232): each state's mark, its words in
+    /// both languages, and only the failed one's tap, which sends it again.
+    #[test]
+    fn each_state_has_its_mark_its_words_and_only_failed_a_tap() {
+        let t = 1_793_350_800;
+        let states = [
+            DeliveryState::Queued,
+            DeliveryState::Sent,
+            DeliveryState::InMailbox,
+            DeliveryState::Delivered,
+            DeliveryState::Read {
+                at: (t + 600) as u32,
+            },
+            DeliveryState::Failed,
+        ];
+        let bodies: Vec<(bool, i64)> = (0..states.len())
+            .map(|i| (true, t + 600 * i as i64))
+            .collect();
+        let mut model = model_with(&bodies);
+        for (message, state) in model.conversations[0].messages.iter_mut().zip(states) {
+            message.delivery = Some(state);
+        }
+        model.selected = 0;
+        let peer = [0x42; 16];
+        let scene = model.scene(LayoutClass::Compact);
+        let marks: Vec<&MarkNode> = scene
+            .chat
+            .as_ref()
+            .expect("the chat")
+            .groups
+            .iter()
+            .flat_map(|g| &g.bubbles)
+            .map(|b| b.mark.as_ref().expect("ours has a mark"))
+            .collect();
+        let got: Vec<(chat::Mark, String, String)> = marks
+            .iter()
+            .map(|m| (m.mark, m.words.resolve(Lang::En), m.words.resolve(Lang::De)))
+            .collect();
+        let want = [
+            (chat::Mark::Sending, "Sending", "Wird gesendet"),
+            (
+                chat::Mark::Unconfirmed,
+                "Sent, not confirmed yet",
+                "Gesendet, noch nicht bestätigt",
+            ),
+            (
+                chat::Mark::Mailbox,
+                "Waiting in the mailbox",
+                "Wartet im Postfach",
+            ),
+            (chat::Mark::Delivered, "Delivered", "Zugestellt"),
+            // 10:10 at the clock's +1 h.
+            (chat::Mark::Read, "Read at 10:10", "Gelesen um 10:10"),
+            (
+                chat::Mark::Failed,
+                "Not sent. Double tap to send again",
+                "Nicht gesendet. Doppeltippen, um es erneut zu senden",
+            ),
+        ];
+        let want: Vec<(chat::Mark, String, String)> = want
+            .iter()
+            .map(|(m, en, de)| (*m, en.to_string(), de.to_string()))
+            .collect();
+        assert_eq!(got, want);
+        for (i, mark) in marks.iter().enumerate() {
+            let key = i as u64 + 1;
+            let again = Intent::SendAgain { peer, key };
+            match mark.mark {
+                chat::Mark::Failed => {
+                    assert_eq!(mark.activate.as_ref().map(|a| &a.intent), Some(&again));
+                    assert_eq!(
+                        scene.action(NodeId::Mark(key)).map(|a| &a.intent),
+                        Some(&again)
+                    );
+                }
+                _ => {
+                    assert!(mark.activate.is_none(), "{:?}", mark.mark);
+                    assert!(scene.action(NodeId::Mark(key)).is_none());
+                }
+            }
+        }
+        // The JSON names the rung's resource and its words.
+        let json = scene.chat.as_ref().expect("the chat").to_json().to_string();
+        assert!(json.contains(r#""resource":"state_ticks_read""#), "{json}");
+        assert!(json.contains(r#""key":"state_mailbox""#), "{json}");
+        // On a client of a home node the home took it: the mailbox's tick.
+        model.home_client = true;
+        let home = model.scene(LayoutClass::Compact);
+        let second = home.chat.as_ref().and_then(|c| {
+            c.groups
+                .iter()
+                .flat_map(|g| &g.bubbles)
+                .nth(1)
+                .and_then(|b| b.mark.clone())
+        });
+        assert_eq!(second.map(|m| m.mark), Some(chat::Mark::Mailbox));
+    }
+
+    /// The red mark's tap: the failed message leaves, the same text goes
+    /// again as a new one at the end; on anything not failed it does
+    /// nothing.
+    #[test]
+    fn send_again_replaces_the_failed_message_with_a_new_send() {
+        use crate::ui::UiEffect;
+        let t = 1_793_350_800;
+        let mut model = model_with(&[(true, t), (true, t + 600)]);
+        let peer = [0x42; 16];
+        model.conversations[0].messages[0].delivery = Some(DeliveryState::Failed);
+        let delivered = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 2 });
+        assert!(delivered.is_empty(), "a delivered one is not sent again");
+        let effects = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 1 });
+        assert!(
+            matches!(effects.as_slice(), [UiEffect::Send { to, body, .. }] if *to == peer && body == "m0"),
+            "{effects:?}"
+        );
+        let bodies: Vec<&str> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["m1", "m0"]);
+        assert_eq!(
+            model.conversations[0].messages[1].delivery,
+            Some(DeliveryState::Queued)
+        );
+        assert!(super::super::update(&mut model, UiEvent::SendAgain { peer, key: 1 }).is_empty());
     }
 
     /// The positive control of the grouping: one bubble 181 s after the

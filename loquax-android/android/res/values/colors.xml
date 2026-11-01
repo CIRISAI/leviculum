@@ -24,6 +24,10 @@
     <!-- The failed mark: its circle 5.0:1 on our bubble, the sign 7.2:1 on it. -->
     <color name="failed_ground">#ffdad6</color>
     <color name="failed_mark">#93000a</color>
+    <!-- Read's two ticks on our bubble (1232): the accent's family, 5.3:1
+         on the bubble where the accent itself has 1.3:1. In the list read
+         is the accent, 5.0:1 on the background. -->
+    <color name="read_mark">#b2ff59</color>
     <!-- The send button: 6.4:1 on the background, its arrow 6.4:1 on it. -->
     <color name="send">#2e6b38</color>
     <color name="on_send">#ffffff</color>

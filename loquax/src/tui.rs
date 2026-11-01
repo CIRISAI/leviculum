@@ -1868,7 +1868,7 @@ mod tests {
             let inside = row.trim_matches(|c: char| c == '│' || c == ' ');
             assert!(inside.starts_with("word"), "{inside:?}");
             assert!(
-                inside.ends_with("word") || inside.ends_with('○'),
+                inside.ends_with("word") || inside.ends_with('◷'),
                 "{inside:?}"
             );
         }
@@ -2224,7 +2224,7 @@ mod tests {
             assert!(shot.contains("── Today ──"), "{shot}");
             assert!(shot.contains(" 2 new "), "{shot}");
             assert!(shot.contains("│ ok, bring the T114.  14:04 "), "{shot}");
-            assert!(shot.contains(" the tripod fits  14:06 ⠋ │"), "{shot}");
+            assert!(shot.contains(" the tripod fits  14:06 ⠋  │"), "{shot}");
             assert!(shot.contains("to <4f4f4f4f…>"), "{shot}");
         }
         let mut model = mockup(80, 24);
@@ -2508,7 +2508,7 @@ mod tests {
             let glyphs = under(&shot, &marks);
             assert!(!glyphs.is_empty(), "{width}: {shot}");
             assert!(
-                glyphs.chars().all(|c| "○◇⌂✓✗⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)),
+                glyphs.chars().all(|c| "◷✓✔! .*vV⠋⠙⠹⠸⠼⠴".contains(c)),
                 "{width}: {glyphs:?}\n{shot}"
             );
         }

@@ -3,6 +3,13 @@
      the settings' entries and the Maps and Privacy pages' rows (1201),
      which the device walk finds by them, and the profile's (1187). -->
 <resources>
+    <!-- A delivery mark's id is its rung of the ladder (1232), set as it is
+         drawn; the walk asserts them, the code finds the view by its tag. -->
+    <item name="state_clock" type="id" />
+    <item name="state_tick" type="id" />
+    <item name="state_ticks" type="id" />
+    <item name="state_ticks_read" type="id" />
+    <item name="state_failed" type="id" />
     <item name="friends_sheet" type="id" />
     <item name="friend_row" type="id" />
     <item name="friend_name" type="id" />

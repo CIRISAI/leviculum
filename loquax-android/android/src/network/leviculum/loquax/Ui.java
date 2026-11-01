@@ -134,15 +134,17 @@ final class Ui {
         return Core.str(row, "last");
     }
 
-    /** The delivery of one of ours, in words. */
-    static String state(Context context, String state) {
+    /**
+     * The delivery of one of ours as a screen reader says it (1232):
+     * `readAt` is the reader's time for "read", unix seconds.
+     */
+    static String state(Context context, String state, long readAt) {
         switch (state) {
-            case "queued": return context.getString(R.string.state_queued);
             case "sending": return context.getString(R.string.state_sending);
-            case "sent": return context.getString(R.string.state_sent);
+            case "unconfirmed": return context.getString(R.string.state_unconfirmed);
+            case "mailbox": return context.getString(R.string.state_mailbox);
             case "delivered": return context.getString(R.string.state_delivered);
-            // Until the glyph ladder's words land (1230).
-            case "read": return context.getString(R.string.state_delivered);
+            case "read": return context.getString(R.string.state_read, clock(readAt));
             case "failed": return context.getString(R.string.state_failed);
             default: return state;
         }

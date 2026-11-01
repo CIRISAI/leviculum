@@ -69,6 +69,9 @@ pub struct Draw<'a> {
     /// The open search's query: each block marks its first match in place,
     /// between `«` and `»` (section 5, the 120 x 40 mockup).
     pub mark: Option<&'a str>,
+    /// A client of a home node: the home's `Sent` is the mailbox's tick
+    /// ([`super::shown_delivery`]).
+    pub home_client: bool,
 }
 
 /// A style drawn in a token's colours.
@@ -356,14 +359,15 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw<'_>, selected: bool) -> R
         push(&mut line, &text, time);
     }
     if let Some(state) = message.delivery {
-        let row = glyph(state);
+        let row = glyph(super::shown_delivery(state, draw.home_client));
         push(
             &mut line,
             if text.is_empty() { "  " } else { " " },
             RStyle::default(),
         );
         let mark = RStyle {
-            fg: draw.tokens.tones.of(row.tone, row.dim),
+            fg: draw.tokens.tones.of(row.tone),
+            bold: row.bold,
             ..RStyle::default()
         };
         push(&mut line, row.symbol(draw.tick as usize, draw.ascii), mark);
@@ -485,7 +489,7 @@ fn block(
     };
     // The mark closes the last row: its cells are that row's last.
     let mark = message.delivery.and_then(|state| {
-        let len = glyph(state)
+        let len = glyph(super::shown_delivery(state, draw.home_client))
             .symbol(draw.tick as usize, draw.ascii)
             .chars()
             .count();

@@ -1,6 +1,6 @@
 //! The messenger (`loquax`, and its `loquax tui` alias) through the real
 //! binary, scripted, against a real daemon: open the conversation, type two lines (`Alt-Enter` between them), send,
-//! watch the delivery mark move from `○` to `✓`, read the two-line reply. The frames the script asks for are pinned in
+//! watch the delivery mark move from `◷` to `✓✓`, read the two-line reply. The frames the script asks for are pinned in
 //! `tests/fixtures/tui_session.frames`.
 //!
 //! The keymap's sessions (`docs/src/concepts/loquax-keys-and-layout.md`,
@@ -52,7 +52,7 @@
 //! one home: an exchange with Bob and a send to Carol, who never answers,
 //! cut off by quitting; a restart with no `--to`, which lists both from the
 //! store, Bob by the name he announced in the first run, our proven message
-//! `✓` and the cut-off send `○` with the restart in its ledger, then pins
+//! `✓✓` and the cut-off send `◷` with the restart in its ledger, then pins
 //! Bob and deletes his reply (`d`, `y`); and a third start that shows the
 //! pin above its rule and the reply gone. Pinned in
 //! `tests/fixtures/tui_history.frames`.
@@ -1091,7 +1091,7 @@ type second line
 key enter
 key esc
 frame two sent
-drag 60 18 69 20
+drag 59 18 69 20
 frame dragged
 tick 12
 frame selected
@@ -1122,7 +1122,7 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
         "{click}"
     );
     assert!(
-        frame(&click, "sent by click").contains("hello by mouse  12:00 ○"),
+        frame(&click, "sent by click").contains("hello by mouse  12:00 ◷"),
         "{click}"
     );
     assert!(
@@ -1624,7 +1624,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
     let restarted = frame(&second, "restarted");
     assert!(restarted.contains("leaving in ten"), "{restarted}");
     assert!(
-        restarted.contains(" ○"),
+        restarted.contains(" ◷"),
         "the cut-off send is queued: {restarted}"
     );
     assert!(
@@ -1640,7 +1640,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         bob_frame.contains("are you at the field site?"),
         "{bob_frame}"
     );
-    assert!(bob_frame.contains(" ✓"), "the proof survived: {bob_frame}");
+    assert!(bob_frame.contains(" ✓✓"), "the proof survived: {bob_frame}");
     assert!(bob_frame.contains("yes, from ten"), "{bob_frame}");
     assert!(frame(&second, "pinned").contains('┄'), "{second}");
     assert!(frame(&second, "asked").contains("y deletes"), "{second}");
@@ -3390,5 +3390,13 @@ async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
         "stderr: {}\nframes:\n{got}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(got, EXPECTED_UGLY, "the frames differ:\n{got}");
+    if got != EXPECTED_UGLY {
+        let kept = std::env::temp_dir().join("loquax-tui-ugly.frames");
+        let _ = std::fs::write(&kept, &got);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_ugly.frames\n{got}",
+            kept.display()
+        );
+    }
 }

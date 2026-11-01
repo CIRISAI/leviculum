@@ -27,6 +27,7 @@
 //! | `Request::Reply`, `UiEvent::Reply`, `Message::Reply` | `Reply` |
 //! | `Message::CancelReply` | `CancelReply` |
 //! | `Request::Forward`, `UiEvent::Forward` | `Forward` |
+//! | `Request::SendAgain`, `UiEvent::SendAgain` (1232) | `SendAgain` |
 //! | `Request::Delete`, `UiEvent::Delete`, `Message::Delete`, `Message::AskDelete`, `Command::DeleteMessage` | `Delete` (`confirmed` tells the asked from the asking) |
 //! | `Request::Used`, `Message::Insert` | `Insert` |
 //! | `Message::ToggleEmoji` | `Emoji` |
@@ -224,6 +225,12 @@ pub enum Intent {
         key: u64,
         to: [u8; 16],
     },
+    /// Send the message `key` of `peer`'s conversation, which was not
+    /// sent, again: what its red mark does (1232).
+    SendAgain {
+        peer: [u8; 16],
+        key: u64,
+    },
     /// Delete messages: `confirmed` once the user said yes, else ask.
     Delete {
         messages: Messages,
@@ -386,6 +393,7 @@ impl Intent {
             Intent::Reply { .. } => StrId::ActionReply,
             Intent::CancelReply => StrId::CancelReply,
             Intent::Forward { .. } => StrId::ActionForward,
+            Intent::SendAgain { .. } => StrId::SendAgain,
             Intent::Delete { .. } => StrId::ActionDelete,
             Intent::Copy => StrId::ActionCopy,
             Intent::Share { .. } => StrId::Share,

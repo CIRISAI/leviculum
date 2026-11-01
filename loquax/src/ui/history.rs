@@ -660,7 +660,7 @@ impl<B> UiModel<B> {
     /// Take one message off the screen, every index into its conversation
     /// moved with it: its LXMF id, `None` when it is not there, `Some(None)`
     /// for one that never had an id.
-    fn remove_message(&mut self, peer: [u8; 16], key: u64) -> Option<Option<[u8; 32]>> {
+    pub(super) fn remove_message(&mut self, peer: [u8; 16], key: u64) -> Option<Option<[u8; 32]>> {
         let c = self.conversations.iter().position(|c| c.peer == peer)?;
         let m = self.conversations[c]
             .messages

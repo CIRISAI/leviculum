@@ -159,7 +159,8 @@ fn invisible(ch: char) -> bool {
 /// A glyph the screen uses for a meaning of its own.
 fn reserved(ch: char) -> bool {
     let mark = DELIVERY_GLYPHS.iter().any(|row| match row.mark {
-        Mark::Glyph(glyph) => glyph.chars().any(|g| g == ch),
+        // The column's padding and the ASCII `!` stay a name's own.
+        Mark::Glyph(glyph) => glyph.chars().any(|g| g == ch && !g.is_ascii()),
         Mark::Spinner => false,
     });
     mark || ch == COLLISION
@@ -748,7 +749,9 @@ mod tests {
     #[test]
     fn glyphs_the_screen_reserves_are_replaced() {
         assert_eq!(sanitise("Bob ✓").as_deref(), Some("Bob ?"));
-        assert_eq!(sanitise("Bob ◇⌂○✗✔☑✅❌").as_deref(), Some("Bob ????????"));
+        assert_eq!(sanitise("Bob ◷✗✔☑✅❌").as_deref(), Some("Bob ??????"));
+        // The ladder's `!` and the glyphs it replaced (1232) are a name's.
+        assert_eq!(sanitise("Hi! ◇⌂○").as_deref(), Some("Hi! ◇⌂○"));
         assert_eq!(sanitise("Alice ·4f2a").as_deref(), Some("Alice ?4f2a"));
         assert_eq!(sanitise("<9c31e0a2…>").as_deref(), Some("<9c31e0a2?>"));
         assert_eq!(sanitise("── Today ──").as_deref(), Some("?? Today ??"));

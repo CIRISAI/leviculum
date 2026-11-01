@@ -3,14 +3,14 @@
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││              yes, from ten. Shall I bring the T114 │
 │                        ││              and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││              enough for the hill?  14:02 ✓         │
+│ <b7b7b7b7…>      12:40 ││              enough for the hill?  14:02 ✓✓        │
 │ the antenna is in the… ││                                                    │
 │                        ││ long one, the hill eats signal  14:03              │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                                 on my way  09:12 ⌂ │
+│                        ││                                on my way  09:12 ✓  │
 │                        ││                                                    │
-│                        ││               stuck at the level crossing  09:31 ◇ │
+│                        ││              stuck at the level crossing  09:31 ◷  │
 │                        ││                                                    │
 │                        ││ ───────────────────── 2 new ────────────────────── │
 │                        ││ ok, bring the T114.  14:04                         │
@@ -18,7 +18,7 @@
 │                        ││ and the small tripod                               │
 │                        ││ if it fits in the bag  14:05                       │
 │                        ││                                                    │
-│                        ││                           the tripod fits  14:06 ⠋ │
+│                        ││                          the tripod fits  14:06 ⠋  │
 │                        │├● to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -36,7 +36,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││ did the board come back from the soak?  19:40                                    │
 │                                  ││                                                                                  │
-│                                  ││                          yes, 100 % over the night, log is on the share  19:52 ✓ │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓✓ │
 │                                  ││                                                                                  │
 │                                  ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow? Dana says the north                          │
@@ -44,14 +44,14 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  ││ is.  13:58                                                                       │
 │                                  ││                                                                                  │
 │                                  ││                      yes, from ten. Shall I bring the T114 and the long antenna, │
-│                                  ││                      or is the stick enough for the hill?  14:02 ✓               │
+│                                  ││                      or is the stick enough for the hill?  14:02 ✓✓              │
 │                                  ││                                                                                  │
 │                                  ││ long one, the hill eats signal  14:03                                            │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                               on my way  09:12 ⌂ │
+│                                  ││                                                              on my way  09:12 ✓  │
 │                                  ││                                                                                  │
-│                                  ││                                             stuck at the level crossing  09:31 ◇ │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
 │                                  ││                                                                                  │
 │                                  ││ ──────────────────────────────────── 2 new ───────────────────────────────────── │
 │                                  ││ ok, bring the T114.  14:04                                                       │
@@ -59,7 +59,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  ││ and the small tripod                                                             │
 │                                  ││ if it fits in the bag  14:05                                                     │
 │                                  ││                                                                                  │
-│                                  ││                                                         the tripod fits  14:06 ⠋ │
+│                                  ││                                                        the tripod fits  14:06 ⠋  │
 │                                  │├● to <4f4f4f4f…>────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -69,14 +69,14 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓         │
+│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓✓        │
 │ the antenna is in the… ││                                                    │
 │                        ││ long one, the hill eats signal  14:03              │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││                                 on my way  09:12 ⌂ │
+│                        ││                                on my way  09:12 ✓  │
 │                        ││                                                    │
-│                        ││               stuck at the level crossing  09:31 ◇ │
+│                        ││              stuck at the level crossing  09:31 ◷  │
 │                        ││                                                    │
 │                        ││ ───────────────────── 2 new ────────────────────── │
 │                        ││ ok, bring the T114.  14:04                         │
@@ -84,7 +84,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││ and the small tripod                               │
 │                        ││ if it fits in the bag  14:05                       │
 │                        ││                                                    │
-│                        ││                           the tripod fits  14:06 ⠋ │
+│                        ││                          the tripod fits  14:06 ⠋  │
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -94,13 +94,13 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓         │
+│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓✓        │
 │ ┌ message ─────────────────────────────────────────────────────────────────┐ │
 │ │from you to <4f4f4f4f…>                                                   │ │
 │ │peer   4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f                                   │ │
 │ │id     a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2   │ │
 │ │size   96 bytes                                                           │ │
-│ │state  delivered                                                          │ │
+│ │state  delivered: it arrived on <4f4f4f4f…>'s device                      │ │
 │ │                                                                          │ │
 │ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
@@ -109,7 +109,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
 │                        ││ if it fits in the bag  14:05                       │
 │                        ││                                                    │
-│                        ││                           the tripod fits  14:06 ⠋ │
+│                        ││                          the tripod fits  14:06 ⠋  │
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -119,10 +119,10 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │▌<4f4f4f4f…>      14:06 ││ 14:03                          │
 │▌you: the tripod fits   ││                                │
 │                        ││          ── Today ──           │
-│ <b7b7b7b7…>      12:40 ││ on my way  you 09:12 ⌂         │
+│ <b7b7b7b7…>      12:40 ││ on my way  you 09:12 ✓         │
 │ the antenna is in the… ││                                │
 │                        ││ stuck at the level crossing    │
-│                        ││ you 09:31 ◇                    │
+│                        ││ you 09:31 ◷                    │
 │                        ││                                │
 │                        ││ ─────────── 2 new ──────────── │
 │                        ││ ok, bring the T114.  14:04     │

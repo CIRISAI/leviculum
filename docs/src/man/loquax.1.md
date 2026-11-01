@@ -169,7 +169,7 @@ A reaction is an emoji, or a short text, attached to an earlier message: the LXM
 
 A conversation opens with its newest 200 messages. Scrolling to the top loads 200 more, and the top line says how many the history still holds (`180 earlier on this device, scroll up for them`) until it reaches the first: `nothing earlier on this device`.
 
-A message you sent that was still on its way when Loquax ended is `○` again after the restart, with `Loquax restarted: no longer being sent` in its detail view. Nothing sends it again; send it anew if it matters.
+A message you sent that was still on its way when Loquax ended is `◷` again after the restart, with `Loquax restarted: no longer being sent` in its detail view. Nothing sends it again; send it anew if it matters.
 
 Message text is kept until you delete it. `d` on a message, then `y`, deletes it from this device; any other key keeps it, and a message still being sent cannot be deleted until it settles. The palette's `delete conversation` deletes the open conversation and its messages the same way, after asking, and `pin` puts the open conversation above the others, under a dotted rule, or takes it back down. Deleting is local: the peer keeps what you sent and what they sent you.
 
@@ -255,7 +255,7 @@ Without capture the terminal's own selection works as before: drag to select, an
 
 ## DELIVERY MARKS
 
-`○` queued; a spinner while a link is built or the bytes go out; `◇` handed to the network, no proof back; `⌂` waiting at a propagation node; `✓` a delivery proof came back; `✗` refused (red) or given up (dim). Only `✓` is green, and only a proof makes it. Each tone has a value per theme and colour tier; in 16 colours a mark takes its block's text colour, and without colour none. With **--ascii**: `.` `*` `o` `^` `v` `x`.
+`◷` queued, or handed to the network with no proof back; a spinner while a link is built or the bytes go out; `✓` waiting in the mailbox (a propagation node took it, or, as a client of a home node, the home node did); `✓✓` a delivery proof came back; `✔✔` in bold green, the peer's read receipt named it; `!` in bold red, refused or given up. Only read is green; every mark is two cells wide. Each tone has a value per theme and colour tier; in 16 colours a mark takes its block's text colour, and without colour none. With **--ascii**: `.` `*` `v` `vv` `VV` `!`.
 
 ## EXIT STATUS
 

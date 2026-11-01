@@ -792,6 +792,7 @@ impl App {
                     return iced::clipboard::write(words);
                 }
             }
+            Intent::SendAgain { peer, key } => self.tell(UiEvent::SendAgain { peer, key }),
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed,
@@ -1885,7 +1886,7 @@ mod tests {
         assert_eq!(nodes[2].bubble.chips.len(), 1);
         assert!(nodes[2].bubble.chips[0].ours);
         assert!(nodes[3].bubble.ours);
-        assert_eq!(nodes[3].bubble.mark, Some(loquax::ui::chat::Mark::Queued));
+        assert_eq!(nodes[3].bubble.mark, Some(loquax::ui::chat::Mark::Sending));
     }
 
     /// One scene, two targets (1218): the rows the window draws are the

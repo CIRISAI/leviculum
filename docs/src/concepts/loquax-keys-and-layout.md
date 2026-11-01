@@ -444,10 +444,10 @@ text. Here it is in cells.
 │▌ok, bring the T114.    ││ are you at the field site tomorrow?  13:58         │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
 │ Bob ·b7d0        12:40 ││                yes, from ten. Shall I bring the    │
-│ you: the antenna is…   ││                T114 and the long antenna?  14:02 ✓ │
+│ you: the antenna is…   ││               T114 and the long antenna?  14:02 ✓✓ │
 │                        ││                                                    │
 │ <9c31e0a2…>        Fri ││                    ── Today ──                     │
-│ hello? is this th… [1] ││                                 on my way  09:12 ⌂ │
+│ hello? is this th… [1] ││                                on my way  09:12 ✓  │
 │                        ││                                                    │
 │ Carol ·17ee     22 Oct ││ ──────────────────── 2 new ─────────────────────── │
 │ you: thanks, merged    ││ ok, bring the T114.  14:04                         │
@@ -479,20 +479,20 @@ text. Here it is in cells.
 │ MESSAGES                       3 ││                          nothing earlier on this device                          │
 │ ▌Alice                     14:05 ││                             ── Friday 23 October ──                              │
 │ ▌and the small «tripod» if it…   ││ did the board come back from the soak?  19:40                                    │
-│                                  ││                          yes, 100 % over the night, log is on the share  19:52 ✓ │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓✓ │
 │  you to Alice              14:06 ││                                                                                  │
 │  the «tripod» fits               ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow? Dana says the north                          │
 │  Bob                       3 Oct ││ gate is locked after six, so the car park by the road it is.  13:58              │
 │  the «tripod» stays in the van,  ││                                                                                  │
 │                                  ││                           yes, from ten. Shall I bring the T114 and the long     │
-│                                  ││                           antenna, or is the stick enough for the hill?  14:02 ✓ │
+│                                  ││                          antenna, or is the stick enough for the hill?  14:02 ✓✓ │
 │                                  ││                                                                                  │
 │                                  ││ long one, the hill eats signal  14:03                                            │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                               on my way  09:12 ⌂ │
-│                                  ││                                             stuck at the level crossing  09:31 ◇ │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
 │                                  ││                                                                                  │
 │                                  ││ ────────────────────────────── 2 new ─────────────────────────────────────────── │
 │                                  ││ ok, bring the T114.  14:04                                                       │
@@ -500,8 +500,8 @@ text. Here it is in cells.
 │                                  ││ and the small «tripod»                                                           │
 │                                  ││ if it fits in the bag  14:05                                                     │
 │                                  ││                                                                                  │
-│                                  ││                                                       the «tripod» fits  14:06 ✓ │
-│                                  ││                                                          leaving in ten  14:07 ○ │
+│                                  ││                                                      the «tripod» fits  14:06 ✓✓ │
+│                                  ││                                                         leaving in ten  14:07 ◷  │
 │                                  │├─ to Alice ─────────────────────── Enter send · Alt-Enter newline · M-x commands ─┤
 │                                  ││ ▏                                                                                │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -595,7 +595,7 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
   the mark take the pane's last quarter if they fit there, else a row of
   their own. Both mockups already do this.
 - **A send still waiting names its leg** before the time
-  (`are you there  direct 2 s · 12:00 ○`), and a received message whose
+  (`are you there  direct 2 s · 12:00 ◷`), and a received message whose
   signature could not be checked yet, its sender's key unknown, says
   `unverified` after its time, until the key arrives and the block changes
   in place; one whose signature does not hold says `INVALID signature`.
@@ -745,7 +745,7 @@ newest messages, its marks, its ledger, its pin and its unread count, and
 the names peers announced. The frames are pinned from three runs over one
 home in `loquax/tests/fixtures/tui_history.frames`: an exchange with Bob
 and a send to Carol cut off by quitting; a restart that shows both from the
-store, Bob by name, the proof `✓`, the cut-off send `○` with the restart in
+store, Bob by name, the proof `✓✓`, the cut-off send `◷` with the restart in
 its ledger, then pins Bob and deletes his reply; and a third start that
 shows the pin and the deletion kept. Where it differs from the text above,
 or fills a gap it leaves:
@@ -758,7 +758,7 @@ or fills a gap it leaves:
   the view staying on what the reader was reading. The pages say "the last
   screens" and name no number.
 - **The restart discontinuity** is the page's: a send still queued or in
-  flight at exit is `○` after the restart, with `Loquax restarted: no
+  flight at exit is `◷` after the restart, with `Loquax restarted: no
   longer being sent` in its ledger at the time of the start. Nothing sends
   it again, because nothing holds the router's queue across a restart
   (`loquax/src/engine.rs`, "What it deliberately does not do"); no screen
@@ -803,7 +803,7 @@ foreground colours can carry the two sides in a terminal the way Signal
 and WhatsApp do on the phone. They can. This part says how; Lew took all
 five proposals of part 6 as they stood, and "Built" after it names where
 the build differs from the text. The table is `leviculum-ui/src/tokens.rs`
-(`tokens`, `leviculum-ui/src/tokens.rs:353`).
+(`tokens`, `leviculum-ui/src/tokens.rs:304`).
 
 The model is the desktop apps': Signal Desktop and WhatsApp Desktop tint
 our own blocks in the app's accent and draw the other side's in a neutral
@@ -845,16 +845,21 @@ and every dim tone below 3:1. So the tones join the table, per theme and
 tier, measured against the own tint and the selected own tint, because a
 mark only ever sits in an own block:
 
-| Tone (state) | truecolor dark | truecolor light | 256 dark | 256 light |
+Since 2026-11-01 (1232) the column draws the tick ladder of
+[read receipts](loquax-read-receipts.md), section 3, and needs three tones,
+not eight: grey for every rung before read, the green for read, the red
+for not sent. Each keeps the value its state had in the table before, so
+the contrast measured for it holds (`Tones` in
+`leviculum-ui/src/tokens.rs`, checked at 3:1 over both own tints):
+
+| Tone (rungs) | truecolor dark | truecolor light | 256 dark | 256 light |
 |---|---|---|---|---|
-| dim gray (queued) | `#b4bcc8` | `#4f5866` | 250 | 240 |
-| dim yellow (proof of work) | `#c8ad4a` | `#7d6a33` | 179 | 94 |
-| yellow (in flight) | `#f2d45c` | `#6b5200` | 221 | 58 |
-| amber (sent, unproven) | `#ffb347` | `#8a4500` | 214 | 130 |
-| blue (at a propagation node) | `#a8ccff` | `#1a46a0` | 153 | 19 |
-| green (delivered) | `#6fe39a` | `#176a35` | 121 | 22 |
-| red (refused) | `#ff8a80` | `#a3211a` | 217 | 124 |
-| dim red (given up) | `#e8a29c` | `#8a4a45` | 181 | 95 |
+| grey (sending, mailbox, delivered; the old queued) | `#b4bcc8` | `#4f5866` | 250 | 240 |
+| green (read; the old delivered) | `#6fe39a` | `#176a35` | 121 | 22 |
+| red (not sent; the old refused) | `#ff8a80` | `#a3211a` | 217 | 124 |
+
+Read is bold besides, and drawn `✔✔` against delivered's `✓✓`, so it does
+not rest on the colour alone.
 
 In 16 colours the marks take the block's text colour. Over the blue own
 tint the bright red (9) is 2.4:1 and the bright blue (12) 2.0:1 on the
@@ -905,14 +910,14 @@ first rung it is.
 #### 2. Light or dark
 
 `loquax` asks the terminal for its background before raw mode
-(`loquax/src/tui.rs:223`), the same query `lnomad` makes: OSC 11, with
+(`loquax/src/tui.rs:227`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:73`). It was hardcoded to
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:219`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:225`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);
@@ -921,7 +926,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:3003`).
+  (`loquax/src/ui.rs:3079`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -966,10 +971,10 @@ not mapped.
 │▌ok, bring the T114.    ││ are you at the field site tomorrow?  13:58         │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
 │ Bob ·b7d0        12:40 ││                yes, from ten. Shall I bring the    │
-│ you: the antenna is…   ││                T114 and the long antenna?  14:02 ✓ │
+│ you: the antenna is…   ││               T114 and the long antenna?  14:02 ✓✓ │
 │                        ││                                                    │
 │ <9c31e0a2…>        Fri ││                    ── Today ──                     │
-│ hello? is this th… [1] ││                                 on my way  09:12 ⌂ │
+│ hello? is this th… [1] ││                                on my way  09:12 ✓  │
 │                        ││                                                    │
 │ Carol ·17ee     22 Oct ││ ──────────────────── 2 new ─────────────────────── │
 │ you: thanks, merged    ││ ok, bring the T114.  14:04                         │
@@ -1035,20 +1040,20 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 │ MESSAGES                       3 ││                          nothing earlier on this device                          │
 │ ▌Alice                     14:05 ││                             ── Friday 23 October ──                              │
 │ ▌and the small «tripod» if it…   ││ did the board come back from the soak?  19:40                                    │
-│                                  ││                          yes, 100 % over the night, log is on the share  19:52 ✓ │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓✓ │
 │  you to Alice              14:06 ││                                                                                  │
 │  the «tripod» fits               ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow? Dana says the north                          │
 │  Bob                       3 Oct ││ gate is locked after six, so the car park by the road it is.  13:58              │
 │  the «tripod» stays in the van,  ││                                                                                  │
 │                                  ││                           yes, from ten. Shall I bring the T114 and the long     │
-│                                  ││                           antenna, or is the stick enough for the hill?  14:02 ✓ │
+│                                  ││                          antenna, or is the stick enough for the hill?  14:02 ✓✓ │
 │                                  ││                                                                                  │
 │                                  ││ long one, the hill eats signal  14:03                                            │
 │                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
-│                                  ││                                                               on my way  09:12 ⌂ │
-│                                  ││                                             stuck at the level crossing  09:31 ◇ │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
 │                                  ││                                                                                  │
 │                                  ││ ────────────────────────────── 2 new ─────────────────────────────────────────── │
 │                                  ││ ok, bring the T114.  14:04                                                       │
@@ -1056,8 +1061,8 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 │                                  ││ and the small «tripod»                                                           │
 │                                  ││ if it fits in the bag  14:05                                                     │
 │                                  ││                                                                                  │
-│                                  ││                                                       the «tripod» fits  14:06 ✓ │
-│                                  ││                                                          leaving in ten  14:07 ○ │
+│                                  ││                                                      the «tripod» fits  14:06 ✓✓ │
+│                                  ││                                                         leaving in ten  14:07 ◷  │
 │                                  │├─ to Alice ─────────────────────── Enter send · Alt-Enter newline · M-x commands ─┤
 │                                  ││ ▏                                                                                │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -1110,14 +1115,15 @@ The same pairs, plus the two the larger frame adds: the date pill is
 7.1:1 on dark and 10.8:1 on light in truecolor (6.3:1 and 8.1:1 in 256),
 and the `2 new` rule over the pane is at least 6.5:1 on dark and 5.3:1 on
 light in truecolor against the reference panes (`#000000` and `#282c34`,
-`#ffffff` and `#fdf6e3`). The marks in this frame (`✓` `⌂` `◇` `○`) are
-5.1:1 to 6.7:1 over the own tint and 3.6:1 to 5.4:1 over the selected one
-in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
+`#ffffff` and `#fdf6e3`). The marks in this frame (`✓✓` `✓` `◷`, drawn
+before 1232 as `✓` `⌂` `◇` `○`) are 5.1:1 to 6.7:1 over the own tint and
+3.6:1 to 5.4:1 over the selected one in truecolor, 3.4:1 to 9.3:1 and 3.1:1
+to 8.6:1 in 256; the ladder's three tones are among the values measured.
 
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:883`) writes characters only, and the existing
+  (`loquax/src/tui.rs:905`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1180,7 +1186,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:1004`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:1031`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:
@@ -1405,7 +1411,7 @@ layout's.
    periculum's.* The SQLite store of [storage](loquax-storage.md),
    conversations and messages across restarts, the ledger persisted,
    search over FTS5, local delete, pinning, and the restart discontinuity
-   shown honestly (a message queued at exit is `○` again after restart).
+   shown honestly (a message queued at exit is `◷` again after restart).
    Depends on the storage decision's implementation, on 4 for FTS5, and
    on 2 for where history is drawn. *Acceptance:* tests over the store's
    durability rule (atomic writes, corrupt is not missing); a restart in

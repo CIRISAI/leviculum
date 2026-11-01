@@ -301,8 +301,8 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││                                       one          │
-│                        ││                                       two  12:00 ○ │
+│                        ││                                      one           │
+│                        ││                                      two  12:00 ◷  │
 │                        │├● to <61ddb79a…>── Enter send · Shift-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

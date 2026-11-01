@@ -1383,12 +1383,31 @@ public class ChatActivity extends Activity implements Events.Listener {
             time.setText(at <= 0 ? "" : ago != null ? ago : Ui.clock(at));
             time.setVisibility(at > 0 ? View.VISIBLE : View.GONE);
             time.setTextColor(metaColor);
-            ImageView mark = (ImageView) view.findViewById(R.id.mark);
+            // Found by its tag: its id is the rung's (1232), which the
+            // device walk reads.
+            ImageView mark = (ImageView) view.findViewWithTag("mark");
             mark.setVisibility(ours ? View.VISIBLE : View.GONE);
+            mark.setOnClickListener(null);
+            mark.setClickable(false);
             if (ours) {
-                mark.setImageDrawable(new Glyph(Glyph.mark(state), metaColor, getColor(R.color.bubble_ours),
+                Glyph.Kind kind = Glyph.mark(state);
+                int ink = kind == Glyph.Kind.TICKS_READ ? getColor(R.color.read_mark) : metaColor;
+                mark.setImageDrawable(new Glyph(kind, ink,
                         getColor(R.color.failed_ground), getColor(R.color.failed_mark)));
-                mark.setContentDescription(Ui.state(ChatActivity.this, state));
+                mark.setId(Glyph.resource(kind));
+                mark.setContentDescription(Ui.state(ChatActivity.this, state, Core.num(row, "read_at")));
+                if (kind == Glyph.Kind.FAILED) {
+                    final long key = Core.num(row, "key");
+                    mark.setOnClickListener(new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            String error = Core.sendAgain(peer, key);
+                            if (error != null) {
+                                line(error);
+                            }
+                        }
+                    });
+                }
             }
 
             LinearLayout chips = (LinearLayout) view.findViewById(R.id.chips);

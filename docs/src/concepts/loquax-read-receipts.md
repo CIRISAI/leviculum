@@ -1,8 +1,10 @@
 # Loquax: read receipts
 
 Status: decided 2026-10-31 (Lew), with the reviewer's decisions of
-2026-11-01 over the study; slice R1 built (order 1230, Refs #232): the
-wire, the mark on every message, the peer's flag, and the Read state. The
+2026-11-01 over the study; slices R1 to R3 built (orders 1230 to 1232,
+Refs #232): the wire, the mark on every message, the peer's flag, the Read
+state, the read event and its sending, and the tick ladder on every
+target. The
 study behind it is the reviewer's `2026-10-31-lesebestaetigungen-konzept`
 (German, every claim cited); this page keeps what is decided and points at
 the code as it stands. Groups are parked.
@@ -46,9 +48,10 @@ not that a person read them.
 
 For experiments the reference suggests keys above 0xFF
 (`LXMF.py:29-32`). They are no option: rsLXMF, the library under
-Ratspeak, truncates every field key to a `u8` (rsLXMF `769d0eb`,
-`crates/lxmf-core/src/message.rs:552-557`, the field type
-`BTreeMap<u8, Vec<u8>>` at `:63`), so 0x1FB would arrive there as 0xFB and
+Ratspeak, truncates every field key to a `u8` (rsLXMF `769d0eb`, in
+its `crates/lxmf-core/src/message.rs` lines 552 to 557, the field type
+`BTreeMap<u8, Vec<u8>>` at line 63; a sibling repository, not checked
+out here), so 0x1FB would arrive there as 0xFB and
 overwrite that client's own field. **Leviculum never writes a field key
 above 0xFF.**
 
@@ -279,7 +282,7 @@ As built (1231):
   Android app sends no `viewport` request before R4; the reply from a
   notification.
 
-## 6. The glyph ladder
+## 6. The glyph ladder (built, R3)
 
 The reviewer's decision of 2026-11-01 over the study: the mailbox is a
 status of its own (Lew), and unproven-sent stays apart from it, so the
@@ -306,9 +309,56 @@ delivered once [name] is online.", "Delivered 10:31.", "Read 10:32." under
 "Delivered 10:31.", and for a contact without receipts "[name] does not
 send read receipts."
 
-Until slice R3 draws the ladder, the table of `leviculum-ui/src/delivery.rs`
-gives Read a row of its own (`✔`, green, ASCII `V`), and Android draws
-`read` as `delivered`.
+As built (1232):
+
+- **One table.** `DELIVERY_GLYPHS` in `leviculum-ui/src/delivery.rs` holds
+  the terminal's rows, two cells each, with tone (grey, green, red) and
+  weight; `leviculum-ui/src/tokens.rs` keeps three tones, the values the
+  queued, delivered and refused tones had. The pixel screens read
+  `loquax::ui::chat::Mark` (six marks, five glyphs: sending and
+  sent-unconfirmed share the clock) and its `Shape`, the lines on a
+  24-unit grid that the window (`loquax/src/gui/chat.rs`) and the phone
+  (`Glyph.java`) both draw; `loquax-android/tests/glyph.rs` reads the
+  numbers out of `Glyph.java` and fails on a drift.
+- **The double tick.** Bare ticks, no circle, the second 6.5 units right
+  of the first. The study's second tick (short leg from `(10.5, 15)`)
+  runs into the first's long leg once both strokes are counted (1.9 units
+  between the centre lines against 2.0 of stroke, 2.6 for read); its short
+  leg now starts at `(11.6, 16.1)`, which leaves 0.84 units clear at read's
+  stroke. At 16 dp on a 2x and a 3x screen the two ticks are two pieces,
+  the study's drawing one (`two_ticks_stay_two_at_sixteen_dp`).
+- **Colours.** In a bubble the grey rungs are the bubble's meta colour;
+  read is `read_mark`, `#b2ff59` in both themes, 5.3:1 (light) and 5.1:1
+  (dark) on our green bubble, where the accent itself has 1.3:1. In the
+  list read is the accent, 5.0:1 on white and 8.8:1 on the dark ground.
+  `every_mark_holds_three_to_one_on_its_ground` in `loquax/src/ui/chat.rs`
+  holds every mark at 3:1 on its ground in both themes.
+- **The home node is the mailbox.** On a client of a home node the home's
+  `Sent` (it took the message) shows one tick, not the clock
+  (`loquax::ui::shown_delivery`): for the reader the home node is "the
+  mailbox" (`loquax-ui.md`, the settings' Mailbox). Without a home node a
+  propagation node's acceptance is the one tick.
+- **Words.** The catalogue's `state_sending`, `state_unconfirmed`,
+  `state_mailbox`, `state_delivered`, `state_read` (with the reader's time)
+  and `state_failed`, in English and German; the scene's `MarkNode`
+  carries them, the phone's `Ui.state` reads them. The detail view says
+  "sent; nobody has confirmed it arrived yet", "in the mailbox, delivered
+  once [name] is online", "delivered: it arrived on [name]'s device",
+  "read 10:32, delivered before", "not sent: … its mark sends it again".
+- **Send again.** The failed mark's tap is `Intent::SendAgain`, the core's
+  `UiEvent::SendAgain`: the failed message leaves the device (on a home's
+  client from every device of the home) and its text and fields go again
+  as a new message. The phone's request is `{"t": "sendagain", "peer",
+  "key"}`; the window presses the mark. The terminal has no key for it yet.
+- **The walk.** The ugly store's imported conversations carry one sent
+  message per rung; the walk's `marks` step reads the five mark ids
+  (`state_clock`, `state_tick`, `state_ticks`, `state_ticks_read`,
+  `state_failed`) and their words off the phone's screen.
+
+Not yet: the "[name] does not send read receipts" line (R4); the M9 has
+no Loquax screen yet, its renderer will read the same `Mark` and `Shape`;
+an imported read message loses its time in the import's archive entry
+(state code 8 without `read_at`), so it says "Read at" the epoch.
 
 ## 7. Settings
 
@@ -362,7 +412,7 @@ acceptance report.
 |---|---|---|
 | R1 | the wire and the state in the core: codec and vectors, the mark on every send, the peer's flag, `DeliveryState::Read { at }`, the store, the facade's `read`, `read_at` and `receipts` | built, 1230 |
 | R2 | the read event and sending: `Intent::Viewport`, the second, the batch per visit, the piggyback, opportunistic then mailbox; the terminal's visible area and focus; the first two cells | built, 1231, without the cells |
-| R3 | the tick ladder on every target, one table in `delivery.rs`, the terminal's two cells, Android's `Glyph.java` drawn anew, the words en/de | |
+| R3 | the tick ladder on every target, one table in `delivery.rs`, the terminal's two cells, Android's `Glyph.java` drawn anew, the words en/de | built, 1232 |
 | R4 | the switch and reciprocity: Privacy, config and palette, "does not send read receipts"; Android reports `Viewport` | |
 | R5 | the home node: `/mark` "seen", the receipt from the home node's outbox, incoming receipts as archive entries, the switch on the home node | |
 | R6 | the PN and mixed cells | |
