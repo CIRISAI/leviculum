@@ -1,0 +1,314 @@
+{
+  "address": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "browser_address"
+      },
+      "resource": "address",
+      "role": "text_field",
+      "selected": false
+    },
+    "activate": {
+      "enabled": true,
+      "intent": "Activate(Address)",
+      "label_key": "browser_edit"
+    },
+    "cursor": null,
+    "editing": false,
+    "go": {
+      "enabled": true,
+      "intent": "Go { url: None }",
+      "label_key": "browser_go"
+    },
+    "hint": {
+      "args": [],
+      "key": "browser_address_hint"
+    },
+    "id": "address",
+    "value": ""
+  },
+  "help": false,
+  "names": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [
+          "marcel"
+        ],
+        "key": "browser_names_title"
+      },
+      "resource": "names",
+      "role": "sheet",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "Dismiss",
+        "label_key": "browser_dismiss"
+      }
+    ],
+    "id": "names",
+    "rows": [
+      {
+        "item": {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [
+                "Marcel ·fafa",
+                {
+                  "args": [
+                    3
+                  ],
+                  "key": "browser_hops"
+                },
+                {
+                  "args": [
+                    2
+                  ],
+                  "key": "browser_hours_ago"
+                },
+                {
+                  "args": [],
+                  "key": "browser_mark_pinned"
+                }
+              ],
+              "key": "browser_name_row"
+            },
+            "resource": "name_0",
+            "role": "row",
+            "selected": true
+          },
+          "activate": {
+            "enabled": true,
+            "intent": "Activate(Name(0))",
+            "label_key": "browser_open"
+          },
+          "hovered": false,
+          "id": "name_0",
+          "menu": [],
+          "selected": true,
+          "title": {
+            "args": [
+              "Marcel ·fafa",
+              {
+                "args": [
+                  3
+                ],
+                "key": "browser_hops"
+              },
+              {
+                "args": [
+                  2
+                ],
+                "key": "browser_hours_ago"
+              },
+              {
+                "args": [],
+                "key": "browser_mark_pinned"
+              }
+            ],
+            "key": "browser_name_row"
+          }
+        }
+      },
+      {
+        "item": {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [
+                "Marcel Solar ·1717",
+                {
+                  "args": [
+                    2
+                  ],
+                  "key": "browser_hops"
+                },
+                {
+                  "args": [
+                    10
+                  ],
+                  "key": "browser_minutes_ago"
+                },
+                {
+                  "raw": ""
+                }
+              ],
+              "key": "browser_name_row"
+            },
+            "resource": "name_1",
+            "role": "row",
+            "selected": false
+          },
+          "activate": {
+            "enabled": true,
+            "intent": "Activate(Name(1))",
+            "label_key": "browser_open"
+          },
+          "hovered": false,
+          "id": "name_1",
+          "menu": [],
+          "selected": false,
+          "title": {
+            "args": [
+              "Marcel Solar ·1717",
+              {
+                "args": [
+                  2
+                ],
+                "key": "browser_hops"
+              },
+              {
+                "args": [
+                  10
+                ],
+                "key": "browser_minutes_ago"
+              },
+              {
+                "raw": ""
+              }
+            ],
+            "key": "browser_name_row"
+          }
+        }
+      },
+      {
+        "item": {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [
+                "Marcel ·9c9c",
+                {
+                  "args": [],
+                  "key": "browser_one_hop"
+                },
+                {
+                  "args": [],
+                  "key": "browser_just_now"
+                },
+                {
+                  "args": [
+                    "·fafa"
+                  ],
+                  "key": "browser_mark_conflict"
+                }
+              ],
+              "key": "browser_name_row"
+            },
+            "resource": "name_2",
+            "role": "row",
+            "selected": false
+          },
+          "activate": {
+            "enabled": true,
+            "intent": "Activate(Name(2))",
+            "label_key": "browser_open"
+          },
+          "hovered": false,
+          "id": "name_2",
+          "menu": [],
+          "selected": false,
+          "title": {
+            "args": [
+              "Marcel ·9c9c",
+              {
+                "args": [],
+                "key": "browser_one_hop"
+              },
+              {
+                "args": [],
+                "key": "browser_just_now"
+              },
+              {
+                "args": [
+                  "·fafa"
+                ],
+                "key": "browser_mark_conflict"
+              }
+            ],
+            "key": "browser_name_row"
+          }
+        }
+      },
+      {
+        "note": {
+          "ask": false,
+          "text": {
+            "args": [],
+            "key": "browser_names_hint"
+          }
+        }
+      }
+    ],
+    "title": {
+      "args": [
+        "marcel"
+      ],
+      "key": "browser_names_title"
+    }
+  },
+  "page": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "browser_page"
+      },
+      "resource": "page",
+      "role": "page",
+      "selected": false
+    },
+    "first": 0,
+    "focus": null,
+    "id": "page",
+    "lines": [
+      []
+    ],
+    "total": 1
+  },
+  "places": null,
+  "state": [],
+  "status": null,
+  "toast": null,
+  "top_bar": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "args": [],
+        "key": "browser_page"
+      },
+      "resource": "top_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": false,
+        "intent": "Forward",
+        "label_key": "browser_forward"
+      },
+      {
+        "enabled": false,
+        "intent": "Reload",
+        "label_key": "browser_reload"
+      }
+    ],
+    "id": "top_bar",
+    "lead": {
+      "me": {
+        "avatar": {
+          "me": ""
+        },
+        "link": null
+      }
+    },
+    "title": {
+      "raw": ""
+    }
+  }
+}

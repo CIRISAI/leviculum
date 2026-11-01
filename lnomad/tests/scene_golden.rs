@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use leviculum_micron::parse;
-use lnomad::app::scene::Scene;
-use lnomad::app::{update, AppEvent, Focus, KeyCode, KeyEvent, KeyModifiers};
+use lnomad::app::scene::{Row, Scene};
+use lnomad::app::{update, AppEvent, Focus, Intent, KeyCode, KeyEvent, KeyModifiers};
 use lnomad::url::parse_url;
 use lnomad::Model;
 
@@ -182,4 +182,77 @@ fn a_readme_scene_is_built_in_well_under_a_frame() {
     let each = start.elapsed() / rounds;
     eprintln!("a README scene at 53x24: {each:?} per build");
     assert!(each < std::time::Duration::from_millis(16), "{each:?}");
+}
+
+/// The name search's results (1227) for "marcel" at 80 by 24: two sites
+/// named Marcel, one of them pinned, and a third whose name holds it, seen
+/// at fixed times, so the rows' words (hops, last seen, the pin marks) are
+/// the same on every run.
+fn names() -> Model {
+    const PINNED: [u8; 16] = [0xfa; 16];
+    const IMPOSTOR: [u8; 16] = [0x9c; 16];
+    const SOLAR: [u8; 16] = [0x17; 16];
+    let now = 10_000;
+    let mut model = Model::from_document(&parse(""), 79, "", (80, 24));
+    model.clock = Some(now);
+    for (dest, name, hops, seen) in [
+        (IMPOSTOR, "Marcel", 1, now - 30),
+        (PINNED, "Marcel", 3, now - 7200),
+        (SOLAR, "Marcel Solar", 2, now - 600),
+    ] {
+        model
+            .node_registry
+            .upsert(dest, Some(name.to_string()), Some(hops), seen);
+    }
+    model.pins.note_visit(Some("Marcel"), &PINNED, 10);
+    update(
+        &mut model,
+        AppEvent::Intent(Intent::FindName {
+            query: "marcel".to_string(),
+        }),
+    );
+    model
+}
+
+/// The result list is a scene list: one item per site with its words as
+/// catalogue keys, the selected one marked, and the key hint under them.
+#[test]
+fn the_name_results_are_the_golden_scene_list() {
+    let scene = names().scene();
+    let sheet = scene.names.as_ref().expect("the result list is open");
+    let items = sheet
+        .rows
+        .iter()
+        .filter(|row| matches!(row, Row::Item { .. }))
+        .count();
+    assert_eq!(items, 3, "three sites match");
+    assert!(matches!(sheet.rows.last(), Some(Row::Note { .. })));
+    check("scene-names.json", &scene);
+}
+
+/// The positive control: the golden sees the rows' order and a row's
+/// words. A list with two rows swapped, or one site a hop further, is
+/// refused.
+#[test]
+fn a_swapped_row_or_a_changed_hop_fails_the_names_golden() {
+    let name = "scene-names.json";
+    let scene = names().scene();
+    assert_eq!(differs(name, &json(&scene)), None, "the golden itself");
+
+    let mut swapped = scene.clone();
+    swapped.names.as_mut().expect("list").rows.swap(0, 1);
+    assert!(differs(name, &json(&swapped)).is_some(), "the order");
+
+    let mut further = scene.clone();
+    let row = further
+        .names
+        .as_mut()
+        .expect("list")
+        .rows
+        .first_mut()
+        .expect("a row");
+    if let Row::Item { title, .. } = row {
+        *title = lnomad::app::strings::Text::Raw("Marcel ·fafa  ·  4 hops".to_string());
+    }
+    assert!(differs(name, &json(&further)).is_some(), "a row's words");
 }
