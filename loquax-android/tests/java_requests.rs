@@ -145,6 +145,18 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "sendAgain",
+            java_map(&[
+                ("t", Java::Str("sendagain")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+            ]),
+            Request::SendAgain {
+                peer: s(PEER),
+                key: KEY,
+            },
+        ),
+        (
             "delete",
             java_map(&[
                 ("t", Java::Str("delete")),

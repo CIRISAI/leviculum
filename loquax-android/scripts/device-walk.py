@@ -63,6 +63,7 @@ STEPS = [
     "list",
     "open_imported",
     "info",
+    "marks",
     "reply_send",
     "receive_wake",
     "receive_report",
@@ -135,8 +136,20 @@ RING = 0.06
 # (the catalogue's position_of), and its tap target is at least 48dp.
 PIN_LABEL = "Position of "
 PIN_DP = 48
-# A delivery mark of ours the walk counts as a tick (Ui.state's words).
-TICKS = {"sent", "delivered ✓"}
+# The ladder's five marks (1232, loquax-read-receipts.md section 3): the
+# view id each rung gives its mark (chat::Mark::resource, Glyph.resource)
+# and the start of what a screen reader says for it (the catalogue's
+# state_* words in English); the clock has two, sending and sent with no
+# proof.
+MARK_WORDS = {
+    "state_clock": ("Sending", "Sent, not confirmed yet"),
+    "state_tick": ("Waiting in the mailbox",),
+    "state_ticks": ("Delivered",),
+    "state_ticks_read": ("Read at ",),
+    "state_failed": ("Not sent. Double tap to send again",),
+}
+# A mark of ours the walk counts as a tick: anyone confirmed it.
+TICKS = {"state_tick", "state_ticks", "state_ticks_read"}
 
 
 # --- Parsers: what the unit tests under scripts/tests/ pin. ---
@@ -167,6 +180,26 @@ class Node:
 
 
 BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+def marks_on(nodes: list[Node]) -> list[Node]:
+    """The delivery marks on screen: nodes whose id is a rung's."""
+    return [n for n in nodes if any(n.is_id(rid) for rid in MARK_WORDS)]
+
+
+def mark_rid(node: Node) -> str:
+    """The rung a mark node's id names, or ""."""
+    return next((rid for rid in MARK_WORDS if node.is_id(rid)), "")
+
+
+def marks_problems(seen: dict[str, str]) -> list[str]:
+    """What is wrong with the marks seen, rung to its spoken words: a rung
+    never seen, or one that says another rung's words."""
+    problems = [f"no {rid}" for rid in MARK_WORDS if rid not in seen]
+    for rid, desc in seen.items():
+        if not desc.startswith(MARK_WORDS[rid]):
+            problems.append(f"{rid} says {desc!r}, not {' or '.join(MARK_WORDS[rid])!r}")
+    return problems
 
 
 def parse_bounds(text: str) -> tuple[int, int, int, int] | None:
@@ -1258,6 +1291,30 @@ class Walk:
             dev.key("KEYCODE_BACK")
         return f"sheet={found[0].text!r} lines={len(shown)}"
 
+    def step_marks(self) -> str:
+        """The imported chat holds one sent message on each rung of the
+        ladder (ugly_store's delivery_of): down from the top until all five
+        marks were on screen, each with its own id and its own words."""
+        dev = self.need_device()
+        seen: dict[str, str] = {}
+        last: list[str] = []
+        for scrolls in range(60):
+            nodes = dev.dump()
+            for node in marks_on(nodes):
+                seen.setdefault(mark_rid(node), node.desc)
+            if len(seen) == len(MARK_WORDS):
+                break
+            bodies = [n.text for n in by_top(find(nodes, rid="body"))]
+            if bodies and bodies == last:
+                break
+            last = bodies
+            self.scroll_list(nodes, "list", up=False)
+        problems = marks_problems(seen)
+        self.note(f"marks seen: {seen}")
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"scrolls={scrolls} rungs={sorted(seen)}"
+
     def step_reply_send(self) -> str:
         dev = self.need_device()
         fixture = self.need_fixture()
@@ -1285,8 +1342,8 @@ class Walk:
             if not mine:
                 return False
             y = mine[-1].bounds[1]
-            marks = [n for n in find(nodes, rid="mark") if n.bounds[1] >= y]
-            mark = marks[0].desc if marks else ""
+            marks = [n for n in by_top(marks_on(nodes)) if n.bounds[1] >= y]
+            mark = mark_rid(marks[0]) if marks else ""
             return mark in TICKS
 
         shown = wait_for(ticked, 5, every=0.2)

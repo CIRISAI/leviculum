@@ -317,6 +317,52 @@ class Dump(unittest.TestCase):
             self.assertFalse(walk.is_hash_name(text), text)
 
 
+def mark_node(rid, desc, top):
+    """A delivery mark as the chat's dump has it (1232)."""
+    return (
+        f'<node index="0" text="" resource-id="network.leviculum.loquax.debug:id/{rid}" '
+        f'class="android.widget.ImageView" content-desc="{desc}" clickable="false" '
+        f'bounds="[900,{top}][948,{top + 48}]" />'
+    )
+
+
+class Marks(unittest.TestCase):
+    """The ladder's step: five rungs by id, each with its own words."""
+
+    ALL = [
+        ("state_clock", "Sending"),
+        ("state_tick", "Waiting in the mailbox"),
+        ("state_ticks", "Delivered"),
+        ("state_ticks_read", "Read at 10:32"),
+        ("state_failed", "Not sent. Double tap to send again"),
+    ]
+
+    def dump(self, marks):
+        body = "".join(mark_node(rid, desc, 200 + 100 * i) for i, (rid, desc) in enumerate(marks))
+        return walk.parse_dump(f'<hierarchy rotation="0">{body}</hierarchy>')
+
+    def test_five_rungs_with_their_words_pass(self):
+        nodes = self.dump(self.ALL)
+        seen = {walk.mark_rid(n): n.desc for n in walk.marks_on(nodes)}
+        self.assertEqual(walk.marks_problems(seen), [])
+
+    def test_a_missing_rung_and_wrong_words_are_named(self):
+        marks = [m for m in self.ALL if m[0] != "state_ticks_read"]
+        marks[1] = ("state_tick", "Delivered")
+        nodes = self.dump(marks)
+        seen = {walk.mark_rid(n): n.desc for n in walk.marks_on(nodes)}
+        problems = walk.marks_problems(seen)
+        self.assertIn("no state_ticks_read", problems)
+        self.assertTrue(any(p.startswith("state_tick says 'Delivered'") for p in problems), problems)
+
+    def test_the_old_mark_id_is_no_rung(self):
+        nodes = self.dump([("mark", "delivered ✓")])
+        self.assertEqual(walk.marks_on(nodes), [])
+
+    def test_a_tick_is_any_confirmed_rung(self):
+        self.assertEqual(walk.TICKS, {"state_tick", "state_ticks", "state_ticks_read"})
+
+
 class Code(unittest.TestCase):
     ADMIT = (
         'Admission code for "walk", good for one device, once:\n\n'

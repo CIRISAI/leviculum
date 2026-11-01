@@ -168,6 +168,7 @@ fn request() -> impl Strategy<Value = Request> {
             body
         }),
         (text(), i64s(), text()).prop_map(|(peer, key, to)| Request::Forward { peer, key, to }),
+        (text(), i64s()).prop_map(|(peer, key)| Request::SendAgain { peer, key }),
         (text(), keys()).prop_map(|(peer, keys)| Request::Delete { peer, keys }),
         text().prop_map(|emoji| Request::Used { emoji }),
         Just(Request::Pull),
@@ -405,7 +406,13 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
     (
         (text(), text(), text(), any::<bool>(), i64s(), u32s()),
         (text(), opt_text(), opt_text(), text(), opt_text()),
-        (text(), opt_text(), any::<(bool, bool, bool)>(), u32s()),
+        (
+            text(),
+            opt_text(),
+            any::<(bool, bool, bool)>(),
+            u32s(),
+            i64s(),
+        ),
         live(),
         (text(), text(), text(), text(), text()),
     )
@@ -413,7 +420,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
             |(
                 (peer, name, last, ours, at, unread),
                 (initials, icon_fg, icon_bg, kind, reaction),
-                (state, photo, (linked, pinned, muted), updates),
+                (state, photo, (linked, pinned, muted), updates, read_at),
                 (liveness, cadence_s, last_fix_at),
                 (live, ring, pin, pin_label, draft),
             )| ConversationRow {
@@ -429,6 +436,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 kind,
                 reaction,
                 state,
+                read_at,
                 photo,
                 linked,
                 pinned,

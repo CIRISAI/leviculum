@@ -215,6 +215,9 @@ pub enum Request {
     /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation to `to`: its text and content fields again.
     Forward { peer: String, key: i64, to: String },
+    /// Tapped the red mark of the message `key` of `peer`'s conversation,
+    /// one of ours not sent: it goes again (1232), the failed one leaves.
+    SendAgain { peer: String, key: i64 },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
     Delete { peer: String, keys: Vec<i64> },
@@ -902,6 +905,10 @@ pub struct ConversationRow {
     /// the list draws its mark where an unread count would be.
     #[serde(default)]
     pub state: String,
+    /// When `state` is `read`: the reader's time, unix seconds, else 0
+    /// (1232), as [`MessageRow::read_at`].
+    #[serde(default)]
+    pub read_at: i64,
     /// The linked contact's thumbnail as loquax copied it, a file the app
     /// decodes (1139); absent, the avatar is the initials.
     #[serde(default)]

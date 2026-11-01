@@ -637,6 +637,7 @@ impl Session {
                 body: Some(body),
             } => UiEvent::Reply { peer, target, body },
             Intent::Forward { from, key, to } => UiEvent::Forward { from, key, to },
+            Intent::SendAgain { peer, key } => UiEvent::SendAgain { peer, key },
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed: true,
@@ -1488,6 +1489,7 @@ impl Inner {
             kind: row.kind.to_string(),
             reaction: row.reaction,
             state: row.mark.map_or("", chat::Mark::word).to_string(),
+            read_at: row.read_at.map_or(0, i64::from),
             photo: self.photo(&row.peer),
             linked: self.book.links.contains_key(&row.peer),
             pinned: row.pinned,
@@ -1968,6 +1970,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             from: parse_peer(&peer)?,
             key: schema::model_key(key),
             to: parse_peer(&to)?,
+        },
+        R::SendAgain { peer, key } => Intent::SendAgain {
+            peer: parse_peer(&peer)?,
+            key: schema::model_key(key),
         },
         R::Delete { peer, keys } => Intent::Delete {
             messages: Messages::Keys {
