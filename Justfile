@@ -2289,6 +2289,28 @@ flash-rnode-extract PORT BOARD="auto":
 flash-rnode PORT BOARD="auto":
     {{rnode_flash}} write --port {{PORT}} --board {{BOARD}} --fw-dir {{rnode_fw}}
 
+# Our own build of Mark's firmware, for the boards we carry a patch for
+# (scripts/patches/rnode-firmware-*.patch). Today that is the Heltec V4 alone:
+# upstream leaves its LNA gain in the packet RSSI the ESP32 path reports, 21 dB
+# hot on the rig (1260). scripts/build-rnode-firmware.sh says what is pinned
+# and why the submodule is copied, never patched in place.
+[doc('Install the pinned toolchain for our patched RNode firmware builds')]
+rnode-firmware-setup:
+    bash scripts/build-rnode-firmware.sh setup
+
+#   just rnode-firmware-build heltec-v4
+[doc('Build the patched RNode firmware into target/rnode-firmware/<board>')]
+rnode-firmware-build BOARD="heltec-v4":
+    bash scripts/build-rnode-firmware.sh build {{BOARD}}
+
+# Write that build's app image and store its hash as the EEPROM target, so the
+# board validates it. Bootloader, partitions, console and EEPROM stay as the
+# release left them. Back up first (flash-rnode-read-image).
+#   just flash-rnode-built /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_44:1B:F6:69:77:24-if00
+[doc('Flash our patched RNode build onto a board')]
+flash-rnode-built PORT BOARD="heltec-v4":
+    {{rnode_flash}} write-app --port {{PORT}} --board {{BOARD}} --image {{justfile_directory()}}/target/rnode-firmware/{{BOARD}}/RNode_Firmware.ino.bin
+
 # The whole flash in one file. This is the restore path: a per-region set
 # presumes the partition table it was cut with, an image presumes nothing.
 # Measured on the V4: 16 MB read in 102.8 s (1306 kbit/s), no retries.

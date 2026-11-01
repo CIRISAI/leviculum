@@ -64,6 +64,8 @@
 # Usage:
 #   rnode-flash.sh extract     --port P [--board B|--chip C] [--fw-dir D]
 #   rnode-flash.sh write       --port P [--board B|--chip C] [--fw-dir D]
+#   rnode-flash.sh write-app   --port P [--board B|--chip C] --image F
+#   rnode-flash.sh hash        --image F                      # app image hash
 #   rnode-flash.sh read-image  --port P [--board B|--chip C] --image F
 #   rnode-flash.sh write-image --port P [--board B|--chip C] --image F
 #   rnode-flash.sh chip        --port P                       # print the chip
@@ -81,6 +83,8 @@ set -euo pipefail
 
 DRY_RUN="${RNODE_DRY_RUN:-0}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RNODECONF=(env "PYTHONPATH=$REPO_DIR/reference/Reticulum" python3
+    "$REPO_DIR/reference/Reticulum/RNS/Utilities/rnodeconf.py")
 ESPTOOL="${ESPTOOL:-${LEVICULUM_RNODE_TOOLS:-$HOME/.rnode-tools/venv}/bin/esptool}"
 BAUD=921600
 PORT=""
@@ -229,7 +233,84 @@ cmd_write_image() {
         write-flash --flash-size keep 0x0 "$IMAGE"
 }
 
-[[ $# -ge 1 ]] || die "usage: $0 <extract|write|read-image|write-image|chip> --port P [--board B|--chip C]"
+# The SHA-256 an ESP-IDF app image carries in its last 32 bytes, checked
+# against the bytes before it. The firmware compares this against the target
+# hash in its EEPROM on every boot (Device.h device_validate_partitions) and
+# keeps the radio off on a mismatch; upstream's partition_hashes prints the
+# same value.
+app_hash() {
+    python3 -I - "$1" <<'PY'
+import hashlib, sys
+d = open(sys.argv[1], "rb").read()
+if len(d) < 64 or hashlib.sha256(d[:-32]).digest() != d[-32:]:
+    sys.exit("rnode-flash: %s carries no appended SHA-256" % sys.argv[1])
+print(d[-32:].hex())
+PY
+}
+
+# Wait for the port to come back after a reset re-enumerated it.
+wait_port() {
+    [[ "$DRY_RUN" == "1" ]] && return 0
+    local _
+    for _ in $(seq 1 30); do
+        [[ -e "$PORT" ]] && { sleep 3; return 0; }
+        sleep 1
+    done
+    die "$PORT did not come back within 30 s"
+}
+
+# A firmware we built ourselves (scripts/build-rnode-firmware.sh), not one we
+# extracted. Only the app region at 0x10000 is written: bootloader,
+# partition table, console and EEPROM stay as Mark's release left them, so
+# the device signature and provisioning survive. The new image's hash is
+# then stored as the EEPROM target, which is what the upstream Makefile's
+# upload-<board> targets do with `rnodeconf --firmware-hash`, and the board
+# is reset so it validates against it.
+cmd_write_app() {
+    [[ -n "$IMAGE" ]] || die "write-app needs --image <file>"
+    local hash
+    if [[ "$DRY_RUN" == "1" ]]; then
+        hash="<sha256 of $IMAGE>"
+    else
+        [[ -f "$IMAGE" ]] || die "no image at $IMAGE"
+        hash="$(app_hash "$IMAGE")" || exit 1
+    fi
+    run "$ESPTOOL" --chip "$CHIP" --port "$PORT" --baud "$BAUD" \
+        --before default-reset --after hard-reset \
+        write-flash --flash-mode dio --flash-freq 80m --flash-size detect \
+        0x10000 "$IMAGE"
+    wait_port
+    run "${RNODECONF[@]}" "$PORT" --firmware-hash "$hash"
+    wait_target_hash "$hash"
+    run "$ESPTOOL" --chip "$CHIP" --port "$PORT" chip-id
+    wait_port
+}
+
+# The firmware commits the EEPROM one byte at a time, each a flash sector
+# write (Utilities.h eeprom_update), and rnodeconf returns as soon as the
+# frame is sent. Measured 2026-11-01 on the V4: a reset straight after it
+# left 17 of the 32 bytes new and the rest of the old hash, so the board
+# rebooted into a firmware it no longer validated. Read the target back
+# until it is the whole hash, and only then reset.
+wait_target_hash() {
+    [[ "$DRY_RUN" == "1" ]] && { printf '%s\n' "${RNODECONF[*]} $PORT --get-target-firmware-hash (until $1)"; return 0; }
+    local _ got
+    for _ in $(seq 1 10); do
+        sleep 2
+        got="$("${RNODECONF[@]}" "$PORT" --get-target-firmware-hash 2>&1 \
+            | sed -n 's/.*The target firmware hash is: \([0-9a-f]*\).*/\1/p' | tail -1)"
+        [[ "$got" == "$1" ]] && { echo "rnode-flash: target hash stored: $got" >&2; return 0; }
+    done
+    die "the board's target hash is '${got:-unreadable}', not $1; do not reset it, run write-app again"
+}
+
+if [[ "${1:-}" == "hash" ]]; then
+    [[ "${2:-}" == "--image" && -n "${3:-}" ]] || die "usage: $0 hash --image F"
+    app_hash "$3"
+    exit $?
+fi
+
+[[ $# -ge 1 ]] || die "usage: $0 <extract|write|write-app|read-image|write-image|chip> --port P [--board B|--chip C]"
 ACTION="$1"
 shift
 
@@ -266,6 +347,7 @@ fi
 case "$ACTION" in
     extract) cmd_extract ;;
     write) cmd_write ;;
+    write-app) cmd_write_app ;;
     read-image) cmd_read_image ;;
     write-image) cmd_write_image ;;
     chip) echo "$CHIP" ;;

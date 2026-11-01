@@ -579,6 +579,46 @@ is identical over all three; only the physical transport differs.
 - Uses `bleak` Python library for BLE access
 - Write chunk size limited to `max_write_without_response_size`
 
+### 2.5 The firmware we patch: Heltec V4 packet RSSI
+
+Every RNode on the rig runs Mark's signed release, written back by `just
+flash-rnode`, except one board we carry a patch for. The patches live in
+`scripts/patches/rnode-firmware-*.patch`; `just rnode-firmware-setup` installs
+the pinned toolchain (arduino-cli, ESP32 core 2.0.17, libraries) and `just
+rnode-firmware-build heltec-v4` copies the `reference/RNode_Firmware`
+submodule into `target/rnode-firmware/`, applies the patches and compiles
+with the upstream Makefile's own `firmware-heltec32_v4` command line.
+`just flash-rnode-built <port>` writes only the app region at 0x10000 and
+stores the new image's hash as the EEPROM target, so bootloader, console,
+signature and provisioning stay as the release left them.
+`scripts/build-rnode-firmware.sh` carries the pins and the reasons.
+
+**The patch.** The Heltec V4 has an external LNA in front of its SX1262:
+17 dB on the GC1109 front end, 21 dB on the KCT8103L of v4.3
+(`reference/RNode_Firmware/Boards.h:391`). Upstream subtracts that gain in
+`currentRssi()` (`reference/RNode_Firmware/sx126x.cpp:529`) and in
+`packetRssi()` (`reference/RNode_Firmware/sx126x.cpp:545`), but not in the
+overload `packetRssi(uint8_t pkt_snr_raw)`
+(`reference/RNode_Firmware/sx126x.cpp:555`), and the ESP32 receive path
+calls exactly that overload (`reference/RNode_Firmware/RNode_Firmware.ino:470`),
+whose value becomes `last_rssi` and so `CMD_STAT_RSSI`. Every packet the
+V4 received was reported with the LNA gain still in it, and `periculum rig
+levels` measured it 21 dB hotter than its peers heard it in every round
+(2026-10-31), so its RSSI was "not trusted". Our patch adds the same
+`lora_lna_gain` subtraction to the overload. Upstream HEAD still has the gap;
+we do not report upstream. Measured after the patch (2026-11-01, order
+1260): the V4's receive bias fell from +21.0 dB to +0.5 dB over eight
+pairs. The noise floor and CSMA readings were never affected, because
+`currentRssi()` was already right; nRF52 and AVR RNodes take the argument-free
+`packetRssi()` and were right too.
+
+**Not fixed by the patch, measured on the same board:** within minutes
+of a boot the V4 can be deaf and unreadable on the air while it still
+radiates (peers read its channel up to +3 dBm at a 2 dBm setting and decode
+nothing). Mark's unmodified 1.86 image behaves the same way, so it is not
+this patch. A `rig levels` round taken right after flashing the V4 shows it
+with no pairs at all; give it a few minutes, or read the round again.
+
 ---
 
 ## 3. Medium Access
