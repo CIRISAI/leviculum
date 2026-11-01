@@ -219,7 +219,7 @@ A file travels in the LXMF file attachments field, `[[name, bytes], ...]` under 
 
 ## VOICE MESSAGES
 
-A voice message travels in the LXMF audio field, `[mode, bytes]` under field 7, as Columba and Sideband write and read it. Loquax sends Opus in Ogg (mode 0x10), the mode both play, mono at 16 kHz and 12 kb/s, about 72 KB a minute, and plays Opus in Ogg and the Codec2 modes Sideband sends on slow links (3200 down to 1200; 700C and 450 show but do not play). In **tui** a message with a voice message carries a line `♪ voice message · 0:07` (`[v] voice message - 0:07` with **--ascii**), under its text or alone; `Enter` on it, or a press on it in **gui**, writes it decoded as `$LNMSG_HOME/voice/`*address*`-`*key*`.wav` and hands it to the system's player. Recording is the phone's: hold the microphone in the compose bar, release to send, slide left to cancel; a recording lasts 0.6 s to 5 min.
+A voice message travels in the LXMF audio field, `[mode, bytes]` under field 7, as Columba and Sideband write and read it. Loquax sends Opus in Ogg (mode 0x10), the mode both play, mono at 16 kHz and 12 kb/s, about 72 KB a minute, and plays Opus in Ogg and the Codec2 modes Sideband sends on slow links (3200 down to 1200; 700C and 450 show but do not play). In **tui** a message with a voice message carries a line `♪ voice message · 0:07` (`[v] voice message - 0:07` with **--ascii**), under its text or alone; `Enter` on it, or a press on it in **gui**, writes it decoded as `$LNMSG_HOME/voice/`*address*`-`*key*`.wav` and hands it to the system's player. Recording is the phone's: hold the microphone in the compose bar, release to send, slide left to cancel; a recording lasts 0.6 s to 10 min, what a receiver takes at that rate.
 
 ## PHOTOS
 

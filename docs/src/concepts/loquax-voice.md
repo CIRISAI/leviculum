@@ -11,7 +11,7 @@ does it, and compatible with the other messengers.
 | Wire | The LXMF audio field, `0x07`, holding `[mode, bytes]`, the mode one of the reference's audio modes. No field of our own. |
 | What goes | Opus in Ogg, `AM_OPUS_OGG` (`0x10`): the one mode Columba and Sideband both play. Mono, 16 kHz, 12 kb/s on average, speech mode, 20 ms frames, ended exactly (the last page's granule says where the recording stops). |
 | What plays | Opus in Ogg from anyone, and the Codec2 modes Sideband sends on slow links (3200, 2400, 1600, 1400, 1300, 1200). 700C and the two 450 modes show as a voice message that does not play here. |
-| Length | 0.6 s to 5 min. A shorter hold is a tap and sends nothing, the chat says to hold; the recorder stops at 5 min, Columba's limit. |
+| Length | 0.6 s to 10 min. A shorter hold is a tap and sends nothing, the chat says to hold. The cap was 5 min, Columba's limit, until 1276 derived it from what a receiver takes ([recording](loquax-voice-recording.md), section 5); the phone's recorder still stops at 5 min until pass two of 1276. |
 | Where the work is done | In Rust: the field, the codec (`loquax::voice`), the length rules and their words, the level bar, which message plays. Java keeps the microphone (`AudioRecord`), the player (`AudioTrack`), the button's gestures and the permission. |
 | Settings | None. Every message goes in the one mode every receiver plays. |
 
@@ -101,8 +101,8 @@ so a hostile stream of one byte packets does not ask for hours of PCM.
   which in a variable rate stream follow the speech; Codec2 frames are
   all one size, so their bar is even.
 - `refusal` says why a recording does not go: under 0.6 s "Hold the
-  microphone to record, release to send.", past 5 min "A voice message
-  lasts at most 5:00." In English and German, from the catalogue.
+  microphone to record, release to send.", past the cap "A voice message
+  lasts at most 10:00." In English and German, from the catalogue.
 - The model keeps which message plays (`UiModel::playing`).
 - `UiEvent::SendVoice`, `PlayVoice`, `PauseVoice`, `VoiceEnded`;
   `UiEffect::PlayVoice`, `PauseVoice`.

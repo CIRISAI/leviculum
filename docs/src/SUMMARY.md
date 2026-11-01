@@ -35,6 +35,7 @@
   - [Loquax: photos](concepts/loquax-photos.md)
   - [Loquax: files](concepts/loquax-files.md)
   - [Loquax: voice messages](concepts/loquax-voice.md)
+  - [Loquax: recording a voice message](concepts/loquax-voice-recording.md)
   - [Loquax: conversation storage](concepts/loquax-storage.md)
   - [Loquax: the propagation node, and who you talk to](concepts/loquax-mailbox.md)
   - [Loquax: the map](concepts/loquax-map.md)
