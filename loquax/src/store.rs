@@ -1326,6 +1326,42 @@ impl Store {
         self.archive_holds_of(crate::home::KIND_PEERSTATE, peer)
     }
 
+    /// The bytes of the archive entry of `kind` kept under `id`, while the
+    /// archive still holds it.
+    pub fn archive_entry(&self, kind: u8, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 AND id = ?3",
+                params![&self.identity[..], i64::from(kind), &id[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Whether a seen mark in the archive names the message `id` (1234):
+    /// some device saw it already, and its read receipt went then.
+    pub fn archive_seen(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        let prefix = crate::home::wire::SEEN_MARK_PREFIX;
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 AND instr(packed, ?5) > 0 LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_MARK),
+                    prefix.len() as i64,
+                    &prefix[..],
+                    &id[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        Ok(found.is_some())
+    }
+
     /// Whether the archive holds an entry of `kind` whose bytes begin with
     /// `peer`'s [`crate::home::wire::name_entry_prefix`].
     fn archive_holds_of(&self, kind: u8, peer: &[u8; 16]) -> Result<bool, StoreError> {

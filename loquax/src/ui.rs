@@ -3232,9 +3232,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         OutboxEvent::HomeSent {
             message_id,
             destination,
+            sent_at,
             body,
             fields,
-        } => home_sent(model, message_id, destination, body, fields),
+        } => home_sent(model, message_id, destination, sent_at, body, fields),
         OutboxEvent::HomePetname {
             destination,
             petname,
@@ -3253,6 +3254,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                     model.forget_by_id(id);
                 }
             }
+            crate::home::wire::MarkFlag::Seen { .. } => model.home_seen(&mark.ids),
         },
         OutboxEvent::Left {
             message_id,
@@ -3682,9 +3684,16 @@ fn home_sent<B>(
     model: &mut UiModel<B>,
     message_id: [u8; 32],
     destination: [u8; 16],
+    sent_at: i64,
     body: Vec<u8>,
     fields: Vec<leviculum_lxmf::Field>,
 ) {
+    // A receipt the home node signed (1234) is a state, not a bubble.
+    if leviculum_lxmf::lev::Lev::from_fields(&fields)
+        .is_some_and(|lev| receipts::alone(&body, &fields, &lev))
+    {
+        return;
+    }
     let now = model.now;
     let mut found = false;
     for conversation in &mut model.conversations {
@@ -3708,7 +3717,13 @@ fn home_sent<B>(
     }
     let index = model.conversation(destination);
     let activity = model.bump();
-    let mut message = Message::ours(String::from_utf8_lossy(&body).into_owned(), now);
+    // Its time is when the other device sent it, not when this one heard
+    // of it: a read receipt is kept no earlier than the send (1234).
+    let at = now.map(|now| WallTime {
+        unix_secs: sent_at,
+        ..now
+    });
+    let mut message = Message::ours(String::from_utf8_lossy(&body).into_owned(), at);
     message.id = Some(message_id);
     message.delivery = Some(DeliveryState::Sent);
     message.note(now, "sent from another device, taken by the mailbox");
@@ -5435,6 +5450,177 @@ mod tests {
         );
     }
 
+    /// The seen marks among a fold's marks (1234): their time and ids.
+    fn seen_marks(model: &mut UiModel<Field>) -> Vec<(u32, Vec<[u8; 32]>)> {
+        use crate::home::wire::MarkFlag;
+        model
+            .take_marks()
+            .into_iter()
+            .filter_map(|mark| match mark.flag {
+                MarkFlag::Seen { at } => Some((at, mark.ids)),
+                MarkFlag::Read | MarkFlag::Deleted => None,
+            })
+            .collect()
+    }
+
+    /// 1234: a client of a home node holds no identity, so it signs no
+    /// receipt: what is seen gathers by the same rules and goes to the
+    /// home node as one seen mark, with the reader's clock at the first
+    /// seen, five seconds after the last bubble. Nothing rides on a reply,
+    /// and a draft holds nothing up.
+    #[test]
+    fn a_home_client_hands_the_mailbox_one_seen_mark_and_sends_no_receipt() {
+        let (mut model, keys) = marked_chat(3, true);
+        model.home_client = true;
+        let _ = model.take_marks();
+        typed(&mut model, "a draft");
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 1_000);
+        assert!(seen_marks(&mut model).is_empty(), "seen, not said yet");
+        assert!(ms_at(&mut model, 5_999).is_empty());
+        assert!(seen_marks(&mut model).is_empty());
+        let effects = ms_at(&mut model, 6_000);
+        assert!(receipts_in(&effects).is_empty(), "{effects:?}");
+        assert!(model.sending.is_empty());
+        assert_eq!(
+            seen_marks(&mut model),
+            [(RT as u32, vec![[0x40; 32], [0x41; 32], [0x42; 32]])]
+        );
+        // Seen once: the same bubbles again say nothing more.
+        let keys = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.activity)
+            .collect();
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 20_000);
+        assert!(seen_marks(&mut model).is_empty());
+        // The reply goes without a receipt in it.
+        let (mut model, keys) = marked_chat(1, true);
+        model.home_client = true;
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 1_000);
+        let effects = sent(&mut model, "reply");
+        assert!(receipts_in(&effects).is_empty(), "{effects:?}");
+        ms_at(&mut model, 6_000);
+        assert_eq!(seen_marks(&mut model), [(RT as u32, vec![[0x40; 32]])]);
+    }
+
+    /// 1234: two devices on one home node. A seen mark another device set
+    /// makes the message seen here, kept in its ledger, and takes it out
+    /// of the receipt this device gathers: a second viewport sends nothing
+    /// new, and only the rest goes.
+    #[test]
+    fn a_seen_mark_from_another_device_owes_nothing_here() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let (mut model, keys) = marked_chat(3, true);
+        model.home_client = true;
+        let _ = model.take_marks();
+        let _ = model.take_writes();
+        // The laptop saw the first before this phone showed anything.
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Seen { at: 7 },
+                    ids: vec![[0x40; 32]],
+                },
+            },
+        );
+        assert!(model.conversations[0].messages[0]
+            .ledger
+            .iter()
+            .any(|e| e.what == receipts::SEEN));
+        assert!(model.take_writes().iter().any(|w| matches!(w,
+            StoreWrite::Message { message, .. }
+                if message.ledger.iter().any(|e| e.what == receipts::SEEN))));
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 1_000);
+        assert_eq!(
+            model.reading.owed(&PEER),
+            Some(&[[0x41; 32], [0x42; 32]][..])
+        );
+        // The laptop's mark for the second comes while this one gathers.
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Seen { at: 8 },
+                    ids: vec![[0x41; 32]],
+                },
+            },
+        );
+        assert_eq!(model.reading.owed(&PEER), Some(&[[0x42; 32]][..]));
+        ms_at(&mut model, 6_000);
+        assert_eq!(seen_marks(&mut model), [(RT as u32, vec![[0x42; 32]])]);
+        // All three seen elsewhere: nothing is owed at all.
+        let (mut model, keys) = marked_chat(1, true);
+        model.home_client = true;
+        let _ = model.take_marks();
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        ms_at(&mut model, 1_000);
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Seen { at: 9 },
+                    ids: vec![[0x40; 32]],
+                },
+            },
+        );
+        assert!(model.reading.owed(&PEER).is_none());
+        ms_at(&mut model, 6_000);
+        assert!(seen_marks(&mut model).is_empty());
+    }
+
+    /// 1234: on a client of a home node, a receipt the home node took for
+    /// our message comes in the pull and reads it, as on a device of its
+    /// own; the receipt the home node signed for what we read comes back as
+    /// its sent entry and is no bubble.
+    #[test]
+    fn on_a_home_client_a_pulled_receipt_reads_ours_and_the_homes_receipt_is_no_bubble() {
+        const T: i64 = 1_800_000_000;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        wall(&mut model, T);
+        engine(
+            &mut model,
+            OutboxEvent::HomeSent {
+                message_id: ID,
+                destination: PEER,
+                sent_at: T,
+                body: b"from the laptop".to_vec(),
+                fields: leviculum_lxmf::lev::Lev::mark().fields().to_vec(),
+            },
+        );
+        state(&mut model, ID, MessageState::Delivered);
+        wall(&mut model, T + 60);
+        engine(
+            &mut model,
+            with_lev(PEER, [0x46; 32], "", &receipt((T + 30) as u32, &[ID])),
+        );
+        let conversation = &model.conversations[0];
+        assert_eq!(conversation.messages.len(), 1, "no bubble");
+        assert_eq!(
+            conversation.messages[0].delivery,
+            Some(DeliveryState::Read {
+                at: (T + 30) as u32
+            })
+        );
+        engine(
+            &mut model,
+            OutboxEvent::HomeSent {
+                message_id: [0x47; 32],
+                destination: PEER,
+                sent_at: T + 40,
+                body: Vec::new(),
+                fields: receipt((T + 40) as u32, &[[0x48; 32]]).fields().to_vec(),
+            },
+        );
+        assert_eq!(model.conversations.len(), 1);
+        assert_eq!(model.conversations[0].messages.len(), 1, "no bubble");
+    }
+
     #[test]
     fn the_glyph_follows_the_router_states_of_the_message_it_queued() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -5846,6 +6032,7 @@ mod tests {
         let home_sent = |id: [u8; 32], to: [u8; 16]| OutboxEvent::HomeSent {
             message_id: id,
             destination: to,
+            sent_at: 0,
             body: b"from the laptop".to_vec(),
             fields: Vec::new(),
         };

@@ -209,6 +209,9 @@ pub enum OutboxEvent {
     HomeSent {
         message_id: [u8; 32],
         destination: [u8; 16],
+        /// When the sending device composed it, the message's timestamp in
+        /// unix seconds: the bubble's time on every other device.
+        sent_at: i64,
         body: Vec<u8>,
         fields: Vec<Field>,
     },

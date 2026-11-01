@@ -1,10 +1,11 @@
 # Loquax: read receipts
 
 Status: decided 2026-10-31 (Lew), with the reviewer's decisions of
-2026-11-01 over the study; slices R1 to R4 built (orders 1230 to 1233,
+2026-11-01 over the study; slices R1 to R5 built (orders 1230 to 1234,
 Refs #232): the wire, the mark on every message, the peer's flag, the Read
 state, the read event and its sending, the tick ladder on every target,
-and the switch with its reciprocity. The
+the switch with its reciprocity, and the home node signing the receipts of
+its devices. The
 study behind it is the reviewer's `2026-10-31-lesebestaetigungen-konzept`
 (German, every claim cited); this page keeps what is decided and points at
 the code as it stands. Groups are parked.
@@ -202,8 +203,8 @@ As built (1231, `loquax/src/ui/receipts.rs`):
   terminal writes a `RECEIPT send` line for each one, alone or on a
   message.
 - None goes to a peer that stopped taking them in the meantime, to a
-  blocked one, with the switch off, or from a client of a home node, which
-  holds no identity to sign it (R5).
+  blocked one, or with the switch off. A client of a home node signs
+  none: it hands the home node a seen mark instead (section 8).
 
 ## 4. Taking a receipt (built, R1)
 
@@ -388,22 +389,57 @@ an imported read message loses its time in the import's archive entry
   With our own switch off it says "read receipts are off: you send none
   and see none". Neither says "unread" or anything that looks like
   waiting.
-- **With a home node** the value belongs to the identity and will live on
-  the home node (R5); until then each device keeps its own in its config,
-  and a client of a home node sends no receipt anyway.
+- **With a home node** each device keeps its own switch in its config for
+  now: off, a device sends no seen mark and shows no read. The study puts
+  the switch on the home node, as the identity's; that move is not built
+  (section 8).
 - No Reticulum words on the way: "read receipts", "read", "delivered",
   "mailbox". "Propagation node", "proof", "ratchet" at most in the detail
   view's technical part.
 
 ## 8. With a home node
 
-The devices do not hold the LXMF identity (`loquax-home-node.md`, Roles
-and keys), so the home node signs the receipt. A device reports the read
-through `/mark` with a new flag "seen" and `read_at` (today's "read" means
-"everything up to here is read" for the counter, which is something else).
-The home node puts the receipt into its outbox. Incoming receipts become
-archive entries that every device applies on its next pull, as the state
-entries are today.
+Built (1234). The devices do not hold the LXMF identity
+(`loquax-home-node.md`, Roles and keys), so the home node signs the
+receipt.
+
+- **The device says what it saw.** The read event and the batch are the
+  same as on a device of its own (section 5); when the receipt would go
+  alone, a client of a home node hands the home node a seen mark instead:
+  `/mark [2, [id, ...], read_at]` (`MarkFlag::Seen`), with the reader's
+  clock at the first bubble seen. "Read" (flag 0) stays what it was, the
+  counter's "everything up to here is read". Nothing rides on a reply from
+  a home client and a draft holds nothing up: the reply is signed by the
+  home node, which keeps no draft.
+- **The home node signs.** For each id no seen mark in its archive names
+  yet, the home node looks up the received message; each sender whose
+  message carried the mark gets one receipt alone, signed with the home
+  identity, batched by seven as everywhere, put into the outbox and
+  delivered as every message a client hands in, direct first and then by
+  the propagation node (`loquax::home::server`, `seen`). A message of a
+  stock client, an imported one, or one the archive's cap evicted is seen
+  and gets none. A home node from before 1234 refuses flag 2 as malformed,
+  and nothing goes.
+- **The first device wins.** The home node keeps a seen mark of the new
+  ids alone, at the first device's clock; a mark with nothing new appends
+  nothing and sends nothing. Every device applies a seen mark on its next
+  pull (`UiModel::home_seen`): the message is seen in its ledger and leaves
+  the batch it gathers, so a second viewport sends nothing new.
+- **Incoming receipts** are received messages like any other: the home
+  node archives them, every device pulls them, and they read our message as
+  on a device of its own (section 4). The receipt the home node signed
+  comes back to the devices as its sent entry and is no bubble. A bubble a
+  device learns from another device's send carries the send's own time, so
+  the read time is kept within the right bounds there too.
+- **Not built:** the switch on the home node. Each device's own switch
+  decides whether it hands in seen marks and shows read; the home node signs
+  for whichever device asks.
+
+Tests: `loquax/tests/mailbox_receipts.rs` drives the home node's answers
+over its store with real identities (one receipt with the home's
+signature and the right ids, the first device wins, a receipt arriving
+reads the message on every device, a read mark sends none), and the
+model's tests in `loquax/src/ui.rs` hold the device's side.
 
 ## 9. Proof of compatibility
 
@@ -436,8 +472,8 @@ acceptance report.
 | R1 | the wire and the state in the core: codec and vectors, the mark on every send, the peer's flag, `DeliveryState::Read { at }`, the store, the facade's `read`, `read_at` and `receipts` | built, 1230 |
 | R2 | the read event and sending: `Intent::Viewport`, the second, the batch per visit, the piggyback, opportunistic then mailbox; the terminal's visible area and focus; the first two cells | built, 1231, without the cells |
 | R3 | the tick ladder on every target, one table in `delivery.rs`, the terminal's two cells, Android's `Glyph.java` drawn anew, the words en/de | built, 1232 |
-| R4 | the switch and reciprocity: Privacy, config and palette, "does not send read receipts"; Android reports `Viewport` | built, 1233, without Android's `Viewport`: a client of a home node sends no receipt before R5 |
-| R5 | the home node: `/mark` "seen", the receipt from the home node's outbox, incoming receipts as archive entries, the switch on the home node | |
+| R4 | the switch and reciprocity: Privacy, config and palette, "does not send read receipts"; Android reports `Viewport` | built, 1233, without Android's `Viewport` |
+| R5 | the home node: `/mark` "seen", the receipt from the home node's outbox, incoming receipts as archive entries, the switch on the home node | built, 1234, without the switch on the home node |
 | R6 | the PN and mixed cells | |
 
 What R1 does not do yet: a receipt for one of ours the screen has not

@@ -28,14 +28,14 @@ pub struct Home<'a> {
     pub cap_bytes: u64,
 }
 
-/// One answer: the bytes for the client, the message a `/send` put in
-/// the outbox, when it was a new one, for the daemon to start delivering,
-/// and for a `/watch` it took, the newest sequence the client was told, so
+/// One answer: the bytes for the client, the messages a `/send` or a seen
+/// `/mark` put in the outbox, the new ones, for the daemon to start
+/// delivering, and for a `/watch` it took, the newest sequence the client was told, so
 /// the daemon keeps the link for its wakes, and for a `/key` it took, the
 /// peer and the public key for the daemon to remember.
 pub struct Answer {
     pub bytes: Vec<u8>,
-    pub accepted: Option<Outgoing>,
+    pub accepted: Vec<Outgoing>,
     pub watching: Option<u64>,
     pub learned: Option<([u8; 16], [u8; 64])>,
 }
@@ -44,7 +44,7 @@ impl Answer {
     fn only(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
-            accepted: None,
+            accepted: Vec::new(),
             watching: None,
             learned: None,
         }
@@ -70,7 +70,7 @@ pub fn answer(
         super::JOIN_PATH => Answer::only(join(store, home, data, device, now_secs)),
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
         super::SEND_PATH => send(store, home, data, device, now),
-        super::MARK_PATH => Answer::only(mark(store, home, data, device, now_secs)),
+        super::MARK_PATH => mark(store, home, data, device, now),
         super::PETNAME_PATH => Answer::only(petname(store, home, data, device, now_secs)),
         super::PEERSTATE_PATH => Answer::only(peer_state(store, home, data, device, now_secs)),
         super::WATCH_PATH => watch(store, data, device),
@@ -156,13 +156,13 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
             );
             Answer {
                 bytes: wire::send_answer(&message.message_id),
-                accepted: Some(Outgoing {
+                accepted: alloc::vec![Outgoing {
                     id: message.message_id,
                     destination: submission.destination,
                     packed,
                     created_at: at,
                     propagated: false,
-                }),
+                }],
                 watching: None,
                 learned: None,
             }
@@ -177,14 +177,30 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
 
 /// A client's mark, kept as an archive entry under the hash of its bytes:
 /// the same mark handed in again, from this client or another, is one
-/// entry.
-fn mark(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: i64) -> Vec<u8> {
+/// entry. A seen mark is kept as the part no device said before, and makes
+/// the read receipts ([`seen`]).
+fn mark(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: f64) -> Answer {
     let Ok(mark) = wire::read_mark(data) else {
-        return wire::status_answer(Status::Malformed);
+        return Answer::only(wire::status_answer(Status::Malformed));
     };
     if let Some(refused) = refuse_unless_admitted(store, &device, "mark") {
-        return refused;
+        return Answer::only(refused);
     }
+    if let wire::MarkFlag::Seen { at } = mark.flag {
+        return seen(store, home, &mark.ids, at, device, now);
+    }
+    Answer::only(keep_mark(store, home, &mark, data, device, now as i64))
+}
+
+/// Append a mark's bytes as its archive entry: the status to answer.
+fn keep_mark(
+    store: &mut Store,
+    home: &Home<'_>,
+    mark: &wire::Mark,
+    data: &[u8],
+    device: [u8; 16],
+    now: i64,
+) -> Vec<u8> {
     let id = leviculum_core::crypto::sha256(data);
     match store.archive_append(super::KIND_MARK, &id, data, now, home.cap_bytes) {
         Ok(seq) => {
@@ -201,6 +217,151 @@ fn mark(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
             tracing::warn!("HOME mark: {error}");
             wire::status_answer(Status::Failed)
         }
+    }
+}
+
+/// A device saw these messages at the reader's clock `at` (1234): the
+/// home node holds the identity, so it signs the read receipts. The first
+/// device to see a message wins: an id a seen mark in the archive names
+/// already is passed over, and a mark with nothing new appends nothing and
+/// sends nothing. The rest is kept as one seen mark, which every device
+/// applies on its next pull, and each sender whose message carried the
+/// `lev` mark gets a receipt alone, signed here and delivered from the
+/// outbox as every message a client hands in, direct first and then by the
+/// propagation node. A message the archive does not hold as received (an
+/// imported one, or one the cap evicted) is seen and gets none.
+fn seen(
+    store: &mut Store,
+    home: &Home<'_>,
+    ids: &[[u8; 32]],
+    at: u32,
+    device: [u8; 16],
+    now: f64,
+) -> Answer {
+    let mut new = Vec::new();
+    let mut owed: alloc::collections::BTreeMap<[u8; 16], Vec<[u8; 32]>> = Default::default();
+    for id in ids {
+        let (seen, entry) = match (
+            store.archive_seen(id),
+            store.archive_entry(super::KIND_RECEIVED, id),
+        ) {
+            (Ok(seen), Ok(entry)) => (seen, entry),
+            (Err(error), _) | (_, Err(error)) => {
+                tracing::warn!("HOME mark seen: {error}");
+                return Answer::only(wire::status_answer(Status::Failed));
+            }
+        };
+        if seen || new.contains(id) {
+            continue;
+        }
+        new.push(*id);
+        let Some(message) = entry.and_then(|packed| {
+            leviculum_lxmf::Message::unpack(&packed, None, None, DeliveryMethod::Direct).ok()
+        }) else {
+            continue;
+        };
+        let marked = leviculum_lxmf::lev::Lev::from_fields(&message.fields)
+            .is_some_and(|lev| lev.supports_receipts());
+        if marked {
+            owed.entry(message.source_hash).or_default().push(*id);
+        }
+    }
+    if new.is_empty() {
+        tracing::info!(
+            "HOME mark seen device={} messages={} new=0",
+            crate::address::to_hex(&device),
+            ids.len()
+        );
+        return Answer::only(wire::status_answer(Status::Ok));
+    }
+    let kept = wire::Mark {
+        flag: wire::MarkFlag::Seen { at },
+        ids: new,
+    };
+    let status = keep_mark(
+        store,
+        home,
+        &kept,
+        &wire::mark_request(&kept),
+        device,
+        now as i64,
+    );
+    if wire::read_status(&status) != Ok(Status::Ok) {
+        return Answer::only(status);
+    }
+    let mut accepted = Vec::new();
+    for (peer, ids) in owed {
+        for receipt in leviculum_lxmf::lev::Receipt::batches(at, &ids) {
+            let count = receipt.ids.len();
+            match receipt_out(store, home, peer, receipt, now) {
+                Ok(Some(outgoing)) => {
+                    tracing::info!(
+                        "HOME receipt to={} ids={count} read_at={at} message={}",
+                        crate::address::to_hex(&peer),
+                        crate::address::to_hex(&outgoing.id)
+                    );
+                    accepted.push(outgoing);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("HOME receipt to {}: {error}", crate::address::to_hex(&peer))
+                }
+            }
+        }
+    }
+    Answer {
+        bytes: status,
+        accepted,
+        watching: None,
+        learned: None,
+    }
+}
+
+/// Sign one receipt alone to `peer` and put it in the outbox under its own
+/// id: the new outbox entry, `None` when the outbox held it already.
+fn receipt_out(
+    store: &mut Store,
+    home: &Home<'_>,
+    peer: [u8; 16],
+    receipt: leviculum_lxmf::lev::Receipt,
+    now: f64,
+) -> Result<Option<Outgoing>, alloc::string::String> {
+    let message = leviculum_lxmf::Message::create(
+        peer,
+        home.address,
+        home.identity,
+        now,
+        Vec::new(),
+        Vec::new(),
+        leviculum_lxmf::lev::Lev::mark_with(receipt)
+            .fields()
+            .to_vec(),
+        DeliveryMethod::Direct,
+    )
+    .map_err(|error| error.to_string())?;
+    let packed = message.pack();
+    let at = now as i64;
+    let mut client_id = [0; 16];
+    client_id.copy_from_slice(&message.message_id[..16]);
+    match store
+        .outbox_accept(
+            &client_id,
+            &message.message_id,
+            &peer,
+            &packed,
+            at,
+            home.cap_bytes,
+        )
+        .map_err(|error| error.to_string())?
+    {
+        Accepted::New { .. } => Ok(Some(Outgoing {
+            id: message.message_id,
+            destination: peer,
+            packed,
+            created_at: at,
+            propagated: false,
+        })),
+        Accepted::Again { .. } => Ok(None),
     }
 }
 
@@ -379,7 +540,7 @@ fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
             );
             Answer {
                 bytes: wire::watch_answer(newest),
-                accepted: None,
+                accepted: Vec::new(),
                 watching: Some(newest),
                 learned: None,
             }
@@ -416,7 +577,7 @@ fn key(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
     );
     Answer {
         bytes: wire::status_answer(Status::Ok),
-        accepted: None,
+        accepted: Vec::new(),
         watching: None,
         learned: Some((peer, public_key)),
     }
@@ -533,7 +694,7 @@ mod tests {
         );
         (
             wire::read_send_answer(&answer.bytes).expect("answer"),
-            answer.accepted,
+            answer.accepted.into_iter().next(),
         )
     }
 

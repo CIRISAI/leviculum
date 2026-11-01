@@ -285,6 +285,11 @@ required-features = ["history"]
 name = "scene_golden"
 required-features = ["history"]
 
+# 1234: read receipts through the mailbox, over its store and its answers.
+[[test]]
+name = "mailbox_receipts"
+required-features = ["history"]
+
 # The home node end to end: `--daemon` and `home` are the terminal build's.
 [[test]]
 name = "home_node"

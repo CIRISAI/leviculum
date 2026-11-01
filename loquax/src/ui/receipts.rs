@@ -45,8 +45,22 @@
 //!   [`DRAFT_WAIT_MS`] after the last bubble seen, for the reply. The
 //!   runner sends it as every message, direct first and then by the
 //!   mailbox, and nothing on screen follows it.
-//! - On a client of a home node the device holds no identity, so it sends
-//!   none yet: the home node signs them in a later slice (R5).
+//!
+//! Slice five (1234): the home node signs the receipt.
+//!
+//! - A client of a home node holds no identity, so it signs nothing: what
+//!   is seen gathers by the same rules, and when the receipt would go alone
+//!   the device hands the home node a seen mark instead
+//!   ([`crate::home::wire::MarkFlag::Seen`], with the reader's clock). The
+//!   home node signs one receipt alone for each sender and delivers it from
+//!   its outbox. Nothing rides on a reply there, and a draft holds nothing
+//!   up: the reply is signed by the home node, which keeps no draft.
+//! - The first device to see a message wins: the home node keeps the seen
+//!   mark of the new ids only, every device applies it on its next pull
+//!   ([`UiModel::home_seen`]), and a message seen on one device owes no
+//!   receipt on another. A receipt that comes back to the home node is a
+//!   received message every device pulls, and turns our message read as
+//!   it does on a device of its own.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -241,6 +255,39 @@ impl<B> UiModel<B> {
 }
 
 impl<B> UiModel<B> {
+    /// A seen mark from the home node (1234): some device of the home saw
+    /// these messages and the home node sent their receipts. Each is seen
+    /// here too, so this device owes none for it.
+    pub(super) fn home_seen(&mut self, ids: &[[u8; 32]]) {
+        let now = self.now;
+        let mut touched = Vec::new();
+        for (c, conversation) in self.conversations.iter_mut().enumerate() {
+            let peer = conversation.peer;
+            for (m, message) in conversation.messages.iter_mut().enumerate() {
+                let Some(id) = message.id else {
+                    continue;
+                };
+                if message.outbound || !ids.contains(&id) {
+                    continue;
+                }
+                if let Some(owed) = self.reading.owed.get_mut(&peer) {
+                    owed.ids.retain(|owed| *owed != id);
+                    if owed.ids.is_empty() {
+                        self.reading.owed.remove(&peer);
+                    }
+                }
+                if message.ledger.iter().any(|entry| entry.what == SEEN) {
+                    continue;
+                }
+                message.note(now, SEEN);
+                touched.push((c, m));
+            }
+        }
+        for (c, m) in touched {
+            self.touch(c, m);
+        }
+    }
+
     /// The platform's viewport: these bubbles of `peer`'s chat are on
     /// screen.
     pub(super) fn set_viewport(&mut self, peer: [u8; 16], keys: Vec<u64>) {
@@ -270,7 +317,9 @@ impl<B> UiModel<B> {
             return;
         }
         // The piggyback: the first message of the fold to a peer owed one.
-        for effect in effects.iter_mut() {
+        // A home client's receipts go as seen marks, never on a reply.
+        let piggyback = if self.home_client { 0 } else { effects.len() };
+        for effect in effects.iter_mut().take(piggyback) {
             let UiEffect::Send { to, fields, .. } = effect else {
                 continue;
             };
@@ -317,6 +366,11 @@ impl<B> UiModel<B> {
             if !self.takes_receipts(&peer) {
                 continue;
             }
+            if self.home_client {
+                let at = owed.read_at;
+                self.mark_out(crate::home::wire::MarkFlag::Seen { at }, owed.ids);
+                continue;
+            }
             for receipt in Receipt::batches(owed.read_at, &owed.ids) {
                 self.sending.push_back((RECEIPT_SEND, 0));
                 effects.push(UiEffect::Send {
@@ -330,11 +384,12 @@ impl<B> UiModel<B> {
 
     /// When the receipt owed `peer` goes alone.
     fn deadline(&self, peer: &[u8; 16], owed: &Owed) -> u64 {
-        let draft = self
-            .conversations
-            .iter()
-            .find(|c| c.peer == *peer)
-            .is_some_and(|c| !c.draft.text.trim().is_empty());
+        let draft = !self.home_client
+            && self
+                .conversations
+                .iter()
+                .find(|c| c.peer == *peer)
+                .is_some_and(|c| !c.draft.text.trim().is_empty());
         match (draft, owed.left) {
             (true, _) => owed.last_ms.saturating_add(DRAFT_WAIT_MS),
             (false, true) => 0,
@@ -345,7 +400,6 @@ impl<B> UiModel<B> {
     /// Whether receipts go to `peer` at all.
     fn takes_receipts(&self, peer: &[u8; 16]) -> bool {
         self.reading.on
-            && !self.home_client
             && self.names.trust(peer) != Trust::Blocked
             && self
                 .conversations
