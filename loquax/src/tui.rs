@@ -2308,7 +2308,9 @@ mod tests {
         frames.push_str(&format!("--- picker ---\n{picker}"));
         let effects = update(&mut model, UiEvent::Key(parse_key("1").expect("key")));
         assert!(
-            matches!(effects.as_slice(), [loquax::ui::UiEffect::Send { fields, .. }] if fields.len() == 1),
+            // The reaction and the read-receipt mark (1230).
+            matches!(effects.as_slice(), [loquax::ui::UiEffect::Send { fields, .. }]
+                if fields.len() == 3 && fields[0].0 == FIELD_REACTION),
             "{effects:?}"
         );
         model.toasts.clear();

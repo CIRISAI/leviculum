@@ -5,7 +5,10 @@
 //! One table, so the conversation glyph, the detail view and anything else
 //! that shows delivery read the same row and cannot disagree. loquax is its
 //! first user; lnomad does not draw delivery. The rules the table encodes:
-//! green and a check mark appear only on proof ([`DeliveryState::Delivered`]);
+//! green and a check mark appear only on proof ([`DeliveryState::Delivered`])
+//! or on what implies it, the peer's read receipt ([`DeliveryState::Read`],
+//! `docs/src/concepts/loquax-read-receipts.md`, whose glyph ladder replaces
+//! this table's marks in a later slice);
 //! the mailbox state is a blue house, not a second check; amber hollow `◇`
 //! against green solid `✓` mirrors unproven against proven; animation means
 //! the machine is working right now, driven by the program's tick, so it
@@ -31,6 +34,11 @@ pub enum DeliveryState {
     InMailbox,
     /// Arrived: a delivery proof came back.
     Delivered,
+    /// Read: the peer's signed read receipt named it. `at` is the reader's
+    /// clock when it came on their screen, unix seconds, kept within the
+    /// time it was sent and the time the receipt came. Read implies
+    /// delivered, and nothing moves a message on from it.
+    Read { at: u32 },
     /// Refused, by the recipient or by a propagation node.
     Rejected,
     /// Given up.
@@ -96,7 +104,7 @@ impl DeliveryGlyph {
 
 /// The table, one row per [`DeliveryState`], in the order of
 /// `loquax-ui.md`, section 2.
-pub const DELIVERY_GLYPHS: [DeliveryGlyph; 8] = [
+pub const DELIVERY_GLYPHS: [DeliveryGlyph; 9] = [
     row(
         DeliveryState::Queued,
         Mark::Glyph("○"),
@@ -136,6 +144,13 @@ pub const DELIVERY_GLYPHS: [DeliveryGlyph; 8] = [
         DeliveryState::Delivered,
         Mark::Glyph("✓"),
         "v",
+        Tone::Green,
+        false,
+    ),
+    row(
+        DeliveryState::Read { at: 0 },
+        Mark::Glyph("✔"),
+        "V",
         Tone::Green,
         false,
     ),
@@ -180,8 +195,9 @@ pub fn glyph(state: DeliveryState) -> &'static DeliveryGlyph {
         DeliveryState::Sent => &DELIVERY_GLYPHS[3],
         DeliveryState::InMailbox => &DELIVERY_GLYPHS[4],
         DeliveryState::Delivered => &DELIVERY_GLYPHS[5],
-        DeliveryState::Rejected => &DELIVERY_GLYPHS[6],
-        DeliveryState::Failed => &DELIVERY_GLYPHS[7],
+        DeliveryState::Read { .. } => &DELIVERY_GLYPHS[6],
+        DeliveryState::Rejected => &DELIVERY_GLYPHS[7],
+        DeliveryState::Failed => &DELIVERY_GLYPHS[8],
     }
 }
 
@@ -194,15 +210,22 @@ mod tests {
         for row in &DELIVERY_GLYPHS {
             assert_eq!(glyph(row.state), row, "{:?}", row.state);
         }
+        // Read's row is one, whenever it was read.
+        assert_eq!(
+            glyph(DeliveryState::Read { at: 1_800_000_000 }).state,
+            DeliveryState::Read { at: 0 }
+        );
     }
 
     #[test]
     fn green_and_a_check_mark_mean_proof_and_nothing_else() {
         for row in &DELIVERY_GLYPHS {
             let proof = row.state == DeliveryState::Delivered;
-            assert_eq!(row.tone == Tone::Green, proof, "{:?}", row.state);
+            let read = matches!(row.state, DeliveryState::Read { .. });
+            assert_eq!(row.tone == Tone::Green, proof || read, "{:?}", row.state);
             assert_eq!(row.symbol(0, false) == "✓", proof, "{:?}", row.state);
             assert_eq!(row.symbol(0, true) == "v", proof, "{:?}", row.state);
+            assert_eq!(row.symbol(0, false) == "✔", read, "{:?}", row.state);
         }
     }
 
@@ -224,7 +247,7 @@ mod tests {
     #[test]
     fn the_ascii_fallback_is_the_documented_set() {
         let set: Vec<&str> = DELIVERY_GLYPHS.iter().map(|r| r.ascii).collect();
-        assert_eq!(set, [".", "*", "*", "o", "^", "v", "x", "x"]);
+        assert_eq!(set, [".", "*", "*", "o", "^", "v", "V", "x", "x"]);
         for row in &DELIVERY_GLYPHS {
             assert!(row.ascii.is_ascii(), "{:?}", row.state);
         }

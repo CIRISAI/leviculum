@@ -1298,11 +1298,12 @@ sees. Where it differs from the table:
 
 ## 6. What is deliberately not copied from the phone apps
 
-- **Read receipts** beyond the LXMF proof. The proof says the bytes
-  reached the destination identity; nothing on the wire says a human read
-  them (`leviculum-lxmf/src/constants.rs:60-86` has no such field), and
-  the delivery decision of 2026-08-10 already forbids implying one. No
-  second check mark, no blue ticks.
+- **Read receipts inferred from the proof.** The proof says the bytes
+  reached the destination identity, not that a person read them, and
+  nothing is read off it. Replaced on 2026-10-31: Loquax shows a read only
+  on the peer's own signed receipt, and its two ticks mean delivered, two
+  heavier accent ticks read ([read receipts](loquax-read-receipts.md),
+  the glyph ladder). A contact without receipts stays at delivered.
 - **Typing indicators.** No LXMF field carries one, and sending one would
   be a transmission per keystroke, which the quiet keyboard rules out on
   its own.

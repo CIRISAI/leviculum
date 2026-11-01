@@ -27,13 +27,15 @@ use crate::when::WallTime;
 /// Messages of one sender this close together form a group.
 pub const GROUP_SECS: i64 = 180;
 
-/// The five marks a pixel screen draws, from the glyph table's nine.
+/// The six marks a pixel screen draws, from the glyph table's nine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     Queued,
     Sending,
     Sent,
     Delivered,
+    /// The peer's read receipt named it (1230).
+    Read,
     Failed,
 }
 
@@ -44,18 +46,20 @@ impl Mark {
             Some(DeliveryState::InFlight) => Self::Sending,
             Some(DeliveryState::Sent) | Some(DeliveryState::InMailbox) => Self::Sent,
             Some(DeliveryState::Delivered) => Self::Delivered,
+            Some(DeliveryState::Read { .. }) => Self::Read,
             Some(DeliveryState::Rejected) | Some(DeliveryState::Failed) => Self::Failed,
         }
     }
 
     /// The facade's word: `queued`, `sending`, `sent`, `delivered`,
-    /// `failed`.
+    /// `read`, `failed`.
     pub fn word(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Sending => "sending",
             Self::Sent => "sent",
             Self::Delivered => "delivered",
+            Self::Read => "read",
             Self::Failed => "failed",
         }
     }
@@ -298,6 +302,9 @@ pub struct Bubble {
     pub body: String,
     /// Ours only.
     pub mark: Option<Mark>,
+    /// Ours only, when [`Mark::Read`]: the reader's time, unix seconds
+    /// (1230).
+    pub read_at: Option<u32>,
     pub at: Option<WallTime>,
     pub chips: Vec<Chip>,
     /// The position the message carries, which the bubble's line opens the
@@ -348,6 +355,10 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                     (false, _) => message.body.clone(),
                 },
                 mark: message.outbound.then(|| Mark::of(message.delivery)),
+                read_at: match message.delivery {
+                    Some(DeliveryState::Read { at }) if message.outbound => Some(at),
+                    _ => None,
+                },
                 at: message.at,
                 chips: message
                     .id
@@ -745,6 +756,7 @@ mod tests {
             ours,
             body: String::new(),
             mark,
+            read_at: None,
             at: at.map(|unix_secs| WallTime {
                 unix_secs,
                 offset_secs: 3600,

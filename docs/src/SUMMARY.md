@@ -31,6 +31,7 @@
   - [Loquax: architecture](concepts/loquax-architecture.md)
   - [Loquax: the user interface](concepts/loquax-ui.md)
   - [Loquax: keys, mouse and layout](concepts/loquax-keys-and-layout.md)
+  - [Loquax: read receipts](concepts/loquax-read-receipts.md)
   - [Loquax: conversation storage](concepts/loquax-storage.md)
   - [Loquax: the propagation node, and who you talk to](concepts/loquax-mailbox.md)
   - [Loquax: the map](concepts/loquax-map.md)

@@ -57,6 +57,10 @@
 //!   in the config. The model writes it once typing paused
 //!   ([`crate::ui::history::DRAFT_DEBOUNCE_MS`]), each write one
 //!   transaction as every write is, and deletes it once sent.
+//! - **Read receipts are two columns** (schema 9, 1230): a message of ours
+//!   the peer read is state 8 with the reader's time in `messages.read_at`,
+//!   and `conversations.receipts` says whether the peer's latest message
+//!   carried the receipt mark (`docs/src/concepts/loquax-read-receipts.md`).
 //! - **Imported history sits below seq 0** (schema 6, `crate::import`): a
 //!   conversation's imported rows are older than what loquax wrote, so they
 //!   take negative keys below the store's lowest, in the source's time
@@ -71,8 +75,8 @@
 //! Schema 1 is the store of slice 6; schema 2 adds `positions`, schema 3
 //! `unverified`, schema 4 the home node's three tables, schema 5 its
 //! outbox, schema 6 the two provenance columns of imported messages, schema 7
-//! a conversation's mute, archive and verification, and schema 8 the drafts,
-//! nothing else, so
+//! a conversation's mute, archive and verification, schema 8 the drafts, and
+//! schema 9 the two read-receipt columns, nothing else, so
 //! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
@@ -112,7 +116,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 8;
+pub const SCHEMA_VERSION: i32 = 9;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -274,6 +278,15 @@ CREATE TABLE drafts(
     reply BLOB,
     attachments TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (identity, peer));
+";
+
+/// What schema 9 adds to schema 8: read receipts (1230). When the peer
+/// read one of ours, its reader's clock in unix seconds, beside `state` 8
+/// (read); and whether the peer's latest message carried the `lev`
+/// namespace's read-receipt mark.
+const SCHEMA_V9: &str = "
+ALTER TABLE messages ADD COLUMN read_at INTEGER;
+ALTER TABLE conversations ADD COLUMN receipts INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -442,7 +455,8 @@ impl Store {
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
-             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} \
+             PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -554,7 +568,10 @@ impl Store {
                 if version < 7 {
                     batch.push_str(SCHEMA_V7);
                 }
-                batch.push_str(SCHEMA_V8);
+                if version < 8 {
+                    batch.push_str(SCHEMA_V8);
+                }
+                batch.push_str(SCHEMA_V9);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -593,7 +610,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT c.peer, c.pinned, c.unread, c.muted_until, c.archived, c.verified, \
-                 (SELECT MAX(seq) FROM messages m \
+                 c.receipts, (SELECT MAX(seq) FROM messages m \
                   WHERE m.identity = c.identity AND m.conversation = c.peer) AS last \
                  FROM conversations c WHERE c.identity = ?1 \
                  ORDER BY last DESC",
@@ -609,6 +626,7 @@ impl Store {
                         muted_until: row.get::<_, Option<i64>>(3)?,
                         archived: row.get::<_, bool>(4)?,
                         verified: row.get::<_, bool>(5)?,
+                        receipts: row.get::<_, bool>(6)?,
                     },
                 ))
             })
@@ -678,7 +696,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT seq, id, direction, state, unproven, verification, last_leg, \
-                 received_at, utc_offset, size, content, fields FROM messages \
+                 received_at, utc_offset, size, content, fields, read_at FROM messages \
                  WHERE identity = ?1 AND conversation = ?2 AND seq < ?3 AND seq >= ?4 \
                  ORDER BY seq",
             )
@@ -2348,11 +2366,11 @@ fn apply(
             tx.execute(
                 "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
                  unproven, verification, last_leg, received_at, utc_offset, size, content, \
-                 fields) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 fields, read_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                  ON CONFLICT(seq) DO UPDATE SET id = excluded.id, state = excluded.state, \
                  unproven = excluded.unproven, verification = excluded.verification, \
-                 last_leg = excluded.last_leg",
+                 last_leg = excluded.last_leg, read_at = excluded.read_at",
                 params![
                     key,
                     &identity[..],
@@ -2368,6 +2386,7 @@ fn apply(
                     message.size as i64,
                     message.body,
                     (!message.fields.is_empty()).then(|| pack_fields(&message.fields)),
+                    read_at(message.delivery),
                 ],
             )?;
             // The ledger only grows: the lines past what the store has.
@@ -2393,11 +2412,11 @@ fn apply(
         } => {
             tx.execute(
                 "INSERT INTO conversations(identity, peer, pinned, unread, muted_until, \
-                 archived, verified) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 archived, verified, receipts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                  ON CONFLICT(identity, peer) DO UPDATE SET \
                  pinned = excluded.pinned, unread = excluded.unread, \
                  muted_until = excluded.muted_until, archived = excluded.archived, \
-                 verified = excluded.verified",
+                 verified = excluded.verified, receipts = excluded.receipts",
                 params![
                     &identity[..],
                     &peer[..],
@@ -2405,7 +2424,8 @@ fn apply(
                     *unread as i64,
                     flags.muted_until,
                     flags.archived,
-                    flags.verified
+                    flags.verified,
+                    flags.receipts
                 ],
             )?;
         }
@@ -2524,7 +2544,10 @@ fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         outbound: direction == 1,
         body: row.get(10)?,
         id: id.and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok()),
-        delivery: state.and_then(state_of),
+        delivery: match state {
+            Some(code) => delivery_of(code, row.get(12)?),
+            None => None,
+        },
         signature: signature_of(row.get(5)?),
         leg: None,
         unproven: row.get(4)?,
@@ -2585,6 +2608,26 @@ pub(crate) fn state_code(state: DeliveryState) -> i64 {
         DeliveryState::Delivered => 5,
         DeliveryState::Rejected => 6,
         DeliveryState::Failed => 7,
+        DeliveryState::Read { .. } => 8,
+    }
+}
+
+/// `messages.read_at` for a state: the time of a read, NULL otherwise.
+fn read_at(state: Option<DeliveryState>) -> Option<i64> {
+    match state {
+        Some(DeliveryState::Read { at }) => Some(i64::from(at)),
+        _ => None,
+    }
+}
+
+/// A row's state with its `read_at`: a read without one (a row another
+/// writer left) is read at 0, the time unknown.
+fn delivery_of(code: i64, read_at: Option<i64>) -> Option<DeliveryState> {
+    match state_of(code)? {
+        DeliveryState::Read { .. } => Some(DeliveryState::Read {
+            at: read_at.and_then(|at| u32::try_from(at).ok()).unwrap_or(0),
+        }),
+        other => Some(other),
     }
 }
 
@@ -2598,6 +2641,7 @@ pub(crate) fn state_of(code: i64) -> Option<DeliveryState> {
         5 => DeliveryState::Delivered,
         6 => DeliveryState::Rejected,
         7 => DeliveryState::Failed,
+        8 => DeliveryState::Read { at: 0 },
         _ => return None,
     })
 }
@@ -2707,6 +2751,8 @@ mod tests {
             at: at(1_010),
             what: "delivered (direct)".to_string(),
         });
+        // 1230: a read with its time, in the row written over the first.
+        sent.delivery = Some(DeliveryState::Read { at: 1_020 });
         put(&mut store, ALICE, sent.clone());
         store
             .write(&[StoreWrite::Conversation {
@@ -2717,6 +2763,7 @@ mod tests {
                     muted_until: Some(i64::MAX),
                     archived: true,
                     verified: true,
+                    receipts: true,
                 },
             }])
             .expect("pin");
@@ -2733,6 +2780,12 @@ mod tests {
         // 1146: the mute, the archive and the verified mark survive.
         assert_eq!(alice.flags.muted_until, Some(i64::MAX));
         assert!(alice.flags.archived && alice.flags.verified);
+        // 1230: the peer's receipt mark, and the read's time.
+        assert!(alice.flags.receipts);
+        assert_eq!(
+            alice.messages[0].delivery,
+            Some(DeliveryState::Read { at: 1_020 })
+        );
         assert_eq!(
             alice.messages,
             vec![sent, message(2, false, "yes, from ten")]
@@ -3505,6 +3558,39 @@ mod tests {
         let restored = store.restore().expect("restore");
         assert!(restored[0].pinned);
         assert_eq!(restored[0].draft, Draft::default());
+    }
+
+    /// A schema 8 store, the one before read receipts (1230), migrates in
+    /// place: its delivered message stays delivered, and no peer is known
+    /// to send receipts.
+    #[test]
+    fn a_schema_8_store_migrates_with_no_receipts() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} PRAGMA user_version = 8; COMMIT;"
+        ))
+        .expect("schema 8");
+        conn.execute(
+            "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
+             verification, size, content) VALUES (1, ?1, ?2, ?3, 1, 5, 1, 2, 'hi')",
+            params![&US[..], &BOB[..], &[7u8; 32][..]],
+        )
+        .expect("a delivered message");
+        conn.execute(
+            "INSERT INTO conversations(identity, peer) VALUES (?1, ?2)",
+            params![&US[..], &BOB[..]],
+        )
+        .expect("its conversation");
+        drop(conn);
+        let store = Store::open_in(home.path(), US).expect("schema 8 opens");
+        let restored = store.restore().expect("restore");
+        assert_eq!(
+            restored[0].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        assert!(!restored[0].flags.receipts);
     }
 
     /// A schema 3 store, as the loquax before the home node wrote it,

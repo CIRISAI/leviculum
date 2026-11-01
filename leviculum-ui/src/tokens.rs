@@ -566,12 +566,20 @@ mod tests {
 
     #[test]
     fn a_tone_reads_its_glyph_row() {
-        use crate::delivery::DELIVERY_GLYPHS;
+        use crate::delivery::{DeliveryState, DELIVERY_GLYPHS};
         let t = &TRUECOLOR_DARK.tones;
+        // Read wears the delivered tone until the glyph ladder of
+        // loquax-read-receipts.md gives the column its own.
+        let read =
+            |row: &&crate::delivery::DeliveryGlyph| matches!(row.state, DeliveryState::Read { .. });
         let got: Vec<Option<Ink>> = DELIVERY_GLYPHS
             .iter()
+            .filter(|row| !read(row))
             .map(|row| t.of(row.tone, row.dim))
             .collect();
         assert_eq!(got, t.all());
+        for row in DELIVERY_GLYPHS.iter().filter(read) {
+            assert_eq!(t.of(row.tone, row.dim), t.delivered);
+        }
     }
 }

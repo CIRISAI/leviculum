@@ -171,6 +171,11 @@ this page leaves, or departs from it:
   left, the screen quits or the phone's session ends; deleted when the
   message is sent and with its conversation. A conversation that holds
   nothing but a draft comes back at start.
+- **Read receipts** (schema 9, 1230). A message of ours the peer read is
+  `state` 8 with the reader's time, unix seconds, in `messages.read_at`;
+  `conversations.receipts` is 1 while the peer's latest message carried the
+  `lev` receipt mark ([read receipts](loquax-read-receipts.md)). A schema 8
+  file gains both columns empty in place.
 - **Writes.** The model notes what a fold changed, and the shell writes it
   in one `BEGIN IMMEDIATE` transaction before the next event, rollback
   journal, `synchronous=FULL`, foreign keys on. A crash leaves the store as

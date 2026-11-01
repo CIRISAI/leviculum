@@ -51,6 +51,11 @@ pub struct Flags {
     pub muted_until: Option<i64>,
     pub archived: bool,
     pub verified: bool,
+    /// Not the reader's word but kept beside it: the peer's latest message
+    /// carried the `lev` read-receipt mark (1230), so the peer sends read
+    /// receipts and wants them. The latest message decides; a receipt from
+    /// the peer proves it too.
+    pub receipts: bool,
 }
 
 /// How long typing must pause before a draft is written: a keystroke

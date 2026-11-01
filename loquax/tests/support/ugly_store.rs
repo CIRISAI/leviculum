@@ -558,6 +558,7 @@ pub fn fill_store_of(home: &Path, own: &Identity) -> Filled {
                 muted_until: state.muted_until,
                 archived: state.archived,
                 verified: false,
+                receipts: false,
             },
         });
         store.write(&writes).expect("the live rows");

@@ -141,6 +141,7 @@ pub mod layout;
 pub mod liveness;
 pub mod map;
 pub mod reactions;
+pub mod receipts;
 pub mod replies;
 pub mod scene;
 pub mod search;
@@ -1426,6 +1427,8 @@ pub enum UiEffect {
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     let mut effects = fold(model, event);
+    // Every message sent says the sender takes read receipts (1230).
+    receipts::mark_sends(&mut effects);
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
@@ -2852,6 +2855,7 @@ fn state_words(state: DeliveryState) -> &'static str {
         DeliveryState::Sent => "sent, no proof yet",
         DeliveryState::InMailbox => "waiting at a propagation node",
         DeliveryState::Delivered => "delivered",
+        DeliveryState::Read { .. } => "read",
         DeliveryState::Rejected => "rejected",
         DeliveryState::Failed => "not sent",
     }
@@ -3182,6 +3186,15 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             verified,
             ..
         } => {
+            let lev = leviculum_lxmf::lev::Lev::from_fields(&fields);
+            // A receipt alone is a state, not a message (1230): it changes
+            // the messages it names and nothing else.
+            if lev
+                .as_ref()
+                .is_some_and(|lev| receipts::alone(&body, &fields, lev))
+            {
+                return model.take_lev(source, lev.as_ref());
+            }
             let blocked = model.names.trust(&source) == Trust::Blocked;
             let shown = model.shows(&source);
             let index = model.conversation(source);
@@ -3241,7 +3254,8 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 .filter(|m| m.is_reaction())
                 .and_then(Message::reaction);
             model.changed.insert((peer, activity));
-            let effects = take_telemetry(model, index, message_id);
+            let mut effects = take_telemetry(model, index, message_id);
+            effects.extend(model.take_lev(source, lev.as_ref()));
             // A reaction: kept and stored, drawn under its target, and the
             // reader told; it is no unread message and moves no cursor.
             if let Some((_, content)) = reaction {
@@ -3537,6 +3551,10 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
             }
             if gives_up(shown) && running.contains(&(c, m)) {
                 // The runner may still carry it another way.
+                continue;
+            }
+            // Read implies delivered (1230): a late proof leaves it.
+            if matches!(message.delivery, Some(DeliveryState::Read { .. })) {
                 continue;
             }
             if message.unproven
@@ -4416,6 +4434,12 @@ pub fn help_groups() -> Vec<HelpGroup> {
 mod tests {
     use super::*;
 
+    /// `fields` as the model sends them: with the read-receipt mark (1230).
+    fn marked(mut fields: Vec<leviculum_lxmf::Field>) -> Vec<leviculum_lxmf::Field> {
+        leviculum_lxmf::lev::Lev::mark().put_into(&mut fields);
+        fields
+    }
+
     /// A minimal field for the model's tests: insert and backspace at the
     /// end, the edits these tests make, `Ctrl-U`, and a cursor a click
     /// places, which the next edit puts back at the end. The terminal's
@@ -4579,13 +4603,222 @@ mod tests {
             [UiEffect::Send {
                 to: OTHER,
                 body: "hello".to_string(),
-                fields: Vec::new(),
+                fields: marked(Vec::new()),
             }]
         );
         assert_eq!(model.compose.value(), "");
         assert_eq!(last_delivery(&model), Some(DeliveryState::Queued));
         // An empty line sends nothing.
         assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+    }
+
+    /// A message from `source` with this namespace (1230), and its body.
+    fn with_lev(
+        source: [u8; 16],
+        id: [u8; 32],
+        body: &str,
+        lev: &leviculum_lxmf::lev::Lev,
+    ) -> OutboxEvent {
+        OutboxEvent::Received {
+            message_id: id,
+            source,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields: lev.fields().to_vec(),
+            verified: true,
+        }
+    }
+
+    fn receipt(read_at: u32, ids: &[[u8; 32]]) -> leviculum_lxmf::lev::Lev {
+        leviculum_lxmf::lev::Lev::mark_with(leviculum_lxmf::lev::Receipt {
+            read_at,
+            ids: ids.to_vec(),
+        })
+    }
+
+    fn wall(model: &mut UiModel<Field>, unix_secs: i64) {
+        update(
+            model,
+            UiEvent::Clock(WallTime {
+                unix_secs,
+                offset_secs: 0,
+            }),
+        );
+    }
+
+    /// 1230: a receipt alone reads the message it names, at the reader's
+    /// time kept within sent and came, and is no message: no bubble, no
+    /// unread, no toast, the list order kept. An id the conversation does
+    /// not hold is dropped with a log line. Read stays through a late
+    /// proof and a second receipt, and the store learns both.
+    #[test]
+    fn a_receipt_alone_reads_our_message_and_is_no_message() {
+        const T: i64 = 1_800_000_000;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, T);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Delivered);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        let activity = model.conversations[0].activity;
+        let _ = model.take_writes();
+        wall(&mut model, T + 50);
+        // The reader's clock runs ahead: it is kept at when the receipt came.
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(with_lev(
+                PEER,
+                [0x33; 32],
+                "",
+                &receipt((T + 100) as u32, &[ID, ID2]),
+            )),
+        );
+        assert_eq!(
+            last_delivery(&model),
+            Some(DeliveryState::Read {
+                at: (T + 50) as u32
+            })
+        );
+        let logs: Vec<&UiEffect> = effects
+            .iter()
+            .filter(
+                |e| matches!(e, UiEffect::Log(line) if line.starts_with("RECEIPT dropped id=2222")),
+            )
+            .collect();
+        assert_eq!(logs.len(), 1, "{effects:?}");
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        let conversation = &model.conversations[0];
+        assert_eq!(conversation.messages.len(), 1, "no bubble");
+        assert_eq!(conversation.unread, 0);
+        assert_eq!(conversation.activity, activity, "the list does not move");
+        assert!(conversation.flags.receipts);
+        assert!(model.current_toast().is_none());
+        assert_eq!(
+            conversation.messages[0]
+                .ledger
+                .last()
+                .map(|e| e.what.as_str()),
+            Some("read by the peer")
+        );
+        let writes = model.take_writes();
+        assert!(writes.iter().any(|w| matches!(w,
+            StoreWrite::Message { message, .. }
+                if message.delivery == Some(DeliveryState::Read { at: (T + 50) as u32 }))));
+        assert!(writes.iter().any(|w| matches!(w,
+            StoreWrite::Conversation { flags, .. } if flags.receipts)));
+        // Monotone: a late proof and another receipt leave it.
+        state(&mut model, ID, MessageState::Delivered);
+        engine(
+            &mut model,
+            with_lev(PEER, [0x34; 32], "", &receipt(T as u32, &[ID])),
+        );
+        assert_eq!(
+            last_delivery(&model),
+            Some(DeliveryState::Read {
+                at: (T + 50) as u32
+            })
+        );
+        // A clock behind the send is kept at the send. Compose has the
+        // focus still.
+        typed(&mut model, "again");
+        update(&mut model, key(KeyCode::Enter));
+        engine(&mut model, OutboxEvent::Queued { message_id: ID2 });
+        engine(
+            &mut model,
+            with_lev(PEER, [0x35; 32], "", &receipt(5, &[ID2])),
+        );
+        assert_eq!(
+            last_delivery(&model),
+            Some(DeliveryState::Read { at: T as u32 + 50 })
+        );
+    }
+
+    /// 1230: a receipt on a text is a message as any, and reads ours too.
+    #[test]
+    fn a_receipt_on_a_text_shows_the_text_and_reads_ours() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        engine(
+            &mut model,
+            with_lev(PEER, ID2, "hi back", &receipt(9, &[ID])),
+        );
+        let messages = &model.conversations[0].messages;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].body, "hi back");
+        assert!(matches!(
+            messages[0].delivery,
+            Some(DeliveryState::Read { .. })
+        ));
+    }
+
+    /// 1230: the peer's latest message decides whether it takes receipts;
+    /// a stock message, without the namespace, says no, and a receipt says
+    /// yes whatever its capabilities.
+    #[test]
+    fn the_latest_message_decides_whether_the_peer_takes_receipts() {
+        use leviculum_lxmf::lev::Lev;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let receipts = |model: &UiModel<Field>| model.conversations[0].flags.receipts;
+        engine(&mut model, received_from(PEER, [1; 32], "stock"));
+        assert!(!receipts(&model), "a stock message leaves it off");
+        engine(&mut model, with_lev(PEER, [2; 32], "loquax", &Lev::mark()));
+        assert!(receipts(&model));
+        engine(&mut model, received_from(PEER, [3; 32], "stock again"));
+        assert!(!receipts(&model), "the latest message decides");
+        let off = Lev {
+            capabilities: Some(0),
+            receipt: None,
+        };
+        engine(&mut model, with_lev(PEER, [4; 32], "turned off", &off));
+        assert!(!receipts(&model));
+        let bare = Lev {
+            capabilities: None,
+            receipt: Some(leviculum_lxmf::lev::Receipt {
+                read_at: 1,
+                ids: Vec::new(),
+            }),
+        };
+        engine(&mut model, with_lev(PEER, [5; 32], "", &bare));
+        assert!(receipts(&model), "a receipt proves it");
+        assert_eq!(
+            model.conversations[0].messages.len(),
+            4,
+            "the receipt is none"
+        );
+    }
+
+    /// 1230: only the peer a message went to can say it read it; a receipt
+    /// from anyone else is dropped, and makes no conversation.
+    #[test]
+    fn a_receipt_reads_only_what_went_to_its_sender() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        update(&mut model, key(KeyCode::Char('j')));
+        sent(&mut model, "for other");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Delivered);
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(with_lev(PEER, [0x44; 32], "", &receipt(9, &[ID]))),
+        );
+        assert!(
+            matches!(effects.as_slice(), [UiEffect::Log(line)] if line.contains("RECEIPT dropped"))
+        );
+        assert_eq!(
+            model.conversations[1].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        let stranger = [0x99; 16];
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(with_lev(stranger, [0x45; 32], "", &receipt(9, &[ID]))),
+        );
+        assert!(matches!(effects.as_slice(), [UiEffect::Log(_)]));
+        assert!(model.conversations.iter().all(|c| c.peer != stranger));
+        assert_eq!(
+            model.conversations[1].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
     }
 
     #[test]
@@ -4889,7 +5122,7 @@ mod tests {
             [UiEffect::Send {
                 to: OTHER,
                 body: "hallo".to_string(),
-                fields: Vec::new(),
+                fields: marked(Vec::new()),
             }]
         );
         let conversation = &model.conversations[model.selected];
@@ -4913,7 +5146,9 @@ mod tests {
             panic!("one send: {effects:?}");
         };
         assert_eq!((*to, body.as_str()), (OTHER, ""));
-        assert_eq!(fields.len(), 1);
+        // The reaction and the read-receipt mark (1230).
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].0, leviculum_lxmf::constants::FIELD_REACTION);
         assert_eq!(model.sending.len(), 2);
     }
 
@@ -5260,7 +5495,7 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "one\ntwo".to_string(),
-                fields: Vec::new(),
+                fields: marked(Vec::new()),
             }]
         );
         model.enhanced = true;
@@ -5297,7 +5532,7 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "a\nb\nc".to_string(),
-                fields: Vec::new(),
+                fields: marked(Vec::new()),
             }]
         );
         model.enhanced = false;
@@ -5481,7 +5716,7 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "one\n\nthree".to_string(),
-                fields: Vec::new(),
+                fields: marked(Vec::new()),
             }]
         );
     }
@@ -9697,7 +9932,11 @@ mod tests {
             panic!("one send: {effects:?}");
         };
         assert_eq!((*to, body.as_str()), (PEER, ""));
-        assert_eq!(fields.len(), 1, "the Telemeter alone: {fields:?}");
+        assert_eq!(
+            *fields,
+            marked(position_fields(location)),
+            "the Telemeter and the receipt mark alone"
+        );
         let read = telemetry::read(OTHER, fields, None);
         assert_eq!(read.fixes.len(), 1, "{read:?}");
         assert_eq!(read.fixes[0].location, location);
@@ -9909,7 +10148,7 @@ mod tests {
             [UiEffect::Send {
                 to: OTHER,
                 body: "look".to_string(),
-                fields: vec![(FIELD_IMAGE, vec![0x01])],
+                fields: marked(vec![(FIELD_IMAGE, vec![0x01])]),
             }]
         );
         let other = model.conversations.iter().position(|c| c.peer == OTHER);

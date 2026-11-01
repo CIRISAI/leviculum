@@ -194,7 +194,9 @@ impl canvas::Program<Message> for Drawing {
                 frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
             }
             Icon::Mark(Mark::Sent) => tick(&mut frame, 0.08),
-            Icon::Mark(Mark::Delivered) => {
+            // Read draws as delivered until the glyph ladder of
+            // loquax-read-receipts.md lands (1230).
+            Icon::Mark(Mark::Delivered | Mark::Read) => {
                 tick(&mut frame, -0.06);
                 tick(&mut frame, 0.18);
             }

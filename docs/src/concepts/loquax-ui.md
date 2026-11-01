@@ -449,9 +449,14 @@ delivery method with a one-sentence explanation, attempt count, hop count,
 and the error string when there is one. In a terminal that is a key press
 on a focused message.
 
-**Never claim a read receipt.** LXMF has no such field
-(`leviculum-lxmf/src/constants.rs:60-86`). Any UI element that suggests one
-is a lie in the protocol's own terms.
+**Claim a read only on a receipt.** LXMF has no read field
+(`leviculum-lxmf/src/constants.rs:60-86`), so a read is never inferred from
+a proof or anything else. Since 2026-10-31 Loquax carries its own, signed
+by the reader, in the `lev` namespace of the custom field pair: a message
+is shown read only when its peer's receipt named it, and a contact without
+receipts stays at delivered. The wire, the gating, the read event and the
+glyph ladder that replaces the table below are
+[read receipts](loquax-read-receipts.md).
 
 **Say what `Delivered` means, once.** It means the bytes reached the
 destination identity, not that a human saw them. The detail view is where
