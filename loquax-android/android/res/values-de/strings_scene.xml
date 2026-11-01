@@ -149,6 +149,7 @@
     <string name="share_stop">Beenden</string>
     <string name="sharing_sign">Du teilst deine Position</string>
     <string name="position_sharing">Positionsfreigabe</string>
+    <string name="share_notice">Loquax teilt deine Position</string>
     <string name="no_shares">Deine Position wird mit niemandem geteilt.</string>
     <string name="location_on">Standort einschalten</string>
     <string name="no_fix">Loquax weiß noch nicht, wo du bist.</string>

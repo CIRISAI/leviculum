@@ -207,6 +207,7 @@ leviculum_ui::catalogue! {
     ShareStop = "share_stop", "Stop", "Beenden";
     SharingSign = "sharing_sign", "Sharing your position", "Du teilst deine Position";
     PositionSharing = "position_sharing", "Position sharing", "Positionsfreigabe";
+    ShareNotice = "share_notice", "Loquax shares your position", "Loquax teilt deine Position";
     NoShares = "no_shares", "Your position is not shared with anyone.", "Deine Position wird mit niemandem geteilt.";
     LocationOn = "location_on", "Turn location on", "Standort einschalten";
     NoFix = "no_fix", "Loquax does not know where you are yet.", "Loquax weiß noch nicht, wo du bist.";

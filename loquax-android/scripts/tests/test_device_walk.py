@@ -767,6 +767,69 @@ class ComposeBar(unittest.TestCase):
         self.assertEqual(walk.accepted_to(log, "0e0e"), 0)
 
 
+class Share(unittest.TestCase):
+    """A share for a while (1273): the chat's chip, its words and its
+    Stop; the end reports in the mailbox's outbox."""
+
+    def chip(self, words, stop_desc="Stop"):
+        return [
+            node("share_chip"),
+            node("share_words", text=words),
+            node("share_stop", text="Stop", desc=stop_desc),
+        ]
+
+    def test_the_chip_with_its_words_and_stop_passes(self):
+        self.assertEqual(
+            walk.chip_problems(self.chip("Sharing your position, 42 min left"), walk.SHARE_LEFT), []
+        )
+        self.assertEqual(walk.chip_problems(self.chip("Sharing your position, 8 h left"), walk.SHARE_LEFT), [])
+        self.assertEqual(walk.chip_problems(self.chip(walk.SHARE_UNTIL), walk.SHARE_UNTIL), [])
+
+    def test_a_missing_chip_wrong_words_or_a_mute_stop_are_named(self):
+        self.assertEqual(walk.chip_problems([node("compose")], walk.SHARE_LEFT), ["no share chip"])
+        self.assertEqual(
+            walk.chip_problems(self.chip(walk.SHARE_UNTIL), walk.SHARE_LEFT),
+            [f"the chip says ['{walk.SHARE_UNTIL}'], want {walk.SHARE_LEFT.pattern!r}"],
+        )
+        mute = [node("share_chip"), node("share_words", text=walk.SHARE_UNTIL), node("share_stop")]
+        self.assertEqual(
+            walk.chip_problems(mute, walk.SHARE_UNTIL),
+            ["the Stop has no words for a screen reader"],
+        )
+        self.assertEqual(
+            walk.chip_problems(self.chip(walk.SHARE_UNTIL)[:2], walk.SHARE_UNTIL),
+            ["the chip has no Stop"],
+        )
+
+    def test_end_reports_count_the_marked_sends_to_the_peer(self):
+        import sqlite3
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as home:
+            store = Path(home) / "history.sqlite3"
+            self.assertEqual(walk.end_reports(store, "0c" * 16), 0, "no store yet")
+            conn = sqlite3.connect(store)
+            conn.execute(
+                "CREATE TABLE home_outbox(identity BLOB, client_id BLOB, id BLOB, destination BLOB, "
+                "packed BLOB, created_at INTEGER, state INTEGER, propagated INTEGER)"
+            )
+            rows = [
+                (b"\x0c" * 16, b"head" + walk.SHARE_ENDED + b"tail"),
+                (b"\x0c" * 16, b"a running report \xa5every\xcd\x03\x84"),
+                (b"\x0d" * 16, walk.SHARE_ENDED),
+            ]
+            for n, (destination, packed) in enumerate(rows):
+                conn.execute(
+                    "INSERT INTO home_outbox VALUES (?, ?, ?, ?, ?, 0, 0, 0)",
+                    (b"me", bytes([n]), bytes([n]), destination, packed),
+                )
+            conn.commit()
+            conn.close()
+            self.assertEqual(walk.end_reports(store, "0c" * 16), 1)
+            self.assertEqual(walk.end_reports(store, "0D" * 16), 1)
+            self.assertEqual(walk.end_reports(store, "0e" * 16), 0)
+
+
 class PictureZoom(unittest.TestCase):
     """The viewer's zoom step (1269): the touch device, the screen size,
     the pinch's events, the viewer's log line and where it put the

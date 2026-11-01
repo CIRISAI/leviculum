@@ -12,6 +12,9 @@
   <!-- The service that holds the session in the background (LoquaxService). -->
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE'/>
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING'/>
+  <!-- The service that keeps the position coming while a share runs
+       (ShareService, 1273). -->
+  <uses-permission a:name='android.permission.FOREGROUND_SERVICE_LOCATION'/>
   <!-- Its notifications: a run time question from Android 13 on (Asks). -->
   <uses-permission a:name='android.permission.POST_NOTIFICATIONS'/>
   <!-- The battery optimisation exemption, asked once and never forced (Asks). -->
@@ -160,6 +163,10 @@
     <service a:name='network.leviculum.loquax.LoquaxService'
              a:exported='false'
              a:foregroundServiceType='remoteMessaging'/>
+
+    <service a:name='network.leviculum.loquax.ShareService'
+             a:exported='false'
+             a:foregroundServiceType='location'/>
 
   </application>
 </manifest>

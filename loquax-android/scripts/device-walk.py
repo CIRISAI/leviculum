@@ -74,6 +74,8 @@ STEPS = [
     "voice",
     "camera_photo",
     "share_position_from_bar",
+    "share_for_15_min",
+    "share_until_stopped",
     "receive_wake",
     "receive_report",
     "position_pin",
@@ -160,6 +162,19 @@ STAGED_WORDS = re.compile(r"^Photo to send, \d+(?:\.\d)? (?:B|KB|MB)$")
 CAMERA_FIXTURE = "camera-fixture.jpg"
 FIX_FIXTURE = "fix-fixture.txt"
 SEEDED_FIX = "43.7731,11.2560"
+# A share for a while (1273): the sheet's rows, the chat's chip, its
+# Stop, its words; a second seeded fix 44 m north of the first, a move by
+# the share's 25 m; and the end report's mark as the wire carries it, the
+# msgpack of `"ended": true` in the location's eighth element.
+SHEET_SHARE_15_MIN = "sheet_share_15_min"
+SHEET_SHARE_UNTIL = "sheet_share_until_stopped"
+SHARE_CHIP = "share_chip"
+SHARE_WORDS = "share_words"
+SHARE_STOP = "share_stop"
+SHARE_LEFT = re.compile(r"^Sharing your position, \d+ (?:min|h) left$")
+SHARE_UNTIL = "Sharing your position until you stop"
+MOVED_FIX = "43.7735,11.2560"
+SHARE_ENDED = b"\xa5ended\xc3"
 # A file (1221): what the paperclip's entry says, what a bubble's file is
 # called by a screen reader (the catalogue's scene_file), and the line the
 # chat shows where no app on the phone opens the kind.
@@ -377,6 +392,45 @@ def accepted_to(log: str, peer: str) -> int:
         for line in log.splitlines()
         if "HOME send accepted" in line and f"to={peer}" in line
     )
+
+
+def chip_problems(nodes: list[Node], words) -> list[str]:
+    """What is wrong with the share's chip (1273): not there, its words
+    not `words` (a string, or a pattern), or a Stop without words for a
+    screen reader."""
+    if not find(nodes, rid=SHARE_CHIP):
+        return ["no share chip"]
+    said = [n.text for n in find(nodes, rid=SHARE_WORDS)]
+    problems = []
+    fits = (lambda t: words.match(t)) if hasattr(words, "match") else (lambda t: t == words)
+    if len(said) != 1 or not fits(said[0]):
+        want = words.pattern if hasattr(words, "match") else words
+        problems.append(f"the chip says {said}, want {want!r}")
+    stop = find(nodes, rid=SHARE_STOP)
+    if not stop:
+        problems.append("the chip has no Stop")
+    elif not (stop[0].desc or stop[0].text):
+        problems.append("the Stop has no words for a screen reader")
+    return problems
+
+
+def end_reports(store: Path, peer: str) -> int:
+    """How many messages the mailbox's outbox holds for `peer` that carry
+    a share's end mark (1273): the packed LXMF is plaintext at rest, its
+    telemetry field with it."""
+    import sqlite3
+
+    if not store.exists():
+        return 0
+    conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT packed FROM home_outbox WHERE lower(hex(destination)) = ?",
+            (peer.lower(),),
+        ).fetchall()
+    finally:
+        conn.close()
+    return sum(1 for (packed,) in rows if SHARE_ENDED in bytes(packed))
 
 
 def photos_on(nodes: list[Node]) -> list[Node]:
@@ -2053,6 +2107,77 @@ class Walk:
             if not wait_for(lambda: not find(dev.dump(), rid="sheet"), 5, every=0.3):
                 raise StepFailed("the sheet stayed open after the share")
             return f"sheet={words.text!r} accepted_ms={ms} to={peer[:8]} sheet=closed"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{FIX_FIXTURE}", check=False)
+
+    def share_from_sheet(self, row: str, words) -> tuple[Device, Fixture, str, int]:
+        """Seed a fix, open the position sheet, tap `row`: the chip says
+        `words` within 10 s and the mailbox accepts the first report for
+        the open chat's peer within 30 s. The device, the fixture, the
+        peer and the acceptances before."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        peer = fixture.manifest["sender_peer"]
+        dev.shell(f"run-as {PACKAGE} sh -c 'echo {SEEDED_FIX} > files/{FIX_FIXTURE}'")
+        before = accepted_to(fixture.mailbox_log(), peer)
+        dev.tap_node(self.wait_id("locate", 5)[0])
+        dev.tap_node(self.wait_id(row, 10)[0])
+        problems: list[str] = []
+
+        def chip():
+            nonlocal problems
+            problems = chip_problems(dev.dump(), words)
+            return not problems
+
+        if not wait_for(chip, 10, every=0.3):
+            raise StepFailed("; ".join(problems))
+        if not wait_for(lambda: accepted_to(fixture.mailbox_log(), peer) > before, 30):
+            raise StepFailed(f"the share's first report did not reach the mailbox for {peer[:8]}")
+        return dev, fixture, peer, before
+
+    def stop_share(self, dev: Device, fixture: Fixture, peer: str) -> int:
+        """Tap the chip's Stop: the chip goes within 5 s, and the end
+        report, one more acceptance carrying the end mark, reaches the
+        mailbox's outbox for the peer within 30 s. The milliseconds from
+        the tap to the chip's going."""
+        store = fixture.mailbox / "history.sqlite3"
+        ended = end_reports(store, peer)
+        start = time.monotonic()
+        dev.tap_node(self.wait_id(SHARE_STOP, 5)[0])
+        if not wait_for(lambda: not find(dev.dump(), rid=SHARE_CHIP), 5, every=0.3):
+            raise StepFailed("the chip stayed after Stop")
+        ms = int((time.monotonic() - start) * 1000)
+        if not wait_for(lambda: end_reports(store, peer) > ended, 30):
+            raise StepFailed(f"no end report for {peer[:8]} in the mailbox's outbox")
+        return ms
+
+    def step_share_for_15_min(self) -> str:
+        """A share for 15 minutes (1273): the sheet's row starts it, the
+        chip says the time left, the first report goes at once; a second
+        seeded fix 44 m away is a move and goes once the share's minute
+        has passed (the share service reads the seeded fix every 15 s);
+        Stop takes the chip away and sends the end report, which the
+        mailbox's outbox holds for the peer with its end mark. The peer's
+        own session is not run by the walk (1270's gap): its mailbox leg
+        is where the walk sees the end report go."""
+        dev, fixture, peer, before = self.share_from_sheet(SHEET_SHARE_15_MIN, SHARE_LEFT)
+        try:
+            dev.shell(f"run-as {PACKAGE} sh -c 'echo {MOVED_FIX} > files/{FIX_FIXTURE}'")
+            moved = wait_for(lambda: accepted_to(fixture.mailbox_log(), peer) > before + 1, 120)
+            if not moved:
+                raise StepFailed("the move of 44 m sent no second report within 2 min")
+            ms = self.stop_share(dev, fixture, peer)
+            return f"chip=left reports=2 moved=sent stop_to_gone_ms={ms} end=in_outbox to={peer[:8]}"
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{FIX_FIXTURE}", check=False)
+
+    def step_share_until_stopped(self) -> str:
+        """A share until stopped (1273): the chip says so, and Stop ends
+        it with the end report as in share_for_15_min."""
+        dev, fixture, peer, _ = self.share_from_sheet(SHEET_SHARE_UNTIL, SHARE_UNTIL)
+        try:
+            ms = self.stop_share(dev, fixture, peer)
+            return f"chip=until reports=1 stop_to_gone_ms={ms} end=in_outbox to={peer[:8]}"
         finally:
             dev.shell(f"run-as {PACKAGE} rm -f files/{FIX_FIXTURE}", check=False)
 

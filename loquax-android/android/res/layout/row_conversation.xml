@@ -76,6 +76,19 @@
             android:gravity="center_vertical|end"
             android:orientation="horizontal">
 
+            <!-- Our position share runs in this chat (1273): a small
+                 crosshair in the accent colour, on our side. -->
+            <TextView
+                android:id="@+id/sharing"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:contentDescription="@string/sharing_sign"
+                android:text="⌖"
+                android:textColor="@color/accent"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
             <ImageView
                 android:id="@+id/pin"
                 android:layout_width="48dp"

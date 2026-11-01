@@ -145,6 +145,10 @@ public class ChatActivity extends Activity implements Events.Listener {
     /** The last header the library gave: name, link, banner, petname. */
     private Map<String, Object> header = Core.map();
     private View banner;
+    /** Our share's chip (1273), its words and its Stop. */
+    private View shareChip;
+    private TextView shareWords;
+    private Button shareStop;
     /** Whether the address goes into the new contact the editor is creating. */
     private boolean insertWithAddress;
     /** The contact screen's request code. */
@@ -338,6 +342,16 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
         });
         banner = findViewById(R.id.book_banner);
+        shareChip = findViewById(R.id.share_chip);
+        shareWords = findViewById(R.id.share_words);
+        shareStop = findViewById(R.id.share_stop);
+        shareStop.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                say(Core.stopShare(peer));
+                refresh();
+            }
+        });
         ((Button) findViewById(R.id.book_add)).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -856,6 +870,21 @@ public class ChatActivity extends Activity implements Events.Listener {
                 line(error == null
                         ? getString(R.string.shared_to, Core.str(header, "name"))
                         : getString(R.string.share_failed, error));
+                sendable();
+                refresh();
+                break;
+            }
+            case "sheet_share_15_min":
+            case "sheet_share_1_h":
+            case "sheet_share_8_h":
+            case "sheet_share_until_stopped": {
+                // A share (1273): the library sends on the fixes the share
+                // service brings; the service starts as the list says it runs.
+                String error = Core.startShare(peer, id.substring("sheet_share_".length()));
+                if (error != null) {
+                    line(getString(R.string.share_failed, error));
+                }
+                ShareService.start(this);
                 sendable();
                 refresh();
                 break;
@@ -2159,6 +2188,12 @@ public class ChatActivity extends Activity implements Events.Listener {
                 + (Core.bool(answer, "verified") ? " \u2714" : ""));
         avatar.show(peer, answer);
         banner.setVisibility(Core.bool(answer, "ask_link") ? View.VISIBLE : View.GONE);
+        // The share's chip (1273): the library's words, or none.
+        String sharing = Core.str(answer, "share");
+        shareChip.setVisibility(sharing.isEmpty() ? View.GONE : View.VISIBLE);
+        shareWords.setText(sharing);
+        shareStop.setText(Core.str(answer, "share_stop"));
+        shareStop.setContentDescription(Core.str(answer, "share_stop"));
         homeClient = Core.bool(answer, "home_client");
         bar(answer);
         rows.clear();

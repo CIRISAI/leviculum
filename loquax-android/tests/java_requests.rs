@@ -449,6 +449,23 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             Request::ShareFix { peer: s(PEER) },
         ),
         (
+            "startShare",
+            java_map(&[
+                ("t", Java::Str("startshare")),
+                ("peer", Java::Str(PEER)),
+                ("span", Java::Str("15_min")),
+            ]),
+            Request::StartShare {
+                peer: s(PEER),
+                span: s("15_min"),
+            },
+        ),
+        (
+            "stopShare",
+            java_map(&[("t", Java::Str("stopshare")), ("peer", Java::Str(PEER))]),
+            Request::StopShare { peer: s(PEER) },
+        ),
+        (
             "Locator.tell",
             java_map(&[
                 ("t", Java::Str("fix")),
@@ -671,6 +688,11 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             "bar",
             java_map(&[("t", Java::Str("bar")), ("peer", Java::Str(PEER))]),
             Query::Bar { peer: s(PEER) },
+        ),
+        (
+            "shares",
+            java_map(&[("t", Java::Str("shares"))]),
+            Query::Shares,
         ),
         (
             "stagedBitmap",

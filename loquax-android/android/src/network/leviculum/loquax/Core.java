@@ -260,6 +260,24 @@ final class Core {
         return command(map("t", "sharefix", "peer", peer));
     }
 
+    /**
+     * A share of the position for `peer`'s chat (1273): `span` is
+     * `15_min`, `1_h`, `8_h` or `until_stopped`.
+     */
+    static String startShare(String peer, String span) {
+        return command(map("t", "startshare", "peer", peer, "span", span));
+    }
+
+    /** The share's Stop: one last report marked as the end (1273). */
+    static String stopShare(String peer) {
+        return command(map("t", "stopshare", "peer", peer));
+    }
+
+    /** The running shares: Settings, Privacy and the share notification (1273). */
+    static Map<String, Object> shares() {
+        return answer(Native.query(MsgPack.pack(map("t", "shares"))));
+    }
+
     /** `peer`'s compose bar alone: its buttons, its staged photo, its sheet (1270). */
     static Map<String, Object> bar(String peer) {
         return answer(Native.query(MsgPack.pack(map("t", "bar", "peer", peer))));

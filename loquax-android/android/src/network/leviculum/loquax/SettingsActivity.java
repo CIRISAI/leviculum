@@ -342,7 +342,58 @@ public class SettingsActivity extends Activity implements Events.Listener {
         for (Map<String, Object> row : rows) {
             body.addView(blocked(row));
         }
+        runningShares();
         sharedPositions();
+    }
+
+    /**
+     * "Position sharing" (1273): every running share by the library's
+     * list, with whom and for how long, each with its Stop.
+     */
+    private void runningShares() {
+        Map<String, Object> answer = Core.shares();
+        TextView header = text(Core.str(answer, "title"), 14, R.color.accent);
+        header.setPadding(dp(16), dp(24), dp(16), dp(4));
+        body.addView(header);
+        if (answer.containsKey("error")) {
+            body.addView(padded(text(Core.str(answer, "error"), 15, R.color.text_secondary)));
+            return;
+        }
+        List<Map<String, Object>> rows = Core.list(answer, "shares");
+        if (rows.isEmpty()) {
+            body.addView(padded(text(Core.str(answer, "empty"), 15, R.color.text_secondary)));
+        }
+        for (Map<String, Object> row : rows) {
+            final String peer = Core.str(row, "peer");
+            LinearLayout line = new LinearLayout(this);
+            line.setTag(Core.str(row, "id"));
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(dp(16), dp(8), dp(4), dp(8));
+            LinearLayout words = new LinearLayout(this);
+            words.setOrientation(LinearLayout.VERTICAL);
+            words.addView(text(Core.str(row, "name"), 16, R.color.text));
+            words.addView(text(Core.str(row, "words"), 14, R.color.text_secondary));
+            line.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            Button stop = new Button(this, null, android.R.attr.borderlessButtonStyle);
+            stop.setText(Core.str(answer, "stop"));
+            stop.setTextColor(getColor(R.color.accent));
+            stop.setTag("share_stop_" + peer);
+            stop.setContentDescription(Core.str(answer, "stop") + ", " + Core.str(row, "name"));
+            stop.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String error = Core.stopShare(peer);
+                    if (error != null) {
+                        android.widget.Toast.makeText(SettingsActivity.this, error,
+                                android.widget.Toast.LENGTH_LONG).show();
+                    }
+                    ShareService.look(SettingsActivity.this, false);
+                    recreate();
+                }
+            });
+            line.addView(stop);
+            body.addView(line);
+        }
     }
 
     /**

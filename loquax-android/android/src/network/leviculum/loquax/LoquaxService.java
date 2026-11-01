@@ -227,9 +227,11 @@ public class LoquaxService extends Service implements Events.Listener {
         List<Map<String, Object>> rows = Core.list(answer, "conversations");
         Map<String, Long> now = new HashMap<>();
         long total = 0;
+        boolean sharing = false;
         NotificationManager manager = getSystemService(NotificationManager.class);
         for (Map<String, Object> row : rows) {
             String peer = Core.str(row, "peer");
+            sharing |= Core.bool(row, "sharing");
             long count = Core.num(row, "unread");
             now.put(peer, count);
             total += count;
@@ -244,6 +246,7 @@ public class LoquaxService extends Service implements Events.Listener {
         }
         unread = now;
         this.total = total;
+        ShareService.look(this, sharing);
         describe();
     }
 

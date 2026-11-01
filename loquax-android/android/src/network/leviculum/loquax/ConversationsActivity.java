@@ -638,6 +638,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));
             final String peer = Core.str(row, "peer");
             ((AvatarView) view.findViewById(R.id.avatar)).show(peer, row);
+            // Our share runs here (1273).
+            view.findViewById(R.id.sharing).setVisibility(
+                    Core.bool(row, "sharing") ? View.VISIBLE : View.GONE);
             // The map pin (1224) in the library's tint: the map on the peer.
             String tint = Core.str(row, "pin");
             ImageView pin = (ImageView) view.findViewById(R.id.pin);

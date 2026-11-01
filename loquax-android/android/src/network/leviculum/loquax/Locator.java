@@ -184,9 +184,14 @@ final class Locator {
 
     /** The debug build's seeded fix ({@link #FIXTURE}), or null. */
     Location fixture() {
+        return fixture(activity);
+    }
+
+    /** The seeded fix in `context`'s files, read anew: the share service's too (1273). */
+    static Location fixture(Context context) {
         boolean debuggable =
-                (activity.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
-        File file = new File(activity.getFilesDir(), FIXTURE);
+                (context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        File file = new File(context.getFilesDir(), FIXTURE);
         if (!debuggable || !file.isFile()) {
             return null;
         }
