@@ -173,6 +173,34 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "voice",
+            java_map(&[
+                ("t", Java::Str("voice")),
+                ("peer", Java::Str(PEER)),
+                ("pcm", Java::Bin(&[0x01, 0x00, 0xff, 0xff])),
+                ("rate", Java::Long(16_000)),
+            ]),
+            Request::Voice {
+                peer: s(PEER),
+                pcm: schema::Blob(vec![0x01, 0x00, 0xff, 0xff]),
+                rate: 16_000,
+            },
+        ),
+        (
+            "playVoice",
+            java_map(&[
+                ("t", Java::Str("playvoice")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+                ("on", Java::Bool(true)),
+            ]),
+            Request::PlayVoice {
+                peer: s(PEER),
+                key: KEY,
+                on: true,
+            },
+        ),
+        (
             "sendAgain",
             java_map(&[
                 ("t", Java::Str("sendagain")),
@@ -549,6 +577,18 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
                 peer: s(PEER),
                 key: KEY,
                 index: 0,
+            },
+        ),
+        (
+            "voicePcm",
+            java_map(&[
+                ("t", Java::Str("voice")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+            ]),
+            Query::Voice {
+                peer: s(PEER),
+                key: KEY,
             },
         ),
         ("mapFling", t("mapfling"), Query::MapFling { set: None }),

@@ -240,6 +240,18 @@ pub enum Request {
         #[serde(default)]
         size: u64,
     },
+    /// Held the microphone and let go (1222): the recording as
+    /// `AudioRecord` made it, mono 16-bit PCM, little endian, at `rate`.
+    /// The session codes it as Opus in Ogg off the lock
+    /// (`loquax::voice::encode`) and sends it to `peer` as the audio
+    /// field; one shorter than 0.6 s or longer than 5 min answers the
+    /// request with the reason.
+    Voice { peer: String, pcm: Blob, rate: u32 },
+    /// Tapped a voice message's play button (`on`) or its pause button,
+    /// or the player came to its end (1222): the bubble's button follows.
+    /// [`Query::Voice`] has the sound.
+    #[serde(rename = "playvoice")]
+    PlayVoice { peer: String, key: i64, on: bool },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
     Delete { peer: String, keys: Vec<i64> },
@@ -505,6 +517,20 @@ pub enum Query {
     /// the name made safe) for the open or share intent (1221). Answered
     /// as [`SavedFile`].
     SaveFile { peer: String, key: i64, index: u32 },
+    /// The voice message of the message `key` of `peer`'s conversation,
+    /// decoded for `AudioTrack` (1222): Opus at 24 kHz, Codec2 at 8 kHz.
+    /// Answered as [`VoicePcm`].
+    Voice { peer: String, key: i64 },
+}
+
+/// What [`Query::Voice`] answers: mono 16-bit PCM, little endian, the
+/// layout `AudioTrack` takes with `ENCODING_PCM_16BIT`, and its rate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoicePcm {
+    pub v: u32,
+    pub ok: bool,
+    pub rate: u32,
+    pub pcm: Blob,
 }
 
 /// What [`Query::SaveFile`] answers: where the file is, under the app's
@@ -1206,6 +1232,25 @@ pub struct MessageRow {
     /// asks [`Query::SaveFile`] with its place.
     #[serde(default)]
     pub files: Vec<FileRow>,
+    /// The voice message it carries (1222), else 0 and empty: the
+    /// sender's audio mode, its length in ms and as `0:07`, the level bar
+    /// (32 heights 0 to 100, empty for an even bar), whether this build
+    /// plays it and whether it plays now, and what a screen reader says,
+    /// `Voice message, 0:07`. [`Query::Voice`] has the sound.
+    #[serde(default)]
+    pub voice_mode: u32,
+    #[serde(default)]
+    pub voice_ms: u32,
+    #[serde(default)]
+    pub voice_duration: String,
+    #[serde(default)]
+    pub voice_levels: Blob,
+    #[serde(default)]
+    pub voice_playable: bool,
+    #[serde(default)]
+    pub voice_playing: bool,
+    #[serde(default)]
+    pub voice_words: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -67,6 +67,7 @@ STEPS = [
     "reply_send",
     "image",
     "file",
+    "voice",
     "receive_wake",
     "receive_report",
     "position_pin",
@@ -139,6 +140,13 @@ PHOTO_FULL = "photo_full"
 ATTACH_FILE = "File"
 FILE_WORDS = re.compile(r"^File (?P<name>.+), \d+(?:\.\d)? (?:B|KB|MB)$")
 FILE_NO_APP = "No app here opens this file."
+# A voice message (1222): what a screen reader says for a bubble's player
+# (the catalogue's scene_voice), its two buttons, and the fixture the
+# debug build records instead of the microphone (Voice.FIXTURE).
+VOICE_WORDS = re.compile(r"^Voice message, (?P<m>\d+):(?P<s>\d\d)$")
+VOICE_PLAY = "Play"
+VOICE_PAUSE = "Pause"
+VOICE_FIXTURE = "voice-fixture.pcm"
 # The region the walk puts on the phone for the Maps page (1207): the
 # repository's Florence fixture, and the middle the page names it by
 # (Ui.place, two decimals, either decimal mark).
@@ -286,6 +294,51 @@ def file_problems(files: list[Node], before: int, name: str) -> list[str]:
     if match is None or match.group("name") != name:
         return [f"the newest file says {files[-1].desc!r}, want {name!r}"]
     return []
+
+
+def voices_on(nodes: list[Node]) -> list[Node]:
+    """The bubbles' voice players on screen (1222), top first: what a
+    screen reader names as a voice message."""
+    return by_top([n for n in nodes if VOICE_WORDS.match(n.desc)])
+
+
+def voice_problems(voices: list[Node], before: int, least_s: int) -> list[str]:
+    """What is wrong with the players on screen after a hold of the
+    microphone, when `before` were there: none new, or the newest shorter
+    than `least_s` seconds."""
+    if len(voices) <= before:
+        return [f"{len(voices)} voice messages on screen, {before} before the hold"]
+    match = VOICE_WORDS.match(voices[-1].desc)
+    if match is None:
+        return [f"the newest says {voices[-1].desc!r}"]
+    secs = int(match.group("m")) * 60 + int(match.group("s"))
+    if secs < least_s:
+        return [f"the newest is {secs} s long, want at least {least_s}"]
+    return []
+
+
+def inside(node: Node, box: Node) -> bool:
+    """Whether `node`'s middle is within `box`."""
+    x, y = node.center
+    x1, y1, x2, y2 = box.bounds
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+
+def speech_pcm(rate: int, ms: int) -> bytes:
+    """Mono 16-bit speech-like sound, as loquax::voice::test_speech makes
+    it for the tests: a voice of moving pitch in syllables with pauses."""
+    out = bytearray()
+    phase = 0.0
+    for i in range(rate * ms // 1000):
+        t = i / rate
+        syllable = int(t / 0.25)
+        within = t / 0.25 - syllable
+        envelope = 0.0 if syllable % 4 == 3 else math.sin(math.pi * within) ** 2
+        pitch = 140.0 + 40.0 * math.sin(t * 2.1)
+        phase += 2 * math.pi * pitch / rate
+        s = envelope * sum(math.sin(phase * h) / h for h in range(1, 8))
+        out += struct.pack("<h", max(-32000, min(32000, int(s * 6000))))
+    return bytes(out)
 
 
 def parse_bounds(text: str) -> tuple[int, int, int, int] | None:
@@ -1625,6 +1678,73 @@ class Walk:
             self.wait_id("compose", 10)
         dev.shell(f"rm -f /sdcard/Download/{name}", check=False)
         return f"picked_to_bubble_ms={ms} desc={row.desc!r} mailbox=accepted saved=ok open={handed}"
+
+    def step_voice(self) -> str:
+        """A voice message through the microphone (1222): the fixture PCM
+        put where the debug build records it from, the permission granted
+        as the first press would ask for it, the send button held for three
+        seconds while the compose field is empty; the bubble's player with
+        its length, the mailbox's send; its play button turns to pause and
+        back at the end; a hold slid left sends nothing."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        local = Path(tempfile.mkdtemp(prefix="walk-voice-")) / VOICE_FIXTURE
+        local.write_bytes(speech_pcm(16_000, 8_000))
+        dev.run("push", str(local), f"/data/local/tmp/{VOICE_FIXTURE}", timeout=60)
+        local.unlink()
+        local.parent.rmdir()
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'cat /data/local/tmp/{VOICE_FIXTURE} > files/{VOICE_FIXTURE}'"
+        )
+        dev.shell(f"pm grant {PACKAGE} android.permission.RECORD_AUDIO", check=False)
+        try:
+            compose = self.wait_id("compose", 5)[0]
+            if compose.text.strip():
+                dev.tap_node(compose)
+                dev.shell("input keyevent KEYCODE_MOVE_END")
+                for _ in range(len(compose.text) + 2):
+                    dev.key("KEYCODE_DEL")
+            sent_before = fixture.mailbox_log().count("HOME send accepted")
+            before = len(voices_on(dev.dump()))
+            mic = self.wait_id("send", 5)[0]
+            dev.long_press(mic, 3_000)
+            start = time.monotonic()
+            problems: list[str] = []
+
+            def shown():
+                nonlocal problems
+                problems = voice_problems(voices_on(dev.dump()), before, 2)
+                return not problems
+
+            if not wait_for(shown, 15, every=0.3):
+                raise StepFailed("; ".join(problems))
+            ms = int((time.monotonic() - start) * 1000)
+            accepted = wait_for(
+                lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+            )
+            if not accepted:
+                raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+            nodes = dev.dump()
+            player = voices_on(nodes)[-1]
+            play = [n for n in find(nodes, desc=VOICE_PLAY) if inside(n, player)]
+            if not play:
+                raise StepFailed(f"no {VOICE_PLAY!r} button in {player.desc!r}")
+            dev.tap_node(play[0])
+            if not wait_for(lambda: any(inside(n, player) for n in find(dev.dump(), desc=VOICE_PAUSE)), 5, every=0.3):
+                raise StepFailed(f"a tap on {VOICE_PLAY!r} did not turn it to {VOICE_PAUSE!r}")
+            if not wait_for(lambda: any(inside(n, player) for n in find(dev.dump(), desc=VOICE_PLAY)), 15, every=0.5):
+                raise StepFailed(f"the player never came back to {VOICE_PLAY!r} at its end")
+            # Slid left: gone, nothing sent.
+            count = len(voices_on(dev.dump()))
+            x, y = mic.center
+            dev.swipe(x, y, max(0, x - 400), y, 2_000)
+            time.sleep(4)
+            if len(voices_on(dev.dump())) != count:
+                raise StepFailed("a hold slid left sent a voice message")
+        finally:
+            dev.shell(f"run-as {PACKAGE} rm -f files/{VOICE_FIXTURE}", check=False)
+            dev.shell(f"rm -f /data/local/tmp/{VOICE_FIXTURE}", check=False)
+        return f"held_to_bubble_ms={ms} desc={player.desc!r} mailbox=accepted played=ok cancel=ok"
 
     def step_receive_wake(self) -> str:
         dev = self.need_device()

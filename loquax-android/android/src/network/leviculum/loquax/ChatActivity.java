@@ -147,6 +147,31 @@ public class ChatActivity extends Activity implements Events.Listener {
     };
     /** Decodes thumbnails and hands picked pictures over, one at a time. */
     private final ExecutorService photos = Executors.newSingleThreadExecutor();
+    /** Voice messages (1222): the coding of one recorded, the player's decoding and writing. */
+    private final ExecutorService voices = Executors.newSingleThreadExecutor();
+    private final ExecutorService playback = Executors.newSingleThreadExecutor();
+    private final Voice.Player player = new Voice.Player();
+    /** The recording while the microphone is held, else null. */
+    private Voice.Recorder recorder;
+    /** Where the finger went down on the microphone, to tell a slide to cancel. */
+    private float recordFrom;
+    /** The played part of the voice message playing, for its bar when the row is drawn again. */
+    private float played;
+    private final Runnable recordTick = new Runnable() {
+        @Override
+        public void run() {
+            if (recorder == null) return;
+            long ms = recorder.ms();
+            if (ms >= Voice.LONGEST_MS) {
+                stopRecording(true);
+                return;
+            }
+            long s = ms / 1000;
+            line(String.format(Locale.ROOT, "\u25CF %d:%02d   \u2039 %s", s / 60, s % 60,
+                    getString(R.string.voice_cancel)), true);
+            ticker.postDelayed(this, 200);
+        }
+    };
     /**
      * The last search in this conversation and the key of its match shown, null for none: a key
      * has either sign (Rust's schema::wire_key), so no number stands for none.
@@ -326,6 +351,81 @@ public class ChatActivity extends Activity implements Events.Listener {
                 send();
             }
         });
+        // With nothing typed the button is the microphone (1222), as in
+        // Signal: held, it records; let go, the message goes; slid left,
+        // it is gone.
+        send.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, android.view.MotionEvent event) {
+                if (!compose.getText().toString().trim().isEmpty()) {
+                    return false;
+                }
+                switch (event.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        recordFrom = event.getRawX();
+                        startRecording();
+                        return true;
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        if (recorder != null && recordFrom - event.getRawX() > dp(96)) {
+                            stopRecording(false);
+                        }
+                        return true;
+                    case android.view.MotionEvent.ACTION_UP:
+                        stopRecording(true);
+                        return true;
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        stopRecording(false);
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+        });
+    }
+
+    /** The microphone pressed: the permission first, at its first use. */
+    private void startRecording() {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, Voice.ASK);
+            return;
+        }
+        player.stop();
+        Voice.Recorder started = new Voice.Recorder(this);
+        if (!started.start()) {
+            line(getString(R.string.voice_no_microphone));
+            return;
+        }
+        recorder = started;
+        send.setPressed(true);
+        send.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+        ticker.post(recordTick);
+    }
+
+    /** The microphone let go (`send`) or slid away: the recording goes to the library, or nowhere. */
+    private void stopRecording(boolean sendIt) {
+        final Voice.Recorder done = recorder;
+        if (done == null) return;
+        recorder = null;
+        ticker.removeCallbacks(recordTick);
+        send.setPressed(false);
+        final byte[] pcm = done.stop();
+        final int rate = done.rate();
+        line("");
+        if (!sendIt) return;
+        voices.execute(new Runnable() {
+            @Override
+            public void run() {
+                final String error = Core.voice(peer, pcm, rate);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        say(error);
+                        refresh();
+                    }
+                });
+            }
+        });
     }
 
     @Override
@@ -365,6 +465,8 @@ public class ChatActivity extends Activity implements Events.Listener {
     @Override
     protected void onPause() {
         ticker.removeCallbacks(tick);
+        stopRecording(false);
+        player.stop();
         Core.front(false);
         Events.listen(null);
         Core.close();
@@ -376,6 +478,9 @@ public class ChatActivity extends Activity implements Events.Listener {
         // A picked picture already handed over still goes; thumbnails
         // still owed are not drawn.
         photos.shutdown();
+        voices.shutdown();
+        player.stop();
+        playback.shutdownNow();
         super.onDestroy();
     }
 
@@ -402,11 +507,19 @@ public class ChatActivity extends Activity implements Events.Listener {
         Ui.showLine(status, text, true);
     }
 
+    private void line(String text, boolean stays) {
+        Ui.showLine(status, text, stays);
+    }
+
     /** The send button is bright with text to send and dimmed without. */
     private void sendable() {
         boolean some = !compose.getText().toString().trim().isEmpty();
-        send.setEnabled(some);
-        send.setAlpha(some ? 1f : 0.38f);
+        // Nothing typed: the microphone (1222), which is always there.
+        send.setImageDrawable(new Glyph(some ? Glyph.Kind.SEND : Glyph.Kind.MIC,
+                getColor(R.color.on_send)));
+        send.setContentDescription(getString(some ? R.string.send : R.string.record_voice));
+        send.setEnabled(true);
+        send.setAlpha(1f);
     }
 
     /** The bar's menu: pull now, the map, the address book and the name. */
@@ -597,6 +710,16 @@ public class ChatActivity extends Activity implements Events.Listener {
     public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(code, permissions, results);
         if (locator.result(code)) {
+            return;
+        }
+        if (code == Voice.ASK) {
+            // Granted: the next press records. Refused: why it does not.
+            if (results.length == 0 || results[0]
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                line(getString(R.string.voice_no_microphone));
+            } else {
+                line(getString(R.string.voice_hold));
+            }
             return;
         }
         if (code == Book.ASK && Book.canRead(this)) {
@@ -888,6 +1011,107 @@ public class ChatActivity extends Activity implements Events.Listener {
             });
             box.addView(line);
         }
+    }
+
+    /**
+     * A row's voice message (1222): the play or pause button, the level
+     * bar and the length, in a bubble's colours, said as the library words
+     * it; a tap plays or pauses it. Gone for a row without.
+     */
+    private void voice(LinearLayout box, final Map<String, Object> row, boolean ours) {
+        box.removeAllViews();
+        if (Core.num(row, "voice_mode") == 0) {
+            box.setVisibility(View.GONE);
+            box.setTag(null);
+            return;
+        }
+        final long key = Core.num(row, "key");
+        box.setVisibility(View.VISIBLE);
+        box.setTag("voice_" + key);
+        int ink = getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(getColor(ours ? R.color.bubble_ours : R.color.bubble_theirs));
+        shape.setCornerRadius(dp(CORNER));
+        box.setBackground(shape);
+        box.setContentDescription(Core.str(row, "voice_words"));
+        boolean playing = Core.bool(row, "voice_playing") && player.playing() == key;
+        ImageButton toggle = new ImageButton(this);
+        toggle.setImageDrawable(new Glyph(playing ? Glyph.Kind.PAUSE : Glyph.Kind.PLAY, ink));
+        toggle.setBackground(null);
+        toggle.setPadding(dp(8), dp(8), dp(8), dp(8));
+        toggle.setContentDescription(getString(playing ? R.string.scene_pause_voice
+                : R.string.scene_play_voice));
+        toggle.setEnabled(Core.bool(row, "voice_playable"));
+        toggle.setAlpha(Core.bool(row, "voice_playable") ? 1f : 0.38f);
+        toggle.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
+        toggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleVoice(key);
+            }
+        });
+        box.addView(toggle);
+        Voice.Bar bar = new Voice.Bar(this);
+        Object levels = row.get("voice_levels");
+        bar.set(levels instanceof byte[] ? (byte[]) levels : null, ink, playing ? played : 0f);
+        bar.setTag("voice_bar");
+        LinearLayout.LayoutParams barSize = new LinearLayout.LayoutParams(dp(150), dp(28));
+        barSize.setMarginStart(dp(4));
+        barSize.setMarginEnd(dp(10));
+        bar.setLayoutParams(barSize);
+        box.addView(bar);
+        TextView length = new TextView(this);
+        length.setText(Core.str(row, "voice_duration"));
+        length.setTextSize(13);
+        length.setTextColor(ink);
+        box.addView(length);
+    }
+
+    /** A tap on a voice message's button: it plays, or the one playing stops. */
+    private void toggleVoice(final long key) {
+        if (player.playing() == key) {
+            player.stop();
+            return;
+        }
+        player.stop();
+        say(Core.playVoice(peer, key, true));
+        played = 0f;
+        refresh();
+        playback.execute(new Runnable() {
+            @Override
+            public void run() {
+                Map<String, Object> sound = Core.voicePcm(peer, key);
+                Object pcm = sound.get("pcm");
+                if (!Core.bool(sound, "ok") || !(pcm instanceof byte[])) {
+                    final String error = Core.str(sound, "error");
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Core.playVoice(peer, key, false);
+                            line(error);
+                            refresh();
+                        }
+                    });
+                    return;
+                }
+                player.play(key, (byte[]) pcm, (int) Core.num(sound, "rate"), new Voice.Listener() {
+                    @Override
+                    public void progress(long at, float done) {
+                        played = done;
+                        View box = list.findViewWithTag("voice_" + at);
+                        View bar = box == null ? null : box.findViewWithTag("voice_bar");
+                        if (bar instanceof Voice.Bar) ((Voice.Bar) bar).progress(done);
+                    }
+
+                    @Override
+                    public void ended(long at) {
+                        played = 0f;
+                        Core.playVoice(peer, at, false);
+                        refresh();
+                    }
+                });
+            }
+        });
     }
 
     /**
@@ -1676,6 +1900,7 @@ public class ChatActivity extends Activity implements Events.Listener {
 
             photo((ImageView) view.findViewById(R.id.photo), row);
             files((LinearLayout) view.findViewById(R.id.files), row, ours);
+            voice((LinearLayout) view.findViewById(R.id.voice), row, ours);
 
             TextView body = (TextView) view.findViewById(R.id.body);
             body.setText(text(row, ours, now));

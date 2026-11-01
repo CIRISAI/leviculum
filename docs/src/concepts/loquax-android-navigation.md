@@ -363,7 +363,9 @@ a friend already on screen is one tap away from the map (the pin).
   attachment menu (a paper clip in the compose field, one entry "My
   position" then; "Photo" joined it above in 1220,
   [photos](loquax-photos.md), and "File" in 1221,
-  [files](loquax-files.md)) send at once. A share is a report of ours with no
+  [files](loquax-files.md)) send at once. With nothing typed the send
+  button is the microphone (1222, [voice messages](loquax-voice.md)):
+  held it records, released it sends, slid left it cancels. A share is a report of ours with no
   text, the Telemeter alone, and the chat shows it as our bubble with the
   position line. The Maps page names a map by its middle ("Around 52.52°
   N, 13.40° E"), since the region files carry no place name; Delete asks

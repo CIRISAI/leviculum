@@ -66,6 +66,20 @@ if ! command -v i2pd >/dev/null 2>&1; then
     echo "[install-ci] Hint: sudo apt install i2pd (needed only for the ignored I2P live tests)"
 fi
 
+# Test dependency: the reference codecs the voice message round trip makes
+# and judges its sounds with (1222, loquax-android's facade test
+# a_voice_message_travels_both_ways_with_python_lxmf): opusenc and opusdec
+# from opus-tools, c2enc and c2dec from codec2. A runner without them
+# leaves that one test out (scripts/integ-prerequisites.txt); run directly,
+# it fails naming this hint.
+for cmd in opusenc opusdec c2enc c2dec; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[install-ci] Note: test dependency '$cmd' not found"
+        echo "[install-ci] Hint: sudo apt install opus-tools codec2 (the voice message round trip)"
+        break
+    fi
+done
+
 # Optional test dependency: lintian is the Debian-policy authority
 # scripts/verify-deb-packaging.sh defers to. `just verify-deb` presupposes a
 # build-deb run and is not part of any tier, so warn rather than fail — but a

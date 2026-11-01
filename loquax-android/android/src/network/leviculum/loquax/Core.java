@@ -237,6 +237,32 @@ final class Core {
                 map("t", "savefile", "peer", peer, "key", key, "index", (long) index))));
     }
 
+    /**
+     * A recording the microphone made (1222): mono 16-bit PCM, little
+     * endian, at `rate`. The library codes it as Opus in Ogg and sends it,
+     * or says why not (too short, too long).
+     */
+    static String voice(String peer, byte[] pcm, int rate) {
+        return command(map("t", "voice", "peer", peer, "pcm", pcm, "rate", (long) rate));
+    }
+
+    /**
+     * The play button of the message `key` (`on`), its pause button or the
+     * player's end (1222): the library's bubble follows.
+     */
+    static String playVoice(String peer, long key, boolean on) {
+        return command(map("t", "playvoice", "peer", peer, "key", key, "on", on));
+    }
+
+    /**
+     * The voice message of the message `key`, decoded by the library
+     * (1222): "rate" and "pcm" (mono 16-bit little endian); "error" when it
+     * does not play. Not on the UI thread.
+     */
+    static Map<String, Object> voicePcm(String peer, long key) {
+        return answer(Native.query(MsgPack.pack(map("t", "voice", "peer", peer, "key", key))));
+    }
+
     /** Delete the messages `keys`, asked already. */
     static String delete(String peer, List<Long> keys) {
         return command(map("t", "delete", "peer", peer, "keys", keys));

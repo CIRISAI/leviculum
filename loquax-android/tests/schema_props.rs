@@ -176,6 +176,12 @@ fn request() -> impl Strategy<Value = Request> {
             data,
             size
         }),
+        (text(), blob(), u32s()).prop_map(|(peer, pcm, rate)| Request::Voice { peer, pcm, rate }),
+        (text(), i64s(), any::<bool>()).prop_map(|(peer, key, on)| Request::PlayVoice {
+            peer,
+            key,
+            on
+        }),
         (text(), keys()).prop_map(|(peer, keys)| Request::Delete { peer, keys }),
         text().prop_map(|emoji| Request::Used { emoji }),
         Just(Request::Pull),
@@ -266,6 +272,7 @@ fn query() -> impl Strategy<Value = Query> {
             key,
             index
         }),
+        (text(), i64s()).prop_map(|(peer, key)| Query::Voice { peer, key }),
     ]
 }
 
@@ -296,6 +303,22 @@ fn file_row() -> impl Strategy<Value = FileRow> {
     })
 }
 
+/// A row's voice message (1222), boxed on its own: one more tuple inline
+/// overflowed the test thread's stack in [`the_lists_round_trip`].
+type VoiceParts = (u32, u32, String, Blob, (bool, bool), String);
+
+fn voice_parts() -> BoxedStrategy<VoiceParts> {
+    (
+        u32s(),
+        u32s(),
+        text(),
+        blob(),
+        any::<(bool, bool)>(),
+        text(),
+    )
+        .boxed()
+}
+
 /// The rows are boxed: with the scene's fields (1217) their tuples together
 /// overflow the test thread's stack in [`the_lists_round_trip`].
 fn message_row() -> BoxedStrategy<MessageRow> {
@@ -315,6 +338,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         (any::<(bool, bool, bool, bool)>(), text(), text()),
         (text(), u32s(), u32s(), u32s(), text()),
         prop::collection::vec(file_row(), 0..3),
+        voice_parts(),
     )
         .prop_map(
             |(
@@ -327,6 +351,14 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 ((joins_before, joins_after, meta, newest), day, live),
                 (photo, photo_bytes, photo_w, photo_h, photo_words),
                 files,
+                (
+                    voice_mode,
+                    voice_ms,
+                    voice_duration,
+                    voice_levels,
+                    (voice_playable, voice_playing),
+                    voice_words,
+                ),
             )| MessageRow {
                 id,
                 ours,
@@ -361,6 +393,13 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 photo_h,
                 photo_words,
                 files,
+                voice_mode,
+                voice_ms,
+                voice_duration,
+                voice_levels,
+                voice_playable,
+                voice_playing,
+                voice_words,
             },
         )
         .boxed()

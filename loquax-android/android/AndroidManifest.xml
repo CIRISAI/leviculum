@@ -24,6 +24,10 @@
        frames go to the library's decoder and nowhere else. A phone
        without a camera pastes the code instead. -->
   <uses-permission a:name='android.permission.CAMERA'/>
+  <!-- Voice messages (1222): the compose bar's microphone, asked at its
+       first press; what it records goes to the library's encoder and
+       into the message, nowhere else. -->
+  <uses-permission a:name='android.permission.RECORD_AUDIO'/>
   <uses-feature a:name='android.hardware.camera.any' a:required='false'/>
   <!-- The phone's own position (1201): asked at the first tap on the
        map's crosshair or on "Share my position", never at start; read

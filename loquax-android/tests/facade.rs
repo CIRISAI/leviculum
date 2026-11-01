@@ -4083,3 +4083,383 @@ async fn a_file_travels_both_ways_with_python_lxmf() {
         .await
         .expect("stopped");
 }
+
+/// The audio field of a message Python's router received: its mode and
+/// bytes.
+fn python_audio(message: &serde_json::Value) -> Option<(u8, Vec<u8>)> {
+    let packed = message.get("fields")?.as_str()?;
+    let packed: Vec<u8> = (0..packed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).ok()?;
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).ok()?;
+        let start = at;
+        msgpack::skip(&packed, &mut at).ok()?;
+        if key == leviculum_lxmf::constants::FIELD_AUDIO {
+            let mut at = start;
+            msgpack::array_len(&packed, &mut at).ok()?;
+            let mode = u8::try_from(msgpack::read_uint(&packed, &mut at).ok()?).ok()?;
+            return Some((mode, msgpack::read_bin(&packed, &mut at).ok()?.to_vec()));
+        }
+    }
+    None
+}
+
+/// One of the reference codec tools (opus-tools' opusenc and opusdec,
+/// codec2's c2enc and c2dec: `sudo apt install opus-tools codec2`, listed
+/// in scripts/install-ci.sh), run to its end.
+fn codec_tool(tool: &str, args: &[&str]) {
+    let status = std::process::Command::new(tool)
+        .args(args)
+        .status()
+        .unwrap_or_else(|e| {
+            panic!("{tool}: {e} (sudo apt install opus-tools codec2, scripts/install-ci.sh)")
+        });
+    assert!(status.success(), "{tool} {args:?}: {status}");
+}
+
+fn le_samples(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|s| i16::from_le_bytes([s[0], s[1]]))
+        .collect()
+}
+
+fn le_bytes(samples: &[i16]) -> Vec<u8> {
+    samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+}
+
+/// Sends `audio` as `[mode, bytes]` from Python to `address` and waits for
+/// DELIVERED.
+async fn python_sends_voice(peer: &python_peer::PythonPeer, address: &str, mode: u8, audio: &[u8]) {
+    let mut field = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut field, 1);
+    leviculum_lxmf::msgpack::int(&mut field, leviculum_lxmf::constants::FIELD_AUDIO);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::uint(&mut field, u64::from(mode));
+    leviculum_lxmf::msgpack::bin(&mut field, audio);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": "",
+                "fields": hex(&field),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Voice messages both ways between the phone and the Python reference
+/// (1222), each side's sound made and judged by the reference codecs.
+/// Python sends Codec2 2400 as Sideband does on a slow link (frames from
+/// c2enc, no header) and Opus in Ogg as Columba and Sideband do (from
+/// opusenc): the phone's rows say a voice message with its length, its
+/// button plays and pauses, and its sound is the reference decoder's
+/// (c2dec, opusdec) within what two implementations of one codec differ
+/// by. A recording the phone sends reaches Python's router as
+/// `[AM_OPUS_OGG, bytes]`, and opusdec plays it back as what was
+/// recorded. A tap on the microphone, shorter than 0.6 s, sends nothing
+/// and says to hold it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_message_travels_both_ways_with_python_lxmf() {
+    use loquax::ui::voice::{AM_CODEC2_2400, AM_OPUS_OGG};
+    use loquax::voice::{likeness, test_speech};
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let work = tempfile::tempdir().expect("a work dir");
+    let file = |name: &str| work.path().join(name).display().to_string();
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    // The reference codecs make Python's two messages and say what they
+    // sound like.
+    let speech8 = test_speech(8_000, 2_000);
+    std::fs::write(file("in8.raw"), le_bytes(&speech8)).expect("raw");
+    codec_tool("c2enc", &["2400", &file("in8.raw"), &file("c2.bit")]);
+    codec_tool("c2dec", &["2400", &file("c2.bit"), &file("c2.raw")]);
+    let codec2 = std::fs::read(file("c2.bit")).expect("c2enc's frames");
+    assert_eq!(codec2.len(), 600, "six bytes a 20 ms frame, no header");
+    let c2_reference = le_samples(&std::fs::read(file("c2.raw")).expect("c2dec's"));
+    let speech16 = test_speech(16_000, 2_000);
+    std::fs::write(file("in16.raw"), le_bytes(&speech16)).expect("raw");
+    codec_tool(
+        "opusenc",
+        &[
+            "--quiet",
+            "--speech",
+            "--bitrate",
+            "12",
+            "--raw",
+            "--raw-rate",
+            "16000",
+            "--raw-chan",
+            "1",
+            &file("in16.raw"),
+            &file("ref.opus"),
+        ],
+    );
+    codec_tool(
+        "opusdec",
+        &[
+            "--quiet",
+            "--rate",
+            "24000",
+            &file("ref.opus"),
+            &file("ref.raw"),
+        ],
+    );
+    let opus = std::fs::read(file("ref.opus")).expect("opusenc's file");
+    let opus_reference = le_samples(&std::fs::read(file("ref.raw")).expect("opusdec's"));
+
+    python_sends_voice(&peer, &address, AM_CODEC2_2400, &codec2).await;
+    python_sends_voice(&peer, &address, AM_OPUS_OGG, &opus).await;
+    let shown_python = python.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let messages = |session: &Session| -> schema::Messages {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: shown_python.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode")
+        };
+        let rows = loop {
+            let rows: Vec<schema::MessageRow> = messages(&session)
+                .messages
+                .into_iter()
+                .filter(|m| m.voice_mode != 0)
+                .collect();
+            if rows.len() == 2 {
+                break rows;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screens never showed both voice messages: {rows:?}"
+            );
+            session.next_event(Duration::from_millis(200));
+        };
+        let shown: Vec<(u32, u32, &str, bool, &str)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.voice_mode,
+                    r.voice_ms,
+                    r.voice_duration.as_str(),
+                    r.voice_playable,
+                    r.voice_words.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (8, 2_000, "0:02", true, "Voice message, 0:02"),
+                (0x10, 2_000, "0:02", true, "Voice message, 0:02"),
+            ]
+        );
+        assert!(rows[0].voice_levels.0.is_empty(), "Codec2: an even bar");
+        assert_eq!(rows[1].voice_levels.0.len(), loquax::ui::voice::BARS);
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let listed = list
+            .conversations
+            .iter()
+            .find(|c| c.peer == shown_python)
+            .expect("listed");
+        assert_eq!(
+            (listed.last.as_str(), listed.kind.as_str()),
+            ("voice message 0:02", "voice")
+        );
+
+        // The sound is the reference decoder's.
+        let sound = |key: i64| -> schema::VoicePcm {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Voice {
+                        peer: shown_python.clone(),
+                        key,
+                    })
+                    .expect("decoded"),
+            )
+            .expect("decode")
+        };
+        let c2 = sound(rows[0].key);
+        assert_eq!(c2.rate, 8_000);
+        let c2 = le_samples(&c2.pcm.0);
+        assert_eq!(c2.len(), c2_reference.len());
+        let like = likeness(&c2_reference, &c2, 8);
+        assert!(like > 0.9, "Codec2 against c2dec: {like}");
+        let ours = sound(rows[1].key);
+        assert_eq!(ours.rate, 24_000);
+        let ours = le_samples(&ours.pcm.0);
+        let like = likeness(&opus_reference, &ours, 24);
+        assert!(like > 0.95, "Opus against opusdec: {like}");
+        assert!(
+            ours.len().abs_diff(opus_reference.len()) <= 24,
+            "{} against {}",
+            ours.len(),
+            opus_reference.len()
+        );
+
+        // The button plays and pauses.
+        let key = rows[1].key;
+        let play = |on: bool| {
+            session
+                .request(Request::PlayVoice {
+                    peer: shown_python.clone(),
+                    key,
+                    on,
+                })
+                .unwrap_or_else(|error| panic!("{error}"));
+            messages(&session)
+                .messages
+                .into_iter()
+                .find(|m| m.key == key)
+                .map(|m| m.voice_playing)
+        };
+        assert_eq!(play(true), Some(true));
+        assert_eq!(play(false), Some(false));
+        session
+    })
+    .await
+    .expect("the voice messages on the phone");
+
+    // The phone to Python: three seconds at the rate the microphone gave.
+    let recorded = test_speech(16_000, 3_000);
+    let to = python.clone();
+    let before = peer.received().len();
+    let pcm = le_bytes(&recorded);
+    let session = tokio::task::spawn_blocking(move || {
+        session
+            .request(Request::Voice {
+                peer: to,
+                pcm: schema::Blob(pcm),
+                rate: 16_000,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        session
+    })
+    .await
+    .expect("sent");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let (mode, ogg) = loop {
+        let got = peer.received();
+        if let Some(value) = got.iter().skip(before).find_map(python_audio) {
+            break value;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python never received the voice message: {:?}",
+            got.len()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(mode, AM_OPUS_OGG, "the mode every receiver plays");
+    assert!(ogg.starts_with(b"OggS"), "Opus in Ogg");
+    std::fs::write(file("ours.opus"), &ogg).expect("written");
+    codec_tool(
+        "opusdec",
+        &[
+            "--quiet",
+            "--rate",
+            "16000",
+            &file("ours.opus"),
+            &file("ours.raw"),
+        ],
+    );
+    let heard = le_samples(&std::fs::read(file("ours.raw")).expect("opusdec's"));
+    assert_eq!(
+        heard.len(),
+        recorded.len(),
+        "as long as recorded, no padding"
+    );
+    let like = likeness(&recorded, &heard, 80);
+    assert!(like > 0.8, "opusdec's against what was recorded: {like}");
+
+    // Negative: a tap on the microphone sends nothing and says to hold it.
+    let to = python.clone();
+    let before = peer.received().len();
+    let session = tokio::task::spawn_blocking(move || {
+        let refused = session.request(Request::Voice {
+            peer: to,
+            pcm: schema::Blob(le_bytes(&test_speech(16_000, 300))),
+            rate: 16_000,
+        });
+        assert_eq!(
+            refused,
+            Err("Hold the microphone to record, release to send.".to_string())
+        );
+        session
+    })
+    .await
+    .expect("refused");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(peer.received().len(), before, "nothing went");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}

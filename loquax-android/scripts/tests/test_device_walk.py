@@ -672,6 +672,45 @@ class File(unittest.TestCase):
         self.assertEqual(walk.files_on([self.node("File a")]), [])
 
 
+class Voice(unittest.TestCase):
+    """The voice step's reading of the screen and its fixture (1222)."""
+
+    def node(self, desc: str, top: int = 0) -> "walk.Node":
+        return walk.Node("", desc, "", "android.widget.LinearLayout", (0, top, 400, top + 80))
+
+    def test_a_new_long_enough_voice_message_is_right(self):
+        voices = [self.node("Voice message, 0:07"), self.node("Voice message, 0:03", 900)]
+        self.assertEqual(walk.voice_problems(voices, 1, 2), [])
+
+    def test_none_new_or_too_short_is_refused(self):
+        self.assertEqual(
+            walk.voice_problems([], 0, 2), ["0 voice messages on screen, 0 before the hold"]
+        )
+        self.assertEqual(
+            walk.voice_problems([self.node("Voice message, 0:01")], 0, 2),
+            ["the newest is 1 s long, want at least 2"],
+        )
+
+    def test_only_what_is_named_a_voice_message_is_one_top_first(self):
+        low = self.node("Voice message, 1:02", 900)
+        high = self.node("Voice message, 0:02", 100)
+        other = self.node("File a, 1 B", 0)
+        old = self.node("Voice message, 0:02, which cannot be played here", 50)
+        self.assertEqual(walk.voices_on([low, other, high, old]), [high, low])
+
+    def test_a_button_inside_its_player(self):
+        player = self.node("Voice message, 0:03", 100)
+        button = walk.Node("", "Play", "", "android.widget.ImageButton", (10, 110, 50, 150))
+        elsewhere = walk.Node("", "Play", "", "android.widget.ImageButton", (10, 510, 50, 550))
+        self.assertTrue(walk.inside(button, player))
+        self.assertFalse(walk.inside(elsewhere, player))
+
+    def test_the_fixture_is_sixteen_bit_speech_of_its_length(self):
+        pcm = walk.speech_pcm(16_000, 500)
+        self.assertEqual(len(pcm), 16_000)
+        self.assertTrue(any(b != 0 for b in pcm[2000:4000]), "it sounds")
+
+
 class Draft(unittest.TestCase):
     """Where the draft step finds a row's last line (1219), and what it
     refuses."""

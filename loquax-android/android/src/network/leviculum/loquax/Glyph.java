@@ -13,13 +13,13 @@ import android.graphics.drawable.Drawable;
  * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
  * the list's search, close and pencil 1130, the tab bar's chat and pin
  * 1199, the map's people button 1200, the crosshair and the chat's
- * attachment menu 1201). The delivery marks are the ladder of
+ * attachment menu 1201, the microphone and the voice player 1222). The delivery marks are the ladder of
  * docs/src/concepts/loquax-read-receipts.md, section 3 (1232): CLOCK, TICK,
  * TICKS, TICKS_READ, FAILED, with the numbers of
  * loquax/src/ui/chat.rs's shapes, which a test of the facade reads here.
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH }
+    enum Kind { BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT, PIN, PEOPLE, LOCATE, ATTACH, MIC, PLAY, PAUSE }
 
     private final Kind kind;
     private final int color;
@@ -198,6 +198,25 @@ final class Glyph extends Drawable {
                 canvas.drawLine(12, 18.5f, 12, 22, stroke);
                 canvas.drawLine(2, 12, 5.5f, 12, stroke);
                 canvas.drawLine(18.5f, 12, 22, 12, stroke);
+                break;
+            case MIC:
+                // A capsule on a stand: the microphone (1222).
+                canvas.drawRoundRect(9, 3, 15, 15, 3, 3, fill);
+                Path cup = new Path();
+                cup.moveTo(6, 11);
+                cup.cubicTo(6, 15, 8.7f, 18, 12, 18);
+                cup.cubicTo(15.3f, 18, 18, 15, 18, 11);
+                canvas.drawPath(cup, stroke);
+                canvas.drawLine(12, 18, 12, 21, stroke);
+                break;
+            case PLAY:
+                Path play = path(8, 5, 19, 12, 8, 19);
+                play.close();
+                canvas.drawPath(play, fill);
+                break;
+            case PAUSE:
+                canvas.drawRect(7, 5, 10.5f, 19, fill);
+                canvas.drawRect(13.5f, 5, 17, 19, fill);
                 break;
             default:
                 break;

@@ -730,6 +730,31 @@ impl Session {
                 }
                 UiEvent::SendFile { peer, name, data }
             }
+            // Coded off the lock (a minute takes a third of a second on a
+            // desktop, more on a phone); too short or too long is refused
+            // in the phone's words, for Java's status line.
+            Intent::SendVoice { peer, pcm, rate } => {
+                let lang = self.lock().lang;
+                let ms = match rate {
+                    0 => 0,
+                    rate => {
+                        u32::try_from(pcm.len() as u64 * 1000 / u64::from(rate)).unwrap_or(u32::MAX)
+                    }
+                };
+                if let Some(why) = loquax::ui::voice::refusal(ms) {
+                    return Err(why.resolve(lang));
+                }
+                let data = loquax::voice::encode(&pcm, rate)?;
+                UiEvent::SendVoice { peer, data }
+            }
+            Intent::PlayVoice { peer, key } => UiEvent::PlayVoice { peer, key },
+            // A pause and the player's end alike: either way it stops.
+            Intent::PauseVoice { peer, key } => {
+                let mut inner = self.lock();
+                inner.apply(UiEvent::PauseVoice { peer, key });
+                inner.apply(UiEvent::VoiceEnded { peer, key });
+                return Ok(());
+            }
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed: true,
@@ -932,6 +957,31 @@ impl Session {
             }
             // A file to open or share (1221): its message's fields copied
             // under the lock, written under the app's files off it.
+            // A voice message's sound (1222): its bytes copied under the
+            // lock, decoded off it.
+            schema::Query::Voice { peer, key } => {
+                let peer = parse_peer(&peer)?;
+                let key = schema::model_key(key);
+                let (mode, data) = {
+                    let inner = self.lock();
+                    inner
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .and_then(|m| loquax::ui::voice::voice_parts(&m.fields))
+                        .map(|(mode, data)| (mode, data.to_vec()))
+                        .ok_or_else(|| "no such voice message".to_string())?
+                };
+                let pcm = loquax::voice::decode(mode, &data)?;
+                return Ok(schema::encode(&schema::VoicePcm {
+                    v: VERSION,
+                    ok: true,
+                    rate: pcm.rate,
+                    pcm: schema::Blob(pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect()),
+                }));
+            }
             schema::Query::SaveFile { peer, key, index } => {
                 let peer = parse_peer(&peer)?;
                 let key = schema::model_key(key);
@@ -1051,7 +1101,8 @@ impl Session {
             | schema::Query::Receipts { .. }
             | schema::Query::PhotoSize { .. }
             | schema::Query::Photo { .. }
-            | schema::Query::SaveFile { .. } => return Err("answered above".to_string()),
+            | schema::Query::SaveFile { .. }
+            | schema::Query::Voice { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -2021,6 +2072,15 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                 .collect();
             let mut row = row(node.bubble);
             row.files = files;
+            if let Some(voice) = &node.voice {
+                row.voice_mode = u32::from(voice.mode);
+                row.voice_ms = voice.duration_ms;
+                row.voice_duration = voice.duration.clone();
+                row.voice_levels = schema::Blob(voice.levels.clone());
+                row.voice_playable = voice.toggle.is_some();
+                row.voice_playing = voice.playing;
+                row.voice_words = voice.words.resolve(lang);
+            }
             if let Some((format, bytes, (w, h), words)) = photo {
                 row.photo = format;
                 row.photo_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
@@ -2108,6 +2168,13 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         photo_h: 0,
         photo_words: String::new(),
         files: Vec::new(),
+        voice_mode: 0,
+        voice_ms: 0,
+        voice_duration: String::new(),
+        voice_levels: schema::Blob::default(),
+        voice_playable: false,
+        voice_playing: false,
+        voice_words: String::new(),
     }
 }
 
@@ -2268,6 +2335,22 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             data: data.0,
             size,
         },
+        R::Voice { peer, pcm, rate } => Intent::SendVoice {
+            peer: parse_peer(&peer)?,
+            pcm: pcm
+                .0
+                .chunks_exact(2)
+                .map(|s| i16::from_le_bytes([s[0], s[1]]))
+                .collect(),
+            rate,
+        },
+        R::PlayVoice { peer, key, on } => {
+            let (peer, key) = (parse_peer(&peer)?, schema::model_key(key));
+            match on {
+                true => Intent::PlayVoice { peer, key },
+                false => Intent::PauseVoice { peer, key },
+            }
+        }
         R::Delete { peer, keys } => Intent::Delete {
             messages: Messages::Keys {
                 peer: parse_peer(&peer)?,

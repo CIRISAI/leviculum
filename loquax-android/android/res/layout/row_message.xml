@@ -41,6 +41,20 @@
         android:orientation="vertical"
         android:visibility="gone" />
 
+    <!-- A voice message (1222): the play or pause button, the level bar
+         and the length above the bubble, as a file's row; ChatActivity
+         fills it from the row. -->
+    <LinearLayout
+        android:id="@+id/voice"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="2dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="12dp"
+        android:visibility="gone" />
+
     <network.leviculum.loquax.BubbleLayout
         android:id="@+id/bubble"
         android:layout_width="wrap_content"
