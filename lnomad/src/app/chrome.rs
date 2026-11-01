@@ -8,7 +8,7 @@ use super::event::*;
 use super::geometry::Rect;
 use super::input::KeyCode;
 use super::model::*;
-use super::strings::{Arg, StrId, Text};
+use super::strings::{Arg, Lang, StrId, Text};
 
 /// The ` · ` separator drawn between the title and the address on the top bar.
 pub(crate) const TOPBAR_SEP: &str = " · ";
@@ -424,136 +424,97 @@ pub fn focused_link_target(model: &Model) -> Option<String> {
 
 pub(crate) use leviculum_ui::help::{HelpEntry, HelpGroup};
 
-/// The keybinding groups shown in the help overlay. The Move group's scroll rows
-/// are pulled straight from [`SCROLL_ROWS`], so the overlay can never list a
-/// scroll binding that the key handler does not honour, nor omit one it does.
-pub(crate) fn help_groups() -> Vec<HelpGroup> {
+/// The catalogue's words for a shared scroll row's description: the rows live
+/// in `leviculum-ui` with English words, the browser says them in its own
+/// language. A row this does not know keeps its English words
+/// (`every_scroll_row_has_its_words` holds that none is left so).
+pub(crate) fn scroll_desc(desc: &'static str, lang: Lang) -> &'static str {
+    let id = match desc {
+        "scroll a line" => StrId::HelpScrollLine,
+        "page down / up" => StrId::HelpScrollPage,
+        "half a page" => StrId::HelpScrollHalf,
+        "top / bottom" => StrId::HelpScrollEnds,
+        _ => return desc,
+    };
+    id.text(lang)
+}
+
+/// The keybinding groups shown in the help overlay, in `lang`. The Move
+/// group's scroll rows are pulled straight from [`SCROLL_ROWS`], so the overlay
+/// can never list a scroll binding that the key handler does not honour, nor
+/// omit one it does.
+pub(crate) fn help_groups_in(lang: Lang) -> Vec<HelpGroup> {
+    let w = |id: StrId| id.text(lang);
+    let e = |keys: &'static str, desc: StrId| HelpEntry {
+        keys,
+        desc: w(desc),
+    };
     // The scroll rows come straight from the keymap table; the mouse wheel is the
     // one Move affordance that is not a key chord, so it is appended here.
     let mut move_entries: Vec<HelpEntry> = SCROLL_ROWS
         .iter()
         .map(|s| HelpEntry {
             keys: s.keys(),
-            desc: s.desc,
+            desc: scroll_desc(s.desc, lang),
         })
         .collect();
-    move_entries.push(HelpEntry {
-        keys: "wheel",
-        desc: "scroll",
-    });
+    move_entries.push(e(w(StrId::HelpWheel), StrId::Scroll));
     vec![
         HelpGroup {
-            title: "Move",
+            title: w(StrId::HelpMove),
             entries: move_entries,
         },
         HelpGroup {
-            title: "Follow",
+            title: w(StrId::HelpFollow),
             entries: vec![
-                HelpEntry {
-                    keys: "Tab / Shift-Tab",
-                    desc: "focus a link or field",
-                },
-                HelpEntry {
-                    keys: "Enter / click",
-                    desc: "follow a link or footer button",
-                },
-                HelpEntry {
-                    keys: "f",
-                    desc: "hint — type a label or the link text",
-                },
-                HelpEntry {
-                    keys: "Alt-← / Alt-→   mouse side buttons",
-                    desc: "back / forward",
-                },
-                HelpEntry {
-                    keys: "hover a link",
-                    desc: "show its URL",
-                },
+                e(w(StrId::HelpFocusKeys), StrId::HelpFocus),
+                e(w(StrId::HelpFollowKeys), StrId::HelpFollowLink),
+                e("f", StrId::HelpHint),
+                e(w(StrId::HelpHistoryKeys), StrId::HelpHistory),
+                e(w(StrId::HelpHoverKeys), StrId::HelpHover),
             ],
         },
         HelpGroup {
-            title: "Page",
+            title: w(StrId::HelpPage),
             entries: vec![
-                HelpEntry {
-                    keys: ": / click the URL",
-                    desc: "enter a URL",
-                },
-                HelpEntry {
-                    keys: "R / Ctrl-R / F5",
-                    desc: "reload (always refetches)",
-                },
-                HelpEntry {
-                    keys: "Esc / Ctrl-g",
-                    desc: "cancel a load",
-                },
-                HelpEntry {
-                    keys: "m / click star",
-                    desc: "bookmark this page",
-                },
-                HelpEntry {
-                    keys: "y",
-                    desc: "copy the link's / page's URL",
-                },
-                HelpEntry {
-                    keys: "d / click a place",
-                    desc: "places panel — click an entry to open it",
-                },
-                HelpEntry {
-                    keys: "i",
-                    desc: "identify / go anonymous to this node",
-                },
-                HelpEntry {
-                    keys: "",
-                    desc: "default anonymous; identifying lets this node attribute your posts",
-                },
-                HelpEntry {
-                    keys: "/ n N",
-                    desc: "search / next / prev",
-                },
+                e(w(StrId::HelpUrlKeys), StrId::HelpUrl),
+                e("R / Ctrl-R / F5", StrId::HelpReload),
+                e("Esc / Ctrl-g", StrId::HelpCancel),
+                e(w(StrId::HelpMarkKeys), StrId::HelpMark),
+                e("y", StrId::HelpCopy),
+                e(w(StrId::HelpPlacesKeys), StrId::HelpPlaces),
+                e("i", StrId::HelpIdentify),
+                e("", StrId::HelpIdentifyNote),
+                e("/ n N", StrId::HelpSearch),
             ],
         },
         HelpGroup {
-            title: "Images",
+            title: w(StrId::HelpImages),
             entries: vec![
-                HelpEntry {
-                    keys: "Enter",
-                    desc: "save the focused picture (no second transfer)",
-                },
-                HelpEntry {
-                    keys: "o",
-                    desc: "open it in the system viewer",
-                },
-                HelpEntry {
-                    keys: "",
-                    desc: "start with --images off to leave them as plain links",
-                },
+                e("Enter", StrId::HelpSaveImage),
+                e("o", StrId::HelpOpenImage),
+                e("", StrId::HelpImagesOff),
             ],
         },
         HelpGroup {
-            title: "Fields",
-            entries: vec![HelpEntry {
-                keys: "type / Space / Esc",
-                desc: "edit / toggle / leave",
-            }],
+            title: w(StrId::HelpFields),
+            entries: vec![e(w(StrId::HelpFieldKeys), StrId::HelpField)],
         },
         HelpGroup {
-            title: "App",
+            title: w(StrId::HelpApp),
             entries: vec![
-                HelpEntry {
-                    keys: "t",
-                    desc: "light / dark theme",
-                },
-                HelpEntry {
-                    keys: "? / Esc / click",
-                    desc: "close this help",
-                },
-                HelpEntry {
-                    keys: "q / Ctrl-c",
-                    desc: "quit",
-                },
+                e("t", StrId::HelpTheme),
+                e(w(StrId::HelpCloseKeys), StrId::HelpClose),
+                e("q / Ctrl-c", StrId::Quit),
             ],
         },
     ]
+}
+
+/// The help groups in English, as the tests of `tui.rs` read them.
+#[cfg(test)]
+pub(crate) fn help_groups() -> Vec<HelpGroup> {
+    help_groups_in(Lang::En)
 }
 
 /// The plain-text lines of lnomad's help overlay ([`leviculum_ui::help::lines`]
@@ -572,5 +533,8 @@ pub(crate) fn help_lines() -> Vec<String> {
 /// [`leviculum_ui::help::scroll_bounds`] over the whole terminal.
 pub(crate) fn help_scroll_geometry(model: &Model) -> (usize, usize) {
     let (cols, rows) = model.size;
-    leviculum_ui::help::scroll_bounds(&help_groups(), leviculum_ui::Rect::new(0, 0, cols, rows))
+    leviculum_ui::help::scroll_bounds(
+        &help_groups_in(model.lang),
+        leviculum_ui::Rect::new(0, 0, cols, rows),
+    )
 }

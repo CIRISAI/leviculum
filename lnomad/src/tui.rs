@@ -389,7 +389,7 @@ fn render_images(model: &Model, images: &ImageStore, frame: &mut Frame, area: Re
                     continue;
                 }
                 let row = body.y + y as u16;
-                let text = crate::image::status_line(&slot.name, state);
+                let text = crate::image::status_text(&slot.name, state).resolve(model.lang);
                 let style = match model.no_color {
                     true => Style::default().add_modifier(Modifier::DIM),
                     false => paint(model.tokens().muted),
@@ -855,8 +855,8 @@ fn render_help(model: &Model, frame: &mut Frame, area: Rect) {
     help::render(
         frame,
         area,
-        &help_groups(),
-        " help — Esc, ? or click to close ",
+        &help_groups_in(model.lang),
+        StrId::HelpTitle.text(model.lang),
         model.help_scroll,
         model.no_color,
         model.theme,

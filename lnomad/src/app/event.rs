@@ -20,7 +20,7 @@ use super::input::{
     input_request, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use super::model::*;
-use super::strings::{with, with_args, Arg, StrId, Text};
+use super::strings::{with, with_args, Arg, Lang, StrId, Text};
 pub(crate) use leviculum_ui::keymap::{self, Ctx, Panes, SCROLL_ROWS};
 
 /// A UI input event, decoupled from crossterm so [`update`] is trivially
@@ -362,19 +362,22 @@ pub(crate) fn plan_images(model: &mut Model) -> Vec<Effect> {
     }
 }
 
-/// The start screen's micron source: what a reader sees when `lnomad` is
-/// started without a URL. A real micron document rather than hand-drawn chrome,
-/// so it goes through the same parse/layout/render path as a fetched page and
-/// re-wraps on a resize or a theme change for free.
-pub(crate) const START_PAGE: &str = "\
->lnomad
-
-Terminal browser for NomadNet pages.
-
-No page is open. Node discovery runs in the background, so nodes appear in the \
-places panel as their announces arrive.
-
-`!d`! places   `!:`! URL   `!?`! help   `!q`! quit";
+/// The start screen's micron source in `lang`: what a reader sees when
+/// `lnomad` is started without a URL. A real micron document rather than
+/// hand-drawn chrome, so it goes through the same parse/layout/render path as a
+/// fetched page and re-wraps on a resize or a theme change for free.
+pub(crate) fn start_page(lang: Lang) -> String {
+    let w = |id: StrId| id.text(lang);
+    format!(
+        ">lnomad\n\n{}\n\n{}\n\n`!d`! {}   `!:`! {}   `!?`! {}   `!q`! {}",
+        w(StrId::StartTagline),
+        w(StrId::StartNoPage),
+        w(StrId::Places),
+        w(StrId::Url),
+        w(StrId::Help),
+        w(StrId::Quit),
+    )
+}
 
 /// The title shown for the start screen, in place of a page's node name.
 pub(crate) const START_TITLE: &str = "lnomad";
@@ -389,7 +392,7 @@ pub(crate) const START_TITLE: &str = "lnomad";
 pub fn show_start_screen(model: &mut Model) {
     apply_loaded(
         model,
-        leviculum_micron::parse(START_PAGE),
+        leviculum_micron::parse(&start_page(model.lang)),
         START_TITLE.to_string(),
     );
     model.show_places = true;

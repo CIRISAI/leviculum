@@ -32,7 +32,7 @@ use super::event::*;
 use super::intent::Intent;
 use super::model::*;
 use super::strings::{with, Arg, StrId, Text};
-use crate::names::result_row;
+use crate::names::{conflict_text, result_text};
 
 /// A node's stable identity: a renderer diffs on it, hit tests to it, and
 /// moves the focus over it; [`NodeId::resource`] is its accessibility id.
@@ -573,7 +573,7 @@ fn names_sheet(model: &Model, results: &NameResults) -> Sheet {
         .iter()
         .enumerate()
         .map(|(i, hit)| {
-            let title = Text::Raw(result_row(hit, &model.pins, now));
+            let title = result_text(hit, &model.pins, now);
             Row::Item {
                 item: ListItem {
                     id: NodeId::Name(i),
@@ -592,7 +592,7 @@ fn names_sheet(model: &Model, results: &NameResults) -> Sheet {
         .collect();
     rows.push(match results.hits.get(results.sel) {
         Some(hit) if results.confirm => Row::Note {
-            text: Text::Raw(crate::names::conflict_prompt(hit, &model.pins)),
+            text: conflict_text(hit, &model.pins),
             ask: true,
         },
         _ => Row::Note {

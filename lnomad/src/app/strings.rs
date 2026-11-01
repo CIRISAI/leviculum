@@ -120,6 +120,67 @@ leviculum_ui::catalogue! {
     IdentifyNotSaved = "browser_identify_not_saved", "could not save identify decision: %1$s", "Identifizier-Entscheidung nicht gespeichert: %1$s";
     OpenedExternally = "browser_opened_externally", "opened externally: %1$s", "extern geöffnet: %1$s";
     FailedToOpen = "browser_failed_to_open", "failed to open: %1$s", "ließ sich nicht öffnen: %1$s";
+    // The name search's rows (1227).
+    NameRow = "browser_name_row", "%1$s  ·  %2$s  ·  %3$s%4$s", "%1$s  ·  %2$s  ·  %3$s%4$s";
+    OneHop = "browser_one_hop", "1 hop", "1 Sprung";
+    JustNow = "browser_just_now", "just now", "gerade eben";
+    MinutesAgo = "browser_minutes_ago", "%1$d min ago", "vor %1$d min";
+    HoursAgo = "browser_hours_ago", "%1$d h ago", "vor %1$d h";
+    DaysAgo = "browser_days_ago", "%1$d d ago", "vor %1$d d";
+    MarkPinned = "browser_mark_pinned", "  pinned", "  gepinnt";
+    MarkPinnedAs = "browser_mark_pinned_as", "  pinned as %1$s", "  gepinnt als %1$s";
+    MarkConflict = "browser_mark_conflict", "  ! name pinned to %1$s", "  ! Name gepinnt auf %1$s";
+    NameConflict = "browser_name_conflict", "\"%1$s\" is pinned to %2$s; this is ·%3$s, another key. Open and pin it too? y/n", "\"%1$s\" ist auf %2$s gepinnt; das hier ist ·%3$s, ein anderer Schlüssel. Öffnen und auch pinnen? y/n";
+    // The status line under an image that is not a picture.
+    ImageQueued = "browser_image_queued", "[%1$s: queued]", "[%1$s: wartet]";
+    ImageLoading = "browser_image_loading", "[%1$s: loading...]", "[%1$s: lädt...]";
+    ImageNotFetched = "browser_image_not_fetched", "[%1$s: not fetched]", "[%1$s: nicht geholt]";
+    // The start page, micron: the tagline and what the reader can do.
+    StartTagline = "browser_start_tagline", "Terminal browser for NomadNet pages.", "Terminal-Browser für NomadNet-Seiten.";
+    StartNoPage = "browser_start_no_page", "No page is open. Node discovery runs in the background, so nodes appear in the places panel as their announces arrive.", "Keine Seite offen. Die Knotensuche läuft im Hintergrund, Knoten erscheinen in den Orten, sobald ihre Ankündigungen eintreffen.";
+    Url = "browser_url", "URL", "URL";
+    // The help overlay: its title, the groups, and the words of each row.
+    HelpTitle = "browser_help_title", " help — Esc, ? or click to close ", " Hilfe — Esc, ? oder Klick schließt ";
+    HelpMove = "browser_help_move", "Move", "Bewegen";
+    HelpFollow = "browser_help_follow", "Follow", "Folgen";
+    HelpPage = "browser_help_page", "Page", "Seite";
+    HelpImages = "browser_help_images", "Images", "Bilder";
+    HelpFields = "browser_help_fields", "Fields", "Felder";
+    HelpApp = "browser_help_app", "App", "Programm";
+    HelpScrollLine = "browser_help_scroll_line", "scroll a line", "eine Zeile blättern";
+    HelpScrollPage = "browser_help_scroll_page", "page down / up", "Seite vor / zurück";
+    HelpScrollHalf = "browser_help_scroll_half", "half a page", "halbe Seite";
+    HelpScrollEnds = "browser_help_scroll_ends", "top / bottom", "Anfang / Ende";
+    HelpWheel = "browser_help_wheel", "wheel", "Mausrad";
+    HelpFocusKeys = "browser_help_focus_keys", "Tab / Shift-Tab", "Tab / Shift-Tab";
+    HelpFocus = "browser_help_focus", "focus a link or field", "Link oder Feld fokussieren";
+    HelpFollowKeys = "browser_help_follow_keys", "Enter / click", "Enter / Klick";
+    HelpFollowLink = "browser_help_follow_link", "follow a link or footer button", "Link oder Knopf der Fußleiste folgen";
+    HelpHint = "browser_help_hint", "hint — type a label or the link text", "Hinweis — Kürzel oder Linktext tippen";
+    HelpHistoryKeys = "browser_help_history_keys", "Alt-← / Alt-→   mouse side buttons", "Alt-← / Alt-→   Maus-Seitentasten";
+    HelpHistory = "browser_help_history", "back / forward", "zurück / vor";
+    HelpHoverKeys = "browser_help_hover_keys", "hover a link", "Zeiger auf Link";
+    HelpHover = "browser_help_hover", "show its URL", "zeigt seine URL";
+    HelpUrlKeys = "browser_help_url_keys", ": / click the URL", ": / Klick auf die URL";
+    HelpUrl = "browser_help_url", "enter a URL", "URL eingeben";
+    HelpReload = "browser_help_reload", "reload (always refetches)", "neu laden (holt immer neu)";
+    HelpCancel = "browser_help_cancel", "cancel a load", "Laden abbrechen";
+    HelpMarkKeys = "browser_help_mark_keys", "m / click star", "m / Klick auf Stern";
+    HelpMark = "browser_help_mark", "bookmark this page", "diese Seite merken";
+    HelpCopy = "browser_help_copy", "copy the link's / page's URL", "URL des Links / der Seite kopieren";
+    HelpPlacesKeys = "browser_help_places_keys", "d / click a place", "d / Klick auf einen Ort";
+    HelpPlaces = "browser_help_places", "places panel — click an entry to open it", "Orte — Klick auf einen Eintrag öffnet ihn";
+    HelpIdentify = "browser_help_identify", "identify / go anonymous to this node", "bei diesem Knoten identifizieren / anonym werden";
+    HelpIdentifyNote = "browser_help_identify_note", "default anonymous; identifying lets this node attribute your posts", "anonym ist Vorgabe; identifiziert ordnet dieser Knoten dir deine Beiträge zu";
+    HelpSearch = "browser_help_search", "search / next / prev", "suchen / nächster / voriger";
+    HelpSaveImage = "browser_help_save_image", "save the focused picture (no second transfer)", "fokussiertes Bild speichern (ohne zweite Übertragung)";
+    HelpOpenImage = "browser_help_open_image", "open it in the system viewer", "im Bildbetrachter des Systems öffnen";
+    HelpImagesOff = "browser_help_images_off", "start with --images off to leave them as plain links", "mit --images off starten lässt sie einfache Links";
+    HelpFieldKeys = "browser_help_field_keys", "type / Space / Esc", "tippen / Space / Esc";
+    HelpField = "browser_help_field", "edit / toggle / leave", "bearbeiten / umschalten / verlassen";
+    HelpTheme = "browser_help_theme", "light / dark theme", "helles / dunkles Thema";
+    HelpCloseKeys = "browser_help_close_keys", "? / Esc / click", "? / Esc / Klick";
+    HelpClose = "browser_help_close", "close this help", "diese Hilfe schließen";
 }
 
 /// `id` with one string argument.
@@ -193,6 +254,71 @@ mod tests {
         for (_, key, en, de) in CATALOGUE {
             assert_eq!(places(en), places(de), "{key}");
         }
+    }
+
+    /// The start page in English is the micron the terminal drew before the
+    /// catalogue, byte for byte; in German no English sentence is left.
+    #[test]
+    fn the_start_page_speaks_both_languages() {
+        let before = "\
+>lnomad
+
+Terminal browser for NomadNet pages.
+
+No page is open. Node discovery runs in the background, so nodes appear in the \
+places panel as their announces arrive.
+
+`!d`! places   `!:`! URL   `!?`! help   `!q`! quit";
+        let start_page = super::super::event::start_page;
+        assert_eq!(start_page(Lang::En), before);
+        let de = start_page(Lang::De);
+        assert!(de.contains("Keine Seite offen"), "{de}");
+        assert!(!de.contains("No page") && !de.contains("quit"), "{de}");
+    }
+
+    /// Every shared scroll row the help lists has the catalogue's words: in
+    /// German none keeps its English description.
+    #[test]
+    fn every_scroll_row_has_its_words() {
+        use super::super::chrome::scroll_desc;
+        use leviculum_ui::keymap::SCROLL_ROWS;
+        assert!(!SCROLL_ROWS.is_empty());
+        for row in SCROLL_ROWS {
+            assert_eq!(scroll_desc(row.desc, Lang::En), row.desc);
+            assert_ne!(scroll_desc(row.desc, Lang::De), row.desc, "{}", row.desc);
+        }
+        // A positive control on the lookup: an unknown row stays English.
+        assert_eq!(scroll_desc("fly away", Lang::De), "fly away");
+    }
+
+    /// The help in German: every group title and description is the
+    /// German text, and the layout still has as many rows as in English.
+    #[test]
+    fn the_help_speaks_german() {
+        use super::super::chrome::help_groups_in;
+        let en = help_groups_in(Lang::En);
+        let de = help_groups_in(Lang::De);
+        assert_eq!(en.len(), de.len());
+        for (e, d) in en.iter().zip(&de) {
+            assert_ne!(e.title, d.title, "{}", e.title);
+            assert_eq!(e.entries.len(), d.entries.len(), "{}", e.title);
+            for (ee, de) in e.entries.iter().zip(&d.entries) {
+                assert_ne!(ee.desc, de.desc, "{}", ee.desc);
+            }
+        }
+    }
+
+    /// The image status lines and the name rows keep their English words
+    /// and say them in German.
+    #[test]
+    fn image_and_name_words_resolve_in_german() {
+        use crate::image::{status_line, status_text, SlotState};
+        assert_eq!(status_line("a.png", &SlotState::Queued), "[a.png: queued]");
+        assert_eq!(
+            status_text("a.png", &SlotState::TooMany).resolve(Lang::De),
+            "[a.png: nicht geholt]"
+        );
+        assert_eq!(crate::names::ago_text(7200, 0).resolve(Lang::De), "vor 2 h");
     }
 
     #[test]
