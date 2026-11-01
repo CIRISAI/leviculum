@@ -247,3 +247,149 @@ async fn test_gateway_server_propagates_announce_to_inbound_peer() {
 
     node.stop().await.ok();
 }
+
+// =========================================================================
+// A phone behind an access-point server (1176)
+// =========================================================================
+
+/// A transport node with two TCP servers, one in `full` mode for the mesh
+/// and one in `phones_mode` for phones, an endpoint on the mesh server, and
+/// a phone (no transport) on the phones server. The endpoint announces;
+/// returned once the transport node holds the path, with the destination.
+struct PhoneRig {
+    transport: leviculum_std::driver::ReticulumNode,
+    endpoint: leviculum_std::driver::ReticulumNode,
+    phone: leviculum_std::driver::ReticulumNode,
+    dest: DestinationHash,
+    _storage: [tempfile::TempDir; 3],
+}
+
+async fn phone_rig(test_name: &str, phones_mode: &str) -> PhoneRig {
+    let mesh = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mesh");
+    let phones = std::net::TcpListener::bind("127.0.0.1:0").expect("bind phones");
+    let (mesh_addr, phones_addr) = (mesh.local_addr().unwrap(), phones.local_addr().unwrap());
+
+    let transport_storage = crate::common::temp_storage(test_name, "transport");
+    let mut transport = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_server_listener(mesh)
+        .add_tcp_server_listener(phones)
+        .interface_mode(phones_mode)
+        .storage_path(transport_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build transport");
+    transport.start().await.expect("start transport");
+
+    let phone_storage = crate::common::temp_storage(test_name, "phone");
+    let mut phone = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(phones_addr)
+        .storage_path(phone_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build phone");
+    phone.start().await.expect("start phone");
+
+    let endpoint_storage = crate::common::temp_storage(test_name, "endpoint");
+    let mut endpoint = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(mesh_addr)
+        .storage_path(endpoint_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build endpoint");
+    endpoint.start().await.expect("start endpoint");
+    // Both clients connected before the announce, so the phone is attached
+    // when the transport node rebroadcasts it.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let dest = announce_local_dest(&mut endpoint, "phone").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !transport.has_path(&dest) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the transport node never heard the endpoint's announce"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    PhoneRig {
+        transport,
+        endpoint,
+        phone,
+        dest,
+        _storage: [transport_storage, phone_storage, endpoint_storage],
+    }
+}
+
+/// Whether `node` holds a path to `dest` within `within`.
+async fn learns_path(
+    node: &leviculum_std::driver::ReticulumNode,
+    dest: &DestinationHash,
+    within: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if node.has_path(dest) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.has_path(dest)
+}
+
+/// How long the phone is given to hear the rebroadcast: the transport
+/// node's rebroadcast waits up to `PATHFINDER_RW` (0.5 s) plus the grace,
+/// and the full-mode control below hears it well within this.
+const REBROADCAST_WINDOW: Duration = Duration::from_secs(4);
+
+/// The phone on an access-point server hears no announce the transport node
+/// forwards from the mesh (Transport.py:1193-1197), and still gets the path
+/// when it asks for it: the answer is an announce attached to the phone's
+/// interface, which the access-point rule lets through (Transport.py:594,
+/// 615, 1194).
+#[tokio::test]
+async fn test_access_point_server_withholds_forwarded_announces_and_answers_path_requests() {
+    let mut rig = phone_rig("ap_phone", "access_point").await;
+
+    assert!(
+        !learns_path(&rig.phone, &rig.dest, REBROADCAST_WINDOW).await,
+        "the access-point server forwarded a mesh announce to the phone"
+    );
+
+    rig.phone
+        .request_path(&rig.dest)
+        .await
+        .expect("path request sent");
+    assert!(
+        learns_path(&rig.phone, &rig.dest, Duration::from_secs(5)).await,
+        "the access-point server did not answer the phone's path request"
+    );
+    assert_eq!(
+        rig.phone.hops_to(&rig.dest),
+        Some(2),
+        "phone -> transport -> endpoint"
+    );
+
+    rig.phone.stop().await.ok();
+    rig.endpoint.stop().await.ok();
+    rig.transport.stop().await.ok();
+}
+
+/// Positive control: the same rig with the phones' server in `full` mode
+/// forwards the announce, so the phone learns the path within the same
+/// window without asking. Without it the test above could pass on a phone
+/// that hears nothing at all.
+#[tokio::test]
+async fn test_full_server_forwards_announces_to_the_phone() {
+    let mut rig = phone_rig("full_phone", "full").await;
+
+    assert!(
+        learns_path(&rig.phone, &rig.dest, REBROADCAST_WINDOW).await,
+        "the full-mode server never forwarded the mesh announce to the phone"
+    );
+
+    rig.phone.stop().await.ok();
+    rig.endpoint.stop().await.ok();
+    rig.transport.stop().await.ok();
+}
