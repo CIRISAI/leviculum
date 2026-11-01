@@ -1633,3 +1633,78 @@ class JoinErrorWords(unittest.TestCase):
         self.assertLess(steps.index("join_error_words"), steps.index("first_start"))
         self.assertGreater(steps.index("first_start_qr"), steps.index("first_start"))
         self.assertGreater(steps.index("pencil_scan"), steps.index("first_start"))
+
+
+# `dumpsys connectivity` as Android 13 writes it, cut to the lines the
+# parser reads: the default network's id and the agents' transports.
+DUMPSYS_WIFI = """\
+Active default network: 100
+Current network preferences:
+  NetworkAgentInfo{network{100}  handle{430242300429}  ni{WIFI CONNECTED extra: }  \
+Score(Policies : IS_VALIDATED&IS_UNMETERED ; KeepConnected : 0)  nc{[ Transports: WIFI \
+Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED ]}}
+  NetworkAgentInfo{network{101}  handle{434537267725}  ni{MOBILE[LTE] CONNECTED extra: }  \
+nc{[ Transports: CELLULAR Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED ]}}
+"""
+
+
+class NetworkChange(unittest.TestCase):
+    """The three network steps (1298): what the default network is, and
+    the detail line and its table row."""
+
+    def test_the_default_network_is_read_from_its_agent_line(self):
+        self.assertEqual(walk.default_network(DUMPSYS_WIFI), "wifi")
+        mobile = DUMPSYS_WIFI.replace("Active default network: 100", "Active default network: 101")
+        self.assertEqual(walk.default_network(mobile), "mobile")
+        self.assertEqual(
+            walk.default_network("Active default network: none\n"), "none"
+        )
+        self.assertEqual(walk.default_network(""), "none", "no line is no network")
+        # A default network whose agent line is missing is not guessed.
+        self.assertEqual(
+            walk.default_network("Active default network: 102\n" + DUMPSYS_WIFI[27:]),
+            "other",
+        )
+        ethernet = DUMPSYS_WIFI.replace("Transports: WIFI", "Transports: ETHERNET")
+        self.assertEqual(walk.default_network(ethernet), "other")
+
+    def test_the_detail_says_each_line_once_and_both_times(self):
+        detail = walk.network_detail(
+            "wifi_toggle",
+            10,
+            ("wifi", "none", "wifi"),
+            ["", walk.RECONNECTING, walk.RECONNECTING, "", "Checking your mailbox…"],
+            2300,
+            4100,
+        )
+        self.assertEqual(
+            detail,
+            "change=wifi_toggle off_s=10 kinds=wifi>none>wifi "
+            "shown=Reconnecting…|Checking your mailbox… line_gone_ms=2300 bubble_ms=4100",
+        )
+        quiet = walk.network_detail("flight_mode", 120, ("wifi", "none", "wifi"), [], None, 900)
+        self.assertIn("shown=- line_gone_ms=never_shown bubble_ms=900", quiet)
+
+    def test_the_walk_log_gives_the_reports_table(self):
+        detail = walk.network_detail(
+            "mobile_switch", 20, ("wifi", "mobile", "wifi"), [walk.RECONNECTING], 1500, 2600
+        )
+        log = "\n".join(
+            [
+                walk.walk_line("draft", True, 10, "row=x"),
+                walk.walk_line("network_mobile_switch", True, 30000, detail),
+                walk.walk_line("network_mobile_switch", True, 9, "change=mobile_switch skipped=no_mobile_network"),
+            ]
+        )
+        self.assertEqual(
+            walk.network_rows(log),
+            ["| mobile_switch | 20 | wifi>mobile>wifi | Reconnecting… | 1500 | 2600 |"],
+        )
+
+    def test_the_steps_run_after_the_draft_and_before_the_map(self):
+        steps = walk.STEPS
+        for name in ("network_wifi_toggle", "network_mobile_switch", "flight_mode"):
+            self.assertIn(name, steps)
+            self.assertTrue(hasattr(walk.Walk, "step_" + name), name)
+        self.assertLess(steps.index("draft"), steps.index("network_wifi_toggle"))
+        self.assertLess(steps.index("flight_mode"), steps.index("map"))

@@ -88,6 +88,9 @@ STEPS = [
     "receive_report",
     "position_pin",
     "draft",
+    "network_wifi_toggle",
+    "network_mobile_switch",
+    "flight_mode",
     "map",
     "fling",
     "friends",
@@ -1930,6 +1933,85 @@ def input_text_arg(text: str) -> str:
 # --- The device. ---
 
 
+# A network change (1298): the line the screens show while a connection
+# the change dropped is not back (strings.xml `reconnecting`), and how long
+# the three walk steps keep the network away. The order's flight mode is
+# two minutes; `--flight-secs` shortens it for a quick run.
+RECONNECTING = "Reconnecting\u2026"
+WIFI_OFF_SECS = 10
+MOBILE_SECS = 20
+# How long after the network is back the host's message may take to show.
+BACK_BUDGET_SECS = 90
+
+ACTIVE_DEFAULT = re.compile(r"Active default network:\s*(\S+)")
+
+
+def default_network(dumpsys: str) -> str:
+    """The kind of the default network in `dumpsys connectivity`: `none`,
+    `wifi`, `mobile` or `other`. The agent line of the active network names
+    its transports (`Transports: WIFI`, `CELLULAR`); one that cannot be
+    found is `other`, never a guess at wifi."""
+    m = ACTIVE_DEFAULT.search(dumpsys)
+    if not m or m.group(1) in ("none", "null"):
+        return "none"
+    netid = m.group(1)
+    for line in dumpsys.splitlines():
+        if f"network{{{netid}}}" not in line or "Transports:" not in line:
+            continue
+        transports = line.split("Transports:", 1)[1].split("Capabilities:", 1)[0]
+        if "WIFI" in transports:
+            return "wifi"
+        if "CELLULAR" in transports:
+            return "mobile"
+        return "other"
+    return "other"
+
+
+def network_detail(
+    change: str,
+    off_secs: int,
+    kinds: tuple[str, str, str],
+    shown: list[str],
+    line_gone_ms: int | None,
+    bubble_ms: int,
+) -> str:
+    """One network step's WALK detail: the change, how long the network was
+    away, the kinds before, during and after, the lines the screen showed
+    meanwhile (each once, in order), when the "Reconnecting…" line was
+    gone and when the host's message showed, both counted from the moment
+    the network came back."""
+    seen: list[str] = []
+    for line in shown:
+        if line and line not in seen:
+            seen.append(line)
+    before, during, after = kinds
+    gone = "never_shown" if line_gone_ms is None else str(line_gone_ms)
+    return (
+        f"change={change} off_s={off_secs} kinds={before}>{during}>{after} "
+        f"shown={'|'.join(seen) or '-'} line_gone_ms={gone} bubble_ms={bubble_ms}"
+    )
+
+
+NETWORK_DETAIL = re.compile(
+    r"change=(?P<change>\S+) off_s=(?P<off>\d+) kinds=(?P<kinds>\S+) "
+    r"shown=(?P<shown>.*?) line_gone_ms=(?P<gone>\S+) bubble_ms=(?P<bubble>\d+)"
+)
+
+
+def network_rows(walk_log: str) -> list[str]:
+    """The network steps of a walk.log as the report's table rows:
+    `| change | off s | kinds | shown | line gone ms | message ms |`."""
+    rows = []
+    for line in walk_log.splitlines():
+        m = NETWORK_DETAIL.search(line)
+        if m:
+            rows.append(
+                f"| {m['change']} | {m['off']} | {m['kinds']} | {m['shown']} "
+                f"| {m['gone']} | {m['bubble']} |"
+            )
+    return rows
+
+
 class StepFailed(Exception):
     """A step's assertion failed; the message is its detail."""
 
@@ -3275,22 +3357,30 @@ class Walk:
             self.unseed_voice()
         return f"notice_at={seconds}s dot=steady discarded=ok"
 
+    def host_send(self, body: str) -> list[str]:
+        """The host sender's `loquax send` of `body` to the phone's address,
+        and its environment, for `subprocess`."""
+        fixture = self.need_fixture()
+        return [
+            self.args.loquax,
+            "send",
+            "--config",
+            str(fixture.cfg),
+            "--via",
+            "direct",
+            fixture.manifest["address"],
+            body,
+        ]
+
+    def host_env(self) -> dict:
+        return {**os.environ, "LNMSG_HOME": str(self.need_fixture().sender)}
+
     def step_receive_wake(self) -> str:
         dev = self.need_device()
-        fixture = self.need_fixture()
         body = f"walk wake {self.nonce}"
         send = subprocess.run(
-            [
-                self.args.loquax,
-                "send",
-                "--config",
-                str(fixture.cfg),
-                "--via",
-                "direct",
-                fixture.manifest["address"],
-                body,
-            ],
-            env={**os.environ, "LNMSG_HOME": str(fixture.sender)},
+            self.host_send(body),
+            env=self.host_env(),
             capture_output=True,
             timeout=60,
         )
@@ -3467,6 +3557,113 @@ class Walk:
             if node.bounds[1] <= middle <= node.bounds[3]:
                 return node
         raise StepFailed(f"no avatar beside {shown!r}")
+
+    def network_kind(self) -> str:
+        return default_network(self.need_device().shell("dumpsys connectivity", check=False))
+
+    def network_change(self, change: str, off: list[str], on: list[str], off_secs: int) -> str:
+        """One network change (1298) on the list screen: `off` takes the
+        network away (or swaps it), the screen's line is read every second
+        for `off_secs`, `on` brings it back, and the host sends a message
+        at once. Measured from the moment `on` ran: when the
+        "Reconnecting…" line was gone, and when the message showed in the
+        list. No tap: the app must come back by itself."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.wait_id("write", 10)
+        before = self.network_kind()
+        shown: list[str] = []
+
+        def line() -> str:
+            status = find(dev.dump(), rid="status")
+            return status[0].text if status else ""
+
+        for command in off:
+            dev.shell(command, check=False)
+        away_until = time.monotonic() + off_secs
+        # The platform takes a moment to let the network go.
+        during = wait_for(lambda: (k := self.network_kind()) != before and k, 10, every=0.5)
+        during = during or before
+        while time.monotonic() < away_until:
+            shown.append(line())
+            time.sleep(1.0)
+        if during == before:
+            for command in on:
+                dev.shell(command, check=False)
+            raise StepFailed(
+                f"the change did nothing on this device: the default network stayed {before}"
+            )
+        body = f"walk {change} {self.nonce}"
+        for command in on:
+            dev.shell(command, check=False)
+        back = time.monotonic()
+        send = subprocess.Popen(
+            self.host_send(body),
+            env=self.host_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        line_gone_ms: int | None = None
+        bubble_ms: int | None = None
+        try:
+            while time.monotonic() - back < BACK_BUDGET_SECS:
+                nodes = dev.dump()
+                now_ms = int((time.monotonic() - back) * 1000)
+                status = find(nodes, rid="status")
+                text = status[0].text if status and status[0].bounds[3] > status[0].bounds[1] else ""
+                shown.append(text)
+                if RECONNECTING in shown and RECONNECTING not in text and line_gone_ms is None:
+                    line_gone_ms = now_ms
+                if find(nodes, text=body, contains=True):
+                    bubble_ms = now_ms
+                    break
+                time.sleep(0.3)
+        finally:
+            try:
+                send.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                send.kill()
+        after = self.network_kind()
+        if bubble_ms is None:
+            raise StepFailed(
+                f"no {body!r} within {BACK_BUDGET_SECS}s of the network's return "
+                f"(kinds {before}>{during}>{after}, lines {shown[-4:]})"
+            )
+        return network_detail(change, off_secs, (before, during, after), shown, line_gone_ms, bubble_ms)
+
+    def step_network_wifi_toggle(self) -> str:
+        return self.network_change(
+            "wifi_toggle", ["svc wifi disable"], ["svc wifi enable"], WIFI_OFF_SECS
+        )
+
+    def step_network_mobile_switch(self) -> str:
+        """WLAN off with mobile data on, then the WLAN back. A device
+        without mobile data (Waydroid, a phone without a SIM) has none to
+        switch to: the step says so in its detail and measures nothing."""
+        dev = self.need_device()
+        dev.shell("svc data enable", check=False)
+        dev.shell("svc wifi disable", check=False)
+        has_mobile = wait_for(lambda: self.network_kind() == "mobile", 15, every=1.0)
+        dev.shell("svc wifi enable", check=False)
+        if not has_mobile:
+            wait_for(lambda: self.network_kind() != "none", 30, every=1.0)
+            return "change=mobile_switch skipped=no_mobile_network"
+        wait_for(lambda: self.network_kind() == "wifi", 30, every=1.0)
+        return self.network_change(
+            "mobile_switch", ["svc wifi disable"], ["svc wifi enable"], MOBILE_SECS
+        )
+
+    def step_flight_mode(self) -> str:
+        return self.network_change(
+            "flight_mode",
+            ["cmd connectivity airplane-mode enable"],
+            ["cmd connectivity airplane-mode disable"],
+            self.args.flight_secs,
+        )
 
     def step_map(self) -> str:
         dev = self.need_device()
@@ -4481,6 +4678,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--adb", default="adb", help="the adb to use")
     p.add_argument("--keep", action="store_true", help="no teardown")
+    p.add_argument(
+        "--flight-secs",
+        type=int,
+        default=120,
+        help="how long flight_mode keeps the network away (the order's two minutes)",
+    )
     p.add_argument("--out", default=str(REPO / "target/tmp/device-walk"), help="log directory")
     p.add_argument(
         "--steps",
