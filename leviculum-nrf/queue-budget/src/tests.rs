@@ -1050,59 +1050,194 @@ fn the_hold_edge_lifts_on_the_first_idle_turn_after_the_rolling_hour_frees_a_bin
 
 // --- The LoRa interface's outbound verdict (leviculum#413) ----------------
 
+/// Distinct frames of a chosen length: a running counter in the first four
+/// bytes, so no two are copies of each other (1169).
+struct Frames(u32);
+
+impl Frames {
+    fn next(&mut self, len: usize) -> Vec<u8> {
+        self.0 += 1;
+        let mut f = vec![0x5a; len];
+        f[..4].copy_from_slice(&self.0.to_be_bytes());
+        f
+    }
+}
+
 #[test]
 fn a_dark_carrier_swallows_a_packet_however_full_the_queue_is() {
     let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
-    assert_eq!(outbound_verdict(false, &q, MTU), Outbound::Swallow);
+    let c = QueuedCopies::new();
+    let mut f = Frames(0);
+    assert_eq!(
+        outbound_verdict(false, &q, &c, &f.next(MTU)),
+        Outbound::Swallow
+    );
     assert_eq!(q.queued_slots(), 0, "a swallowed packet reserves nothing");
+    assert!(c.is_empty(), "and records nothing");
     // Fill the queue while lit, then switch the carrier off: still Swallow,
     // never the BufferFull a full queue would answer.
-    while outbound_verdict(true, &q, MTU) == Outbound::Queue {}
+    while outbound_verdict(true, &q, &c, &f.next(MTU)) == Outbound::Queue {}
     let full = (q.queued_slots(), q.queued_bytes());
-    assert_eq!(outbound_verdict(false, &q, MTU), Outbound::Swallow);
+    assert_eq!(
+        outbound_verdict(false, &q, &c, &f.next(MTU)),
+        Outbound::Swallow
+    );
     assert_eq!((q.queued_slots(), q.queued_bytes()), full);
 }
 
 #[test]
 fn a_lit_carrier_queues_with_room_and_refuses_with_the_bound_that_bound() {
     let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
-    assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+    let c = QueuedCopies::new();
+    let mut f = Frames(0);
+    assert_eq!(
+        outbound_verdict(true, &q, &c, &f.next(MTU)),
+        Outbound::Queue
+    );
     assert_eq!((q.queued_slots(), q.queued_bytes()), (1, MTU));
     for _ in 1..LORA_QUEUE_BYTES / MTU {
-        assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+        assert_eq!(
+            outbound_verdict(true, &q, &c, &f.next(MTU)),
+            Outbound::Queue
+        );
     }
     let before = (q.queued_slots(), q.queued_bytes());
     assert_eq!(
-        outbound_verdict(true, &q, MTU),
+        outbound_verdict(true, &q, &c, &f.next(MTU)),
         Outbound::Refuse(QueueBound::Bytes)
     );
     assert_eq!((q.queued_slots(), q.queued_bytes()), before);
+    assert_eq!(c.len(), before.0, "a refused packet is not recorded");
 
     // Small packets bind the slot bound instead.
     let small = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    let c = QueuedCopies::new();
     for _ in 0..LORA_QUEUE_SLOTS {
-        assert_eq!(outbound_verdict(true, &small, 20), Outbound::Queue);
+        assert_eq!(
+            outbound_verdict(true, &small, &c, &f.next(20)),
+            Outbound::Queue
+        );
     }
     assert_eq!(
-        outbound_verdict(true, &small, 20),
+        outbound_verdict(true, &small, &c, &f.next(20)),
         Outbound::Refuse(QueueBound::Slots)
     );
+    assert_eq!(c.len(), LORA_QUEUE_SLOTS, "the table holds a full queue");
 }
 
 #[test]
 fn a_channel_refusal_hands_the_reserved_room_back() {
     let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
-    assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+    let c = QueuedCopies::new();
+    let mut f = Frames(0);
+    let first = f.next(MTU);
+    assert_eq!(outbound_verdict(true, &q, &c, &first), Outbound::Queue);
     q.channel_refused(MTU);
+    c.dequeued(&first);
     assert_eq!((q.queued_slots(), q.queued_bytes()), (0, 0));
-    // Refusal after refusal leaks nothing: the queue still takes a full load.
+    assert!(c.is_empty());
+    // Refusal after refusal leaks nothing: the queue still takes a full load,
+    // and the refused frame itself is not taken for a queued one.
     for _ in 0..100 {
-        assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+        assert_eq!(outbound_verdict(true, &q, &c, &first), Outbound::Queue);
         q.channel_refused(MTU);
+        c.dequeued(&first);
     }
     for _ in 0..LORA_QUEUE_BYTES / MTU {
-        assert_eq!(outbound_verdict(true, &q, MTU), Outbound::Queue);
+        assert_eq!(
+            outbound_verdict(true, &q, &c, &f.next(MTU)),
+            Outbound::Queue
+        );
     }
+}
+
+// --- A copy of a queued frame (1169) --------------------------------------
+
+#[test]
+fn a_copy_of_a_queued_frame_is_dropped_and_reserves_nothing() {
+    let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    let c = QueuedCopies::new();
+    let response = vec![0x51; 183];
+    assert_eq!(outbound_verdict(true, &q, &c, &response), Outbound::Queue);
+    for _ in 0..2 {
+        assert_eq!(
+            outbound_verdict(true, &q, &c, &response),
+            Outbound::Duplicate
+        );
+    }
+    assert_eq!((q.queued_slots(), q.queued_bytes()), (1, 183));
+    // One byte different is a different frame.
+    let mut other = response.clone();
+    other[182] ^= 1;
+    assert_eq!(outbound_verdict(true, &q, &c, &other), Outbound::Queue);
+}
+
+#[test]
+fn a_copy_of_a_frame_that_left_the_queue_is_queued_again() {
+    // Dequeued means handed to the transmitter: that copy can still be lost
+    // on the air, so a retry of it must go out.
+    let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    let c = QueuedCopies::new();
+    let response = vec![0x51; 183];
+    assert_eq!(outbound_verdict(true, &q, &c, &response), Outbound::Queue);
+    q.release(response.len());
+    c.dequeued(&response);
+    assert_eq!(outbound_verdict(true, &q, &c, &response), Outbound::Queue);
+}
+
+#[test]
+fn a_copy_is_dropped_even_when_the_queue_is_full() {
+    // Not BufferFull: the driver would offer the copy again and again,
+    // although the queued original already carries it.
+    let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    let c = QueuedCopies::new();
+    let mut f = Frames(0);
+    let first = f.next(MTU);
+    assert_eq!(outbound_verdict(true, &q, &c, &first), Outbound::Queue);
+    while outbound_verdict(true, &q, &c, &f.next(MTU)) == Outbound::Queue {}
+    assert_eq!(outbound_verdict(true, &q, &c, &first), Outbound::Duplicate);
+}
+
+#[test]
+fn a_dark_carrier_swallows_a_copy_too() {
+    let q = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+    let c = QueuedCopies::new();
+    let response = vec![0x51; 183];
+    assert_eq!(outbound_verdict(true, &q, &c, &response), Outbound::Queue);
+    assert_eq!(
+        outbound_verdict(false, &q, &c, &response),
+        Outbound::Swallow
+    );
+}
+
+#[test]
+fn dequeuing_forgets_one_copy_and_an_unknown_frame_nothing() {
+    let c = QueuedCopies::new();
+    let a = vec![1u8; 40];
+    let b = vec![2u8; 40];
+    c.queued(&a);
+    c.queued(&b);
+    c.dequeued(&[9u8; 40]);
+    assert_eq!(c.len(), 2, "a frame never recorded changes nothing");
+    c.dequeued(&a);
+    assert!(!c.is_queued(&a));
+    assert!(c.is_queued(&b));
+}
+
+#[test]
+fn a_full_table_queues_untracked_and_never_refuses() {
+    let c = QueuedCopies::new();
+    let mut f = Frames(0);
+    for _ in 0..LORA_QUEUE_SLOTS {
+        c.queued(&f.next(20));
+    }
+    let extra = f.next(20);
+    c.queued(&extra);
+    assert_eq!(c.len(), LORA_QUEUE_SLOTS);
+    assert!(
+        !c.is_queued(&extra),
+        "untracked: a later copy is keyed, the behaviour before the table"
+    );
 }
 
 // --- One packet's frames on the air (leviculum#413) ----------------------

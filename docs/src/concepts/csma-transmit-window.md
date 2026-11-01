@@ -144,7 +144,7 @@ The two predict a median gap of 216 ms and 204 ms; the bench measured
 we are already transmitting owes nothing, because the frame before it
 served the wait. The wait comes back when the channel is handed back,
 which the transmit path does after its post-TX listening window
-(`leviculum-nrf/src/lora.rs:2598`).
+(`leviculum-nrf/src/lora.rs:2634`).
 
 Asking for the wait does not discharge it. The wait is spent listening
 and the listen returns early on a reception, so a wait cut short by an
@@ -249,7 +249,7 @@ Codeberg #423, and it is fixed here rather than described.
 
 The window the transmit path opens after a transmission is one full
 single-frame reply airtime plus the peer's turnaround
-(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:984`, deciding in
+(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:1020`, deciding in
 `leviculum-channel-access` where the peer's window is defined). The right
 comparison is against the peer's time to *key up*, not to finish its
 frame: the receiver stops its timeout on preamble detect and then runs
@@ -328,7 +328,7 @@ that went deaf would trade a collision for a missed frame, which is the
 same loss at the layer that counts. The transmit path arms the receiver
 for the drawn duration and reports back what it actually listened
 through, and a reception that cuts the wait short leaves the debt
-standing (`leviculum-nrf/src/lora.rs:2315`).
+standing (`leviculum-nrf/src/lora.rs:2351`).
 
 ## 6. Does the window's floor matter?
 

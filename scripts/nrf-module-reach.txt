@@ -32,7 +32,7 @@ src/gnss.rs (598): boards log log_critical vext
 src/heap_census.rs (398): log pn
 src/led.rs (48): feedback log
 src/lib.rs (745): log log_critical
-src/lora.rs (2710): announce chtm events log media pn radio radio_store set_irq_priorities
+src/lora.rs (2747): announce chtm events log media pn radio radio_store set_irq_priorities
 src/media.rs (288): log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): log

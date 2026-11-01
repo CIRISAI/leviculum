@@ -166,7 +166,7 @@ packet it accepts (`accepted_packets`, `leviculum-nrf/src/lora.rs:49`) and
 the task settles each one in that order, keyed or dropped
 (`settle_packet`, `leviculum-nrf/src/lora.rs:55`, called at the mute's
 drop, the stale drop and after a transmission,
-`leviculum-nrf/src/lora.rs:1829,2224,2469`). The button arm notes the
+`leviculum-nrf/src/lora.rs:1865,2260,2505`). The button arm notes the
 count before and after its dispatch around the feedback policy's
 watch (`leviculum-nrf/firmware/src/feedback.rs:273`, called from each
 binary, e.g. `leviculum-nrf/src/bin/t1000e.rs:1099-1119`), and the
