@@ -32,9 +32,9 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3650`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2424`) and the positions in a table of
-their own (`SCHEMA_V2`, `loquax/src/store.rs:183`). The sender's timestamp
+`loquax/src/ui.rs:3691`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:2529`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:191`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.
@@ -50,14 +50,14 @@ What the core reads them with, all in `leviculum-lxmf`, `no_std + alloc`:
   (`leviculum-lxmf/src/constants.rs:61`, `leviculum-lxmf/src/constants.rs:62`);
 - the Telemeter codec, `Telemetry` (`leviculum-lxmf/src/telemetry.rs:176`)
   with `Telemetry::decode_field_value`
-  (`leviculum-lxmf/src/telemetry.rs:325`), and its `Location` in the wire's
+  (`leviculum-lxmf/src/telemetry.rs:341`), and its `Location` in the wire's
   scaled integers (`leviculum-lxmf/src/telemetry.rs:56`);
 - the stream decoder for a collector's rows, `decode_stream_field_value`
-  (`leviculum-lxmf/src/telemetry.rs:381`);
+  (`leviculum-lxmf/src/telemetry.rs:493`);
 - the request reader, `telemetry_request_timebase`
-  (`leviculum-lxmf/src/telemetry.rs:688`), whose command id is a
+  (`leviculum-lxmf/src/telemetry.rs:800`), whose command id is a
   documented assumption (`COMMAND_TELEMETRY_REQUEST`,
-  `leviculum-lxmf/src/telemetry.rs:678`).
+  `leviculum-lxmf/src/telemetry.rs:790`).
 
 ## 1. What the user sees
 
@@ -1142,6 +1142,70 @@ remembered. The techniques and the measurements behind their order are
   `<mosh|tmux|screen|local>:<TERM_PROGRAM, else TERM>`. A remembered way
   wins over the ladder at the next start unless it cannot work there at
   all (a picture behind mosh), which is said once.
+
+### Sharing for a while (1273)
+
+Lew, 2026-11-01: sharing a position must be possible once, for a
+certain time, or until stopped, and ending it must be simple. The
+position sheet behind the compose bar's ⌖ (1270) has five rows: "Now,
+once" sends one report as before; "For 15 minutes", "For 1 hour", "For
+8 hours" and "Until I stop" start a **share** for that chat. The model
+owns it (`loquax/src/ui/share.rs`): its end time, its cadence and the
+last report it sent. The platform only delivers fixes and the clock.
+
+**The cadence**, constants in `share.rs`, after the board's rule in
+[announce cadence](announce-cadence.md) (5 min moving, 1 h still),
+shortened at rest so the receiver keeps the stream live:
+
+| Rule | Constant | Value |
+|---|---|---|
+| the share's first fix goes at once | | |
+| a fix farther than this from the last report goes | `MOVED_M` | 25 m |
+| never two reports closer than | `MIN_GAP_S` | 60 s |
+| after a report for a move, the next at the latest | `MOVING_EVERY_S` | 5 min |
+| at rest, one report every | `STILL_EVERY_S` | 15 min |
+
+The distance is the equirectangular one, exact enough at 25 m. A clock
+without a new fix still sends the rest report from the newest fix (a
+phone at rest may deliver none), and the phone's session wakes at least
+every `MIN_GAP_S` while a share runs.
+
+**On the wire** every report of a running share carries the share mark
+of [telemetry](telemetry.md), "The extension ladder": `"every": 900`,
+the longest the next report waits, as the location's eighth element.
+The stop sends one last report from the newest fix with `"ended":
+true`. A receiver's liveness (1209, `ui::liveness`) keeps a stream live
+for twice the promise whatever cadence it learned, so a sharer who walked
+(reports a minute apart) and then sat down stays live for half an hour
+between rest reports; the end report makes the stream not live at all,
+only as old as it is: the chat's header and the Friends sheet say the
+age words (`last position 2 min ago`) from then on. A receiver that does
+not know the mark sees the same fixes and an older last one.
+
+**Visible while it runs, stoppable in one tap.** The chat shows a chip at
+its top, `scene::ShareChip`: "Sharing your position, 42 min left" (the
+time left rounded up, minutes under an hour, else hours) or "Sharing
+your position until you stop", and its Stop. The list's row carries
+`sharing`, drawn as a small ⌖ in the accent colour on our side. Settings,
+Privacy, "Position sharing" lists every running share by name with its
+words and a Stop (`scene::share_rows`). The terminal cannot share (it has
+no position), but draws the chip row of a share the model holds under
+the mailbox's row, `⌖ Sharing your position, 42 min left · click to
+stop`, and a click on it stops the share (`tests/fixtures/tui_share_chip.frames`).
+
+**Android.** The foreground service `ShareService` (type location)
+keeps the fixes coming while a share runs: GPS and the network provider
+every 30 s, and in the debug build the walk's seeded fix every 15 s. Its
+notification says "Loquax shares your position", with whom and how long,
+and has a Stop that ends every share with its end report. It starts from
+the sheet's row and whenever the list says a share runs (a share of a
+restart among them), and ends itself once the library lists none. A
+share survives a restart (schema 10, [storage](loquax-storage.md)); one
+whose end passed meanwhile ends at the first clock with its end report.
+No share survives an uninstall: the store goes with the app. Android 14
+refuses a location service started from the background; a share
+restored before any screen then runs on the fixes a screen brings until
+one starts the service.
 
 ## 7. Decided
 

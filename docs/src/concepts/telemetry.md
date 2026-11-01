@@ -396,7 +396,7 @@ answer to every timebase.
 Sideband's own source is not vendored under `reference/`, so the
 command id (0x01) and the value shape (a list of command maps,
 `[{0x01: <timebase>}]`) are a **documented assumption** — recorded at
-`COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:678`) —
+`COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:790`) —
 to be verified against a captured Columba/Sideband request and then
 pinned as a fixture.
 
@@ -663,6 +663,31 @@ climbs from the bottom and stops at the first rung that works.
    upstream in LXMF, proposed as such, and not shipped into one client
    ahead of that. A field number minted by us and understood by one app
    is a fork of the format with a friendlier name.
+
+**One extension in use: the share mark (Loquax 1273, Lew 2026-11-01).**
+A live position share has to say two things the seven location
+elements cannot: how long the next report may take, so a resting sharer
+stays live at the receiver, and that this report is the last, so the
+receiver turns from live to an age at once. It rides as an **eighth
+element of the `SID_LOCATION` array**, a msgpack map with string keys:
+`"every"` (an int, seconds, the longest gap to the next report while
+the share runs) and `"ended"` (`true` on the stop's report). The codec
+is `ShareMark` in `leviculum-lxmf/src/telemetry.rs`
+(`Telemetry::encode_marked`, `ShareMark::of_blob`); an empty mark writes
+the plain seven elements byte for byte. It sits below rung 1: it is no
+new sensor and no new field, but more of an existing sensor's value.
+Failure mode on a viewer that does not participate: Sideband's
+`Location.unpack` (`2000d81`) reads elements 0 to 6 and ignores the
+rest, as this tree's `parse_location` does, so such a viewer reads the
+same fix and sees the end report as one more, older position; the
+stream then goes stale by that viewer's own clock. Columba's own parser
+is not in this tree and was not read for this; whether it accepts an
+eighth element is the open check before the mark is offered beyond
+Loquax. Both ends are ours (the facade test
+`a_share_starts_lists_and_stops_with_its_end_report` and the store's
+bytes). Columba's `FIELD_CUSTOM_META` `expires` would tell a Columba
+viewer the same end; not built, and its `cease`, which deletes the track,
+is not what an end report means here.
 
 Two conditions apply at every rung. An extension must be **demonstrated
 between two implementations that are both ours** before it is offered to

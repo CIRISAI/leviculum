@@ -200,8 +200,17 @@ Lew, 2026-10-31: Loquax may read the phone's location. Rules:
    the user shares it: from the map's empty state button, from a pin's
    card ("Share mine" with that friend), or from the chat's attachment
    menu. Reading the location for the crosshair sends nothing.
-5. Live sharing (a position every few minutes for an hour) is deferred
-   until the battery measurement exists.
+5. Sharing for a while (1273, Lew 2026-11-01: once, for a certain time,
+   or until stopped, and ending it simple): the chat's position sheet
+   offers "Now, once", "For 15 minutes", "For 1 hour", "For 8 hours" and
+   "Until I stop". While a share runs the chat shows a chip at its top
+   ("Sharing your position, 42 min left", or "… until you stop") with a
+   Stop, the list's row a small ⌖ in the accent colour, Settings, Privacy,
+   "Position sharing" lists every running share with its Stop, and a
+   foreground service shows "Loquax shares your position" with a Stop of
+   its own. The rules and the numbers are in [the map](loquax-map.md),
+   "Sharing for a while". The battery side is measured by tier R (1177)
+   afterwards, not assumed.
 
 ## Settings
 
@@ -319,9 +328,9 @@ a friend already on screen is one tap away from the map (the pin).
 ## Deferred
 
 - **The Calls tab**, with LXST; it appears when calls work.
-- **Live sharing** for an hour, after the battery measurement: a
-  position every few minutes keeps the radio and the GPS awake, and that
-  cost is measured before it ships, as for the keepalives of
+- **Live sharing** was here; Lew lifted it on 2026-11-01 (1273, above).
+  Its cost, the radio and the GPS kept awake, is measured by tier R
+  (1177) afterwards, as for the keepalives of
   [the home node](loquax-home-node.md).
 - **Routing**: never ours; Navigate hands off to the phone's app.
 

@@ -396,10 +396,11 @@ The plus opens the attachment sheet, a `Sheet` node with its rows
 position; a Contact row later). The position button opens the position
 sheet straight away, unlike Signal, which buries the position in its
 plus: sharing a position is one tap away. That sheet shows the own fix on
-the map and its age ("Found 5 min ago"; the scene's `Whereabouts`) and one
-row, "Send my position now" (`ShareFix`), which sends the fix to the chat
-as the position report of 1209 (a state, not a message) and closes the
-sheet; without a fix it says so and offers "Turn location on", the
+the map and its age ("Found 5 min ago"; the scene's `Whereabouts`) and
+the row "Now, once" (`ShareFix`, "Send my position now" until 1273),
+which sends the fix to the chat as the position report of 1209 (a state,
+not a message) and closes the sheet, then since 1273 the four shares
+(`StartShare`, [the map](loquax-map.md), "Sharing for a while"); without a fix it says so and offers "Turn location on", the
 permission flow of 1201. Both paths lead to the same sheet.
 
 The camera takes a photo at once and stages it in the bar with its
