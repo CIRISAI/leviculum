@@ -245,10 +245,10 @@ The reasons for the tab:
 
 What the network seam needs on the phone (slice 3): the mailbox's node is
 built with transport off and without the application event stream
-(`loquax/src/engine/shell.rs:641`, `loquax/src/engine/shell.rs:680`): it
+(`loquax/src/engine/shell.rs:693`, `loquax/src/engine/shell.rs:732`): it
 is "a destination on the network, not a transport node"
-(`loquax/src/engine/shell.rs:667`), so a leaf on its screens' listener
-(`loquax/src/engine/shell.rs:670`) has no route through it to a NomadNet
+(`loquax/src/engine/shell.rs:719`), so a leaf on its screens' listener
+(`loquax/src/engine/shell.rs:722`) has no route through it to a NomadNet
 node. So the browser on the phone
 fetches through the mailbox's node itself: `fetch::Session` (`Session`,
 `lnomad/src/fetch.rs:120`) gains a constructor over a node the host hands
