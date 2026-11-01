@@ -93,6 +93,7 @@ STEPS = [
     "first_start_qr",
     "pencil_scan",
     "buildings",
+    "link_device",
     "teardown",
 ]
 
@@ -100,6 +101,19 @@ STEPS = [
 # runs the phone in English; a German one shows values-de's.
 WHERE_TITLE = "Where should your mailbox be?"
 WHERE_COMPUTER = "On a computer at home"
+WHERE_PHONE = "On this phone"
+USE_THIS_PHONE = "Use this phone"
+DONE = "Done"
+# Link a device (1264, finding 7): the profile's row, the sheet's ids, the
+# line once the other device came, and the name the walk's second device
+# (the host's loquax) brings in its join.
+LINK_ROW = "profile_link_device"
+LINK_QR = "link_qr"
+LINK_CODE = "link_code"
+LINK_STATUS = "link_status"
+LINKED = "Device linked: {}"
+LINKED_NAME = "walk laptop"
+JOIN_CODE_PREFIX = "lqxh1"
 CONTINUE = "Continue"
 PASTE_CODE = "Paste a code"
 JOIN = "Join"
@@ -1048,6 +1062,24 @@ def first_start_qr_problems(welcome: list[str], profile: list[str], address: str
             problems.append(f"the {where} QR is {read[0]!r}, not of {address}")
     if len(welcome) == 1 and len(profile) == 1 and welcome != profile:
         problems.append(f"the first start's QR {welcome[0]!r} is not the profile's {profile[0]!r}")
+    return problems
+
+
+def link_code_problems(shown: str, scanned: list[str], server: str) -> list[str]:
+    """The sheet of "Link a device" (1264): the code as text is a join
+    code with the phone mailbox's server list behind it, which the walk
+    set to `server`, and the QR on screen reads as the same code (a join
+    code's QR raises it to capitals for the alphanumeric mode, so the case
+    is not compared)."""
+    problems = []
+    if not shown.startswith(JOIN_CODE_PREFIX):
+        problems.append(f"the code {shown!r} is no join code")
+    elif not shown.endswith(f"@{server}"):
+        problems.append(f"the code {shown!r} does not carry {server}")
+    if len(scanned) != 1:
+        problems.append(f"the sheet holds {len(scanned)} codes: {scanned}")
+    elif scanned[0].lower() != shown.lower():
+        problems.append(f"the QR reads {scanned[0]!r}, the text says {shown!r}")
     return problems
 
 
@@ -3530,6 +3562,69 @@ class Walk:
             time.sleep(0.6)
         if not find(dev.dump(), rid="map"):
             raise StepFailed(f"not back on the map after the theme {choice!r}")
+
+    def step_link_device(self) -> str:
+        """Link a device (1264, finding 7), last before the teardown since
+        it starts the app afresh: the phone becomes the mailbox ("On this
+        phone"), its node dialling the walk's lnsd (the servers file, put
+        in before the first start, stands in for the public rendezvous);
+        the profile's "Link a device" shows a join code whose QR zbarimg
+        reads as the code's text, the server behind it; the host's loquax
+        joins with that code over lnsd as a second device, under its own
+        name; the sheet then says "Device linked: <that name>"."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        dev.shell(f"am force-stop {PACKAGE}", check=False)
+        dev.shell(f"pm clear {PACKAGE}")
+        dev.shell(
+            f"run-as {PACKAGE} sh -c 'mkdir -p files/mailbox && "
+            f"echo {self.args.server} > files/mailbox/servers'"
+        )
+        dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
+        self.wait_text(WHERE_TITLE, 20)
+        self.tap_text(WHERE_PHONE)
+        self.tap_text(USE_THIS_PHONE)
+        deadline = time.monotonic() + 90
+        while True:
+            nodes = dev.dump()
+            if find(nodes, rid="write") and find(nodes, rid="avatar"):
+                break
+            if time.monotonic() > deadline:
+                raise StepFailed(f"no chats 90s after Use this phone; screen: {texts(nodes)[:12]}")
+            if find(nodes, rid="welcome_qr") and find(nodes, text=DONE):
+                dev.tap_node(find(nodes, text=DONE)[0])
+            elif find(nodes, text=CONTINUE):
+                dev.tap_node(find(nodes, text=CONTINUE)[0])
+            else:
+                self.dismiss_dialogs(1)
+            time.sleep(0.5)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        dev.tap_node(self.wait_id(LINK_ROW, 10)[0])
+        self.wait_id(LINK_QR, 15)
+        shown = find(dev.dump(), rid=LINK_CODE)
+        code = shown[0].text.strip() if shown else ""
+        problems = link_code_problems(code, self.screen_codes("link_device"), self.args.server)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        second = fixture.root / "linked"
+        second.mkdir(exist_ok=True)
+        joined = subprocess.run(
+            [self.args.loquax, "mailbox", "join", "--config", str(fixture.cfg), code],
+            env={**os.environ, "LNMSG_HOME": str(second), "LNMSG_DISPLAY_NAME": LINKED_NAME},
+            capture_output=True,
+            timeout=120,
+        )
+        if joined.returncode != 0:
+            raise StepFailed(
+                f"loquax mailbox join exit={joined.returncode}: {joined.stderr.decode()[-300:]}"
+            )
+        self.wait_text(LINKED.format(LINKED_NAME), 15)
+        done = find(dev.dump(), text=DONE)
+        if done:
+            dev.tap_node(done[0])
+        else:
+            dev.key("KEYCODE_BACK")
+        return f"code={code[:24]}… server={self.args.server} linked={LINKED_NAME!r}"
 
     def step_teardown(self) -> str:
         done = []

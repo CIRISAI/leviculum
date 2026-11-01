@@ -425,6 +425,32 @@ class Code(unittest.TestCase):
         self.assertIsNone(walk.parse_code("loquax: no mailbox here"))
 
 
+class LinkDevice(unittest.TestCase):
+    """The sheet of "Link a device" (1264)."""
+
+    CODE = "lqxh1abcdefgh234567@192.168.240.1:4242"
+
+    def test_a_code_with_its_server_and_its_qr_passes(self):
+        self.assertEqual(
+            walk.link_code_problems(self.CODE, [self.CODE.upper()], "192.168.240.1:4242"), []
+        )
+
+    def test_a_contact_code_or_another_server_is_named(self):
+        problems = walk.link_code_problems("lxma://00", ["lxma://00"], "192.168.240.1:4242")
+        self.assertIn("no join code", problems[0])
+        problems = walk.link_code_problems(self.CODE, [self.CODE], "10.0.0.2:4242")
+        self.assertIn("does not carry 10.0.0.2:4242", problems[0])
+
+    def test_a_qr_that_reads_otherwise_or_twice_is_named(self):
+        problems = walk.link_code_problems(self.CODE, ["lqxh1other"], "192.168.240.1:4242")
+        self.assertIn("the QR reads", problems[0])
+        problems = walk.link_code_problems(self.CODE, [], "192.168.240.1:4242")
+        self.assertIn("holds 0 codes", problems[0])
+
+    def test_the_step_is_last_before_the_teardown(self):
+        self.assertEqual(walk.STEPS[-2:], ["link_device", "teardown"])
+
+
 class Screencap(unittest.TestCase):
     def test_both_headers(self):
         for header in (12, 16):
