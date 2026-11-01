@@ -1037,7 +1037,17 @@ impl<B> UiModel<B> {
         if self.search.is_some() {
             ctx = ctx.with(keys::SEARCHING);
         }
+        if self.recording_bar().is_some() {
+            ctx = ctx.with(keys::RECORDING);
+        }
         ctx
+    }
+
+    /// The recording bar of the open conversation, while a voice message
+    /// records for it (1276): the terminal's compose box is the bar then.
+    pub fn recording_bar(&self) -> Option<scene::RecordingBar> {
+        let peer = self.conversations.get(self.selected)?.peer;
+        scene::recording_bar(self, peer)
     }
 
     /// What the open search looks for, when it looks for anything: the
@@ -1200,6 +1210,11 @@ impl<B> UiModel<B> {
     where
         B: InputBuffer,
     {
+        // The recording bar (1276): its row, and the line under it when it
+        // says something.
+        if let Some(bar) = self.recording_bar() {
+            return 1 + usize::from(bar.notice.is_some());
+        }
         self.compose
             .value()
             .split('\n')
@@ -1272,6 +1287,7 @@ impl<B> UiModel<B> {
                     mark: self.query(),
                     home_client: self.home_client,
                     receipts: self.reading.on,
+                    tracks: Some(&self.voice_tracks),
                 },
             ),
             None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
@@ -1990,7 +2006,15 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
     let pane = model.focus;
     // A selection lasts until the next key: the copy row copies it.
     let selection = model.selection.take();
+    // While a voice message records (1276) the bar is the compose box:
+    // nothing is typed into the field it hides, and the send chord sends
+    // the recording.
+    let recording = pane == Pane::Compose && ctx.contains(keys::RECORDING);
     match keys::resolve(&key, keys::panes_of(pane), ctx) {
+        Some(Action::Run(PaletteCommand::Send)) if recording => {
+            record_key(model, keys::RecKey::Send)
+        }
+        Some(Action::Edit | Action::Newline | Action::ClearDraft) | None if recording => Vec::new(),
         Some(Action::Copy) => copy(model, selection),
         Some(action) => act(model, action, key),
         None => {
@@ -2187,6 +2211,7 @@ fn act<B: InputBuffer + Default>(
         Action::CloseSearch => close_search(model),
         Action::Map(cmd) => return map_key(model, cmd),
         Action::OpenMessage => return open_message(model),
+        Action::Record(key) => return record_key(model, key),
         Action::PeerOnMap => peer_on_map(model),
     }
     Vec::new()
@@ -2663,10 +2688,56 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
         }
         Target::Send => {
             model.focus = Pane::Compose;
+            if model.recording_bar().is_some() {
+                return record_key(model, keys::RecKey::Send);
+            }
             return run(model, PaletteCommand::Send);
+        }
+        // A button of the recording bar, or its silence line (1276).
+        Target::Rec(verb) => {
+            model.focus = Pane::Compose;
+            if let Some(peer) = model.conversations.get(model.selected).map(|c| c.peer) {
+                return model.record(peer, recording::Input::Verb(verb));
+            }
         }
     }
     Vec::new()
+}
+
+/// A key of the recording (1276) in the open conversation. A terminal has
+/// no hold, so a recording starts locked; `p` pauses or goes on, `Space`
+/// plays or stops, by where the recording is. The time is the shell's
+/// clock, which the levels come on too.
+fn record_key<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    key: keys::RecKey,
+) -> Vec<UiEffect> {
+    use recording::{Input, Phase, Verb};
+    let Some(peer) = model.conversations.get(model.selected).map(|c| c.peer) else {
+        return Vec::new();
+    };
+    let verb = match key {
+        keys::RecKey::Start => {
+            model.focus = Pane::Compose;
+            let now = model.elapsed_ms;
+            let mut effects = model.record(peer, Input::Press { now });
+            if model.recording.peer == peer && matches!(model.recording.phase, Phase::Held { .. }) {
+                effects.extend(model.record(peer, Input::Verb(Verb::Lock)));
+            }
+            return effects;
+        }
+        keys::RecKey::Send => Verb::Send,
+        keys::RecKey::Discard => Verb::Discard,
+        keys::RecKey::Pause => match model.recording.phase {
+            Phase::Paused => Verb::Resume,
+            _ => Verb::Pause,
+        },
+        keys::RecKey::Play => match model.recording.previewing {
+            true => Verb::StopPlay,
+            false => Verb::Play,
+        },
+    };
+    model.record(peer, Input::Verb(verb))
 }
 
 /// What a footer button runs when clicked: its row's action, the same the
@@ -4128,6 +4199,9 @@ pub struct View {
     /// The compose pane's border hint: the chords that send and break the
     /// line in this terminal and setting ([`keys::compose_hint`]).
     pub compose_hint: String,
+    /// While a voice message records for the open conversation (1276):
+    /// the recording bar, drawn in the compose box in the field's place.
+    pub recording: Option<layout::RecRows>,
     /// Where the focus is: the renderer marks that pane.
     pub focus: Pane,
     /// The footer buttons.
@@ -4565,6 +4639,17 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         None => "compose".to_string(),
     };
     let ctx = model.ctx();
+    let recording = model.recording_bar().map(|bar| {
+        let width = hit::screen(model).compose.width.saturating_sub(2);
+        layout::recording_rows(
+            &bar,
+            usize::from(width),
+            model.ascii,
+            model.tokens(),
+            keys::send_chord(ctx),
+            model.tick,
+        )
+    });
     let palette = model.palette.as_ref().map(|p| PaletteView {
         query: p.query.value().to_string(),
         cursor: p.query.cursor(),
@@ -4630,7 +4715,11 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         compose_title,
         compose: model.compose.value().to_string(),
         compose_cursor: model.compose.cursor(),
-        compose_hint: keys::compose_hint(ctx),
+        compose_hint: match &recording {
+            Some(_) => format!("{} send · Esc cancel", keys::send_chord(ctx)),
+            None => keys::compose_hint(ctx),
+        },
+        recording,
         focus: model.focus,
         footer: footer(model),
         footer_hover: model.footer_hover,

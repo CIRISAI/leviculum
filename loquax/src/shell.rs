@@ -249,6 +249,9 @@ pub(crate) struct Shell {
     watch: Option<(tokio::task::JoinHandle<()>, UnboundedReceiver<WatchEvent>)>,
     watching: bool,
     fallback: Fallback,
+    /// The desktop's microphone (1276): the system's recorder, run on the
+    /// model's recording effects and pumped on every poll.
+    mic: crate::mic::Mic,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -372,8 +375,16 @@ impl Shell {
                     }
                 }
                 UiEffect::PauseVoice { .. } => {}
-                // The terminal records nothing yet (1276, pass two).
-                UiEffect::Recording { .. } => {}
+                // The recording bar's effects (1276): the microphone runs
+                // them; a finished recording comes back as its voice
+                // message, a preview as a WAV file for the system's player.
+                UiEffect::Recording { peer, effect } => {
+                    let done = self.mic.effect(peer, effect, &self.context.home);
+                    if let Some(path) = done.play {
+                        self.outputs.push(Output::File(path));
+                    }
+                    answers.extend(done.events);
+                }
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
                 UiEffect::Remember { key, value } => {
@@ -661,6 +672,40 @@ impl Shell {
         let steps = self.loader.poll(self.elapsed_ms());
         self.map_steps(steps);
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
+        self.listen();
+    }
+
+    /// The microphone's windows since the last poll, as levels, and the
+    /// recording's clock (1276); a recorder that stopped by itself is
+    /// said once.
+    fn listen(&mut self) {
+        let pumped = self.mic.pump(self.elapsed_ms());
+        for input in pumped.inputs {
+            self.apply(UiEvent::Record {
+                peer: pumped.peer,
+                input,
+            });
+        }
+        if let Some(line) = pumped.stopped {
+            self.apply(UiEvent::Notice(line));
+        }
+    }
+
+    /// A gesture on the window's microphone (1276), on the shell's clock:
+    /// the window has none of its own that the model's recording counts
+    /// by.
+    #[cfg(feature = "gui")]
+    pub(crate) fn record(&mut self, peer: [u8; 16], input: loquax::ui::recording::Input) {
+        use loquax::ui::recording::Input;
+        let now = self.elapsed_ms();
+        let input = match input {
+            Input::Press { .. } => Input::Press { now },
+            Input::Release { .. } => Input::Release { now },
+            Input::Tick { .. } => Input::Tick { now },
+            other => other,
+        };
+        self.apply(UiEvent::Elapsed(now));
+        self.apply(UiEvent::Record { peer, input });
     }
 
     /// The clock's tick, every [`TICK_MS`]: the time of day to the model,
@@ -1246,6 +1291,10 @@ pub(crate) async fn start(
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     model.reading.on = config.read_receipts.unwrap_or(true);
     model.photo_size = config.photo_size.unwrap_or_default();
+    // The microphone (1276): the system's recorder, where it has one; the
+    // window offers the microphone only then.
+    let mic = crate::mic::Mic::of_process();
+    model.bar.abilities.microphone = mic.available();
     // The mailbox's schedule: the flag, else the config file, else fifteen
     // minutes. A script runs one only when its command line names the flag,
     // as it ticks only when it says so.
@@ -1355,6 +1404,7 @@ pub(crate) async fn start(
         watch,
         watching: false,
         fallback: Fallback::default(),
+        mic,
     };
     Ok((shell, config))
 }

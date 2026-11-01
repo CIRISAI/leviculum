@@ -65,6 +65,9 @@ pub enum Target {
     Compose { at: usize },
     /// The word `send` on the compose box's border. Transmits: a send.
     Send,
+    /// A button of the recording bar in the compose box, or its silence
+    /// line's click (1276), by the verb it raises.
+    Rec(super::recording::Verb),
     /// A footer button.
     Footer(FooterAct),
     /// Inside the open palette or detail view.
@@ -194,6 +197,18 @@ pub fn target_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Targ
         let box_ = inner(screen.compose, true);
         if !rect_contains(box_, col, row) {
             return Target::Pane(Pane::Compose);
+        }
+        // The recording bar in the field's place (1276): its buttons, and
+        // no text to put a cursor in.
+        if let Some(bar) = &shown.recording {
+            let (x, y) = (usize::from(col - box_.x), usize::from(row - box_.y));
+            return bar
+                .buttons
+                .iter()
+                .find(|&&(r, c, len, _)| r == y && x >= c && x < c + len)
+                .map_or(Target::Pane(Pane::Compose), |&(_, _, _, verb)| {
+                    Target::Rec(verb)
+                });
         }
         return Target::Compose {
             at: compose_index(

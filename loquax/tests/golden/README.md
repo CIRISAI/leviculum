@@ -56,6 +56,20 @@ window in the Compact class (1218), 420 x 640, light, drawn by
 chat alone with a back in its bar, and once the model closed it the
 list with the tabs at the bottom, as the phone stacks them.
 
+`gui-recording-held.png`, `gui-recording-locked.png`,
+`gui-recording-paused.png`: the window's recording bar (1276) over the
+chat of `gui-chat-light.png`, 900 x 560, light, drawn by
+`gui::tests::the_recording_bar_is_the_golden_held_locked_and_paused`:
+held three seconds into a recording with the pointer 40 px left (the red
+dot, `REC 00:03`, the live waveform, the cancel hint, the grown red
+microphone and the open lock chip above it); locked seven seconds in,
+after a three second voice message went whose bubble draws the
+recording's own waveform (the bin, the pause, the big Send, the closed
+lock); paused after three silent seconds (the hollow dot, the play, the
+bin, resume, and the amber "Nothing heard" line with its Allow). The
+pulse is a frame of the timer's clock, so each picture is the same when
+taken again.
+
 
 `scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json`:
 the scene of the list and the chat (1217, `loquax::ui::scene`) built from

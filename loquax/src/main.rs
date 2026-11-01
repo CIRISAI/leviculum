@@ -22,6 +22,8 @@
 #[cfg(feature = "gui")]
 mod gui;
 #[cfg(any(feature = "tui", feature = "gui"))]
+mod mic;
+#[cfg(any(feature = "tui", feature = "gui"))]
 mod shell;
 #[cfg(feature = "tui")]
 mod tui;

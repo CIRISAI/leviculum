@@ -130,6 +130,12 @@ impl Seen {
 pub enum Want {
     Map(MapWant),
     Ui(UiEvent),
+    /// A gesture or a button of the recording (1276), timed by the shell
+    /// on the clock the model's recording counts by.
+    Record {
+        peer: [u8; 16],
+        input: loquax::ui::recording::Input,
+    },
 }
 
 /// `loquax gui`: the shell started as the terminal starts it, driven on
@@ -214,6 +220,7 @@ async fn drive(
             Some(want) = asks.recv() => match want {
                 Want::Map(want) => shell.map_ask(want),
                 Want::Ui(event) => shell.apply(event),
+                Want::Record { peer, input } => shell.record(peer, input),
             },
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => shell.tick(&mut clocks),
@@ -303,6 +310,15 @@ pub enum Message {
     Viewer(viewer::Input),
     /// The viewer's Close.
     ViewerClose,
+    /// The microphone went down under the mouse (1276): it records while
+    /// held.
+    RecPress,
+    /// The pointer, in logical pixels, while the microphone is held.
+    RecCursor(Point),
+    /// The mouse button came up while the microphone was held.
+    RecRelease,
+    /// The pointer went onto the lock chip, or off it, while held.
+    RecOverLock(bool),
 }
 
 impl Message {
@@ -518,6 +534,12 @@ struct App {
     scene: Scene,
     /// The photo whole while it is open (1269), over everything.
     viewer: Option<viewer::Viewer>,
+    /// The microphone held by the mouse (1276): the chat it records for,
+    /// where the pointer was first seen since, and whether it is over
+    /// the lock chip.
+    rec_held: Option<[u8; 16]>,
+    rec_origin: Option<Point>,
+    rec_over_lock: bool,
 }
 
 impl App {
@@ -589,6 +611,9 @@ impl App {
             lang: Lang::En,
             scene: empty,
             viewer: None,
+            rec_held: None,
+            rec_origin: None,
+            rec_over_lock: false,
         }
     }
 
@@ -609,6 +634,57 @@ impl App {
     fn tell(&self, event: UiEvent) {
         if let Some(asks) = &self.asks {
             let _ = asks.send(Want::Ui(event));
+        }
+    }
+
+    /// Hand a gesture or a button of the recording to the model, through
+    /// the shell's clock (1276).
+    fn record(&self, peer: [u8; 16], input: loquax::ui::recording::Input) {
+        if let Some(asks) = &self.asks {
+            let _ = asks.send(Want::Record { peer, input });
+        }
+    }
+
+    /// The microphone held with the mouse (1276): down is the press,
+    /// every move the slide from where the pointer was first seen, in
+    /// logical pixels as dp (left and up negative), up the release, or
+    /// the lock where it comes up over the chip.
+    fn rec_mouse(&mut self, message: Message) {
+        use loquax::ui::recording::{Input, Verb};
+        match message {
+            Message::RecPress => {
+                let Some(peer) = self.scene.chat.as_ref().map(|c| c.peer) else {
+                    return;
+                };
+                self.rec_held = Some(peer);
+                self.rec_origin = None;
+                self.rec_over_lock = false;
+                self.record(peer, Input::Press { now: 0 });
+            }
+            Message::RecCursor(at) => {
+                let Some(peer) = self.rec_held else {
+                    return;
+                };
+                let origin = *self.rec_origin.get_or_insert(at);
+                self.record(
+                    peer,
+                    Input::Slide {
+                        dx: (at.x - origin.x).round() as i32,
+                        dy: (at.y - origin.y).round() as i32,
+                    },
+                );
+            }
+            Message::RecRelease => {
+                let Some(peer) = self.rec_held.take() else {
+                    return;
+                };
+                match std::mem::take(&mut self.rec_over_lock) {
+                    true => self.record(peer, Input::Verb(Verb::Lock)),
+                    false => self.record(peer, Input::Release { now: 0 }),
+                }
+            }
+            Message::RecOverLock(over) => self.rec_over_lock = over && self.rec_held.is_some(),
+            _ => {}
         }
     }
 
@@ -637,6 +713,10 @@ impl App {
                     Err(why) => self.seen.notice = Some(why.say(self.lang).to_string()),
                 }
             }
+            Message::RecPress
+            | Message::RecCursor(_)
+            | Message::RecRelease
+            | Message::RecOverLock(_) => self.rec_mouse(message),
             Message::Compose(action) => {
                 let edit = action.is_edit();
                 self.compose.perform(action);
@@ -875,6 +955,10 @@ impl App {
                 self.tell(UiEvent::OpenFile { peer, key, index })
             }
             Intent::PlayVoice { peer, key } => self.tell(UiEvent::PlayVoice { peer, key }),
+            // The recording bar's buttons (1276).
+            Intent::Recording { peer, verb } => {
+                self.record(peer, loquax::ui::recording::Input::Verb(verb))
+            }
             Intent::PauseVoice { peer, key } => self.tell(UiEvent::PauseVoice { peer, key }),
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
@@ -978,11 +1062,18 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut all = vec![
             window::events().map(|(_, event)| Message::Window(event)),
             keyboard::listen().map(Message::Key),
             iced::system::theme_changes().map(Message::SystemTheme),
-        ])
+        ];
+        // The pointer anywhere in the window while the microphone is held
+        // (1276): it may leave the button, and the release counts
+        // wherever it is.
+        if self.rec_held.is_some() {
+            all.push(iced::event::listen_with(held_pointer));
+        }
+        Subscription::batch(all)
     }
 
     fn now_ms(&self) -> u64 {
@@ -1603,6 +1694,24 @@ impl canvas::Program<Message> for MapCanvas<'_> {
 
 /// The language the desktop's locale names (`LC_ALL`, `LC_MESSAGES`,
 /// `LANG`, the first one set): the scene's words are said in it.
+/// What the held microphone follows (1276): the pointer's moves and the
+/// left button's release, anywhere in the window.
+fn held_pointer(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _: window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::RecCursor(position))
+        }
+        iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            Some(Message::RecRelease)
+        }
+        _ => None,
+    }
+}
+
 fn locale() -> Lang {
     ["LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
@@ -2479,6 +2588,138 @@ mod tests {
         let (w, h) = (900, 560);
         app.window = Size::new(w as f32, h as f32);
         map::tests::same_as("gui-chat-media.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// `pcm` as the microphone's levels for Anna's recording, a window
+    /// every 50 ms from `from` on; the time after the last.
+    fn levels_of(model: &mut crate::shell::Model, pcm: &[i16], from: u64) -> u64 {
+        use loquax::ui::recording::{rms, Input, WINDOW_MS};
+        let mut now = from;
+        for chunk in pcm.chunks((loquax::voice::RATE / (1000 / WINDOW_MS)) as usize) {
+            now += u64::from(WINDOW_MS);
+            update(
+                model,
+                UiEvent::Record {
+                    peer: ANNA,
+                    input: Input::Level {
+                        now,
+                        rms: rms(chunk),
+                    },
+                },
+            );
+        }
+        now
+    }
+
+    fn rec(model: &mut crate::shell::Model, input: loquax::ui::recording::Input) {
+        update(model, UiEvent::Record { peer: ANNA, input });
+    }
+
+    /// The recording bar in the window (1276), pixel for pixel the
+    /// goldens, light, 900 x 560: held (the red dot, `REC 00:03`, the
+    /// live waveform, the cancel hint followed 40 px left, the grown red
+    /// microphone with the open lock chip risen above it), locked after a
+    /// voice message already went (its bubble draws the recording's own
+    /// waveform; the bar has the bin, the pause and the big Send under
+    /// the closed lock), and paused after three silent seconds (the
+    /// hollow dot, the play, the bin, resume, and the amber line with its
+    /// Allow). Each picture is the same when taken again.
+    #[test]
+    fn the_recording_bar_is_the_golden_held_locked_and_paused() {
+        use loquax::ui::recording::{Input, Phase, Verb};
+        let speech = loquax::voice::test_speech(loquax::voice::RATE, 7_400);
+        let (w, h) = (900, 560);
+        let shot = |model: &crate::shell::Model| {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+            app.apply(Message::Seen(Box::new(seen_of(model))));
+            app.window = Size::new(w as f32, h as f32);
+            let first = shoot(&app, w, h);
+            assert_eq!(shoot(&app, w, h), first, "a second picture is the same");
+            first
+        };
+
+        let mut held = chat_model();
+        rec(&mut held, Input::Press { now: 1_000 });
+        levels_of(&mut held, &speech[..48_000], 1_000);
+        rec(&mut held, Input::Slide { dx: -40, dy: -30 });
+        assert!(matches!(held.recording.phase, Phase::Held { .. }));
+
+        let mut locked = chat_model();
+        rec(&mut locked, Input::Press { now: 1_000 });
+        let end = levels_of(&mut locked, &speech[..48_000], 1_000);
+        rec(&mut locked, Input::Release { now: end });
+        assert_eq!(locked.recording.phase, Phase::Sent);
+        let data = loquax::voice::encode(&speech[..48_000], loquax::voice::RATE).expect("coded");
+        update(&mut locked, UiEvent::SendVoice { peer: ANNA, data });
+        rec(&mut locked, Input::Press { now: 20_000 });
+        rec(&mut locked, Input::Verb(Verb::Lock));
+        levels_of(&mut locked, &speech, 20_000);
+        assert!(matches!(locked.recording.phase, Phase::Locked { .. }));
+
+        let mut paused = chat_model();
+        rec(&mut paused, Input::Press { now: 1_000 });
+        rec(&mut paused, Input::Verb(Verb::Lock));
+        levels_of(&mut paused, &vec![0; 48_000], 1_000);
+        rec(&mut paused, Input::Verb(Verb::Pause));
+        assert_eq!(paused.recording.phase, Phase::Paused);
+
+        for (name, model) in [
+            ("gui-recording-held.png", &held),
+            ("gui-recording-locked.png", &locked),
+            ("gui-recording-paused.png", &paused),
+        ] {
+            map::tests::same_as(name, &shot(model), w, h);
+        }
+    }
+
+    /// The mouse on the window's microphone (1276): down is the press,
+    /// the moves are slides from where the pointer was first seen, up is
+    /// the release; up over the lock chip locks instead; the bar's
+    /// buttons are the model's verbs. Every one goes to the shell, which
+    /// times it.
+    #[test]
+    fn the_mouse_holds_slides_locks_and_releases_the_microphone() {
+        use loquax::ui::recording::{Input, Verb};
+        let (mut app, mut rx) = chat_window();
+        let mut sent = || {
+            let mut out = Vec::new();
+            while let Ok(want) = rx.try_recv() {
+                if let Want::Record { peer, input } = want {
+                    assert_eq!(peer, ANNA);
+                    out.push(input);
+                }
+            }
+            out
+        };
+        let _ = app.update(Message::RecPress);
+        let _ = app.update(Message::RecCursor(Point::new(800.0, 500.0)));
+        let _ = app.update(Message::RecCursor(Point::new(700.0, 480.0)));
+        let _ = app.update(Message::RecRelease);
+        assert_eq!(
+            sent(),
+            [
+                Input::Press { now: 0 },
+                Input::Slide { dx: 0, dy: 0 },
+                Input::Slide { dx: -100, dy: -20 },
+                Input::Release { now: 0 },
+            ]
+        );
+        // Released again: nothing, it is no longer held.
+        let _ = app.update(Message::RecRelease);
+        let _ = app.update(Message::RecCursor(Point::new(1.0, 1.0)));
+        assert!(sent().is_empty());
+        // Up over the chip: the lock.
+        let _ = app.update(Message::RecPress);
+        let _ = app.update(Message::RecOverLock(true));
+        let _ = app.update(Message::RecRelease);
+        assert_eq!(sent(), [Input::Press { now: 0 }, Input::Verb(Verb::Lock)]);
+        // A button of the bar.
+        let _ = app.update(Message::Intent(Intent::Recording {
+            peer: ANNA,
+            verb: Verb::Pause,
+        }));
+        assert_eq!(sent(), [Input::Verb(Verb::Pause)]);
     }
 
     /// A narrow window stacks as the phone does, and a resize switches

@@ -475,6 +475,10 @@ impl Intent {
             keys::Action::Map(cmd) => Intent::Map(cmd),
             keys::Action::OpenMessage => Intent::OpenMessage,
             keys::Action::PeerOnMap => Intent::OpenMapAt { peer: Target::Open },
+            // The recording's keys are the terminal's (1276): they resolve
+            // in its compose pane alone, where a key is the field's, and a
+            // window or a phone records with the pointer.
+            keys::Action::Record(_) => Intent::Edit,
         }
     }
 

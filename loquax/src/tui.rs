@@ -1285,7 +1285,12 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
     let no_color = tier == Tier::Mono;
     let tokens = leviculum_ui::tokens(tier, theme);
     let compose_lines: Vec<&str> = view.compose.split('\n').collect();
-    let compose_rows = compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS);
+    // The recording bar takes the field's place (1276): its row, and the
+    // line under it when it says something.
+    let compose_rows = match &view.recording {
+        Some(bar) => bar.rows.len(),
+        None => compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS),
+    };
     // The model's rectangles, the ones the mouse hit-tests against.
     let area = frame.area();
     let screen = ui::Screen::of(area.width, area.height, compose_rows);
@@ -1390,15 +1395,21 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
         usize::from(inner.width),
         usize::from(inner.height),
     );
-    let shown: Vec<Line> = compose_lines
-        .iter()
-        .skip(top)
-        .take(usize::from(inner.height.max(1)))
-        .map(|line| Line::from(line.chars().skip(scroll).collect::<String>()))
-        .collect();
-    frame.render_widget(Paragraph::new(Text::from(shown)), inner);
+    match &view.recording {
+        Some(bar) => frame.render_widget(Paragraph::new(to_ratatui_text(&bar.rows)), inner),
+        None => {
+            let shown: Vec<Line> = compose_lines
+                .iter()
+                .skip(top)
+                .take(usize::from(inner.height.max(1)))
+                .map(|line| Line::from(line.chars().skip(scroll).collect::<String>()))
+                .collect();
+            frame.render_widget(Paragraph::new(Text::from(shown)), inner);
+        }
+    }
     let overlay = view.palette.is_some() || view.help || view.detail.is_some();
-    if focused && !overlay {
+    // No cursor in the recording bar: there is no text to type into.
+    if focused && !overlay && view.recording.is_none() {
         frame.set_cursor_position(Position::new(
             inner.x + (cursor_column - scroll) as u16,
             inner.y + (cursor_line - top) as u16,
@@ -2022,6 +2033,261 @@ mod tests {
         );
         assert!(model.share(&peer).is_none());
         assert_eq!(model.chip_row(), None);
+    }
+
+    /// Recording a voice message in the terminal (1276): `Alt-v` in
+    /// compose starts it locked and the compose box is the bar, the dot
+    /// and the timer, the waveform in block characters, the keys; `p`
+    /// pauses, and a microphone that heard nothing says so on the line
+    /// under it; the cap stops it into the preview with its line. Each at
+    /// 80 x 24 and 120 x 40, pinned in
+    /// `tests/fixtures/tui_recording.frames`. Then the keys and the
+    /// clicks: `v` sends, `Esc` and a click on `Esc cancel` throw it away,
+    /// a click on the silence line asks for the microphone.
+    #[test]
+    fn the_recording_bar_takes_the_compose_box_and_its_keys() {
+        use loquax::ui::recording::{rms, Effect, Input, Phase, WINDOW_MS};
+        let peer = [0xab; 16];
+        let key = |model: &mut Model, code: KeyCode, mods: KeyModifiers| {
+            update(model, UiEvent::Key(KeyEvent::new(code, mods)))
+        };
+        let fresh = || {
+            let mut model = Model::new(&[peer]);
+            model.names.remember(peer, "Anna Schulz");
+            update(&mut model, UiEvent::Open { peer });
+            update(&mut model, UiEvent::Elapsed(1_000));
+            let _ = key(&mut model, KeyCode::Tab, KeyModifiers::NONE);
+            let _ = key(&mut model, KeyCode::Tab, KeyModifiers::NONE);
+            assert_eq!(model.focus, Pane::Compose);
+            model
+        };
+        // `ms` of sound from 1000 on, a level a window: the speech's or
+        // silence.
+        let feed = |model: &mut Model, pcm: &[i16]| {
+            let window = (loquax::voice::RATE / (1000 / WINDOW_MS)) as usize;
+            let mut now = 1_000;
+            for chunk in pcm.chunks(window) {
+                now += u64::from(WINDOW_MS);
+                update(
+                    model,
+                    UiEvent::Record {
+                        peer,
+                        input: Input::Level {
+                            now,
+                            rms: rms(chunk),
+                        },
+                    },
+                );
+            }
+            now
+        };
+        let start = |model: &mut Model| {
+            let effects = key(model, KeyCode::Char('v'), KeyModifiers::ALT);
+            assert!(
+                effects.iter().any(|e| matches!(
+                    e,
+                    ui::UiEffect::Recording {
+                        effect: Effect::Start,
+                        ..
+                    }
+                )),
+                "{effects:?}"
+            );
+            assert!(matches!(model.recording.phase, Phase::Locked { .. }));
+        };
+        let speech = loquax::voice::test_speech(loquax::voice::RATE, 7_400);
+
+        let mut locked = fresh();
+        let typed = key(&mut locked, KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(
+            typed.is_empty() && locked.compose.value() == "v",
+            "a letter"
+        );
+        let _ = key(&mut locked, KeyCode::Backspace, KeyModifiers::NONE);
+        start(&mut locked);
+        feed(&mut locked, &speech);
+        // Typing does not reach the hidden field.
+        let _ = key(&mut locked, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(locked.compose.value(), "");
+
+        let mut paused = fresh();
+        start(&mut paused);
+        feed(&mut paused, &vec![0; 16_000 * 3]);
+        let _ = key(&mut paused, KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_eq!(paused.recording.phase, Phase::Paused);
+
+        let mut capped = fresh();
+        start(&mut capped);
+        let now = feed(&mut capped, &speech);
+        let since = 1_000;
+        update(
+            &mut capped,
+            UiEvent::Record {
+                peer,
+                input: Input::Tick {
+                    now: now.max(since + u64::from(loquax::voice::LONGEST_MS)),
+                },
+            },
+        );
+        assert_eq!(capped.recording.phase, Phase::Preview);
+
+        let mut frames = String::new();
+        for (name, model) in [
+            ("locked", &mut locked),
+            ("paused, nothing heard", &mut paused),
+            ("preview at the cap", &mut capped),
+        ] {
+            for (w, h) in [(80u16, 24u16), (120, 40)] {
+                update(
+                    model,
+                    UiEvent::Resize {
+                        width: w,
+                        height: h,
+                    },
+                );
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                let view = ui::view(model);
+                terminal
+                    .draw(|frame| draw(frame, &view, None))
+                    .expect("draw");
+                let screen = frame_text(terminal.backend().buffer());
+                frames.push_str(&format!("=== {name} {w}x{h}\n{screen}"));
+            }
+        }
+        for (want, state) in [
+            ("● REC 00:07", "locked"),
+            ("p pause · Enter send", "locked"),
+            ("p pause · Esc cancel · Enter send", "locked, wide"),
+            ("○ REC 00:03", "paused"),
+            ("Space play · p resume · Esc cancel · Enter send", "paused"),
+            ("Nothing heard. Is the microphone allowed?", "paused"),
+            ("○ REC 10:00", "preview"),
+            ("That is as long as a voice message can be", "preview"),
+        ] {
+            assert!(frames.contains(want), "{state}: {want:?}\n{frames}");
+        }
+        assert!(frames.contains('▇') && frames.contains('▁'), "{frames}");
+        let expected = include_str!("../tests/fixtures/tui_recording.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-recording.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_recording.frames\n{frames}",
+                kept.display()
+            );
+        }
+
+        // ASCII: the same bar in ASCII alone.
+        locked.ascii = true;
+        let bar = ui::view(&locked).recording.expect("the bar");
+        let row: String = bar.rows[0].cells.iter().map(|c| c.ch).collect();
+        assert!(row.starts_with("* REC 00:07  "), "{row}");
+        assert!(row.is_ascii(), "{row}");
+        locked.ascii = false;
+
+        // `v` sends what is recorded.
+        let sent = key(&mut locked, KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(
+            sent.iter().any(|e| matches!(
+                e,
+                ui::UiEffect::Recording {
+                    effect: Effect::Finish,
+                    ..
+                }
+            )),
+            "{sent:?}"
+        );
+        assert!(ui::view(&locked).recording.is_none(), "the field is back");
+        // The shell hands the coded recording back: its bubble draws the
+        // recording's own track as block characters.
+        let track = locked.recording.track.clone();
+        let data = loquax::voice::encode(&speech, loquax::voice::RATE).expect("coded");
+        update(&mut locked, UiEvent::SendVoice { peer, data });
+        let bars = track.bars(loquax::ui::voice::BARS, loquax::ui::recording::Fold::Peak);
+        let wave = loquax::ui::layout::waveform(&bars, bars.len(), false, false);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        let view = ui::view(&locked);
+        terminal
+            .draw(|frame| draw(frame, &view, None))
+            .expect("draw");
+        let screen = frame_text(terminal.backend().buffer());
+        assert!(screen.contains("♪ voice message · 0:08"), "7.4 s: {screen}");
+        assert!(screen.contains(&wave), "{wave}\n{screen}");
+
+        // `Esc` throws it away, and stays in compose.
+        let mut again = fresh();
+        start(&mut again);
+        feed(&mut again, &speech[..16_000]);
+        let gone = key(&mut again, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(gone.iter().any(|e| matches!(
+            e,
+            ui::UiEffect::Recording {
+                effect: Effect::Discard,
+                ..
+            }
+        )));
+        assert_eq!(again.focus, Pane::Compose);
+
+        // A click on `Esc cancel` in the bar, and one on the silence line.
+        let click = |model: &mut Model, col: u16, row: u16| {
+            let mut effects = Vec::new();
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                effects.extend(update(
+                    model,
+                    UiEvent::Mouse(MouseEvent {
+                        kind,
+                        column: col,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                ));
+            }
+            effects
+        };
+        let screen = ui::Screen::of(120, 40, paused.compose_rows());
+        let bar = ui::view(&paused).recording.expect("the bar");
+        let place = |verb| {
+            bar.buttons
+                .iter()
+                .find(|b| b.3 == verb)
+                .map(|&(r, c, _, _)| {
+                    (
+                        screen.compose.x + 1 + c as u16,
+                        screen.compose.y + 1 + r as u16,
+                    )
+                })
+                .expect("the button")
+        };
+        use loquax::ui::recording::Verb;
+        let (col, row) = place(Verb::AskMicrophone);
+        let asked = click(&mut paused, col, row);
+        assert!(
+            asked.iter().any(|e| matches!(
+                e,
+                ui::UiEffect::Recording {
+                    effect: Effect::AskMicrophone,
+                    ..
+                }
+            )),
+            "{asked:?}"
+        );
+        let (col, row) = place(Verb::Discard);
+        let thrown = click(&mut paused, col, row);
+        assert!(
+            thrown.iter().any(|e| matches!(
+                e,
+                ui::UiEffect::Recording {
+                    effect: Effect::Discard,
+                    ..
+                }
+            )),
+            "{thrown:?}"
+        );
+        assert!(ui::view(&paused).recording.is_none());
     }
 
     /// The first user in the terminal (1263, finding 6): the empty list
