@@ -354,6 +354,8 @@ The frontends:
   16 ms is shown late, the Canvas scaling the last frame, names and
   ground together, until it lands.
 
+  The gui feature's tests pin the same rule; `just loquax-gui` runs them.
+
   The pins
   are drawn over the tiles every frame, so a pin costs no tile. A pinch
   keeps the step it is composed from while it stays within a step of it,

@@ -1563,8 +1563,9 @@ mod tests {
     /// the same names where the drag moved them, so where the two frames
     /// overlap they are the same pixels, 40 apart. The frame on screen
     /// moves with the pointer until the next lands, and the pins with it.
-    /// The control: the same moving frame from frames that never rested
-    /// has no names, and differs there.
+    /// The same moving frame from frames that never rested places the
+    /// same names itself (1225). The control: frames that set no names
+    /// draw it without them, and differ there.
     #[test]
     fn a_drag_keeps_the_names() {
         let pins = vec![pin(1, "alice", 43.7752, 11.2640)];
@@ -1606,9 +1607,15 @@ mod tests {
         assert_eq!(overlap(&b), 0, "the moved frame is the rest frame, moved");
         let (p0, p1) = (&rest.placed[0], &moved.placed[0]);
         assert!((p1.x - (p0.x - 40.0)).abs() < 1e-3, "{p0:?} {p1:?}");
-        let control = draw(&Mutex::new(florence()), moved.order.clone());
+        let fresh = Mutex::new(florence());
+        draw(&fresh, moved.order.clone());
+        let placed = fresh.lock().unwrap_or_else(PoisonError::into_inner).names();
+        assert_eq!(placed, named, "a moving frame places its own names");
+        let mut ground = florence();
+        ground.set_names_off(true);
+        let control = draw(&Mutex::new(ground), moved.order.clone());
         let differ = overlap(&rgba(&control));
-        assert!(differ > 1000, "without kept names: {differ} pixels differ");
+        assert!(differ > 1000, "without names: {differ} pixels differ");
     }
 
     /// A fractional wheel zoom stays where it ends (1144): a touchpad's

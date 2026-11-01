@@ -199,14 +199,16 @@ pub(super) mod tests {
     /// Florence fixture at z16 with one pin, the parks and the streets the
     /// zoom shows, each name with its halo, none under the pin's name; the
     /// frame the same on a second one and pixel for pixel the golden. A
-    /// frame drawn while the view moves, before any at rest, carries none.
+    /// frame drawn while the view zooms in to z16 from a rest at z15
+    /// places its names as the frame at rest at z16 does (1225), the same
+    /// names. The control: a zooming frame over a region with no labels,
+    /// Pisa outside the fixture, sets none.
     #[test]
     fn the_map_names_are_set_into_the_picture() {
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         let view = ExactView::new(at, 16 * MILLI, 480, 320);
         let pins = [pin(1, "alice", 43.7752, 11.2640)];
-        let mut plain_frames = florence();
-        let plain = plain_frames.frame(&Ask {
+        let moving = |view| Ask {
             view,
             margin: (0, 0),
             moving: true,
@@ -219,8 +221,11 @@ pub(super) mod tests {
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
-        });
-        assert!(plain_frames.names().is_empty());
+        };
+        let mut ground = florence();
+        ground.set_names_off(true);
+        let plain = rest(&mut ground, view, &pins, None, 1.0);
+        assert!(ground.names().is_empty());
         let mut frames = florence();
         let named = rest(&mut frames, view, &pins, None, 1.0);
         let names = frames.names();
@@ -239,6 +244,28 @@ pub(super) mod tests {
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         same_as("gui-names-florence-z16.png", &rgb, 480, 320);
+        // Zooming in: at rest at z15, then a moving frame at z16.
+        let mut zooming = florence();
+        rest(
+            &mut zooming,
+            ExactView::new(at, 15 * MILLI, 480, 320),
+            &pins,
+            None,
+            1.0,
+        );
+        let at_15 = zooming.names();
+        assert_ne!(at_15, names, "z15 and z16 show other names");
+        zooming.frame(&moving(view));
+        assert_eq!(
+            zooming.names(),
+            names,
+            "the zooming frame's are the rest frame's"
+        );
+        // The control: no labels where the view zooms, no names.
+        let pisa = project(LatLon::from_degrees(43.7228, 10.4017));
+        let mut empty = florence();
+        empty.frame(&moving(ExactView::new(pisa, 16 * MILLI, 480, 320)));
+        assert!(empty.names().is_empty(), "{:?}", empty.names());
     }
 
     /// Hold `rgb` to the PNG golden `name` under `loquax/tests/golden`,
