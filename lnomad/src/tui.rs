@@ -7555,6 +7555,39 @@ Text unter dem Bild.
         );
     }
 
+    /// Italic text reaches the frame as the italic modifier, and plain text
+    /// beside it does not: no other frame test held the italic flag of a run
+    /// (pass one's positive control found the gap).
+    #[test]
+    fn an_italic_run_is_drawn_italic() {
+        let m = Model::from_document(
+            &parse("`*slanted`* upright"),
+            content_width(40),
+            "t",
+            (40, 6),
+        );
+        let buffer = render(&m, 40, 6);
+        let row = (0..buffer.area.height)
+            .find(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("slanted upright")
+            })
+            .expect("the line is drawn");
+        let line: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, row)].symbol())
+            .collect();
+        let at = line.find("slanted").expect("slanted") as u16;
+        let up = line.find("upright").expect("upright") as u16;
+        for x in at..at + 7 {
+            assert!(buffer[(x, row)].modifier.contains(Modifier::ITALIC), "{x}");
+        }
+        for x in up..up + 7 {
+            assert!(!buffer[(x, row)].modifier.contains(Modifier::ITALIC), "{x}");
+        }
+    }
+
     /// In German the help, the footer and the start page are German: the
     /// shell may follow the locale because nothing it draws is left English.
     #[test]
