@@ -5,6 +5,13 @@
 //! lists, each tile's blob depends on that tile's bytes alone, the worker
 //! threads only compute blobs that are then written in order, and nothing
 //! of the time or the machine goes into the file. Same input, same bytes.
+//!
+//! The file is version 4 (1291): the header and every tile's slot first,
+//! then the tiles a round at a time, coarse to fine, each round's slots
+//! filled once its blobs are written and flushed, the names and buildings
+//! last and the file length after them. A reader opening the file while
+//! the cut still writes it draws every tile written so far
+//! ([`cut_streamed`] says when a round is out).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Seek, SeekFrom, Write};
@@ -15,7 +22,8 @@ use leviculum_map::labels::{encode_section, encode_strings, LabelKind, LineLabel
 use leviculum_map::mercator::{x_of_lon, y_of_lat};
 use leviculum_map::profile::{self, ZoomLayers};
 use leviculum_map::region::{
-    Bounds, BuildingTables, Entry, Header, LabelTables, TileId, ENTRY_LEN, HEADER_LEN_3, TILE_VIEW,
+    Bounds, BuildingTables, Entry, Header, LabelTables, TileId, EMPTY_SLOT, ENTRY_LEN,
+    HEADER_LEN_3, LEN_AT, TILE_VIEW,
 };
 use leviculum_mapfill::fixture::{write, Kind};
 use leviculum_mapfill::style::Class;
@@ -27,8 +35,10 @@ use crate::{Res, TileSource};
 /// Blobs up to this size are stored once and shared by every tile that
 /// has the same bytes: the uniform tiles of sea, forest and farmland.
 const SHARE_MAX: usize = 4096;
-/// Tiles handed to the workers per round.
-const ROUND: usize = 1024;
+/// Tiles handed to the workers per round, and written before a reader
+/// sees them: a quarter of Berlin's z15 columns at 1024, so 256 lets the
+/// detail fill in a sixteenth at a time (1291).
+pub const ROUND: usize = 256;
 /// The device's work capacity per feature (`leviculum-mapfill/m9`): a
 /// feature with more vertices is skipped there as an overflow.
 pub const DEVICE_POINTS: usize = 4096;
@@ -60,8 +70,11 @@ pub struct CutOptions {
     pub locale: Option<String>,
     /// Cut the building footprints of the z15 tiles into building
     /// sections (version 3, [`leviculum_map::buildings`]); without them,
-    /// or without z15 in the zooms, the region is version 2.
+    /// or without z15 in the zooms, the section count is 0.
     pub buildings: bool,
+    /// Tiles a round ([`ROUND`]): what a reader of the file still being
+    /// written sees arrive at once. The bytes do not depend on it.
+    pub round: usize,
 }
 
 /// The view zoom from which a street name of `kind` shows: major and
@@ -586,11 +599,37 @@ fn section(labels: &TileLabels, table: &[&str]) -> Res<Vec<u8>> {
     Ok(encode_section(&points, &lines, &alts))
 }
 
+/// How far a cut has come: after each round of tiles is written, and
+/// once at the end with every tile and the file complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    /// Tiles written (slots filled), of `tiles`.
+    pub done: usize,
+    pub tiles: usize,
+    /// The deepest zoom written so far.
+    pub zoom: u8,
+    /// Bytes of the file so far.
+    pub bytes: u64,
+    /// The names, the buildings and the file length are written.
+    pub complete: bool,
+}
+
 /// Cut `src` into `out` under `opts`.
 pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
     src: &S,
     opts: &CutOptions,
+    out: W,
+) -> Res<CutStats> {
+    cut_streamed(src, opts, out, &mut |_| {})
+}
+
+/// [`cut`], telling `progress` after each round, when a reader of the
+/// file sees the round's tiles.
+pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
+    src: &S,
+    opts: &CutOptions,
     mut out: W,
+    progress: &mut dyn FnMut(Progress),
 ) -> Res<CutStats> {
     let (lo, hi) = (*opts.zooms.start(), *opts.zooms.end());
     if lo > hi || hi > leviculum_map::region::MAX_ZOOM {
@@ -611,30 +650,54 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
     ids.dedup();
 
     let with_buildings = opts.buildings && opts.zooms.contains(&BUILDING_ZOOM);
-    // A cut without buildings writes version 2, which older readers read.
-    let header_len = match with_buildings {
-        true => HEADER_LEN_3,
-        false => leviculum_map::region::HEADER_LEN_2,
-    };
-    out.write_all(&vec![0u8; header_len])?;
-    let mut pos = header_len as u64;
-    let mut text = |s: &str, pos: &mut u64| -> Res<(u32, u32)> {
+    // The header, the texts and a slot per tile, all before any tile, so
+    // a reader opens the file from the first flush on.
+    let mut pos = HEADER_LEN_3 as u64;
+    let text = |s: &str, pos: &mut u64| -> Res<(u32, u32)> {
         let at = u32::try_from(*pos)?;
-        out.write_all(s.as_bytes())?;
         *pos += s.len() as u64;
         Ok((at, u32::try_from(s.len())?))
     };
     let attribution = text(&opts.attribution, &mut pos)?;
     let notice = text(&opts.notice, &mut pos)?;
+    let index = pos;
+    let mut header = Header {
+        bounds: opts.bounds,
+        min_zoom: lo,
+        max_zoom: hi,
+        profile: opts.profile,
+        attribution,
+        notice,
+        tiles: u32::try_from(ids.len())?,
+        index,
+        len: 0,
+        labels: None,
+        buildings: None,
+        streamed: true,
+    };
+    out.write_all(&header.encode())?;
+    out.write_all(opts.attribution.as_bytes())?;
+    out.write_all(opts.notice.as_bytes())?;
+    for id in &ids {
+        let slot = Entry {
+            id: *id,
+            offset: 0,
+            len: 0,
+        };
+        out.write_all(&slot.encode())?;
+    }
+    pos += (ids.len() * ENTRY_LEN) as u64;
+    out.flush()?;
 
     let mut stats = CutStats::default();
-    let mut entries: Vec<Entry> = Vec::new();
     let mut shared: HashMap<Vec<u8>, (u64, u32)> = HashMap::new();
     let mut named: Vec<(TileId, TileLabels)> = Vec::new();
     let mut built: Vec<(TileId, Vec<u8>)> = Vec::new();
     let threads = opts.threads.max(1);
     let locale = opts.locale.as_deref();
-    for round in ids.chunks(ROUND) {
+    let mut done = 0;
+    for round in ids.chunks(opts.round.max(1)) {
+        src.want(round)?;
         let per = round.len().div_ceil(threads);
         let results: Vec<Res<CutTile>> = std::thread::scope(|s| {
             let handles: Vec<_> = round
@@ -665,6 +728,7 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
                 })
                 .collect()
         });
+        let mut slots: Vec<Entry> = Vec::with_capacity(round.len());
         for (t, r) in round.iter().zip(results) {
             let CutTile {
                 blob,
@@ -678,6 +742,12 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
             if let Some(section) = section {
                 built.push((*t, section));
             }
+            // A tile with nothing in it says so in its slot.
+            let mut slot = Entry {
+                id: *t,
+                offset: EMPTY_SLOT,
+                len: 0,
+            };
             if let Some(blob) = blob {
                 let len = u32::try_from(blob.len())?;
                 let reuse = if blob.len() <= SHARE_MAX {
@@ -702,19 +772,46 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
                     }
                 };
                 st.entries += 1;
-                entries.push(Entry {
+                slot = Entry {
                     id: *t,
                     offset,
                     len,
-                });
+                };
             }
+            slots.push(slot);
             *stats.zooms.entry(t.z).or_default() += st;
         }
+        // The round's blobs are out; then the slots' offsets, then their
+        // lengths, so a reader never sees a length before its offset nor a
+        // slot before its bytes.
+        out.flush()?;
+        let first = index + (done * ENTRY_LEN) as u64;
+        out.seek(SeekFrom::Start(first))?;
+        let mut offsets = Vec::with_capacity(slots.len() * ENTRY_LEN);
+        for s in &slots {
+            offsets.extend_from_slice(&Entry { len: 0, ..*s }.encode());
+        }
+        out.write_all(&offsets)?;
+        out.flush()?;
+        for (i, s) in slots.iter().enumerate().filter(|(_, s)| s.len > 0) {
+            out.seek(SeekFrom::Start(first + (i * ENTRY_LEN) as u64 + 16))?;
+            out.write_all(&s.len.to_le_bytes())?;
+        }
+        out.seek(SeekFrom::Start(pos))?;
+        out.flush()?;
+        done += round.len();
+        progress(Progress {
+            done,
+            tiles: ids.len(),
+            zoom: round.last().map_or(lo, |t| t.z),
+            bytes: pos,
+            complete: false,
+        });
     }
 
     // The names: every string once, sorted, numbered by its place in the
     // table; the label sections after the tiles, then the table, then the
-    // label index right before the tile index.
+    // label index right before the building index, which ends the file.
     let strings: BTreeSet<&str> = named
         .iter()
         .flat_map(|(_, l)| {
@@ -767,40 +864,35 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
         out.write_all(&e.encode())?;
     }
     pos += (building_entries.len() * ENTRY_LEN) as u64;
+    out.flush()?;
 
-    let index = pos;
-    for e in &entries {
-        out.write_all(&e.encode())?;
-    }
-    pos += (entries.len() * ENTRY_LEN) as u64;
-    let header = Header {
-        bounds: opts.bounds,
-        min_zoom: lo,
-        max_zoom: hi,
-        profile: opts.profile,
-        attribution,
-        notice,
-        tiles: u32::try_from(entries.len())?,
-        index,
-        len: pos,
-        labels: Some(LabelTables {
-            index: label_index,
-            sections: u32::try_from(label_entries.len())?,
-            strings: count,
-            table: strings_at,
-            table_len: bytes.len() as u64,
-        }),
-        buildings: match with_buildings {
-            true => Some(BuildingTables {
-                index: building_index,
-                sections: u32::try_from(building_entries.len())?,
-            }),
-            false => None,
-        },
-    };
+    // The names' and buildings' fields, then the length alone: a reader
+    // takes the file as complete only once the length is there.
+    header.labels = Some(LabelTables {
+        index: label_index,
+        sections: u32::try_from(label_entries.len())?,
+        strings: count,
+        table: strings_at,
+        table_len: bytes.len() as u64,
+    });
+    header.buildings = Some(BuildingTables {
+        index: building_index,
+        sections: u32::try_from(building_entries.len())?,
+    });
     out.seek(SeekFrom::Start(0))?;
     out.write_all(&header.encode())?;
     out.flush()?;
+    out.seek(SeekFrom::Start(LEN_AT))?;
+    out.write_all(&pos.to_le_bytes())?;
+    out.seek(SeekFrom::Start(pos))?;
+    out.flush()?;
     stats.bytes = pos;
+    progress(Progress {
+        done,
+        tiles: ids.len(),
+        zoom: hi,
+        bytes: pos,
+        complete: true,
+    });
     Ok(stats)
 }

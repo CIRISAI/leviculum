@@ -11,7 +11,7 @@ use leviculum_map::buildings::{
     MAX_RINGS, MAX_VERTICES,
 };
 use leviculum_map::region::{
-    BuildingTables, Header, Region, RegionError, HEADER_LEN, HEADER_LEN_3, VERSION, VERSION_2,
+    BuildingTables, Header, Region, RegionError, HEADER_LEN, HEADER_LEN_3, VERSION_2, VERSION_3,
 };
 
 const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
@@ -292,15 +292,15 @@ fn a_version_3_header_is_refused_by_the_version_2_reader() {
     };
     let bytes = h.encode();
     assert_eq!(bytes.len(), HEADER_LEN_3);
-    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), VERSION);
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), VERSION_3);
     assert_eq!(Header::parse(&bytes), Ok(h));
     let head: &[u8; HEADER_LEN] = bytes[..HEADER_LEN].try_into().expect("head");
     // The check a version 2 reader runs first, at its newest version.
     assert_eq!(
         Header::version_up_to(head, VERSION_2),
-        Err(RegionError::Version(VERSION))
+        Err(RegionError::Version(VERSION_3))
     );
-    assert_eq!(Header::version(head), Ok(VERSION));
+    assert_eq!(Header::version(head), Ok(VERSION_3));
     // The reserved word after the building count must stay 0.
     let mut b = bytes.clone();
     b[108] = 1;

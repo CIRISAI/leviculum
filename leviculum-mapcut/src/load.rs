@@ -133,6 +133,7 @@ pub fn load<R: RangeRead, W: Write + Seek>(
         threads,
         locale: want.locale.clone(),
         buildings: want.buildings,
+        round: crate::cut::ROUND,
     };
     let stats = cut(&fetched, &opts, out)?;
     Ok(Loaded {

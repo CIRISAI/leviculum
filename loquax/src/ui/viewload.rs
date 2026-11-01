@@ -316,6 +316,7 @@ mod tests {
             len: 0,
             labels: None,
             buildings: None,
+            streamed: false,
         }
     }
 

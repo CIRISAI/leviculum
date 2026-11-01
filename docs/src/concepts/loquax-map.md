@@ -510,8 +510,8 @@ whose module comment is the normative layout). All integers little-endian,
 offsets from the start of the file:
 
 - a header: `LMR1`, the version (1, 2 since 1100 with names, 3 since
-  1191 with buildings), the header length (64, 96 for version 2, 112 for
-  version 3), the bounds in
+  1191 with buildings, 4 since 1291 in arrival order), the header length
+  (64, 96 for version 2, 112 for version 3 and 4), the bounds in
   degrees x 10^7 (west, south, east, north; west greater than east means
   across the antimeridian), the zoom range (at most 16, so x and y fit a
   `u16`), the layer profile id, where the attribution and the notice lie,
@@ -549,7 +549,26 @@ offsets from the start of the file:
   "Buildings" below says why it is so;
 - the index last, 20 bytes per tile ascending by (z, x, y): z, x, y,
   offset, length. Last, so the cut can stream tiles and learn their count
-  at the end.
+  at the end;
+- version 4 (LMR4, 1291) keeps every field and part and changes their
+  order, so a file is usable while it arrives. The tile index comes right
+  after the two texts, one slot for every tile the box lists, the count
+  known before the cut starts. A slot is an entry, or with length 0 either
+  offset 0, "not here yet", or offset `u64::MAX`, "nothing there". The
+  tile blobs follow in index order, which is (z, x, y), so coarse to fine:
+  the outline and the main roads of the shallow zooms in the first few
+  hundred kilobytes, the deepest zoom last. The label sections, the
+  building sections, the string table, the label index and the building
+  index come after every tile, the building index ending the file. The
+  writer fills a slot after its blob is out, its offset before its
+  length, and writes the file length last, after the names' and
+  buildings' fields; the length is 0 until then. So a reader of a file
+  still being cut in place, or of a copy still downloading (its length
+  already set, the file shorter), knows from the slots alone which tiles
+  are whole: a slot with a length whose bytes lie inside what is there.
+  The rest are pending, and the draw stands the nearest coarser tile
+  that is there in for each (`Region::stand_in`); the names and the
+  buildings show once the file is complete.
 
 **Buildings** (1191, the format and the cut; 1192, the draw).
 Protomaps' z15 tiles carry every OSM building. They are not in the
@@ -585,9 +604,12 @@ A version 2 reader refuses a version 3 file with `RegionError::Version(3)`
 before it reads past the version field, as a version 1 reader refuses
 version 2, so the reader has to ship before regions with buildings reach
 it; Loquax cuts its own regions, so in practice only a file copied by hand
-meets an older reader. A cut without buildings (`leviculum-map-tool cut
---buildings false`, or no z15 in its zooms) writes version 2, which every
-version 2 reader reads.
+meets an older reader. Since 1291 every cut writes version 4, with
+buildings or without (a section count of 0), and this reader reads
+versions 1 to 4; a version 3 reader refuses it. No region file is
+published anywhere today: the autoload cuts its regions on the device
+from the Protomaps archive, and the committed fixtures stay version 1 to
+3, which this reader keeps reading.
 
 The cut (`leviculum-mapcut/src/cut.rs`, `footprints`) takes the
 `buildings` layer of each z15 source tile, the same decode as the tile's

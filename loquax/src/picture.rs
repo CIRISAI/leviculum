@@ -608,6 +608,7 @@ mod tests {
                 threads: 1,
                 locale: None,
                 buildings: true,
+                round: leviculum_mapcut::cut::ROUND,
             };
             let out = File::create(maps.join(format!("{name}.lmr"))).expect("create");
             cut(&archive, &opts, std::io::BufWriter::new(out)).expect("cut");

@@ -357,6 +357,7 @@ fn options(threads: usize) -> CutOptions {
         threads,
         locale: Some("de".to_owned()),
         buildings: true,
+        round: leviculum_mapcut::cut::ROUND,
     }
 }
 
@@ -942,8 +943,9 @@ fn the_cut_writes_the_z15_buildings_and_leaves_the_tiles_as_they_were() {
     );
     rw.verify().expect("verify");
     ro.verify().expect("verify");
-    assert_eq!(rw.header().version_of(), 3);
-    assert_eq!(ro.header().version_of(), 2);
+    // Version 4 either way (1291); without buildings the section count is 0.
+    assert_eq!(rw.header().version_of(), 4);
+    assert_eq!(ro.header().version_of(), 4);
     assert_eq!(ro.building_sections(), 0);
     // The base tiles are the same bytes with and without buildings.
     assert_eq!(blobs(&with), blobs(&without));
