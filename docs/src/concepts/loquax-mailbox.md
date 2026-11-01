@@ -289,7 +289,7 @@ default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
 consequence spelled out, not a config-file default nobody reads. Loquax
 does not expose it yet: it enables the client with
-`PropagationClientConfig::default()` (`loquax/src/engine.rs:1584`).
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1604`).
 
 Set to `true`, our client keeps every message on the node. That is a
 deviation from the reference client, whose flag only keeps messages it
@@ -315,7 +315,7 @@ list until older ones expire.
 - The sync schedule (there is none in the library).
 - Persistence of known propagation nodes and of the selection, since
   neither is in the router snapshot (`snapshot`,
-  `leviculum-lxmf/src/router.rs:2126-2143`); replay via
+  `leviculum-lxmf/src/router.rs:2285-2302`); replay via
   `restore_known_propagation_node`
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1450`).
 - Re-selection after restart.
@@ -357,7 +357,7 @@ Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
 (`leviculum-lxmf/src/message.rs:232-234`), and such messages **are
 delivered to the application anyway**
-(`leviculum-lxmf/src/router.rs:1485-1488`). And the router discards the
+(`leviculum-lxmf/src/router.rs:1644-1647`). And the router discards the
 display name from announces entirely, so **the client must maintain its own
 hash-to-name map** from raw `NodeEvent::AnnounceReceived`.
 

@@ -120,6 +120,11 @@ pub enum Command {
     /// [`Via::Propagated`]. A message the router will not take is reported
     /// as [`OutboxEvent::Unsent`].
     SendPacked { packed: Vec<u8>, via: Via },
+    /// On a home node: the message handed out as [`OutboxEvent::Packed`] is
+    /// archived, so its proof goes out now
+    /// ([`leviculum_lxmf::router::LxmfRouter::release_proofs`]). A sender
+    /// is told DELIVERED only for a message the archive holds (1239).
+    Prove { message_id: [u8; 32] },
     /// Answered with [`OutboxEvent::Fenced`] once every command before it
     /// was taken: a runner that waits for it knows the events those
     /// commands caused were handed out before it.
@@ -222,7 +227,7 @@ pub enum OutboxEvent {
         state: crate::home::wire::PeerState,
     },
     /// The message left the router's outbound queue, which the router does
-    /// only in a terminal state (`leviculum-lxmf/src/router.rs:771-773`).
+    /// only in a terminal state (`leviculum-lxmf/src/router.rs:872-874`).
     /// `last` is the last state seen for it, when there was one.
     Left {
         message_id: [u8; 32],
@@ -309,7 +314,8 @@ pub enum OutboxEvent {
     Fenced { token: u64 },
     /// The message just [`OutboxEvent::Received`], packed as it came, for a
     /// home node's archive. Only an engine asked for it hands it out
-    /// ([`crate::engine::Engine::handing_out_packed`]).
+    /// ([`crate::engine::Engine::handing_out_packed`]), and that engine holds
+    /// the message's proof until a [`Command::Prove`] says it is archived.
     Packed {
         message_id: [u8; 32],
         packed: Vec<u8>,
