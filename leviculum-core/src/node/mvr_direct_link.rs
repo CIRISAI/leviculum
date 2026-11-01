@@ -253,10 +253,7 @@ fn an_upgrade_moves_the_link_and_a_lost_interface_moves_it_back() {
 
     let a_direct = add_iface(&mut pair.a, "A_direct");
     let b_direct = add_iface(&mut pair.b, "B_direct");
-    let out = pair.a.direct_link_punched(&session, Some(a_direct));
-    pair.a_events.extend(out.events);
-    let out = pair.b.direct_link_punched(&session, Some(b_direct));
-    pair.b_events.extend(out.events);
+    punch_both(&mut pair, &session, a_direct, b_direct);
 
     assert!(pair.a_events.iter().any(|e| matches!(
         e,
@@ -470,6 +467,7 @@ fn a_failed_punch_ends_both_sessions_quietly() {
 fn closing_the_link_retires_its_direct_interface() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
+    b_commits_first(&mut pair, &session);
     let a_direct = add_iface(&mut pair.a, "A_direct");
     let _ = pair.a.direct_link_punched(&session, Some(a_direct));
     let _ = pair.a.take_direct_link_jobs();
@@ -506,14 +504,58 @@ fn a_punch_that_lands_after_the_link_closed_hands_its_interface_back() {
 }
 
 /// Bring both sides of a punched pair onto their direct interfaces.
+/// Both sides' punches succeed, and their COMPLETEs cross over the relay
+/// (the two-sided commit, leviculum#89): A finishes first, B then finds A's
+/// COMPLETE waiting and moves at once, and A moves on B's.
+fn punch_both(
+    pair: &mut Pair,
+    session: &crate::direct_link::SessionId,
+    a_direct: usize,
+    b_direct: usize,
+) {
+    let out = pair.a.direct_link_punched(session, Some(a_direct));
+    pair.a_events.extend(out.events.clone());
+    let to_b = packets(&out);
+    let (_, ev) = deliver(&mut pair.b, pair.b_mesh, to_b);
+    pair.b_events.extend(ev);
+    let out = pair.b.direct_link_punched(session, Some(b_direct));
+    pair.b_events.extend(out.events.clone());
+    pair.pump_from_b(packets(&out));
+    // B's COMPLETE may wait a tick behind its channel's pacing.
+    for _ in 0..10 {
+        if pair.a.direct_link_interface(&pair.link).is_some() {
+            break;
+        }
+        pair.advance(200);
+    }
+}
+
+/// B's punch succeeds first and its COMPLETE reaches A over the relay, so
+/// A's own punch verdict alone decides A (the two-sided commit,
+/// leviculum#89). B is left waiting on A's COMPLETE, which these tests do
+/// not deliver.
+fn b_commits_first(pair: &mut Pair, session: &crate::direct_link::SessionId) {
+    let b_direct = add_iface(&mut pair.b, "B_direct_first");
+    let out = pair.b.direct_link_punched(session, Some(b_direct));
+    let mut to_a = packets(&out);
+    for _ in 0..10 {
+        if !to_a.is_empty() {
+            break;
+        }
+        // The COMPLETE may wait a tick behind B's channel pacing.
+        pair.b.transport.clock().advance(200);
+        pair.a.transport.clock().advance(200);
+        to_a = packets(&pair.b.handle_timeout());
+    }
+    let (_, ev) = deliver(&mut pair.a, pair.a_mesh, to_a);
+    pair.a_events.extend(ev);
+}
+
 fn established(pair: &mut Pair) -> (usize, usize) {
     let (session, _) = to_punch(pair);
     let a_direct = add_iface(&mut pair.a, "A_direct");
     let b_direct = add_iface(&mut pair.b, "B_direct");
-    let out = pair.a.direct_link_punched(&session, Some(a_direct));
-    pair.a_events.extend(out.events);
-    let out = pair.b.direct_link_punched(&session, Some(b_direct));
-    pair.b_events.extend(out.events);
+    punch_both(pair, &session, a_direct, b_direct);
     (a_direct, b_direct)
 }
 
@@ -854,6 +896,8 @@ fn a_session_id_in_use_on_another_link_is_refused() {
         initiator_public: a_public(),
         protocol: ProbeProtocol::Rnsp,
         initiator_local: Vec::new(),
+        commit: false,
+        host_payload: None,
     };
     let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
     assert!(pair
@@ -945,9 +989,11 @@ fn a_link_that_went_stale_during_the_punch_is_live_again_when_it_lands() {
         .unwrap()
         .set_state(crate::link::LinkState::Stale);
     let a_direct = add_iface(&mut pair.a, "A_direct");
-    let out = pair.a.direct_link_punched(&session, Some(a_direct));
-    assert!(out
-        .events
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    punch_both(&mut pair, &session, a_direct, b_direct);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+    assert!(pair
+        .a_events
         .iter()
         .any(|e| matches!(e, NodeEvent::LinkRecovered { .. })));
     assert_eq!(
@@ -983,6 +1029,7 @@ fn a_dead_direct_interface_nudges_the_peer_over_the_relay() {
 fn a_punched_link_with_a_transfer_under_way_moves_once_it_is_done() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
+    b_commits_first(&mut pair, &session);
     pair.b
         .set_resource_strategy(&pair.link, crate::resource::ResourceStrategy::AcceptAll)
         .unwrap();
@@ -1075,6 +1122,7 @@ fn a_channel_message_too_big_for_udp_holds_the_link_on_the_relay() {
             .set_negotiated_mtu_for_test(16_384);
     }
     let (session, _) = to_punch(&mut pair);
+    b_commits_first(&mut pair, &session);
     // A big message sized for the TCP-era MTU is out and not yet proved.
     pair.a.transport.clock().advance(1_000);
     let big = std::vec![9u8; 4_000];
@@ -1120,6 +1168,8 @@ fn a_peer_cannot_propose_again_inside_the_cooldown() {
         initiator_public: a_public(),
         protocol: ProbeProtocol::Rnsp,
         initiator_local: Vec::new(),
+        commit: false,
+        host_payload: None,
     };
     pair.a.transport.clock().advance(1_000);
     pair.b.transport.clock().advance(1_000);
@@ -1170,6 +1220,7 @@ fn a_nudge_inside_the_grace_still_brings_the_peer_back() {
 fn a_fallback_that_died_before_the_move_is_no_fallback() {
     let mut pair = Pair::new();
     let (session, _) = to_punch(&mut pair);
+    b_commits_first(&mut pair, &session);
     // The relay goes while the punch runs.
     let _ = pair.a.handle_interface_down(InterfaceId(pair.a_mesh));
     let a_direct = add_iface(&mut pair.a, "A_direct");
@@ -1353,10 +1404,7 @@ fn retire_moves_a_direct_link_back_and_the_peer_follows() {
     let (session, _) = to_punch(&mut pair);
     let a_direct = add_iface(&mut pair.a, "A_direct");
     let b_direct = add_iface(&mut pair.b, "B_direct");
-    let out = pair.a.direct_link_punched(&session, Some(a_direct));
-    pair.a_events.extend(out.events);
-    let out = pair.b.direct_link_punched(&session, Some(b_direct));
-    pair.b_events.extend(out.events);
+    punch_both(&mut pair, &session, a_direct, b_direct);
     assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
     pair.a_events.clear();
     pair.b_events.clear();
@@ -1413,5 +1461,156 @@ fn retire_moves_a_direct_link_back_and_the_peer_follows() {
     assert_eq!(
         pair.a.retire_direct_link(&pair.link).unwrap_err(),
         DirectLinkError::NotDirect
+    );
+}
+
+// ─── +ciris leviculum#89: the two-sided commit ─────────────────────────
+
+/// The 2026-10-31 incident: A's punch succeeded, B's did not. Before, A moved
+/// alone and its replies went into the socket B had released. Now A waits
+/// for B's verdict, hears B's REJECT, and neither side moves.
+#[test]
+fn a_punch_that_succeeds_on_one_side_only_moves_neither() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let out = pair.a.direct_link_punched(&session, Some(a_direct));
+    pair.a_events.extend(out.events.clone());
+    assert_eq!(
+        pair.a.direct_link_interface(&pair.link),
+        None,
+        "A's punch alone does not move the link"
+    );
+    let _ = deliver(&mut pair.b, pair.b_mesh, packets(&out));
+    // B's punch fails; it says so over the relay.
+    let out = pair.b.direct_link_punched(&session, None);
+    pair.b_events.extend(out.events.clone());
+    pair.pump_from_b(packets(&out));
+    pair.advance(1_000);
+
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), None);
+    assert!(a_failed(&pair).contains(&Failure::Rejected(
+        crate::direct_link::wire::REJECT_PUNCH_FAILED
+    )));
+    assert!(
+        pair.a
+            .take_direct_link_jobs()
+            .contains(&DirectLinkJob::CloseInterface {
+                interface_index: a_direct
+            }),
+        "A's punched interface is closed, never used"
+    );
+    // The link still works over the relay.
+    pair.advance(2_000);
+    let out = pair.b.send_on_link(&pair.link, b"still relayed").unwrap();
+    let (_, ev) = deliver(&mut pair.a, pair.a_mesh, packets(&out));
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        NodeEvent::MessageReceived { data, .. } if data == b"still relayed"
+    )));
+}
+
+/// A side whose punch succeeded but never hears the peer's verdict gives up
+/// and stays relayed.
+#[test]
+fn a_silent_peer_after_the_punch_moves_nothing() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let _ = pair.a.direct_link_punched(&session, Some(a_direct));
+    for _ in 0..14 {
+        pair.a.transport.clock().advance(1_000);
+        let out = pair.a.handle_timeout();
+        pair.a_events.extend(out.events);
+    }
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert!(a_failed(&pair).contains(&Failure::Timeout));
+    assert!(pair
+        .a
+        .take_direct_link_jobs()
+        .contains(&DirectLinkJob::CloseInterface {
+            interface_index: a_direct
+        }));
+}
+
+/// The peer finishing first changes nothing: whichever order the verdicts
+/// cross in, both sides move once both succeeded.
+#[test]
+fn both_sides_move_whichever_punch_finishes_first() {
+    for b_first in [false, true] {
+        let mut pair = Pair::new();
+        let (session, _) = to_punch(&mut pair);
+        let a_direct = add_iface(&mut pair.a, "A_direct");
+        let b_direct = add_iface(&mut pair.b, "B_direct");
+        if b_first {
+            let out = pair.b.direct_link_punched(&session, Some(b_direct));
+            let _ = deliver(&mut pair.a, pair.a_mesh, packets(&out));
+            let out = pair.a.direct_link_punched(&session, Some(a_direct));
+            pair.pump_from_a(packets(&out));
+        } else {
+            punch_both(&mut pair, &session, a_direct, b_direct);
+        }
+        pair.advance(2_000);
+        assert_eq!(
+            pair.a.direct_link_interface(&pair.link),
+            Some(a_direct),
+            "{b_first}"
+        );
+        assert_eq!(
+            pair.b.direct_link_interface(&pair.link),
+            Some(b_direct),
+            "{b_first}"
+        );
+    }
+}
+
+// ─── +ciris leviculum#88: a host payload rides the REQUEST ─────────────
+
+#[test]
+fn a_host_payload_reaches_the_asking_host() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AskHost);
+    let grant = std::vec![0xA5u8; 6_000];
+    // A TCP-sized MTU, so a 6 KB grant fits the channel MDU.
+    for node in [&mut pair.a, &mut pair.b] {
+        node.links
+            .get_mut(&pair.link)
+            .unwrap()
+            .set_negotiated_mtu_for_test(16_384);
+    }
+    let out = pair
+        .a
+        .propose_direct_link_with(&pair.link, Some(grant.clone()))
+        .expect("proposal starts");
+    pair.a_events.extend(out.events);
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    assert!(pair.b_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkRequested { host_payload: Some(p), .. } if *p == grant
+    )));
+}
+
+#[test]
+fn a_host_payload_that_cannot_fit_is_refused_up_front() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AskHost);
+    // Base MTU: the link MDU is a few hundred bytes.
+    assert_eq!(
+        pair.a
+            .propose_direct_link_with(&pair.link, Some(std::vec![0u8; 2_000]))
+            .err(),
+        Some(DirectLinkError::PayloadTooLarge)
+    );
+    assert_eq!(
+        pair.a
+            .propose_direct_link_with(
+                &pair.link,
+                Some(std::vec![0u8; crate::direct_link::wire::MAX_HOST_PAYLOAD + 1])
+            )
+            .err(),
+        Some(DirectLinkError::PayloadTooLarge)
     );
 }
