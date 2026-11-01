@@ -2558,6 +2558,19 @@ loquax-gui:
     cargo clippy -p loquax --features gui --all-targets --target "$(rustc -vV | sed -n 's/^host: //p')" -- -D warnings
     {{manifest}} loquax-gui -- cargo test -p loquax --features gui --lib --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
 
+# Slice 2 of lnomad-everywhere (#475): lnomad's window behind its `gui`
+# feature, and the window widgets it shares with Loquax (leviculum-ui-iced).
+# Clippy over every lnomad target with the feature, then the crate's tests
+# and lnomad's with it: the README's window pixel for pixel
+# (`lnomad/tests/golden/gui-page-{light,dark}.png`), a headless click on a
+# link, the frame time. For the host's own triple, as `loquax-gui`: the
+# window's crates link libdl, which a musl-static binary cannot. Not in
+# `standard`: nothing ships it yet.
+[doc('Lint and test lnomad --features gui and leviculum-ui-iced (#475)')]
+lnomad-gui:
+    cargo clippy -p leviculum-ui-iced -p lnomad --features gui --all-targets --target "$(rustc -vV | sed -n 's/^host: //p')" -- -D warnings
+    {{manifest}} lnomad-gui -- cargo test -p leviculum-ui-iced -p lnomad --features gui --target "$(rustc -vV | sed -n 's/^host: //p')"
+
 # 1217, #232: the phone's strings of the list and the chat come from the core's
 # catalogue (`loquax/src/ui/strings.rs`, English and German), which this writes
 # to `loquax-android/android/res/values{,-de}/strings_scene.xml`. The library's

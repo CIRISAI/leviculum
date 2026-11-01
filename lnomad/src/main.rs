@@ -98,6 +98,11 @@ struct Args {
     /// Fetch, render and print the page once, then exit (non-interactive).
     #[arg(long)]
     print: bool,
+
+    /// Open the browser in a window instead of the terminal. `--theme auto`
+    /// is dark there, `light` and `dark` force a theme.
+    #[arg(long, conflicts_with = "print")]
+    gui: bool,
 }
 
 /// The `--images` choice.
@@ -171,8 +176,12 @@ async fn main() -> ExitCode {
     // Print-once mode: also chosen automatically when stdout is not a tty, so a
     // piped/redirected invocation never blocks on the UI. It also decides what a
     // missing URL means: the start screen on a terminal, an error otherwise.
-    let interactive =
-        !args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let interactive = args.gui
+        || (!args.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal());
+    if args.gui && !cfg!(feature = "gui") {
+        eprintln!("lnomad: this build has no window; build it with --features gui");
+        return ExitCode::from(2);
+    }
 
     let mode = match resolve_args(args.url.as_deref(), interactive) {
         Ok(mode) => mode,
@@ -233,6 +242,19 @@ async fn main() -> ExitCode {
     // A /file/ target downloads to disk (never rendered, never a TUI session):
     // fetch the raw bytes, save them, print the save line.
     let downloading = target.as_ref().is_some_and(|t| t.is_file);
+
+    #[cfg(feature = "gui")]
+    if args.gui && !downloading {
+        // The window owns the session as the TUI does, below.
+        let theme = lnomad::resolve_theme(None, args.theme.into());
+        return match lnomad::gui::run_gui(session, target, opts, theme).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("lnomad: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     if interactive && !downloading {
         // The TUI owns the session and drives navigation: it does the initial

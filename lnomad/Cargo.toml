@@ -76,12 +76,33 @@ tui = [
     "dep:crossterm",
     "dep:terminal_size",
 ]
+# `lnomad --gui`: the window (`gui`, slice 2 of
+# docs/src/concepts/lnomad-everywhere.md), on the window widgets shared with
+# Loquax. Off by default, so iced is in no graph that does not ask for it:
+# not the terminal package's, not the core's. Built for the gnu target, as
+# Loquax's window: winit opens X11 and Wayland with dlopen, which a
+# musl-static binary cannot do.
+gui = ["dep:iced", "dep:leviculum-ui-iced"]
 
 [dependencies]
 leviculum-micron = { path = "../leviculum-micron" }
 leviculum-ui = { path = "../leviculum-ui" }
 # The shared terminal widgets and shell, the frontend half (`tui`).
 leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", features = ["images"], optional = true }
+# The window's widgets (`gui`), shared with Loquax's window.
+leviculum-ui-iced = { path = "../leviculum-ui-iced", optional = true }
+# The window (`gui`): iced 0.14 as Loquax's window has it, the software
+# renderer alone; `advanced` for loading the page's face into the font
+# system a view drawn without a window uses; Fira Sans embedded for the
+# chrome, so a picture and its golden agree on every host.
+iced = { version = "0.14", default-features = false, features = [
+    "tiny-skia",
+    "x11",
+    "wayland",
+    "thread-pool",
+    "advanced",
+    "fira-sans",
+], optional = true }
 # Default features off, see `[features]`.
 leviculum-std = { path = "../leviculum-std", default-features = false, features = ["compression"] }
 leviculum-core = { path = "../leviculum-core" }
@@ -112,6 +133,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 [dev-dependencies]
 tempfile = "3"
 hex = "0.4"
+# The window's PNG goldens (`gui`); in the lock already, through Loquax's.
+png = "0.18"
 
 [lib]
 name = "lnomad"

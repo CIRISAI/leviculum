@@ -32,6 +32,8 @@ pub mod color;
 pub mod discovery;
 pub mod download;
 pub mod fetch;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod identify;
 pub mod identity;
 pub mod image;
