@@ -126,6 +126,40 @@ impl Maps {
         self.dir().map(load).unwrap_or_default()
     }
 
+    /// How many region files there are now and their bytes together, by
+    /// the directory alone, none opened: the Maps page's "Delete all
+    /// downloaded maps (1.2 GB)" (1290).
+    pub fn usage(&self) -> (usize, u64) {
+        let lens: Vec<u64> = self
+            .dir()
+            .map(region_files)
+            .unwrap_or_default()
+            .iter()
+            .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
+            .collect();
+        (lens.len(), lens.iter().sum())
+    }
+
+    /// Delete every region file, the hand placed ones too, and tell every
+    /// painter (1290); how many went. One that will not go stops it with
+    /// a line, the ones before it are gone. A region the autoload is
+    /// writing lands after, as any area looked at does.
+    pub fn delete_all(&self) -> Result<usize, String> {
+        let paths = self.dir().map(region_files).unwrap_or_default();
+        let mut gone = 0;
+        let result = paths.iter().try_for_each(|path| {
+            std::fs::remove_file(path)
+                .map_err(|error| format!("map: {} was not deleted: {error}", path.display()))?;
+            gone += 1;
+            Ok(())
+        });
+        if gone > 0 {
+            tracing::info!("MAPLOAD deleted all={gone}");
+            self.changed();
+        }
+        result.map(|()| gone)
+    }
+
     /// The headers of the regions there now, newest first
     /// ([`newest_first`]).
     pub fn headers(&self) -> Vec<Header> {
@@ -155,18 +189,25 @@ pub fn newest_first(regions: &[Installed]) -> Vec<&Installed> {
     order
 }
 
-/// Every `*.lmr` in `dir`, by name, and a line for each that did not open.
-/// A missing directory is no regions, not an error.
-pub fn load(dir: &Path) -> (Vec<Installed>, Vec<String>) {
+/// The paths of every `*.lmr` in `dir`, by name; none for a missing
+/// directory.
+fn region_files(dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "lmr"))
+            .filter(|p| p.extension().is_some_and(|x| x == "lmr") && p.is_file())
             .collect(),
-        Err(_) => return (Vec::new(), Vec::new()),
+        Err(_) => return Vec::new(),
     };
     paths.sort();
+    paths
+}
+
+/// Every `*.lmr` in `dir`, by name, and a line for each that did not open.
+/// A missing directory is no regions, not an error.
+pub fn load(dir: &Path) -> (Vec<Installed>, Vec<String>) {
+    let paths = region_files(dir);
     let (mut regions, mut problems) = (Vec::new(), Vec::new());
     for path in paths {
         let name = path
@@ -263,6 +304,11 @@ impl Painter {
         self.epoch = epoch;
         self.regions = self.maps.load().0;
         true
+    }
+
+    /// The directory it reads, as the shell and the loader share it.
+    pub fn maps(&self) -> &Maps {
+        &self.maps
     }
 
     /// The epoch of the regions this painter draws.

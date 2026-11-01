@@ -487,6 +487,11 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "deleteRegions",
+            java_map(&[("t", Java::Str("deleteregions"))]),
+            Request::DeleteRegions,
+        ),
+        (
             "Locator.tell",
             java_map(&[
                 ("t", Java::Str("fix")),

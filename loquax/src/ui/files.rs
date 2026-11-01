@@ -204,7 +204,10 @@ pub fn refusal(bytes: usize) -> Option<Text> {
     (bytes > LARGEST).then(|| {
         Text::Key(
             StrId::FileTooLarge,
-            alloc::vec![Arg::Str(size_words(bytes)), Arg::Str(size_words(LARGEST))],
+            alloc::vec![
+                Arg::Str(size_words(bytes as u64)),
+                Arg::Str(size_words(LARGEST as u64))
+            ],
         )
     })
 }
@@ -216,7 +219,7 @@ pub fn file_words(file: &FileRef) -> Text {
         StrId::File,
         alloc::vec![
             Arg::Str(safe_name(&file.name)),
-            Arg::Str(size_words(file.bytes))
+            Arg::Str(size_words(file.bytes as u64))
         ],
     )
 }

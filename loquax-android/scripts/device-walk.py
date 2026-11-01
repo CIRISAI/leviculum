@@ -302,6 +302,19 @@ FIXTURE_REGION = REPO / "leviculum-map" / "fixtures" / "firenze.lmr"
 FIXTURE_REGION_PLACE = re.compile(r"43[.,]\d\d° N, 11[.,]\d\d° E")
 # A size as Formatter.formatShortFileSize writes it: "1.2 MB", "345 kB".
 FILE_SIZE = re.compile(r"\d+(?:[.,]\d+)?\s?(?:B|kB|KB|MB|GB)\b")
+# The Maps page's last row (1290, the core's catalogue): its id, its label
+# with the total, its one question with the count while the automatic
+# download is on, and the question's yes.
+DELETE_ALL = "maps_delete_all"
+DELETE_ALL_LABEL = re.compile(
+    r"(?:Delete all downloaded maps|Alle geladenen Karten löschen) \((.+)\)"
+)
+DELETE_ALL_ASK = re.compile(
+    r"Delete all (\d+) maps\? Areas you visit will be downloaded again when you look at them\."
+    r"|Alle (\d+) Karten löschen\? Gebiete, die du besuchst, werden wieder geladen,"
+    r" wenn du sie anschaust\."
+)
+DELETE_ALL_YES = "Delete all"
 # The buttons of the dialogs a first start may raise: Android's
 # notification question, its battery exemption, the app's own (Asks.java).
 # "Not now" before "Leave it out": the latter opens a second, system dialog.
@@ -373,6 +386,7 @@ class Node:
     scrollable: bool = False
     checked: bool = False
     selected: bool = False
+    enabled: bool = True
 
     @property
     def center(self) -> tuple[int, int]:
@@ -921,6 +935,7 @@ def parse_dump(xml_text: str) -> list[Node]:
                 scrollable=el.get("scrollable") == "true",
                 checked=el.get("checked") == "true",
                 selected=el.get("selected") == "true",
+                enabled=el.get("enabled", "true") == "true",
             )
         )
     return nodes
@@ -1259,6 +1274,52 @@ def maps_page_problems(nodes: list[Node]) -> tuple[str, list[str]]:
     problems += decode_problems(nodes)
     state = "none" if not switch else "on" if switch[0].checked else "off"
     return f"auto={state} used={size.group(0) if size else '?'} regions={len(names)}", problems
+
+
+def delete_all_row_problems(nodes: list[Node]) -> tuple[str, list[str]]:
+    """The Maps page's last row (1290): its total, and what is wrong: no
+    row, a label that is not "Delete all downloaded maps (size)", a total
+    other than the storage line's, the row above a region, the row off
+    while regions are listed or on while none are."""
+    row = find(nodes, rid=DELETE_ALL)
+    if not row:
+        return "?", ["no Delete all row"]
+    label = DELETE_ALL_LABEL.fullmatch(row[0].text)
+    regions = find(nodes, rid="maps_region_name")
+    used = find(nodes, rid="maps_used")
+    problems = []
+    total = label.group(1) if label else "?"
+    if label is None:
+        problems.append(f"the row says {row[0].text!r}")
+    else:
+        size = FILE_SIZE.search(used[0].text) if used else None
+        if size is None or size.group(0) != total:
+            problems.append(
+                f"the row's total {total!r} is not the storage line's "
+                f"{used[0].text if used else None!r}"
+            )
+    if any(r.bounds[1] > row[0].bounds[1] for r in regions):
+        problems.append("the row is not below every region")
+    if row[0].enabled != bool(regions):
+        state = "on" if row[0].enabled else "off"
+        problems.append(f"the row is {state} with {len(regions)} regions")
+    return total, problems
+
+
+def delete_all_ask_problems(nodes: list[Node], regions: int) -> list[str]:
+    """The row's question (1290): what is wrong: no question in the
+    automatic download's words, or one with a count other than the
+    regions listed, or no Delete all to say yes with."""
+    asked = [m for t in texts(nodes) if (m := DELETE_ALL_ASK.fullmatch(t))]
+    if not asked:
+        return [f"no question; screen: {texts(nodes)[:8]}"]
+    problems = []
+    count = int(asked[0].group(1) or asked[0].group(2))
+    if count != regions:
+        problems.append(f"the question counts {count} maps, the page listed {regions}")
+    if not find(nodes, text=DELETE_ALL_YES):
+        problems.append(f"no {DELETE_ALL_YES!r} button")
+    return problems
 
 
 def privacy_page_problems(nodes: list[Node]) -> tuple[bool | None, list[str]]:
@@ -3453,7 +3514,10 @@ class Walk:
         """The Maps page (1207), open: the switch on, the storage used,
         the fixture's region with its size; the switch off, the page left
         and opened again still off (stored), then on again; never a line
-        that did not decode. The page's line for the detail."""
+        that did not decode. Then Delete all (1290): the row at the list's
+        foot with the storage line's total, its one question with the
+        regions' count, and after the yes no region, 0 B and the row off.
+        The page's line for the detail."""
         dev = self.need_device()
         nodes = self.maps_switch(True)
         detail, problems = maps_page_problems(nodes)
@@ -3467,8 +3531,45 @@ class Walk:
         self.wait_id("maps_auto", 10)
         nodes = self.maps_switch(False)
         dev.tap_node(find(nodes, rid="maps_auto")[0])
-        self.maps_switch(True)
-        return f"{detail} switch=off,stored,on"
+        nodes = self.maps_switch(True)
+        return f"{detail} switch=off,stored,on {self.delete_all_maps(nodes)}"
+
+    def delete_all_maps(self, nodes: list[Node]) -> str:
+        """The Maps page's Delete all (1290) on the open page `nodes`."""
+        dev = self.need_device()
+        total, problems = delete_all_row_problems(nodes)
+        if problems:
+            raise StepFailed("Delete all: " + "; ".join(problems))
+        regions = len(find(nodes, rid="maps_region_name"))
+        dev.tap_node(find(nodes, rid=DELETE_ALL)[0])
+        asked: list[Node] = []
+
+        def question():
+            nonlocal asked
+            asked = dev.dump()
+            return any(DELETE_ALL_ASK.fullmatch(t) for t in texts(asked))
+
+        wait_for(question, 10, every=0.3)
+        problems = delete_all_ask_problems(asked, regions)
+        if problems:
+            raise StepFailed("Delete all: " + "; ".join(problems))
+        dev.tap_node(find(asked, text=DELETE_ALL_YES)[0])
+        after: list[Node] = []
+
+        def emptied():
+            nonlocal after
+            after = dev.dump()
+            return not find(after, rid="maps_region_name") and find(after, rid=DELETE_ALL)
+
+        if not wait_for(emptied, 10, every=0.3):
+            raise StepFailed(f"Delete all: regions left; screen: {texts(after)[:8]}")
+        left, problems = delete_all_row_problems(after)
+        problems += decode_problems(after)
+        if not re.fullmatch(r"0\s?B", left):
+            problems.append(f"the row says {left!r} with no maps")
+        if problems:
+            raise StepFailed("Delete all: " + "; ".join(problems))
+        return f"delete_all={total},asked={regions},left={left}"
 
     def step_profile(self) -> str:
         """The profile (1187): our avatar at the top left of the chats

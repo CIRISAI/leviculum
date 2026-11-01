@@ -76,6 +76,7 @@
 //! | `Command::Import` | `Import` |
 //! | `Command::MyCode` | `MyCode` |
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
+//! | the Maps page's last row (1290), `Request::DeleteRegions` | `DeleteAllRegions` (`confirmed` tells the asked from the asking) |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
 //! | `keys::Action::Newline`, `ClearDraft` | the same names |
@@ -453,6 +454,11 @@ pub enum Intent {
     ReadReceipts {
         on: Switch,
     },
+    /// The Maps page's last row (1290): delete every downloaded region,
+    /// after asking unless `confirmed`. The autoload stays as it is.
+    DeleteAllRegions {
+        confirmed: bool,
+    },
 }
 
 impl Intent {
@@ -611,6 +617,7 @@ impl Intent {
             Intent::Mouse => StrId::Mouse,
             Intent::Import => StrId::Import,
             Intent::ReadReceipts { .. } => StrId::ReadReceipts,
+            Intent::DeleteAllRegions { .. } => StrId::DeleteAllRegionsYes,
         }
     }
 }

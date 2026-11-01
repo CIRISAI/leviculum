@@ -109,6 +109,13 @@
     <string name="scene_import">Import</string>
     <string name="read_receipts">Send read receipts</string>
     <string name="read_receipts_text">Others see when you have read their messages. Off, you do not see it from others either.</string>
+    <string name="settings_maps">Maps</string>
+    <string name="maps_used">Storage used: %1$s</string>
+    <string name="maps_delete_all">Delete all downloaded maps (%1$s)</string>
+    <string name="maps_delete_all_ask">Delete all %1$d maps? Areas you visit will be downloaded again when you look at them.</string>
+    <string name="maps_delete_all_ask_manual">Delete all %1$d maps? They come back only when you load an area again.</string>
+    <string name="maps_delete_all_yes">Delete all</string>
+    <string name="scene_cancel">Cancel</string>
     <string name="scene_photo">Photo, %1$s</string>
     <string name="attach_photo">Gallery</string>
     <string name="scene_view_photo">Show photo</string>

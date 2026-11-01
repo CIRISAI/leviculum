@@ -228,6 +228,53 @@ class MapsPage(unittest.TestCase):
         _, problems = walk.maps_page_problems(maps_page()[1:])
         self.assertEqual(problems, ["no automatic download switch"])
 
+    def test_delete_all_row_as_built_and_after(self):
+        """1290: the row below the regions with the storage line's total;
+        after the yes no region, 0 B and the row off."""
+        row = at("maps_delete_all", "Delete all downloaded maps (1.4 MB)", 600)
+        total, problems = walk.delete_all_row_problems(maps_page() + [row])
+        self.assertEqual((total, problems), ("1.4 MB", []))
+        off = walk.Node(text="Delete all downloaded maps (0 B)", desc="",
+                        rid=row.rid, cls="", bounds=row.bounds, enabled=False)
+        empty = maps_page(used="Storage used: 0 B", rows=()) + [off]
+        self.assertEqual(walk.delete_all_row_problems(empty), ("0 B", []))
+
+    def test_delete_all_row_problems(self):
+        self.assertEqual(walk.delete_all_row_problems(maps_page()), ("?", ["no Delete all row"]))
+        wrong = at("maps_delete_all", "Delete all downloaded maps (2.8 MB)", 300)
+        off = walk.Node(text=wrong.text, desc="", rid=wrong.rid, cls="", bounds=wrong.bounds,
+                        enabled=False)
+        _, problems = walk.delete_all_row_problems(maps_page() + [off])
+        self.assertEqual(problems, [
+            "the row's total '2.8 MB' is not the storage line's 'Storage used: 1.4 MB'",
+            "the row is not below every region",
+            "the row is off with 1 regions",
+        ])
+        _, problems = walk.delete_all_row_problems(
+            maps_page(rows=()) + [at("maps_delete_all", "Delete all", 600)])
+        self.assertEqual(problems, ["the row says 'Delete all'", "the row is on with 0 regions"])
+
+    def test_delete_all_question(self):
+        ask = node("", "Delete all 1 maps? Areas you visit will be downloaded again when you "
+                       "look at them.")
+        yes = node("", walk.DELETE_ALL_YES)
+        self.assertEqual(walk.delete_all_ask_problems([ask, yes], 1), [])
+        german = node("", "Alle 3 Karten löschen? Gebiete, die du besuchst, werden wieder "
+                          "geladen, wenn du sie anschaust.")
+        self.assertEqual(walk.delete_all_ask_problems([german, yes], 3), [])
+        self.assertEqual(walk.delete_all_ask_problems([ask], 2), [
+            "the question counts 1 maps, the page listed 2",
+            "no 'Delete all' button",
+        ])
+        manual = node("", "Delete all 1 maps? They come back only when you load an area again.")
+        self.assertTrue(walk.delete_all_ask_problems([manual, yes], 1)[0].startswith("no question"))
+
+    def test_the_dump_reads_a_buttons_enabled(self):
+        xml = ('<hierarchy rotation="0"><node index="0" text="x" resource-id="x:id/maps_delete_all" '
+               'class="android.widget.Button" enabled="false" bounds="[0,0][1,1]" /></hierarchy>')
+        self.assertFalse(walk.parse_dump(xml)[0].enabled)
+        self.assertTrue(walk.parse_dump(xml.replace('enabled="false" ', ""))[0].enabled)
+
     def test_the_dump_reads_a_switchs_state(self):
         xml = ('<hierarchy rotation="0"><node index="0" text="" resource-id="x:id/maps_auto" '
                'class="android.widget.Switch" checked="true" bounds="[0,0][1,1]" /></hierarchy>')

@@ -583,6 +583,15 @@ final class Core {
         return answer(Native.query(MsgPack.pack(request)));
     }
 
+    /**
+     * The Maps page's last row, after its question (1290): every
+     * downloaded region deleted; null, or the line why not. Off the UI
+     * thread, as {@link #mapRegions} is.
+     */
+    static String deleteRegions() {
+        return command(map("t", "deleteregions"));
+    }
+
     /** Every link: peer, lookup, contact_id, name. */
     static List<Map<String, Object>> links() {
         return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");

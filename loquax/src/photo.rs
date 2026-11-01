@@ -95,8 +95,8 @@ impl core::fmt::Display for PhotoError {
             PhotoError::TooLarge { bytes } => write!(
                 f,
                 "the photo is {} and others take at most {}: choose a smaller photo size",
-                crate::ui::photos::size_words(*bytes),
-                crate::ui::photos::size_words(LARGEST)
+                crate::ui::photos::size_words(*bytes as u64),
+                crate::ui::photos::size_words(LARGEST as u64)
             ),
             PhotoError::Encode(detail) => write!(f, "the photo did not encode: {detail}"),
         }

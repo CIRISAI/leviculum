@@ -156,6 +156,16 @@ leviculum_ui::catalogue! {
     // The privacy page's switch (1233, loquax-read-receipts.md, section 4).
     ReadReceipts = "read_receipts", "Send read receipts", "Lesebestätigungen senden";
     ReadReceiptsText = "read_receipts_text", "Others see when you have read their messages. Off, you do not see it from others either.", "Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.";
+    // The Maps page (1201, 1290): its title, the storage line, and the
+    // row at the list's foot that deletes every region, with its one
+    // question, which says whether the autoload brings them back.
+    SettingsMaps = "settings_maps", "Maps", "Karten";
+    MapsUsed = "maps_used", "Storage used: %1$s", "Belegter Speicher: %1$s";
+    DeleteAllRegions = "maps_delete_all", "Delete all downloaded maps (%1$s)", "Alle geladenen Karten löschen (%1$s)";
+    DeleteAllRegionsAsk = "maps_delete_all_ask", "Delete all %1$d maps? Areas you visit will be downloaded again when you look at them.", "Alle %1$d Karten löschen? Gebiete, die du besuchst, werden wieder geladen, wenn du sie anschaust.";
+    DeleteAllRegionsAskManual = "maps_delete_all_ask_manual", "Delete all %1$d maps? They come back only when you load an area again.", "Alle %1$d Karten löschen? Sie kommen erst wieder, wenn du ein Gebiet neu lädst.";
+    DeleteAllRegionsYes = "maps_delete_all_yes", "Delete all", "Alle löschen";
+    Cancel = "scene_cancel", "Cancel", "Abbrechen";
     // Photos (1220): the bubble's words, the paperclip's entry, the
     // setting under Settings › Chats with its one line.
     Photo = "scene_photo", "Photo, %1$s", "Foto, %1$s";

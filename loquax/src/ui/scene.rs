@@ -1409,7 +1409,9 @@ pub fn compose<B>(model: &UiModel<B>, c: usize) -> Compose {
         staged: model.bar.staged.get(&peer).map(|staged| {
             let words = Text::Key(
                 StrId::Staged,
-                Vec::from([Arg::Str(super::photos::size_words(staged.data.len()))]),
+                Vec::from([Arg::Str(
+                    super::photos::size_words(staged.data.len() as u64),
+                )]),
             );
             StagedNode {
                 id: NodeId::Staged,
@@ -1580,7 +1582,7 @@ fn bubble_node(
         bytes: photo.bytes,
         words: Text::Key(
             StrId::Photo,
-            Vec::from([Arg::Str(super::photos::size_words(photo.bytes))]),
+            Vec::from([Arg::Str(super::photos::size_words(photo.bytes as u64))]),
         ),
         open: Action::of(Intent::ViewPhoto {
             peer,
@@ -1595,7 +1597,7 @@ fn bubble_node(
             id: NodeId::File(bubble.key, index),
             name: super::files::safe_name(&file.name),
             bytes: file.bytes,
-            size: super::photos::size_words(file.bytes),
+            size: super::photos::size_words(file.bytes as u64),
             words: super::files::file_words(file),
             open: Action::of(Intent::OpenFile {
                 peer,

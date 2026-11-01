@@ -1089,6 +1089,12 @@ impl Session {
                 peer,
                 input: Input::Verb(verb),
             },
+            // The maps are the renderer's, not the model's (1290): off the
+            // session's lock, as the Maps page's queries are.
+            Intent::DeleteAllRegions { confirmed: true } => {
+                let home = self.lock().home.clone();
+                return crate::map::delete_all_regions(&home).map(|_| ());
+            }
             other => return Err(format!("not a request of the facade: {other:?}")),
         };
         self.lock().apply(event);
@@ -2964,6 +2970,8 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             verb: verb_of(&verb)
                 .ok_or_else(|| format!("{verb:?} is no button of the recording bar"))?,
         },
+        // Java asked its question before it sends this (1290).
+        R::DeleteRegions => Intent::DeleteAllRegions { confirmed: true },
     };
     Ok(Decoded::Intent(intent))
 }

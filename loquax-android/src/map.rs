@@ -322,6 +322,15 @@ impl Renderer {
         })
     }
 
+    /// Delete every region of the directory (1290), told to the frames
+    /// and the loader as one deleted alone is; how many went.
+    pub fn delete_all(&mut self) -> Result<usize, String> {
+        let gone = self.maps.delete_all();
+        self.frames.refresh();
+        self.fitted_at = None;
+        gone
+    }
+
     /// One frame for `request` over `pins`, in a buffer of its own.
     pub fn frame(&mut self, request: &MapRequest, pins: &[MapPin]) -> (MapShown, Vec<u8>) {
         let mut rgba = Vec::new();
@@ -784,6 +793,12 @@ pub fn regions(
     set_autoload: Option<bool>,
 ) -> Result<MapRegions, String> {
     with_dir(dir, |renderer| renderer.regions(delete, set_autoload))
+}
+
+/// The Maps page's "Delete all downloaded maps" (1290) for the app's
+/// directory `dir`: how many regions went.
+pub fn delete_all_regions(dir: &Path) -> Result<usize, String> {
+    with_dir(dir, Renderer::delete_all)
 }
 
 /// `f` with the renderer of the request's directory, made on its first

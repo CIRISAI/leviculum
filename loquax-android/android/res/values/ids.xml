@@ -52,6 +52,7 @@
     <item name="maps_region" type="id" />
     <item name="maps_region_name" type="id" />
     <item name="maps_region_line" type="id" />
+    <item name="maps_delete_all" type="id" />
     <item name="maps_used" type="id" />
     <item name="privacy_receipts" type="id" />
     <item name="photo_full" type="id" />

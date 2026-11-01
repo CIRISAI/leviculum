@@ -109,6 +109,13 @@
     <string name="scene_import">Importieren</string>
     <string name="read_receipts">Lesebestätigungen senden</string>
     <string name="read_receipts_text">Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.</string>
+    <string name="settings_maps">Karten</string>
+    <string name="maps_used">Belegter Speicher: %1$s</string>
+    <string name="maps_delete_all">Alle geladenen Karten löschen (%1$s)</string>
+    <string name="maps_delete_all_ask">Alle %1$d Karten löschen? Gebiete, die du besuchst, werden wieder geladen, wenn du sie anschaust.</string>
+    <string name="maps_delete_all_ask_manual">Alle %1$d Karten löschen? Sie kommen erst wieder, wenn du ein Gebiet neu lädst.</string>
+    <string name="maps_delete_all_yes">Alle löschen</string>
+    <string name="scene_cancel">Abbrechen</string>
     <string name="scene_photo">Foto, %1$s</string>
     <string name="attach_photo">Galerie</string>
     <string name="scene_view_photo">Foto zeigen</string>

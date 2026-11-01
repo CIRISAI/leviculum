@@ -470,14 +470,14 @@ fn block(
     if let Some(photo) = super::photos::photo_of(&message.fields) {
         media.push(format!(
             "{photo_glyph} photo {dot} {}",
-            super::photos::size_words(photo.bytes)
+            super::photos::size_words(photo.bytes as u64)
         ));
     }
     for file in super::files::files_of(&message.fields) {
         media.push(format!(
             "{file_glyph} {} {dot} {}",
             super::files::safe_name(&file.name),
-            super::photos::size_words(file.bytes)
+            super::photos::size_words(file.bytes as u64)
         ));
     }
     if let Some(voice) = super::voice::voice_of(&message.fields) {

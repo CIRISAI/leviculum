@@ -151,6 +151,8 @@
 //! [`Query::MovePhone`] answering a [`LinkCode`], [`Query::Moving`]
 //! answering a [`Linked`], and three fields of [`Start`] an older app
 //! never sends: `moving`, `take_back` and `anyway`.
+//! Deleting every map (1290) came within version 1 too:
+//! [`Request::DeleteRegions`]. An older app deletes them one by one.
 
 use serde::{Deserialize, Serialize};
 
@@ -549,6 +551,10 @@ pub enum Request {
         peer: String,
         verb: String,
     },
+    /// The Maps page's last row, after its question (1290): every
+    /// downloaded region deleted. The page asks [`Query::MapRegions`]
+    /// again for what is left.
+    DeleteRegions,
 }
 
 /// What a contact said when loquax read it.

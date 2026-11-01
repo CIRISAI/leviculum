@@ -209,7 +209,6 @@
     <string name="settings_chats_summary">Fotogröße</string>
     <string name="settings_privacy">Privatsphäre</string>
     <string name="settings_privacy_summary">Lesebestätigungen, blockierte Kontakte, geteilte Positionen</string>
-    <string name="settings_maps">Karten</string>
     <string name="settings_maps_summary">Karten auf diesem Telefon, automatisch laden</string>
     <string name="settings_backup">Sicherung</string>
     <string name="settings_backup_summary">Das Postfach sichern</string>
@@ -242,7 +241,6 @@
     <string name="map_fling_text">Nach einem Wisch gleitet die Karte weiter und wird langsamer, wenn dein Finger loslässt.</string>
     <string name="maps_auto">Karten automatisch laden</string>
     <string name="maps_auto_text">Die Karte der Gegend, die du anschaust, lädt von selbst und bleibt auf dem Telefon.</string>
-    <string name="maps_used">Belegter Speicher: %1$s</string>
     <string name="maps_none">Noch keine Karten auf diesem Telefon.</string>
     <string name="maps_region">Um %1$s</string>
     <string name="maps_region_line">%1$s · %2$s · Zoom %3$d bis %4$d</string>

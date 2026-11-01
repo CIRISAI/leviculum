@@ -41,7 +41,7 @@ use loquax::ui::recording::Verb;
 use loquax::ui::scene::{
     self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, RecordingBar, Row, Tab, TabId,
 };
-use loquax::ui::strings::{Lang, StrId};
+use loquax::ui::strings::{Arg, Lang, StrId, Text};
 use loquax::when::{list_time, WallTime};
 
 use super::{App, Message};
@@ -802,7 +802,8 @@ impl App {
                     .height(size::BAR)
                     .padding([0, 12])
                     .align_y(Alignment::Center),
-                receipts
+                receipts,
+                self.maps_rows(t),
             ]
             .width(Length::Fill),
         )
@@ -813,6 +814,63 @@ impl App {
             ..container::Style::default()
         })
         .into()
+    }
+
+    /// The phone's Maps page in the window (1290): its title, the storage
+    /// the regions take, and "Delete all downloaded maps (1.2 GB)", off
+    /// without maps; a press asks once, in the words that say whether the
+    /// autoload brings them back, with "Delete all" and "Cancel".
+    fn maps_rows(&self, t: Colours) -> Element<'_, Message> {
+        let (count, bytes) = self.maps_usage;
+        let size = Arg::Str(loquax::ui::photos::size_words(bytes));
+        let say = |id: StrId, arg: Arg| Text::Key(id, vec![arg]).resolve(self.lang);
+        let title = text(self.word(StrId::SettingsMaps))
+            .size(16)
+            .color(colour(t.text));
+        let used = text(say(StrId::MapsUsed, size.clone()))
+            .size(14)
+            .color(colour(t.text_secondary));
+        let ink = match count {
+            0 => t.text_secondary,
+            _ => t.failed_mark_on_panel,
+        };
+        let all = button(
+            text(say(StrId::DeleteAllRegions, size))
+                .size(15)
+                .color(colour(ink)),
+        )
+        .on_press_maybe(
+            (count > 0).then_some(Message::Intent(Intent::DeleteAllRegions {
+                confirmed: false,
+            })),
+        )
+        .padding([4, 0])
+        .style(|_: &Theme, _| button::Style::default());
+        let mut rows = column![title, used, all].spacing(4).padding([12, 16]);
+        if self.maps_asked {
+            let ask = match self.seen.autoload {
+                true => StrId::DeleteAllRegionsAsk,
+                false => StrId::DeleteAllRegionsAskManual,
+            };
+            let count = i64::try_from(count).unwrap_or(i64::MAX);
+            let yes = flat(
+                text(self.word(StrId::DeleteAllRegionsYes))
+                    .size(15)
+                    .color(colour(t.failed_mark_on_panel)),
+                Message::Intent(Intent::DeleteAllRegions { confirmed: true }),
+            )
+            .padding([4, 8]);
+            rows = rows.push(
+                text(say(ask, Arg::Int(count)))
+                    .size(14)
+                    .color(colour(t.text)),
+            );
+            rows = rows.push(row![
+                yes,
+                link(self.word(StrId::Cancel), Message::Intent(Intent::Back), t)
+            ]);
+        }
+        rows.into()
     }
 
     /// The list pane: the scene's top bar, the search, the new

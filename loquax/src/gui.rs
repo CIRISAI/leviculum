@@ -528,6 +528,11 @@ struct App {
     /// delete was asked once.
     menu: Option<NodeId>,
     deleting: Option<NodeId>,
+    /// The settings' Maps rows (1290): how many regions and their bytes,
+    /// read as the page opens and after a delete, and whether "Delete
+    /// all downloaded maps" was asked once.
+    maps_usage: (usize, u64),
+    maps_asked: bool,
     /// The language the scene's words are said in: the desktop's locale.
     lang: Lang,
     /// The scene of [`Seen`] in the window's class: what is drawn.
@@ -608,6 +613,8 @@ impl App {
             emoji: false,
             menu: None,
             deleting: None,
+            maps_usage: (0, 0),
+            maps_asked: false,
             lang: Lang::En,
             scene: empty,
             viewer: None,
@@ -817,6 +824,7 @@ impl App {
                     self.menu = None;
                     self.deleting = None;
                 }
+                (None, Screen::Settings) if self.maps_asked => self.maps_asked = false,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
                 // A stacked chat goes back to the list, as its bar's back
                 // does; beside the list Back has nothing to leave.
@@ -830,6 +838,19 @@ impl App {
             Intent::Theme => self.flipped = !self.flipped,
             Intent::ReadReceipts { on } => {
                 self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
+            }
+            Intent::DeleteAllRegions { confirmed: false } => {
+                self.maps_usage = self.maps().usage();
+                self.maps_asked = self.maps_usage.0 > 0;
+            }
+            Intent::DeleteAllRegions { confirmed: true } => {
+                self.maps_asked = false;
+                if let Err(why) = self.maps().delete_all() {
+                    self.seen.notice = Some(why);
+                }
+                self.regions_changed();
+                self.maps_usage = self.maps().usage();
+                return self.paint();
             }
             Intent::Search => {
                 self.screen = Screen::Chats;
@@ -1126,6 +1147,8 @@ impl App {
             Message::Settings => {
                 self.screen = Screen::Settings;
                 self.menu = None;
+                self.maps_asked = false;
+                self.maps_usage = self.maps().usage();
                 return Task::none();
             }
             Message::Key(event) => {
@@ -1320,6 +1343,13 @@ impl App {
     /// A region landed or left: the regions read again, the setup with
     /// them, and the fit again when the reader has not moved since it.
     /// The tiles drop themselves on the new epoch.
+    /// The maps directory the window draws from, as the shell's autoload
+    /// shares it.
+    fn maps(&self) -> loquax::picture::Maps {
+        let frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        frames.painter().maps().clone()
+    }
+
     fn regions_changed(&mut self) {
         {
             let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2804,6 +2834,57 @@ mod tests {
         assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(true)]);
         let _ = app.update(Message::Intent(Intent::Back));
         assert_eq!(app.screen, Screen::Chats);
+    }
+
+    /// 1290: the settings page's Maps rows delete every region after
+    /// asking once: the label's total is the three regions', Back takes
+    /// the question away and keeps the page, a yes deletes the files,
+    /// which the painter no longer draws, and an empty list asks nothing.
+    #[test]
+    fn the_settings_page_deletes_all_maps_after_asking_once() {
+        let dir = tempfile::tempdir().expect("maps dir");
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../leviculum-map/fixtures/firenze.lmr");
+        for name in ["firenze.lmr", "auto-a.lmr", "auto-b.lmr"] {
+            std::fs::copy(&fixture, dir.path().join(name)).expect("a region");
+        }
+        let len = std::fs::metadata(&fixture).expect("its size").len();
+        let maps = loquax::picture::Maps::new(Some(dir.path().to_path_buf()));
+        let mut app = App::new(Frames::new(maps), None);
+        app.seen.autoload = true;
+        assert_eq!(app.setup.regions.len(), 3);
+        let _ = app.update(Message::Settings);
+        assert_eq!(app.maps_usage, (3, 3 * len));
+        assert!(!app.maps_asked);
+
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: false,
+        }));
+        assert!(app.maps_asked);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert!(!app.maps_asked, "Back takes the question away");
+        assert_eq!(app.screen, Screen::Settings, "and keeps the page");
+        assert!(dir.path().join("firenze.lmr").is_file());
+
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: false,
+        }));
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: true,
+        }));
+        assert!(!app.maps_asked);
+        assert_eq!(app.maps_usage, (0, 0));
+        assert!(std::fs::read_dir(dir.path())
+            .expect("the dir")
+            .next()
+            .is_none());
+        assert!(app.setup.regions.is_empty(), "the painter drew them last");
+        assert_eq!(app.screen, Screen::Settings);
+
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: false,
+        }));
+        assert!(!app.maps_asked, "nothing to ask about");
     }
 
     /// The desktop's dark setting turns the window dark, and the toggle

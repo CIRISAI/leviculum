@@ -3425,6 +3425,74 @@ async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
     node.stop().await;
 }
 
+/// 1290: the Maps page's "Delete all downloaded maps", in Java's bytes as
+/// `Core.deleteRegions` sends it after its question, against a phone with
+/// three regions, a hand placed one among them: before, the page lists
+/// three and their sum; after, none, zero bytes, and no region file left,
+/// the stray file beside them untouched and the automatic download as it
+/// was. A second press with nothing left deletes nothing and is no error.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_all_maps_empties_the_maps_page() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let maps = phone.path().join("maps");
+    std::fs::create_dir_all(&maps).expect("maps dir");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr");
+    let names = ["firenze.lmr", "auto-a.lmr", "auto-b.lmr"];
+    for name in names {
+        std::fs::copy(&fixture, maps.join(name)).expect("a region");
+    }
+    std::fs::write(maps.join("notes.txt"), "not a region").expect("a stray file");
+    let len = std::fs::metadata(&fixture).expect("its size").len();
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let page: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the Maps page");
+        assert!(page.ok && page.autoload, "{page:?}");
+        assert_eq!(page.regions.len(), 3, "{page:?}");
+        assert_eq!(page.region_bytes, 3 * len);
+
+        let delete = || {
+            session.request(schema::decode(&java_map(&[(
+                "t",
+                Java::Str("deleteregions"),
+            )]))?)
+        };
+        delete().expect("every map deleted");
+        let empty: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the page again");
+        assert!(
+            empty.ok && empty.regions.is_empty() && empty.region_bytes == 0,
+            "{empty:?}"
+        );
+        assert!(empty.autoload, "the automatic download stays on");
+        for name in names {
+            assert!(!maps.join(name).exists(), "{name} is gone");
+        }
+        assert!(maps.join("notes.txt").is_file(), "only regions go");
+        delete().expect("nothing left is no error");
+        session.stop();
+    })
+    .await
+    .expect("the session");
+    node.stop().await;
+}
+
 /// One answer of `session` to `query`.
 fn asked<T: serde::de::DeserializeOwned>(session: &Session, query: schema::Query) -> T {
     rmp_serde::from_slice(&session.query(query).expect("a query")).expect("decode")
@@ -3703,7 +3771,7 @@ async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
             staged.staged,
             format!(
                 "Photo to send, {}",
-                loquax::ui::photos::size_words(gallery.data.len())
+                loquax::ui::photos::size_words(gallery.data.len() as u64)
             )
         );
         assert_eq!(staged.round, "send", "a staged photo is something to send");
