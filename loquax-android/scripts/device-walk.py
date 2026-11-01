@@ -68,6 +68,7 @@ STEPS = [
     "notification_text",
     "open_imported",
     "info",
+    "contact_info",
     "marks",
     "reply_send",
     "compose_bar",
@@ -155,6 +156,17 @@ JOIN = "Join"
 ACTION_INFO = "Info"
 ACTION_REPLY = "Reply"
 INFO_TITLE = "Message details"
+# The chat menu and the contact screen (1283, walk findings 28 and 29):
+# Refresh left the menu; the identity and the network sit under a closed
+# Advanced, whose header and body have their ids (ids.xml).
+CONTACT_INFO = "Contact info"
+CHAT_MENU_GONE = ["Refresh"]
+CONTACT_SCROLL = "contact_scroll"
+CONTACT_ADVANCED = "contact_advanced"
+CONTACT_ADVANCED_BODY = "contact_advanced_body"
+CONTACT_FOLDED = ["Identity", "Network"]
+# Words the contact screen's main rows no longer say (finding 29).
+CONTACT_MAIN_WORDS = ["hash", "the name it announces"]
 MAP = "Map"
 MORE = "More"
 SEND = "Send"
@@ -321,8 +333,9 @@ DELETE_ALL_ASK = re.compile(
 DELETE_ALL_YES = "Delete all"
 # The buttons of the dialogs a first start may raise: Android's
 # notification question, its battery exemption, the app's own (Asks.java).
-# "Not now" before "Leave it out": the latter opens a second, system dialog.
-DIALOG_BUTTONS = ["Allow", "ALLOW", "Not now"]
+# "Not now" first: the battery question's "Allow" (1283, finding 27) opens a
+# second, system dialog; Android's own questions have no "Not now".
+DIALOG_BUTTONS = ["Not now", "Allow", "ALLOW"]
 # The list's last line for a peer whose position is live (1209, Ui.preview).
 LIVE_LINE = "\U0001f4cd live"
 # A row's last line while a message is typed there and not sent (1219,
@@ -1418,6 +1431,41 @@ def pencil_problems(nodes: list[Node], camera: bool) -> list[str]:
     return problems + daemon_word_problems(nodes)
 
 
+def chat_menu_problems(menu: list[str]) -> list[str]:
+    """The chat bar's menu (1283, finding 28): Contact info is there,
+    Refresh is gone."""
+    problems = [] if CONTACT_INFO in menu else ["no Contact info in the menu"]
+    return problems + [f"the menu still offers {gone!r}" for gone in CHAT_MENU_GONE if gone in menu]
+
+
+def contact_fold_problems(closed: list[Node], opened: list[Node]) -> list[str]:
+    """The contact screen's Advanced fold (1283, finding 29): `closed` is
+    the screen as it opens, `opened` every node seen after the header's
+    tap, scrolled down. Closed: the header shows, its body does not, and
+    neither do the identity, the network or a word of Reticulum's. Opened:
+    the body shows, and the identity and the network are in it."""
+    problems = []
+    if not find(closed, rid=CONTACT_ADVANCED):
+        problems.append("no Advanced")
+    if find(closed, rid=CONTACT_ADVANCED_BODY):
+        problems.append("Advanced is open before the tap")
+    shown = texts(closed)
+    for header in CONTACT_FOLDED:
+        if header in shown:
+            problems.append(f"{header} on the main rows")
+    for text in shown:
+        for word in CONTACT_MAIN_WORDS:
+            if word in text:
+                problems.append(f"a main row says {word!r}: {text!r}")
+    if not find(opened, rid=CONTACT_ADVANCED_BODY):
+        problems.append("Advanced did not open")
+    seen = texts(opened)
+    for header in CONTACT_FOLDED:
+        if header not in seen:
+            problems.append(f"no {header} under Advanced")
+    return problems + decode_problems(closed + opened)
+
+
 def join_error_problems(nodes: list[Node], said: str) -> list[str]:
     """A failed join (1263, finding 8): the one sentence `said`, Retry,
     the Details fold, no daemon word in the sentence."""
@@ -2476,6 +2524,37 @@ class Walk:
         else:
             dev.key("KEYCODE_BACK")
         return f"sheet={found[0].text!r} lines={len(shown)}"
+
+    def step_contact_info(self) -> str:
+        """The chat menu and the contact screen (1283, findings 28 and 29):
+        the menu has Contact info and no Refresh; the screen opens with
+        Advanced closed and no identity, network or hash on it; a tap opens
+        the fold, and down it the identity and the network show; back to
+        the chat."""
+        dev = self.need_device()
+        dev.tap_node(self.wait_id("menu", 10)[0])
+        self.wait_text(CONTACT_INFO, 10)
+        menu = texts(dev.dump())
+        problems = chat_menu_problems(menu)
+        self.tap_text(CONTACT_INFO)
+        header = self.wait_id(CONTACT_ADVANCED, 10)
+        closed = dev.dump()
+        dev.tap_node(header[0])
+        self.wait_id(CONTACT_ADVANCED_BODY, 10)
+        opened: list[Node] = []
+        for _ in range(6):
+            nodes = dev.dump()
+            opened += nodes
+            if all(h in texts(opened) for h in CONTACT_FOLDED):
+                break
+            self.scroll_list(nodes, CONTACT_SCROLL, up=False)
+        problems += contact_fold_problems(closed, opened)
+        self.note(f"contact info: menu={menu} closed={texts(closed)[:16]}")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("compose", 10)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"menu=no_refresh advanced=closed_then_open folded={CONTACT_FOLDED}"
 
     def step_marks(self) -> str:
         """The imported chat holds one sent message on each rung of the

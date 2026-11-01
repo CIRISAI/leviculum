@@ -472,6 +472,64 @@ class Code(unittest.TestCase):
         self.assertIsNone(walk.parse_code("loquax: no mailbox here"))
 
 
+class ContactInfo(unittest.TestCase):
+    """The chat menu and the contact screen's Advanced fold (1283)."""
+
+    CLOSED = [
+        node("title", "Walk Friend"),
+        node(text="Nickname"),
+        node(text="None; the name they chose"),
+        node("contact_advanced", "Advanced  \u25be"),
+        node(text="Block"),
+    ]
+    OPENED = [
+        node("contact_advanced", "Advanced  \u25b4"),
+        node("contact_advanced_body"),
+        node(text="Identity"),
+        node(text="Network"),
+    ]
+
+    def test_the_menu_as_built_has_contact_info_and_no_refresh(self):
+        self.assertEqual(walk.chat_menu_problems(["Contact info", "Search", "Map", "Rename"]), [])
+
+    def test_a_menu_with_refresh_or_without_contact_info(self):
+        self.assertEqual(walk.chat_menu_problems(["Contact info", "Refresh"]),
+                         ["the menu still offers 'Refresh'"])
+        self.assertEqual(walk.chat_menu_problems(["Search"]), ["no Contact info in the menu"])
+
+    def test_the_fold_as_built_has_no_problem(self):
+        self.assertEqual(walk.contact_fold_problems(self.CLOSED, self.OPENED), [])
+
+    def test_the_identity_and_the_network_on_the_main_rows(self):
+        closed = self.CLOSED + [node(text="Identity"), node(text="Network"),
+                                node(text="The address is a hash of the identity's public key")]
+        self.assertEqual(walk.contact_fold_problems(closed, self.OPENED), [
+            "Identity on the main rows",
+            "Network on the main rows",
+            "a main row says 'hash': \"The address is a hash of the identity's public key\"",
+        ])
+
+    def test_the_old_nickname_line_is_found(self):
+        closed = self.CLOSED + [node(text="None; the name it announces")]
+        self.assertEqual(walk.contact_fold_problems(closed, self.OPENED),
+                         ["a main row says 'the name it announces': 'None; the name it announces'"])
+
+    def test_no_header_an_open_fold_and_a_fold_that_does_not_open(self):
+        self.assertEqual(walk.contact_fold_problems(self.CLOSED[:3], []), [
+            "no Advanced", "Advanced did not open", "no Identity under Advanced",
+            "no Network under Advanced",
+        ])
+        closed = self.CLOSED + [node("contact_advanced_body")]
+        self.assertEqual(walk.contact_fold_problems(closed, self.OPENED),
+                         ["Advanced is open before the tap"])
+
+    def test_the_step_runs_after_info_in_the_chat(self):
+        self.assertEqual(walk.STEPS.index("contact_info"), walk.STEPS.index("info") + 1)
+
+    def test_the_dialogs_tap_not_now_before_allow(self):
+        self.assertLess(walk.DIALOG_BUTTONS.index("Not now"), walk.DIALOG_BUTTONS.index("Allow"))
+
+
 class LinkDevice(unittest.TestCase):
     """The sheet of "Link a device" (1264)."""
 
