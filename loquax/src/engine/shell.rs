@@ -493,7 +493,7 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
         Some(hash) => {
             crate::home::rendezvous::Side::Phone(leviculum_core::DestinationHash::new(hash))
         }
-        None => crate::home::rendezvous::Side::Peer(None),
+        None => crate::home::rendezvous::Side::Peer,
     };
     attached.dial(&servers, side, tcp, timing)?;
     Ok(attached)
@@ -524,13 +524,6 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
             detail,
         })?;
     }
-    // A home node announces its home destination on every up of its entry.
-    let home = match &role {
-        Role::Home { .. } => crate::home::destination_hash(&identity.public_key_bytes())
-            .ok()
-            .map(leviculum_core::DestinationHash::new),
-        _ => None,
-    };
     let joined = Joined {
         storage_dir,
         identity,
@@ -538,12 +531,7 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
         notices,
     };
     let mut attached = attach_through(joined, role, Upstream::Mesh { screens }).await?;
-    attached.dial(
-        &servers,
-        crate::home::rendezvous::Side::Peer(home),
-        tcp,
-        timing,
-    )?;
+    attached.dial(&servers, crate::home::rendezvous::Side::Peer, tcp, timing)?;
     Ok(attached)
 }
 

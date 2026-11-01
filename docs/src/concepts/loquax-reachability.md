@@ -197,6 +197,12 @@ below is made and built.
 - **`loquax.home` is announced** on the delivery destination's cadence,
   and again by a mailbox each time its rendezvous connection comes up.
   Every relay then holds the path, and A works beyond the first relay.
+  The second is the node's own re-announce on a new or reconnected
+  interface, which carries the delivery destination too, once each: a
+  third announce at connect is what a stock Python entry holds as a burst
+  of a new interface, and it held the delivery announce for half a minute
+  when that came third (order 1274,
+  `reference/Reticulum/RNS/Transport.py:1705`).
   The client still asks for the path on every connect. The residual case
   is a mailbox behind a third party's plain port whose announce has not
   reached the phone's entry node yet: the client asks again with a

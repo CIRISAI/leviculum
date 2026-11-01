@@ -273,9 +273,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             attached
                 .dial(
                     &rendezvous,
-                    super::rendezvous::Side::Peer(Some(leviculum_core::DestinationHash::new(
-                        home_destination,
-                    ))),
+                    super::rendezvous::Side::Peer,
                     tcp,
                     super::rendezvous::Timing::default(),
                 )
