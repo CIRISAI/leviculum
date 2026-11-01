@@ -158,7 +158,7 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/lnpnd-nightly-arm64.ta
 
 \`sudo apt install ./lnpnd-nightly-amd64.deb\` installs \`lnpnd\` as a systemd service that is enabled but not started: put the node's identity at \`/etc/lnpnd/identity\` first, or accept a fresh one, then \`sudo systemctl start lnpnd\`.
 
-**loquax — LXMF messenger** (separate package, no service; \`loquax send\` for scripts, \`loquax tui\` for people):
+**loquax — LXMF messenger** (separate package, no service; \`loquax send\` for scripts, plain \`loquax\` for people):
 
 \`\`\`
 https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-amd64.deb
