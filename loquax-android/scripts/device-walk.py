@@ -97,6 +97,7 @@ STEPS = [
     "buildings",
     "first_start_name",
     "link_device",
+    "move_phone",
     "teardown",
 ]
 
@@ -117,6 +118,17 @@ LINK_STATUS = "link_status"
 LINKED = "Device linked: {}"
 LINKED_NAME = "walk laptop"
 JOIN_CODE_PREFIX = "lqxh1"
+# Moving to a new phone (1281, walk finding 24): the profile's row, the
+# sheet's ids, its line once the new phone (the host's walk_move) took the
+# mailbox, and the first screen of the old phone afterwards.
+MOVE_ROW = "profile_move_phone"
+MOVE_QR = "move_qr"
+MOVE_CODE = "move_code"
+MOVED = "Moved to {}. This phone has stopped."
+MOVED_NAME = "walk new phone"
+MOVED_TITLE = "This phone has moved"
+TAKE_BACK = "Use this phone again"
+TAKE_BACK_ID = "join_retry"
 # The first start's name (walk finding 9): the address page's one field,
 # and the name the walk types into it on a phone mailbox.
 WELCOME_NAME = "welcome_name"
@@ -1099,6 +1111,22 @@ def link_code_problems(shown: str, scanned: list[str], server: str) -> list[str]
         problems.append(f"the sheet holds {len(scanned)} codes: {scanned}")
     elif scanned[0].lower() != shown.lower():
         problems.append(f"the QR reads {scanned[0]!r}, the text says {shown!r}")
+    return problems
+
+
+def moved_page_problems(nodes: list[Node]) -> list[str]:
+    """The old phone's first screen after the move (1281): it says the
+    phone moved, offers to take the mailbox back, and shows no join form
+    (no field to type a code into)."""
+    problems = []
+    if not any(MOVED_TITLE in n.text for n in nodes):
+        problems.append(f"no {MOVED_TITLE!r}")
+    button = find(nodes, rid=TAKE_BACK_ID)
+    if not button or button[0].text != TAKE_BACK:
+        problems.append(f"no {TAKE_BACK!r} button")
+    edits = [n for n in nodes if n.cls.endswith("EditText")]
+    if edits:
+        problems.append(f"{len(edits)} fields on the moved page")
     return problems
 
 
@@ -3824,6 +3852,71 @@ class Walk:
             dev.key("KEYCODE_BACK")
         return f"code={code[:24]}… server={self.args.server} linked={LINKED_NAME!r}"
 
+    def step_move_phone(self) -> str:
+        """Move to a new phone (1281, walk finding 24), after link_device
+        and last before the teardown, since it ends the phone's mailbox:
+        the profile's "Move to a new phone" shows a join code whose QR
+        zbarimg reads as its text, the walk's server behind it; the host's
+        walk_move takes the mailbox over with it as the new phone; the sheet
+        says "Moved to <that name>"; Done opens the first screen, which says
+        the phone moved and offers to use it again; that takes it back and
+        the chats come again."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not self.on_phone:
+            self.start_on_phone(None)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        dev.tap_node(self.wait_id(MOVE_ROW, 10)[0])
+        self.wait_id(MOVE_QR, 15)
+        shown = find(dev.dump(), rid=MOVE_CODE)
+        code = shown[0].text.strip() if shown else ""
+        problems = link_code_problems(code, self.screen_codes("move_phone"), self.args.server)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        new = fixture.root / "new-phone"
+        mover = (
+            [self.args.walk_move]
+            if self.args.walk_move
+            else [
+                "cargo",
+                "run",
+                "--quiet",
+                "--manifest-path",
+                str(REPO / "Cargo.toml"),
+                "-p",
+                "loquax-android",
+                "--example",
+                "walk_move",
+                "--",
+            ]
+        )
+        moved = subprocess.run(
+            [*mover, str(new), code, MOVED_NAME], capture_output=True, timeout=480
+        )
+        if moved.returncode != 0:
+            raise StepFailed(f"walk_move exit={moved.returncode}: {moved.stderr.decode()[-300:]}")
+        if not (new / "mailbox" / "identity").exists() or not (new / "mailbox-here").exists():
+            raise StepFailed(f"{new} holds no mailbox after the move")
+        self.wait_text(MOVED.format(MOVED_NAME), 15)
+        dev.tap_node(self.wait_text(DONE, 5)[0])
+        self.wait_text(MOVED_TITLE, 30, contains=True)
+        problems = moved_page_problems(dev.dump())
+        if problems:
+            raise StepFailed("; ".join(problems))
+        dev.tap_node(self.wait_id(TAKE_BACK_ID, 5)[0])
+        # The confirmation names the risk; its positive button takes it back.
+        confirm = []
+
+        def asked():
+            confirm[:] = [n for n in dev.dump() if n.rid == "android:id/button1"]
+            return bool(confirm)
+
+        if not wait_for(asked, 10, every=0.5):
+            raise StepFailed("no confirmation for Use this phone again")
+        dev.tap_node(confirm[0])
+        self.wait_id("write", 60)
+        return f"code={code[:24]}… moved to={MOVED_NAME!r} taken back"
+
     def step_teardown(self) -> str:
         done = []
         problems = []
@@ -3878,6 +3971,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--walk-mailbox",
         help="a built walk_mailbox example; default: cargo run it",
+    )
+    p.add_argument(
+        "--walk-move",
+        help="a built walk_move example; default: cargo run it",
     )
     p.add_argument("--adb", default="adb", help="the adb to use")
     p.add_argument("--keep", action="store_true", help="no teardown")

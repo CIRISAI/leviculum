@@ -447,8 +447,8 @@ class LinkDevice(unittest.TestCase):
         problems = walk.link_code_problems(self.CODE, [], "192.168.240.1:4242")
         self.assertIn("holds 0 codes", problems[0])
 
-    def test_the_step_is_last_before_the_teardown(self):
-        self.assertEqual(walk.STEPS[-2:], ["link_device", "teardown"])
+    def test_the_step_comes_before_the_move(self):
+        self.assertEqual(walk.STEPS[-3:], ["link_device", "move_phone", "teardown"])
 
 
 class Screencap(unittest.TestCase):
@@ -707,9 +707,37 @@ class FirstStartName(unittest.TestCase):
         steps = walk.STEPS
         self.assertLess(steps.index("first_start"), steps.index("notification_text"))
         self.assertLess(steps.index("pencil_scan"), steps.index("share_in_contact"))
-        self.assertEqual(steps[-3:], ["first_start_name", "link_device", "teardown"])
+        self.assertEqual(
+            steps[-4:], ["first_start_name", "link_device", "move_phone", "teardown"]
+        )
         for step in ("notification_text", "share_in_contact", "first_start_name"):
             self.assertTrue(callable(getattr(walk.Walk, "step_" + step)), step)
+
+
+class MovePhone(unittest.TestCase):
+    """The old phone's first screen after the move (1281, walk finding 24)."""
+
+    def moved_text(self):
+        return walk.Node(text=walk.MOVED_TITLE + "\n\nThis phone has moved. Your mailbox is on your new phone now.",
+                         desc="", rid="network.leviculum.loquax.debug:id/error", cls="", bounds=(0, 0, 1, 1))
+
+    def test_the_moved_page_with_its_button_passes(self):
+        nodes = [self.moved_text(), node(walk.TAKE_BACK_ID, walk.TAKE_BACK)]
+        self.assertEqual(walk.moved_page_problems(nodes), [])
+
+    def test_no_title_another_button_or_a_join_form_is_named(self):
+        self.assertIn(f"no {walk.MOVED_TITLE!r}",
+                      walk.moved_page_problems([node(walk.TAKE_BACK_ID, walk.TAKE_BACK)]))
+        self.assertIn(f"no {walk.TAKE_BACK!r} button",
+                      walk.moved_page_problems([self.moved_text(), node(walk.TAKE_BACK_ID, "Try again")]))
+        self.assertIn("1 fields on the moved page",
+                      walk.moved_page_problems([self.moved_text(), node(walk.TAKE_BACK_ID, walk.TAKE_BACK),
+                                                edit("code", 100)]))
+
+    def test_the_step_is_last_before_the_teardown_and_runs(self):
+        self.assertEqual(walk.STEPS[-2:], ["move_phone", "teardown"])
+        self.assertTrue(callable(getattr(walk.Walk, "step_move_phone")))
+        self.assertEqual(walk.parse_args(["--walk-move", "/x/walk_move"]).walk_move, "/x/walk_move")
 
 
 def boxed(rid, bounds, desc=""):
