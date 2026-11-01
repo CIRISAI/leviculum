@@ -129,6 +129,13 @@
               a:exported='false'
               a:grantUriPermissions='true'/>
 
+    <!-- Received files for the app that opens or shares them (1221): the
+         library's files/files/ tree, read only (FilesProvider). -->
+    <provider a:name='network.leviculum.loquax.FilesProvider'
+              a:authorities='{{PACKAGE_NAME}}.files'
+              a:exported='false'
+              a:grantUriPermissions='true'/>
+
     <activity a:name='network.leviculum.loquax.SettingsActivity'
               a:theme='@style/Loquax.List'
               a:exported='false'/>

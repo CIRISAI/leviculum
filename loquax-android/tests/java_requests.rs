@@ -157,6 +157,22 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             },
         ),
         (
+            "file",
+            java_map(&[
+                ("t", Java::Str("file")),
+                ("peer", Java::Str(PEER)),
+                ("name", Java::Str("Grüße.pdf")),
+                ("data", Java::Bin(&[0x25, 0x50, 0x44, 0x46])),
+                ("size", Java::Long(4_200_000)),
+            ]),
+            Request::File {
+                peer: s(PEER),
+                name: s("Grüße.pdf"),
+                data: schema::Blob(vec![0x25, 0x50, 0x44, 0x46]),
+                size: 4_200_000,
+            },
+        ),
+        (
             "sendAgain",
             java_map(&[
                 ("t", Java::Str("sendagain")),
@@ -519,6 +535,20 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
                 peer: s(PEER),
                 key: KEY,
                 edge: 720,
+            },
+        ),
+        (
+            "saveFile",
+            java_map(&[
+                ("t", Java::Str("savefile")),
+                ("peer", Java::Str(PEER)),
+                ("key", Java::Long(KEY)),
+                ("index", Java::Long(0)),
+            ]),
+            Query::SaveFile {
+                peer: s(PEER),
+                key: KEY,
+                index: 0,
             },
         ),
         ("mapFling", t("mapfling"), Query::MapFling { set: None }),

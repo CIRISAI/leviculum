@@ -126,6 +126,13 @@ public class ChatActivity extends Activity implements Events.Listener {
     private static final int CONTACT = 45;
     /** The system picker's answer for the paperclip's "Photo" (1220). */
     private static final int PHOTO = 46;
+    /** The system picker's answer for the paperclip's "File" (1221). */
+    private static final int FILE = 47;
+    /**
+     * The most bytes of a picked file kept: past the library's 990 KB cap,
+     * so it says the refusal; the rest is only counted.
+     */
+    private static final int FILE_KEEP = 1000 * 1000;
     /** The longer side of a bubble's photo, in dp. */
     private static final int PHOTO_DP = 240;
     /** The most bytes of a picked picture read; past it the pick is refused. */
@@ -545,12 +552,13 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /**
      * The attachment menu (1201): a photo from the system's picker (1220),
-     * the own position, sent once to this chat when the user picks it;
+     * any file from it (1221), the own position, sent once to this chat when the user picks it;
      * the permission first if need be.
      */
     private void attach(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
         popup.getMenu().add(0, R.string.attach_photo, 0, R.string.attach_photo);
+        popup.getMenu().add(0, R.string.attach_file, 0, R.string.attach_file);
         popup.getMenu().add(0, R.string.attach_position, 0, R.string.attach_position);
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
@@ -561,6 +569,11 @@ public class ChatActivity extends Activity implements Events.Listener {
                     startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT)
                             .setType("image/*")
                             .addCategory(Intent.CATEGORY_OPENABLE), PHOTO);
+                } else if (item.getItemId() == R.string.attach_file) {
+                    // Any file the system's picker offers (1221).
+                    startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT)
+                            .setType("*/*")
+                            .addCategory(Intent.CATEGORY_OPENABLE), FILE);
                 } else if (item.getItemId() == R.string.attach_position) {
                     locator.shareWith(peer, Core.str(header, "name"), new Locator.Fix() {
                         @Override
@@ -721,6 +734,10 @@ public class ChatActivity extends Activity implements Events.Listener {
             sendPhoto(data.getData());
             return;
         }
+        if (request == FILE) {
+            sendFile(data.getData());
+            return;
+        }
         if (request != Book.PICK && request != Book.INSERT) {
             return;
         }
@@ -768,6 +785,152 @@ public class ChatActivity extends Activity implements Events.Listener {
                             line(said);
                         }
                         refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * The picked file's name and bytes, read off the UI thread, to the
+     * library, which sends it or says why not (1221): past FILE_KEEP only
+     * counted, so a film is not held in memory to be refused.
+     */
+    private void sendFile(final android.net.Uri uri) {
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                String name = "";
+                try (android.database.Cursor cursor = getContentResolver().query(uri,
+                        new String[] {android.provider.OpenableColumns.DISPLAY_NAME},
+                        null, null, null)) {
+                    if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                        name = cursor.getString(0);
+                    }
+                } catch (RuntimeException e) {
+                    name = "";
+                }
+                if (name.isEmpty() && uri.getLastPathSegment() != null) {
+                    name = uri.getLastPathSegment();
+                }
+                String error;
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[64 * 1024];
+                    long count = 0;
+                    int n;
+                    while (in != null && (n = in.read(chunk)) > 0) {
+                        int keep = (int) Math.max(0, Math.min(n, FILE_KEEP - count));
+                        bytes.write(chunk, 0, keep);
+                        count += n;
+                    }
+                    error = in == null
+                            ? getString(R.string.file_unreadable)
+                            : Core.file(peer, name, bytes.toByteArray(),
+                                    count > bytes.size() ? count : 0);
+                } catch (java.io.IOException | SecurityException e) {
+                    error = getString(R.string.file_unreadable);
+                }
+                final String said = error;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (said != null) {
+                            line(said);
+                        }
+                        refresh();
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * A row's files (1221): one line each, its name and size in a bubble's
+     * colours, said as the library words it; a tap opens it, a long press
+     * shares it. Gone for a row without.
+     */
+    private void files(LinearLayout box, Map<String, Object> row, boolean ours) {
+        box.removeAllViews();
+        List<Map<String, Object>> files = Core.list(row, "files");
+        box.setVisibility(files.isEmpty() ? View.GONE : View.VISIBLE);
+        final long key = Core.num(row, "key");
+        for (int i = 0; i < files.size(); i++) {
+            Map<String, Object> file = files.get(i);
+            final int index = i;
+            TextView line = new TextView(this);
+            line.setText("\u25A4  " + Core.str(file, "name") + "\n" + Core.str(file, "size"));
+            line.setTextSize(15);
+            line.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
+            line.setPadding(dp(12), dp(8), dp(12), dp(8));
+            line.setMaxWidth(dp(280));
+            line.setContentDescription(Core.str(file, "words"));
+            GradientDrawable shape = new GradientDrawable();
+            shape.setColor(getColor(ours ? R.color.bubble_ours : R.color.bubble_theirs));
+            shape.setCornerRadius(dp(CORNER));
+            line.setBackground(shape);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.bottomMargin = dp(2);
+            line.setLayoutParams(params);
+            line.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    openFile(key, index, false);
+                }
+            });
+            line.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    openFile(key, index, true);
+                    return true;
+                }
+            });
+            box.addView(line);
+        }
+    }
+
+    /**
+     * The library saves the file under the app's files (1221); the app the
+     * system has for its kind opens it, or the share sheet takes it, with
+     * read access to that one file (FilesProvider).
+     */
+    private void openFile(final long key, final int index, final boolean share) {
+        photos.execute(new Runnable() {
+            @Override
+            public void run() {
+                final Map<String, Object> saved = Core.saveFile(peer, key, index);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        android.net.Uri uri = Core.bool(saved, "ok")
+                                ? FilesProvider.uri(ChatActivity.this, Core.str(saved, "path"))
+                                : null;
+                        if (uri == null) {
+                            line(getString(R.string.file_unreadable));
+                            return;
+                        }
+                        String name = Core.str(saved, "name");
+                        String type = FilesProvider.type(name);
+                        Intent send = new Intent(Intent.ACTION_SEND)
+                                .setType(type)
+                                .putExtra(Intent.EXTRA_STREAM, uri)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        send.setClipData(ClipData.newRawUri(name, uri));
+                        Intent chooser = Intent.createChooser(send, name)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        Intent view = new Intent(Intent.ACTION_VIEW)
+                                .setDataAndType(uri, type)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        try {
+                            startActivity(share ? chooser : view);
+                        } catch (android.content.ActivityNotFoundException e) {
+                            try {
+                                startActivity(chooser);
+                            } catch (android.content.ActivityNotFoundException again) {
+                                line(getString(R.string.file_no_app));
+                            }
+                        }
                     }
                 });
             }
@@ -1512,6 +1675,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             bubble.setBackground(shape);
 
             photo((ImageView) view.findViewById(R.id.photo), row);
+            files((LinearLayout) view.findViewById(R.id.files), row, ours);
 
             TextView body = (TextView) view.findViewById(R.id.body);
             body.setText(text(row, ours, now));

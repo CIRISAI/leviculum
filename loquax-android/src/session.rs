@@ -649,6 +649,21 @@ impl Session {
                     data: prepared.data,
                 }
             }
+            // A file past what a receiver takes is refused here, in the
+            // phone's words, for Java's status line (1221).
+            Intent::SendFile {
+                peer,
+                name,
+                data,
+                size,
+            } => {
+                let lang = self.lock().lang;
+                let whole = usize::try_from(size).unwrap_or(usize::MAX).max(data.len());
+                if let Some(why) = loquax::ui::files::refusal(whole) {
+                    return Err(why.resolve(lang));
+                }
+                UiEvent::SendFile { peer, name, data }
+            }
             Intent::Delete {
                 messages: Messages::Keys { peer, keys },
                 confirmed: true,
@@ -849,6 +864,36 @@ impl Session {
                     rgba: schema::Blob(pixels.rgba),
                 }));
             }
+            // A file to open or share (1221): its message's fields copied
+            // under the lock, written under the app's files off it.
+            schema::Query::SaveFile { peer, key, index } => {
+                let peer = parse_peer(&peer)?;
+                let key = schema::model_key(key);
+                let (home, fields) = {
+                    let inner = self.lock();
+                    let fields = inner
+                        .model
+                        .conversations
+                        .iter()
+                        .find(|c| c.peer == peer)
+                        .and_then(|c| c.messages.iter().find(|m| m.activity == key))
+                        .map(|m| m.fields.clone())
+                        .ok_or_else(|| "no such message".to_string())?;
+                    (inner.home.clone(), fields)
+                };
+                let index = usize::try_from(index).map_err(|e| e.to_string())?;
+                let path = loquax::file_save::save(&home, peer, key, index, &fields)?;
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                return Ok(schema::encode(&schema::SavedFile {
+                    v: VERSION,
+                    ok: true,
+                    path: path.display().to_string(),
+                    name,
+                }));
+            }
             schema::Query::Receipts { set } => {
                 let mut inner = self.lock();
                 if let Some(on) = set {
@@ -939,7 +984,8 @@ impl Session {
             | schema::Query::MapFling { .. }
             | schema::Query::Receipts { .. }
             | schema::Query::PhotoSize { .. }
-            | schema::Query::Photo { .. } => return Err("answered above".to_string()),
+            | schema::Query::Photo { .. }
+            | schema::Query::SaveFile { .. } => return Err("answered above".to_string()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -1861,7 +1907,18 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                     photo.words.resolve(lang),
                 )
             });
+            let files = node
+                .files
+                .iter()
+                .map(|file| schema::FileRow {
+                    name: file.name.clone(),
+                    bytes: u32::try_from(file.bytes).unwrap_or(u32::MAX),
+                    size: file.size.clone(),
+                    words: file.words.resolve(lang),
+                })
+                .collect();
             let mut row = row(node.bubble);
+            row.files = files;
             if let Some((format, bytes, (w, h), words)) = photo {
                 row.photo = format;
                 row.photo_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
@@ -1948,6 +2005,7 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         photo_w: 0,
         photo_h: 0,
         photo_words: String::new(),
+        files: Vec::new(),
     }
 }
 
@@ -2096,6 +2154,17 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         R::Photo { peer, data } => Intent::SendPhoto {
             peer: parse_peer(&peer)?,
             data: data.0,
+        },
+        R::File {
+            peer,
+            name,
+            data,
+            size,
+        } => Intent::SendFile {
+            peer: parse_peer(&peer)?,
+            name,
+            data: data.0,
+            size,
         },
         R::Delete { peer, keys } => Intent::Delete {
             messages: Messages::Keys {

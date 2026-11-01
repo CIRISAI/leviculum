@@ -218,6 +218,25 @@ final class Core {
         return answer(Native.query(MsgPack.pack(request)));
     }
 
+    /**
+     * A file the user picked with the paperclip's "File" (1221): its name
+     * and the bytes read, `size` the whole file's bytes counted where the
+     * reading stopped early, else 0. The library sends it, or says why not.
+     */
+    static String file(String peer, String name, byte[] data, long size) {
+        return command(map("t", "file", "peer", peer, "name", name, "data", data, "size", size));
+    }
+
+    /**
+     * The `index`th file of the message `key`, saved by the library under
+     * the app's files (1221): "path" and "name"; "error" when it cannot
+     * be. Not on the UI thread.
+     */
+    static Map<String, Object> saveFile(String peer, long key, int index) {
+        return answer(Native.query(MsgPack.pack(
+                map("t", "savefile", "peer", peer, "key", key, "index", (long) index))));
+    }
+
     /** Delete the messages `keys`, asked already. */
     static String delete(String peer, List<Long> keys) {
         return command(map("t", "delete", "peer", peer, "keys", keys));

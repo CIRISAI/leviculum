@@ -647,6 +647,31 @@ class Photo(unittest.TestCase):
         self.assertEqual(walk.photos_on([low, other, high]), [high, low])
 
 
+class File(unittest.TestCase):
+    """The file step's reading of the screen (1221)."""
+
+    def node(self, desc: str, top: int = 0) -> "walk.Node":
+        return walk.Node("\u25a4  x\n2 KB", desc, "", "android.widget.TextView", (0, top, 400, top + 80))
+
+    def test_a_new_file_with_its_name_is_right(self):
+        files = [self.node("File a.pdf, 104 KB"), self.node("File walk-file-1.txt, 2 KB", 900)]
+        self.assertEqual(walk.file_problems(files, 1, "walk-file-1.txt"), [])
+
+    def test_none_new_or_another_name_is_refused(self):
+        self.assertEqual(walk.file_problems([], 0, "a"), ["0 files on screen, 0 before the send"])
+        self.assertEqual(
+            walk.file_problems([self.node("File b, 1 B")], 0, "a"),
+            ["the newest file says 'File b, 1 B', want 'a'"],
+        )
+
+    def test_only_what_is_named_a_file_is_a_file_top_first(self):
+        low = self.node("File a, 1.4 MB", 900)
+        high = self.node("File b, 2 KB", 100)
+        other = self.node("Photo, 3 KB", 0)
+        self.assertEqual(walk.files_on([low, other, high]), [high, low])
+        self.assertEqual(walk.files_on([self.node("File a")]), [])
+
+
 class Draft(unittest.TestCase):
     """Where the draft step finds a row's last line (1219), and what it
     refuses."""

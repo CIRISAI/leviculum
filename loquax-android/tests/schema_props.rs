@@ -12,7 +12,7 @@
 
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Blob, CandidateRow, Chip, ContactCopy, ConversationRow,
-    Conversations, Detail, Done, Event, FriendRow, Friends, ImRow, Info, LinkRow, Links,
+    Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info, LinkRow, Links,
     MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, Me, MessageRow,
     Messages, PositionRow, Query, Recents, RegionRow, Request, Run, RunRow, Shared, SharedRow,
     Start, Started, SuggestionRow, Suggestions,
@@ -170,6 +170,12 @@ fn request() -> impl Strategy<Value = Request> {
         (text(), i64s(), text()).prop_map(|(peer, key, to)| Request::Forward { peer, key, to }),
         (text(), i64s()).prop_map(|(peer, key)| Request::SendAgain { peer, key }),
         (text(), blob()).prop_map(|(peer, data)| Request::Photo { peer, data }),
+        (text(), text(), blob(), any::<u64>()).prop_map(|(peer, name, data, size)| Request::File {
+            peer,
+            name,
+            data,
+            size
+        }),
         (text(), keys()).prop_map(|(peer, keys)| Request::Delete { peer, keys }),
         text().prop_map(|emoji| Request::Used { emoji }),
         Just(Request::Pull),
@@ -255,6 +261,11 @@ fn query() -> impl Strategy<Value = Query> {
         prop::option::of(any::<bool>()).prop_map(|set| Query::MapFling { set }),
         opt_text().prop_map(|set| Query::PhotoSize { set }),
         (text(), i64s(), u32s()).prop_map(|(peer, key, edge)| Query::Photo { peer, key, edge }),
+        (text(), i64s(), u32s()).prop_map(|(peer, key, index)| Query::SaveFile {
+            peer,
+            key,
+            index
+        }),
     ]
 }
 
@@ -276,6 +287,15 @@ fn chip() -> impl Strategy<Value = Chip> {
     })
 }
 
+fn file_row() -> impl Strategy<Value = FileRow> {
+    (text(), u32s(), text(), text()).prop_map(|(name, bytes, size, words)| FileRow {
+        name,
+        bytes,
+        size,
+        words,
+    })
+}
+
 /// The rows are boxed: with the scene's fields (1217) their tuples together
 /// overflow the test thread's stack in [`the_lists_round_trip`].
 fn message_row() -> BoxedStrategy<MessageRow> {
@@ -294,6 +314,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         (text(), u32s()),
         (any::<(bool, bool, bool, bool)>(), text(), text()),
         (text(), u32s(), u32s(), u32s(), text()),
+        prop::collection::vec(file_row(), 0..3),
     )
         .prop_map(
             |(
@@ -305,6 +326,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (liveness, cadence_s),
                 ((joins_before, joins_after, meta, newest), day, live),
                 (photo, photo_bytes, photo_w, photo_h, photo_words),
+                files,
             )| MessageRow {
                 id,
                 ours,
@@ -338,6 +360,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 photo_w,
                 photo_h,
                 photo_words,
+                files,
             },
         )
         .boxed()

@@ -3787,3 +3787,293 @@ async fn a_photo_travels_both_ways_with_python_lxmf_at_each_size() {
         .await
         .expect("stopped");
 }
+
+/// The file attachments field of the fields map Python's router handed its
+/// delivery callback, raw: the entries as the reference packed them.
+fn python_files(message: &serde_json::Value) -> Option<Vec<u8>> {
+    let packed = message.get("fields")?.as_str()?;
+    let packed: Vec<u8> = (0..packed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    let entries = msgpack::map_len(&packed, &mut at).ok()?;
+    for _ in 0..entries {
+        let key = msgpack::read_int(&packed, &mut at).ok()?;
+        let start = at;
+        msgpack::skip(&packed, &mut at).ok()?;
+        if key == leviculum_lxmf::constants::FIELD_FILE_ATTACHMENTS {
+            return Some(packed[start..at].to_vec());
+        }
+    }
+    None
+}
+
+/// Files both ways between the phone and the Python reference (1221).
+/// Files Python sends as Sideband does, `fields[FIELD_FILE_ATTACHMENTS] =
+/// [[name, bytes], …]`, show on the phone: a row each with its name, size
+/// and words, the list says the first name; saved for the open intent
+/// they land under the app's files with their bytes, a hostile name made
+/// safe. A file the phone sends reaches Python's router as that field,
+/// the name a str as Columba writes it and the bytes unchanged, past one
+/// packet through the phone's mailbox as a request resource. A file past
+/// the 990 KB a receiver takes is refused with both sizes, and nothing
+/// goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_travels_both_ways_with_python_lxmf() {
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    // Python to the phone, as Sideband sends files: two, one of them
+    // named to climb out of the folder it is saved in.
+    let report: Vec<u8> = (0..200_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let mut field = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut field, 1);
+    leviculum_lxmf::msgpack::int(
+        &mut field,
+        leviculum_lxmf::constants::FIELD_FILE_ATTACHMENTS,
+    );
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::string(&mut field, "Protokoll.pdf");
+    leviculum_lxmf::msgpack::bin(&mut field, &report);
+    leviculum_lxmf::msgpack::array(&mut field, 2);
+    leviculum_lxmf::msgpack::string(&mut field, "../../evil.sh");
+    leviculum_lxmf::msgpack::bin(&mut field, b"#!/bin/sh\n");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": "",
+                "fields": hex(&field),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let shown_python = python.clone();
+    let home = phone.path().to_path_buf();
+    let session = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let row = loop {
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: shown_python.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode");
+            if let Some(row) = messages.messages.iter().find(|m| !m.files.is_empty()) {
+                break row.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screens never showed the files: {messages:?}"
+            );
+            session.next_event(Duration::from_millis(200));
+        };
+        assert_eq!(row.body, "");
+        let shown: Vec<(&str, u32, &str, &str)> = row
+            .files
+            .iter()
+            .map(|f| (f.name.as_str(), f.bytes, f.size.as_str(), f.words.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "Protokoll.pdf",
+                    200_000,
+                    "200 KB",
+                    "File Protokoll.pdf, 200 KB"
+                ),
+                ("_.._evil.sh", 10, "10 B", "File _.._evil.sh, 10 B"),
+            ]
+        );
+        let list: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let listed = list
+            .conversations
+            .iter()
+            .find(|c| c.peer == shown_python)
+            .expect("listed");
+        assert_eq!(
+            (listed.last.as_str(), listed.kind.as_str()),
+            ("Protokoll.pdf", "file")
+        );
+        for (index, want) in [(0u32, &report[..]), (1, &b"#!/bin/sh\n"[..])] {
+            let saved: schema::SavedFile = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::SaveFile {
+                        peer: shown_python.clone(),
+                        key: row.key,
+                        index,
+                    })
+                    .expect("saved"),
+            )
+            .expect("decode");
+            let path = std::path::PathBuf::from(&saved.path);
+            assert!(
+                path.starts_with(home.join(loquax::file_save::DIR)),
+                "under the app's files: {}",
+                saved.path
+            );
+            assert_eq!(std::fs::read(&path).expect("its bytes"), want);
+            assert_eq!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(saved.name.as_str())
+            );
+        }
+        assert!(session
+            .query(schema::Query::SaveFile {
+                peer: shown_python.clone(),
+                key: row.key,
+                index: 2,
+            })
+            .is_err());
+        session
+    })
+    .await
+    .expect("the files on the phone");
+
+    // The phone to Python.
+    let notes: Vec<u8> = (0..300_000u32)
+        .map(|i| (i.wrapping_mul(40_503) >> 8) as u8)
+        .collect();
+    let to = python.clone();
+    let before = peer.received().len();
+    let sent = notes.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        session
+            .request(Request::File {
+                peer: to,
+                name: "Grüße.txt".to_string(),
+                data: schema::Blob(sent),
+                size: 0,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        session
+    })
+    .await
+    .expect("sent");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let value = loop {
+        let got = peer.received();
+        if let Some(value) = got.iter().skip(before).find_map(python_files) {
+            break value;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python never received the file: {:?}",
+            got.len()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    use leviculum_lxmf::msgpack;
+    let mut at = 0;
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(1), "one file");
+    assert_eq!(msgpack::array_len(&value, &mut at), Ok(2), "[name, bytes]");
+    assert_eq!(msgpack::read_str(&value, &mut at), Ok("Grüße.txt"), "a str");
+    assert!(
+        msgpack::read_bin(&value, &mut at) == Ok(&notes[..]),
+        "the bytes"
+    );
+
+    // Negative: past what a receiver takes, nothing sent, both sizes said.
+    let to = python.clone();
+    let python_to = python.clone();
+    let before = peer.received().len();
+    let session = tokio::task::spawn_blocking(move || {
+        let refused = session.request(Request::File {
+            peer: to,
+            name: "film.mp4".to_string(),
+            data: schema::Blob(vec![0; loquax::ui::files::LARGEST + 1]),
+            size: 0,
+        });
+        assert_eq!(
+            refused,
+            Err("This file is 991 KB. A message carries at most 990 KB.".to_string())
+        );
+        // As Java hands one it stopped reading: the first megabyte and
+        // the count.
+        let refused = session.request(Request::File {
+            peer: python_to.clone(),
+            name: "film.mp4".to_string(),
+            data: schema::Blob(vec![0; 1_000_000]),
+            size: 48_300_000,
+        });
+        assert_eq!(
+            refused,
+            Err("This file is 48.3 MB. A message carries at most 990 KB.".to_string())
+        );
+        session
+    })
+    .await
+    .expect("refused");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(peer.received().len(), before, "nothing went");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}

@@ -66,6 +66,7 @@ STEPS = [
     "marks",
     "reply_send",
     "image",
+    "file",
     "receive_wake",
     "receive_report",
     "position_pin",
@@ -132,6 +133,12 @@ FIXTURE_PHOTO = REPO / "loquax" / "tests" / "fixtures" / "photo-portrait.jpg"
 ATTACH_PHOTO = "Photo"
 PHOTO_WORDS = re.compile(r"^Photo, \d+(?:\.\d)? (?:B|KB|MB)$")
 PHOTO_FULL = "photo_full"
+# A file (1221): what the paperclip's entry says, what a bubble's file is
+# called by a screen reader (the catalogue's scene_file), and the line the
+# chat shows where no app on the phone opens the kind.
+ATTACH_FILE = "File"
+FILE_WORDS = re.compile(r"^File (?P<name>.+), \d+(?:\.\d)? (?:B|KB|MB)$")
+FILE_NO_APP = "No app here opens this file."
 # The region the walk puts on the phone for the Maps page (1207): the
 # repository's Florence fixture, and the middle the page names it by
 # (Ui.place, two decimals, either decimal mark).
@@ -262,6 +269,23 @@ def photo_problems(photos: list[Node], before: int) -> list[str]:
         if min(x2 - x1, y2 - y1) < 48:
             problems.append(f"a photo is {x2 - x1}x{y2 - y1}")
     return problems
+
+
+def files_on(nodes: list[Node]) -> list[Node]:
+    """The bubbles' file rows on screen (1221), top first: what a screen
+    reader names as a file."""
+    return by_top([n for n in nodes if FILE_WORDS.match(n.desc)])
+
+
+def file_problems(files: list[Node], before: int, name: str) -> list[str]:
+    """What is wrong with the file rows on screen after `name` was sent,
+    when `before` were there: none new, or the newest not named `name`."""
+    if len(files) <= before:
+        return [f"{len(files)} files on screen, {before} before the send"]
+    match = FILE_WORDS.match(files[-1].desc)
+    if match is None or match.group("name") != name:
+        return [f"the newest file says {files[-1].desc!r}, want {name!r}"]
+    return []
 
 
 def parse_bounds(text: str) -> tuple[int, int, int, int] | None:
@@ -1535,6 +1559,72 @@ class Walk:
         self.wait_id("compose", 10)
         dev.shell(f"rm -f /sdcard/Pictures/{name}", check=False)
         return f"picked_to_bubble_ms={ms} desc={photo.desc!r} mailbox=accepted full=shown"
+
+    def step_file(self) -> str:
+        """A file through the paperclip (1221): a text file onto the
+        phone's downloads, the system's picker, the bubble's file row with
+        its name and size, the mailbox's send; a tap saves it under the
+        app's files, where run-as finds its bytes, and hands it to an app
+        that opens it or says none does; Back to the chat."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        name = f"walk-file-{self.nonce}.txt"
+        content = f"loquax device walk {self.nonce}\n".encode() * 64
+        local = Path(tempfile.mkdtemp(prefix="walk-file-")) / name
+        local.write_bytes(content)
+        dev.run("push", str(local), f"/sdcard/Download/{name}", timeout=60)
+        local.unlink()
+        local.parent.rmdir()
+        dev.shell(
+            "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+            f"-d file:///sdcard/Download/{name}",
+            check=False,
+        )
+        sent_before = fixture.mailbox_log().count("HOME send accepted")
+        before = len(files_on(dev.dump()))
+        dev.tap_node(self.wait_id("attach", 5)[0])
+        self.tap_text(ATTACH_FILE)
+        start = time.monotonic()
+        dev.tap_node(self.wait_text(name, 20, contains=True)[0])
+        problems: list[str] = []
+
+        def shown():
+            nonlocal problems
+            problems = file_problems(files_on(dev.dump()), before, name)
+            return not problems
+
+        if not wait_for(shown, 15, every=0.3):
+            raise StepFailed("; ".join(problems))
+        ms = int((time.monotonic() - start) * 1000)
+        accepted = wait_for(
+            lambda: fixture.mailbox_log().count("HOME send accepted") > sent_before, 30
+        )
+        if not accepted:
+            raise StepFailed("the mailbox log has no new 'HOME send accepted'")
+        row = files_on(dev.dump())[-1]
+        dev.tap_node(row)
+        saved = ""
+
+        def stored():
+            nonlocal saved
+            saved = dev.shell(
+                f"run-as {PACKAGE} sh -c 'cat files/files/*/{name}' 2>/dev/null", check=False
+            )
+            return saved.encode() == content
+
+        if not wait_for(stored, 10, every=0.5):
+            raise StepFailed(f"files/files/*/{name} holds {len(saved)} bytes, want {len(content)}")
+        time.sleep(2)
+        nodes = dev.dump()
+        if find(nodes, rid="compose") and not any(n.text == FILE_NO_APP for n in nodes):
+            opened = "the chat stayed and said nothing"
+            raise StepFailed(f"a tap on the file opened nothing: {opened}")
+        handed = "no_app" if any(n.text == FILE_NO_APP for n in nodes) else "another_app"
+        if handed == "another_app":
+            dev.key("KEYCODE_BACK")
+            self.wait_id("compose", 10)
+        dev.shell(f"rm -f /sdcard/Download/{name}", check=False)
+        return f"picked_to_bubble_ms={ms} desc={row.desc!r} mailbox=accepted saved=ok open={handed}"
 
     def step_receive_wake(self) -> str:
         dev = self.need_device()

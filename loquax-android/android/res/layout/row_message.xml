@@ -32,6 +32,15 @@
         android:scaleType="centerCrop"
         android:visibility="gone" />
 
+    <!-- Files (1221): a row each above the bubble, its name and size; a
+         tap opens it, a long press shares it. -->
+    <LinearLayout
+        android:id="@+id/files"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone" />
+
     <network.leviculum.loquax.BubbleLayout
         android:id="@+id/bubble"
         android:layout_width="wrap_content"

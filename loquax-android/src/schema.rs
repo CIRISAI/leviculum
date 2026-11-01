@@ -227,6 +227,19 @@ pub enum Request {
     /// them to `peer` as the image field; a picture it cannot send
     /// answers the request with the reason.
     Photo { peer: String, data: Blob },
+    /// Picked a file with the paperclip's "File" (1221): its display name
+    /// and bytes as the picker gave them. The session sends them to `peer`
+    /// as the file attachments field; one past the 990 KB a receiver
+    /// takes answers the request with both sizes. Java stops reading a
+    /// file past 1 MB and only counts the rest: `size` is the whole
+    /// file's bytes it counted, 0 for `data`'s length.
+    File {
+        peer: String,
+        name: String,
+        data: Blob,
+        #[serde(default)]
+        size: u64,
+    },
     /// Deleted the messages `keys` of `peer`'s conversation, the user asked
     /// already; on a client of a home node from its every device.
     Delete { peer: String, keys: Vec<i64> },
@@ -487,6 +500,34 @@ pub enum Query {
     /// upright and scaled into an `edge` by `edge` box, never up (1220):
     /// a bubble's thumbnail, the full view. Answered as [`PhotoPixels`].
     Photo { peer: String, key: i64, edge: u32 },
+    /// The `index`th file of the message `key` of `peer`'s conversation,
+    /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
+    /// the name made safe) for the open or share intent (1221). Answered
+    /// as [`SavedFile`].
+    SaveFile { peer: String, key: i64, index: u32 },
+}
+
+/// What [`Query::SaveFile`] answers: where the file is, under the app's
+/// files, and the name it was saved under.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedFile {
+    pub v: u32,
+    pub ok: bool,
+    pub path: String,
+    pub name: String,
+}
+
+/// One file a bubble carries (1221).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRow {
+    /// The name the sender wrote, made safe to show and save
+    /// (`loquax::ui::files::safe_name`).
+    pub name: String,
+    pub bytes: u32,
+    /// `312 KB`.
+    pub size: String,
+    /// What a screen reader says: `File report.pdf, 312 KB`.
+    pub words: String,
 }
 
 /// What [`Query::PhotoSize`] answers.
@@ -1156,6 +1197,10 @@ pub struct MessageRow {
     pub photo_h: u32,
     #[serde(default)]
     pub photo_words: String,
+    /// The files it carries (1221), in the sender's order; a tap on one
+    /// asks [`Query::SaveFile`] with its place.
+    #[serde(default)]
+    pub files: Vec<FileRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
