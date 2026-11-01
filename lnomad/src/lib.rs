@@ -40,6 +40,7 @@ pub mod names;
 pub mod page_cache;
 pub mod render;
 pub mod theme;
+pub mod transfer;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod url;
