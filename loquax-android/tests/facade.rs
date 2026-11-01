@@ -1704,6 +1704,7 @@ impl HomeNode {
                 fetch_budget: Duration::from_secs(10),
                 wake: true,
                 stop: Some(stopped),
+                network: Default::default(),
             },
         ));
         Self {
@@ -1972,6 +1973,94 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     .await
     .expect("the session after the engine died");
 
+    node.kill().await;
+}
+
+/// A network change through the facade (1298): Java's `Core.network` with
+/// another network drops the session's connection to the mailbox and dials
+/// it at once; the line says "Reconnecting…" (`Event::Network`
+/// `reconnecting`), then it is gone (`back`), the link is up again and a
+/// send reaches the mailbox, with no restart and no user action. A burst of
+/// three words is one reconnect; the same network with the link up is none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_network_change_reconnects_the_phone_without_a_restart() {
+    let _facade = FACADE.lock().await;
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = loquax::address::to_hex(&[0x6e; 16]);
+    tokio::task::spawn_blocking(move || {
+        let answer = started(&loquax_android::start(&schema::encode(&first)));
+        assert!(answer.ok, "{answer:?}");
+        link_event(true, 30);
+        facade_home_link(true, 30);
+        let network = |kind: &str, changed: bool| {
+            let done: schema::Done =
+                rmp_serde::from_slice(&loquax_android::command(&schema::encode(
+                    &Request::Network {
+                        kind: kind.to_string(),
+                        changed,
+                    },
+                )))
+                .expect("a Done");
+            assert!(done.ok, "{done:?}");
+        };
+        let state = |want: &'static str| {
+            move |event: &Event| matches!(event, Event::Network { state, .. } if state == want)
+        };
+
+        // WLAN to mobile data, as the platform says it: lost, available,
+        // its capabilities.
+        network("none", true);
+        network("mobile", true);
+        network("mobile", false);
+        let began = std::time::Instant::now();
+        facade_event(10, "reconnecting", state("reconnecting"));
+        facade_event(20, "back", state("back"));
+        let took = began.elapsed();
+        link_event(true, 10);
+        facade_home_link(true, 60);
+        send_through_facade(&peer, "nach dem Netzwechsel", 60);
+        // One reconnect for the burst: no second line within the settle.
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            if let Some(bytes) = loquax_android::next_event(Duration::from_millis(200)) {
+                let event: Event = rmp_serde::from_slice(&bytes).expect("an Event");
+                assert!(
+                    !matches!(event, Event::Network { .. }),
+                    "a second reconnect for one burst: {event:?}"
+                );
+            }
+        }
+        // Asleep and back on the same network, the link up: kept.
+        network("mobile", false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            if let Some(bytes) = loquax_android::next_event(Duration::from_millis(200)) {
+                let event: Event = rmp_serde::from_slice(&bytes).expect("an Event");
+                assert!(
+                    !matches!(event, Event::Network { .. } | Event::Link { up: false, .. }),
+                    "the same network dropped an up link: {event:?}"
+                );
+            }
+        }
+        eprintln!("NETWORK change to back: {} ms", took.as_millis());
+        loquax_android::stop();
+    })
+    .await
+    .expect("the session");
     node.kill().await;
 }
 

@@ -59,6 +59,43 @@ pub mod setup;
 #[cfg(feature = "std")]
 pub mod watch;
 
+/// The network the phone has now, as the platform names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetworkKind {
+    /// None at all: flight mode, or out of reach of any.
+    None,
+    /// A WLAN.
+    Wifi,
+    /// Mobile data.
+    Mobile,
+    /// Something else that carries IP (Ethernet, a VPN, Waydroid's bridge).
+    #[default]
+    Other,
+}
+
+impl NetworkKind {
+    /// The word the platform hands in, `none`, `wifi`, `mobile` or anything
+    /// else for [`NetworkKind::Other`].
+    pub fn from_word(word: &str) -> Self {
+        match word {
+            "none" => Self::None,
+            "wifi" => Self::Wifi,
+            "mobile" => Self::Mobile,
+            _ => Self::Other,
+        }
+    }
+
+    /// The word for logs, the inverse of [`NetworkKind::from_word`].
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Wifi => "wifi",
+            Self::Mobile => "mobile",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// The home destination's app name and aspect: `loquax.home`, a SINGLE
 /// destination of the home identity. A client learns its key from the
 /// admission code and asks for its path on every connect.

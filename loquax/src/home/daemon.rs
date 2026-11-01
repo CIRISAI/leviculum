@@ -202,6 +202,10 @@ pub struct DaemonOptions {
     /// inside an app, which installs no signal handler and ends when the
     /// sender says so or is dropped.
     pub stop: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// The platform's word on the network its rendezvous rotation
+    /// re-evaluates on (1298): the phone's mailbox hears the app's;
+    /// [`Network::default`](super::rendezvous::Network) elsewhere.
+    pub network: super::rendezvous::Network,
 }
 
 /// A source of [`MailboxRun`]s, read once per collection.
@@ -266,6 +270,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         fetch_budget,
         wake,
         stop,
+        network,
     } = options;
     if let Some(at) = super::handover::gone_at(&home) {
         return Err(format!(
@@ -327,6 +332,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     super::rendezvous::Side::Peer,
                     tcp,
                     super::rendezvous::Timing::default(),
+                    network,
                 )
                 .map_err(|e| e.to_string())?;
             (instance, attached, mailbox)
@@ -347,6 +353,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     display_name,
                     notices: Terminal::new(home.clone()),
                     tcp,
+                    network,
                 },
                 role,
             )

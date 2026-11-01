@@ -20,11 +20,24 @@
 //!   waits for an announce, which a phone behind an access point port does
 //!   not hear anyway (`reference/Reticulum/RNS/Transport.py:1193-1196`).
 //!
+//! - **A network change** ([`Network`], 1298): the platform says the
+//!   phone's network went, came or changed ([`NetworkKind`]); after a short
+//!   settle ([`Settle`]) every rotation re-evaluates once ([`evaluate`]): a
+//!   new network drops the connection the old one carried and dials the
+//!   first entry at once, no network drops it and dials nothing until one
+//!   comes, the same network back with the connection down cuts the
+//!   backoff short, and the same network with it up asks the paths again.
+//!   The node's own up handling re-announces each destination once on the
+//!   new connection (`handle_interface_up`), and the phone side asks the
+//!   home path on that up as on any other (rule 2).
+//!
 //! The rotation itself is plain logic on a millisecond clock and has no I/O;
 //! [`run`] drives it over the node.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+
+pub use super::NetworkKind;
 
 /// The host of our own rendezvous, `leviculum.network`.
 pub const HOST: &str = "leviculum.network";
@@ -187,6 +200,12 @@ pub struct Timing {
     pub up_look_ms: u64,
     /// How often a dial in progress is looked at.
     pub dial_look_ms: u64,
+    /// How long the network changes must be quiet before a rotation
+    /// evaluates them ([`Settle`]).
+    pub network_settle_ms: u64,
+    /// How long after the first change of a burst it is evaluated at the
+    /// latest.
+    pub network_settle_max_ms: u64,
 }
 
 impl Default for Timing {
@@ -199,6 +218,85 @@ impl Default for Timing {
             return_max_ms: 30 * 60_000,
             up_look_ms: leviculum_core::constants::LINK_KEEPALIVE_SECS * 1000,
             dial_look_ms: 500,
+            network_settle_ms: 1_500,
+            network_settle_max_ms: 6_000,
+        }
+    }
+}
+
+/// What one network change asks of a rotation, by [`evaluate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Evaluation {
+    /// No network: drop the connection, which no longer leads anywhere,
+    /// and dial nothing until one comes; a dial into no network only grows
+    /// the backoff that the coming network would then wait out.
+    Pause,
+    /// Drop the connection and dial the first entry now, the backoff
+    /// started over: a new network (its socket is bound to an address the
+    /// phone no longer has and dies only when the keepalive gives up), or
+    /// the same network back with the connection down.
+    Redial,
+    /// The same network, the connection up: keep it, and ask the paths
+    /// this side needs once, which also shows soon whether it still
+    /// carries anything.
+    Ask,
+}
+
+/// What a rotation does about a network of `kind`, `changed` when it is
+/// another network than the one before, with its connection `up` or not.
+pub fn evaluate(kind: NetworkKind, changed: bool, up: bool) -> Evaluation {
+    match (kind, changed, up) {
+        (NetworkKind::None, _, _) => Evaluation::Pause,
+        (_, true, _) | (_, false, false) => Evaluation::Redial,
+        (_, false, true) => Evaluation::Ask,
+    }
+}
+
+/// The changes the platform says in a burst, folded into one evaluation:
+/// a phone that leaves a WLAN says lost, then the mobile network
+/// available, then its capabilities, within a second. The evaluation runs
+/// once the changes went quiet for [`Timing::network_settle_ms`], and at
+/// the latest [`Timing::network_settle_max_ms`] after the first, so a
+/// network that flaps on and on is still evaluated. `changed` is kept if
+/// any change of the burst said it; the kind is the last one's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Settle {
+    first_ms: Option<u64>,
+    last_ms: u64,
+    kind: NetworkKind,
+    changed: bool,
+}
+
+impl Settle {
+    /// A change said at `now_ms`.
+    pub fn note(&mut self, now_ms: u64, kind: NetworkKind, changed: bool) {
+        if self.first_ms.is_none() {
+            self.first_ms = Some(now_ms);
+            self.changed = false;
+        }
+        self.last_ms = now_ms;
+        self.kind = kind;
+        self.changed |= changed;
+    }
+
+    /// When the burst is due for its evaluation, if one is pending.
+    pub fn due_at(&self, timing: &Timing) -> Option<u64> {
+        self.first_ms.map(|first| {
+            self.last_ms
+                .saturating_add(timing.network_settle_ms)
+                .min(first.saturating_add(timing.network_settle_max_ms))
+        })
+    }
+
+    /// The burst's kind and `changed`, once it is due at `now_ms`; the
+    /// settle is empty again then.
+    pub fn take(&mut self, now_ms: u64, timing: &Timing) -> Option<(NetworkKind, bool)> {
+        match self.due_at(timing) {
+            Some(at) if now_ms >= at => {
+                self.first_ms = None;
+                Some((self.kind, self.changed))
+            }
+            _ => None,
         }
     }
 }
@@ -280,6 +378,13 @@ impl Rotation {
         self.return_at_ms = Some(now_ms.saturating_add(self.return_wait_ms));
     }
 
+    /// A network change asked for a fresh dial ([`Evaluation::Redial`],
+    /// [`Evaluation::Pause`]): the first entry again, with the first
+    /// backoff and the first return wait, as at the start.
+    pub fn restart(&mut self) {
+        *self = Self::new(self.len, self.timing);
+    }
+
     /// The first entry answered: the traffic goes back to it.
     pub fn returned(&mut self) {
         self.active = 0;
@@ -289,9 +394,10 @@ impl Rotation {
     }
 }
 
-pub use driver::{run, Dial, Rendezvous, Side, State};
+pub use driver::{run, Dial, Network, Rendezvous, Side, State};
 
 mod driver {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -300,7 +406,7 @@ mod driver {
     use leviculum_std::driver::TapEvent;
     use leviculum_std::ReticulumNode;
 
-    use super::{Rotation, Timing};
+    use super::{evaluate, Evaluation, NetworkKind, Rotation, Settle, Timing};
 
     /// Which end dials: the name its interface gets, and whether it asks
     /// for a path when the entry comes up.
@@ -322,15 +428,103 @@ mod driver {
         Peer,
     }
 
+    /// One word of the platform about the network, numbered so a rotation
+    /// sees each.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    struct Note {
+        seq: u64,
+        kind: NetworkKind,
+        changed: bool,
+    }
+
+    /// The platform's word on the phone's network (1298), handed to every
+    /// rotation of the process: the phone's leaf and its own mailbox hear
+    /// the same change. It also counts the rotations that re-dial for a
+    /// change and are not up again yet, which is what the app's line says
+    /// ("Reconnecting…" while there is one).
+    #[derive(Debug, Clone)]
+    pub struct Network {
+        notes: Arc<tokio::sync::watch::Sender<Note>>,
+        owed: Arc<AtomicUsize>,
+    }
+
+    impl Default for Network {
+        fn default() -> Self {
+            Self {
+                notes: Arc::new(tokio::sync::watch::Sender::new(Note::default())),
+                owed: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl Network {
+        /// A network that nobody has said anything about yet.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// The phone's network is `kind` now, `changed` when it is another
+        /// network than before (another WLAN, WLAN to mobile data, back
+        /// from none). Every rotation evaluates it once the burst settled.
+        pub fn say(&self, kind: NetworkKind, changed: bool) {
+            self.notes.send_modify(|note| {
+                note.seq = note.seq.wrapping_add(1);
+                note.kind = kind;
+                note.changed = changed;
+            });
+        }
+
+        /// Whether a rotation re-dials for a change and is not up yet.
+        pub fn reconnecting(&self) -> bool {
+            self.owed.load(Ordering::Relaxed) > 0
+        }
+
+        fn subscribe(&self) -> tokio::sync::watch::Receiver<Note> {
+            let mut notes = self.notes.subscribe();
+            // What was said before the rotation started is no change to it.
+            notes.mark_unchanged();
+            notes
+        }
+    }
+
+    /// One rotation's share of [`Network::reconnecting`], given back when
+    /// it is up again or its task ends.
+    struct Owed {
+        count: Arc<AtomicUsize>,
+        owed: bool,
+    }
+
+    impl Owed {
+        fn set(&mut self, owed: bool) {
+            match (self.owed, owed) {
+                (false, true) => {
+                    self.count.fetch_add(1, Ordering::Relaxed);
+                }
+                (true, false) => {
+                    self.count.fetch_sub(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+            self.owed = owed;
+        }
+    }
+
+    impl Drop for Owed {
+        fn drop(&mut self) {
+            self.set(false);
+        }
+    }
+
     /// What [`run`] needs: the node, the entries as `host:port`, already
-    /// on the ports this side dials, the side, the TCP keepalive and the
-    /// timing.
+    /// on the ports this side dials, the side, the TCP keepalive, the
+    /// timing, and the network word it listens to.
     pub struct Dial {
         pub node: Arc<ReticulumNode>,
         pub entries: Vec<(String, u16)>,
         pub side: Side,
         pub tcp: crate::config::TcpLiveness,
         pub timing: Timing,
+        pub network: Network,
     }
 
     /// Where the rotation stands: the entry it dials or holds, as
@@ -424,6 +618,12 @@ mod driver {
         }
     }
 
+    fn drop_all(node: &ReticulumNode, ids: &mut Vec<InterfaceId>) {
+        for id in ids.drain(..) {
+            let _ = node.remove_interface(id);
+        }
+    }
+
     /// Whether `host:port` takes a TCP connection within five seconds: the
     /// first entry's try while a later one carries the traffic. The
     /// connection is closed at once; a server takes it as a client that
@@ -437,6 +637,20 @@ mod driver {
             .await,
             Ok(Ok(_))
         )
+    }
+
+    /// The phone's path request on an up and on [`Evaluation::Ask`]
+    /// (rule 2): whether a path is held or not, one learned through an
+    /// entry that is gone leads nowhere.
+    async fn ask_home(node: &ReticulumNode, home: &DestinationHash, via: &str) {
+        tracing::info!(
+            event = "HOME_PATH_REQUEST",
+            dst = %crate::address::to_hex(home.as_bytes()),
+            via = %via,
+        );
+        if let Err(error) = node.request_path(home).await {
+            tracing::warn!("HOME path request: {error}");
+        }
     }
 
     /// Dial the entries one at a time until the task is dropped, saying
@@ -459,21 +673,34 @@ mod driver {
         let origin = tokio::time::Instant::now();
         let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut tap = dial.node.subscribe_events();
+        let mut notes = dial.network.subscribe();
+        let mut notes_open = true;
+        let mut settle = Settle::default();
+        let mut owed = Owed {
+            count: Arc::clone(&dial.network.owed),
+            owed: false,
+        };
         let mut rotation = Rotation::new(dial.entries.len(), dial.timing);
         let mut ids = spawn(&dial.node, &dial, rotation.active());
         tell(rotation.active(), false);
-        // Up since, or down since (`None` until the first up of this dial).
         let mut up = false;
+        // Down since, while a dial is in progress (`None` while up, while
+        // waiting out a backoff, and while there is no network).
         let mut down_since: Option<u64> = Some(now_ms());
+        // When the next entry is dialled, after a failure's backoff.
+        let mut dial_at: Option<u64> = None;
         loop {
-            let look = match up {
+            let now = now_ms();
+            let mut look = match up {
                 true => dial.timing.up_look_ms,
                 false => dial.timing.dial_look_ms,
             };
-            let look = match rotation.return_at() {
-                Some(at) => look.min(at.saturating_sub(now_ms()).max(1)),
-                None => look,
-            };
+            for at in [rotation.return_at(), settle.due_at(&dial.timing), dial_at]
+                .into_iter()
+                .flatten()
+            {
+                look = look.min(at.saturating_sub(now).max(1));
+            }
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_millis(look)) => {}
                 event = tap.recv() => match event {
@@ -486,30 +713,80 @@ mod driver {
                     Some(_) => continue,
                     None => return,
                 },
+                said = notes.changed(), if notes_open => match said {
+                    Ok(()) => {
+                        let note = *notes.borrow_and_update();
+                        settle.note(now_ms(), note.kind, note.changed);
+                        continue;
+                    }
+                    // Every handle is gone: nobody says a change again.
+                    Err(_) => {
+                        notes_open = false;
+                        continue;
+                    }
+                },
+            }
+            let now = now_ms();
+            if let Some((kind, changed)) = settle.take(now, &dial.timing) {
+                let action = evaluate(kind, changed, up);
+                let index = rotation.active();
+                tracing::info!(
+                    event = "HOME_NETWORK",
+                    kind = kind.word(),
+                    changed = changed,
+                    action = match action {
+                        Evaluation::Pause => "pause",
+                        Evaluation::Redial => "redial",
+                        Evaluation::Ask => "ask",
+                    },
+                    entry = index,
+                );
+                match action {
+                    Evaluation::Pause | Evaluation::Redial => {
+                        if up {
+                            let (host, port) = &dial.entries[index];
+                            said(host, *port, "down", index);
+                        }
+                        drop_all(&dial.node, &mut ids);
+                        rotation.restart();
+                        up = false;
+                        dial_at = None;
+                        owed.set(true);
+                        tell(0, false);
+                        if action == Evaluation::Redial {
+                            ids = spawn(&dial.node, &dial, 0);
+                            down_since = Some(now);
+                        } else {
+                            down_since = None;
+                        }
+                    }
+                    Evaluation::Ask => {
+                        if let Side::Phone(home) = dial.side {
+                            let (host, port) = &dial.entries[index];
+                            ask_home(&dial.node, &home, &format!("{host}:{port}")).await;
+                        }
+                    }
+                }
+                continue;
+            }
+            if dial_at.is_some_and(|at| now >= at) {
+                dial_at = None;
+                ids = spawn(&dial.node, &dial, rotation.active());
+                down_since = Some(now);
             }
             let index = rotation.active();
             let (host, port) = dial.entries[index].clone();
-            let now = now_ms();
-            let is_online = online(&dial.node, &ids);
+            let is_online = !ids.is_empty() && online(&dial.node, &ids);
             match (up, is_online) {
                 (false, true) => {
                     up = true;
                     down_since = None;
+                    owed.set(false);
                     rotation.up(now);
                     tell(index, true);
                     said(&host, port, "up", index);
                     if let Side::Phone(home) = dial.side {
-                        // Rule 2: the path, asked for at once on every up,
-                        // whether a path is held or not; one learned
-                        // through an entry that is gone leads nowhere.
-                        tracing::info!(
-                            event = "HOME_PATH_REQUEST",
-                            dst = %crate::address::to_hex(home.as_bytes()),
-                            via = %format!("{host}:{port}"),
-                        );
-                        if let Err(error) = dial.node.request_path(&home).await {
-                            tracing::warn!("HOME path request: {error}");
-                        }
+                        ask_home(&dial.node, &home, &format!("{host}:{port}")).await;
                     }
                 }
                 (true, false) => {
@@ -524,9 +801,7 @@ mod driver {
                 && down_since
                     .is_some_and(|since| now.saturating_sub(since) >= dial.timing.dial_grace_ms)
             {
-                for id in ids.drain(..) {
-                    let _ = dial.node.remove_interface(id);
-                }
+                drop_all(&dial.node, &mut ids);
                 let wait = rotation.failed();
                 tracing::info!(
                     "HOME rendezvous {host}:{port} did not come up; the next, {}:{}, in {} s",
@@ -535,18 +810,16 @@ mod driver {
                     wait / 1000
                 );
                 tell(rotation.active(), false);
-                tokio::time::sleep(Duration::from_millis(wait)).await;
-                ids = spawn(&dial.node, &dial, rotation.active());
-                down_since = Some(now_ms());
+                // Waited out in the loop, so a network change cuts it short.
+                down_since = None;
+                dial_at = Some(now.saturating_add(wait));
                 continue;
             }
             if up && rotation.return_due(now_ms()) {
                 let (first_host, first_port) = dial.entries[0].clone();
                 if answers(&first_host, first_port).await {
                     tracing::info!("HOME rendezvous {first_host}:{first_port} answers again");
-                    for id in ids.drain(..) {
-                        let _ = dial.node.remove_interface(id);
-                    }
+                    drop_all(&dial.node, &mut ids);
                     said(&host, port, "down", index);
                     rotation.returned();
                     tell(0, false);
@@ -574,6 +847,8 @@ mod tests {
             return_max_ms: 40_000,
             up_look_ms: 1_000,
             dial_look_ms: 100,
+            network_settle_ms: 500,
+            network_settle_max_ms: 2_000,
         }
     }
 
@@ -618,6 +893,74 @@ mod tests {
         rotation.failed();
         rotation.up(100_000);
         assert_eq!(rotation.return_at(), Some(110_000));
+    }
+
+    #[test]
+    fn a_network_change_is_evaluated_by_kind_change_and_connection() {
+        use Evaluation::*;
+        use NetworkKind::*;
+        // No network pauses whatever was before.
+        for (changed, up) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(evaluate(None, changed, up), Pause);
+        }
+        // Another network re-dials, up or not: the old socket leads nowhere.
+        for kind in [Wifi, Mobile, Other] {
+            assert_eq!(evaluate(kind, true, true), Redial);
+            assert_eq!(evaluate(kind, true, false), Redial);
+            // The same network back (after Doze): a down connection is
+            // dialled at once, an up one is kept and asked.
+            assert_eq!(evaluate(kind, false, false), Redial);
+            assert_eq!(evaluate(kind, false, true), Ask);
+        }
+        assert_eq!(NetworkKind::from_word("mobile"), Mobile);
+        assert_eq!(NetworkKind::from_word("ethernet"), Other);
+        for kind in [None, Wifi, Mobile, Other] {
+            assert_eq!(NetworkKind::from_word(kind.word()), kind);
+        }
+    }
+
+    #[test]
+    fn a_burst_of_changes_is_one_evaluation_and_a_flapping_one_still_comes() {
+        let timing = timing();
+        let mut settle = Settle::default();
+        assert_eq!(settle.due_at(&timing), Option::None);
+        // Leaving a WLAN: lost, mobile available, its capabilities.
+        settle.note(1_000, NetworkKind::None, true);
+        settle.note(1_200, NetworkKind::Mobile, true);
+        settle.note(1_300, NetworkKind::Mobile, false);
+        assert_eq!(settle.due_at(&timing), Some(1_800));
+        assert_eq!(settle.take(1_799, &timing), Option::None);
+        assert_eq!(
+            settle.take(1_800, &timing),
+            Some((NetworkKind::Mobile, true)),
+            "the last kind, and changed if any said it"
+        );
+        assert_eq!(settle.take(10_000, &timing), Option::None, "once");
+        // A network that flaps every 400 ms is evaluated after the cap.
+        let mut at = 20_000;
+        while at < 23_000 {
+            settle.note(at, NetworkKind::Wifi, false);
+            at += 400;
+        }
+        assert_eq!(settle.due_at(&timing), Some(22_000));
+        assert_eq!(
+            settle.take(22_000, &timing),
+            Some((NetworkKind::Wifi, false))
+        );
+    }
+
+    #[test]
+    fn a_restart_dials_the_first_entry_with_the_first_backoff() {
+        let mut rotation = Rotation::new(3, timing());
+        rotation.failed();
+        rotation.failed();
+        rotation.up(5_000);
+        assert_eq!(rotation.active(), 2);
+        assert!(rotation.return_at().is_some());
+        rotation.restart();
+        assert_eq!(rotation.active(), 0);
+        assert_eq!(rotation.return_at(), Option::None);
+        assert_eq!(rotation.failed(), 100, "the backoff starts over");
     }
 
     #[test]

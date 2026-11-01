@@ -182,6 +182,10 @@ struct Inner {
     /// What the recorder is to do (1276, `UiEffect::Recording`), by peer,
     /// until [`schema::Query::Recording`] hands it out.
     recorder: Vec<([u8; 16], Effect)>,
+    /// The platform's word on the network (1298), and whether the line
+    /// says "Reconnecting…" now.
+    network: loquax::home::rendezvous::Network,
+    reconnecting: bool,
 }
 
 /// A running session.
@@ -228,8 +232,11 @@ impl Session {
             }
             mailbox::take_back(&home).map_err(StartError::other)?;
         }
+        // The platform's word on the network (1298), heard by the leaf's
+        // rotation and the phone's own mailbox's alike.
+        let network = loquax::home::rendezvous::Network::new();
         let (start, here) = if start.here || mailbox::is_here(&home) {
-            let (start, here) = Self::start_here(start, &home, runtime.handle())?;
+            let (start, here) = Self::start_here(start, &home, runtime.handle(), &network)?;
             (start, Some(here))
         } else {
             (start.clone(), None)
@@ -314,6 +321,12 @@ impl Session {
                 display_name: Vec::new(),
                 notices: loquax::effects::Terminal::new(home.clone()),
                 tcp,
+                // The phone's own mailbox is on the loopback address, which
+                // no network change touches: its rotation hears none.
+                network: match here {
+                    Some(_) => loquax::home::rendezvous::Network::new(),
+                    None => network.clone(),
+                },
             },
             Role::Client { address },
         ));
@@ -385,6 +398,8 @@ impl Session {
         let (heard_tx, heard_rx) = tokio::sync::mpsc::unbounded_channel();
         runtime.spawn(watch::run(watching, heard_tx));
         runtime.spawn(relay_watch(heard_rx, watch_tx, Arc::clone(&wake)));
+        let mut inner = inner;
+        inner.network = network;
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
@@ -428,6 +443,7 @@ impl Session {
         start: &schema::Start,
         home: &Path,
         runtime: &tokio::runtime::Handle,
+        network: &loquax::home::rendezvous::Network,
     ) -> Result<(schema::Start, mailbox::Here), StartError> {
         let lang = Lang::of_tag(start.lang.as_deref().unwrap_or_default());
         if let Some(text) = start.moving.as_deref() {
@@ -500,7 +516,8 @@ impl Session {
                     .encode(),
             ),
         };
-        let here = mailbox::Here::start(home, runtime).map_err(StartError::other)?;
+        let here =
+            mailbox::Here::start(home, runtime, network.clone()).map_err(StartError::other)?;
         let start = schema::Start {
             server: Some(here.server()),
             code,
@@ -982,6 +999,12 @@ impl Session {
                 let mut inner = self.lock();
                 inner.asked_to_pull();
                 inner.apply(UiEvent::Run(PaletteCommand::Fetch));
+                return Ok(());
+            }
+            Intent::Network { kind, changed } => {
+                self.lock().apply(UiEvent::Network { kind, changed });
+                // The pump looks at the rotations soon and says the line.
+                self.wake.notify_one();
                 return Ok(());
             }
             Intent::Front(front) => {
@@ -1607,6 +1630,8 @@ impl Inner {
             just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
             recorder: Vec::new(),
+            network: loquax::home::rendezvous::Network::new(),
+            reconnecting: false,
         })
     }
 
@@ -1660,6 +1685,7 @@ impl Inner {
             }
         }
         self.look_at_link();
+        self.look_at_network();
         let elapsed = self.elapsed_ms();
         if let Some(say) = self.pull_line.tick(elapsed) {
             self.say(say);
@@ -1686,6 +1712,8 @@ impl Inner {
             || self.pull_owed
             || !self.sends.is_empty()
             || self.link.is_none()
+            || self.reconnecting
+            || self.network.reconnecting()
             || self.dirty;
         if busy {
             return PUMP;
@@ -1751,6 +1779,25 @@ impl Inner {
         if self.link != Some(up) {
             self.link = Some(up);
             let _ = self.events.send(Event::Link { v: VERSION, up });
+        }
+    }
+
+    /// After a network change (1298): the line says "Reconnecting…" while
+    /// a rotation that dropped its connection for it is not up again, and
+    /// is gone once every one is.
+    fn look_at_network(&mut self) {
+        let now = self.network.reconnecting();
+        if now != self.reconnecting {
+            self.reconnecting = now;
+            let state = match now {
+                true => "reconnecting",
+                false => "back",
+            };
+            tracing::info!("NETWORK {state}");
+            let _ = self.events.send(Event::Network {
+                v: VERSION,
+                state: state.to_string(),
+            });
         }
     }
 
@@ -1849,6 +1896,8 @@ impl Inner {
             match effect {
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
+                // Every rotation of the session hears it (1298).
+                UiEffect::Network { kind, changed } => self.network.say(kind, changed),
                 UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
                 // A petname set here or pulled (1139): the contacts file
                 // in the app's directory, which the next start reads.
@@ -2839,6 +2888,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         R::Used { emoji } => Intent::Insert(emoji),
         R::Pull => Intent::Pull,
         R::Front { front } => Intent::Front(front),
+        R::Network { kind, changed } => Intent::Network {
+            kind: loquax::home::NetworkKind::from_word(&kind),
+            changed,
+        },
         R::Viewport { peer, keys } => Intent::Viewport {
             peer: parse_peer(&peer)?,
             keys: keys.into_iter().map(schema::model_key).collect(),

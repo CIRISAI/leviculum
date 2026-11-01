@@ -378,6 +378,18 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             Request::Front { front: true },
         ),
         (
+            "network",
+            java_map(&[
+                ("t", Java::Str("network")),
+                ("kind", Java::Str("mobile")),
+                ("changed", Java::Bool(true)),
+            ]),
+            Request::Network {
+                kind: "mobile".to_string(),
+                changed: true,
+            },
+        ),
+        (
             "Locator.share",
             java_map(&[
                 ("t", Java::Str("share")),

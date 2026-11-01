@@ -1342,6 +1342,16 @@ pub enum UiEvent {
     Elapsed(u64),
     /// The machine woke from suspend (`crate::sync::resumed`).
     Resumed,
+    /// The platform says the device's network is `kind` now (1298),
+    /// `changed` when it is another network than before: another WLAN,
+    /// WLAN to mobile data, back from none. Also said with `changed` off
+    /// after the phone's Doze, so the first wake re-runs the evaluation.
+    /// Asks the shell to re-evaluate its interfaces
+    /// ([`UiEffect::Network`]); nothing the screen shows changes here.
+    Network {
+        kind: crate::home::NetworkKind,
+        changed: bool,
+    },
     /// On a client of a home node: the home node said its archive grew
     /// past this device's cursor ([`crate::home::watch`]), so a pull starts,
     /// or follows the one running.
@@ -1568,6 +1578,14 @@ pub enum MapLoad {
 /// What the shell is asked to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiEffect {
+    /// Re-evaluate the interfaces for a network change
+    /// ([`UiEvent::Network`]): every rendezvous rotation hears it
+    /// (`crate::home::rendezvous::Network`), drops a dead connection,
+    /// dials again, asks its paths, bounded and idempotent.
+    Network {
+        kind: crate::home::NetworkKind,
+        changed: bool,
+    },
     /// Send `body` to `to` the way `loquax send --via auto` does. The shell
     /// runs sends one at a time in this order and reports each with
     /// [`UiEvent::SendDone`]. `fields` go with it as they are: a reaction's
@@ -1742,6 +1760,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.set_front(front);
             Vec::new()
         }
+        UiEvent::Network { kind, changed } => vec![UiEffect::Network { kind, changed }],
         UiEvent::ReadReceipts(on) => model.set_receipts(on),
         UiEvent::SendPhoto { peer, format, data } => model.send_photo(peer, &format, data),
         UiEvent::StagePhoto { peer, format, data } => {

@@ -362,6 +362,16 @@ pub enum Request {
     Front {
         front: bool,
     },
+    /// The phone's network is `kind` now (1298): `none`, `wifi`, `mobile`
+    /// or `other`, as Android's `ConnectivityManager` callbacks say it;
+    /// `changed` when it is another network than the one before. Said
+    /// again with `changed` off once the phone leaves Doze. The library
+    /// re-evaluates its connections and says what it does as a `network`
+    /// event.
+    Network {
+        kind: String,
+        changed: bool,
+    },
     /// These bubbles of `peer`'s chat are on screen, at least half of each,
     /// by their [`MessageRow::key`], on every change (1231): the core
     /// decides from it, and from the front, what was read.
@@ -1896,6 +1906,10 @@ pub enum Event {
     /// The TCP interface to the home node came up or went down. Once
     /// soon after the start, then on each change.
     Link { v: u32, up: bool },
+    /// After a network change (1298): `reconnecting` while a connection
+    /// it dropped is not up again, `back` once every one is: the line says
+    /// "Reconnecting…" and then is gone.
+    Network { v: u32, state: String },
     /// The session ended; `detail` says why when it was not asked to. One
     /// that ended by itself is gone from the library then: the next
     /// `start` makes a fresh one.
@@ -2253,6 +2267,11 @@ mod tests {
             decode::<Request>(&encode(&Request::Front { front: true })),
             Ok(Request::Front { front: true })
         );
+        let network = Request::Network {
+            kind: "mobile".to_string(),
+            changed: true,
+        };
+        assert_eq!(decode::<Request>(&encode(&network)), Ok(network));
     }
 
     /// A link carries the thumbnail as `bin`, Java's `byte[]`, and decodes

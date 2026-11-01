@@ -1707,6 +1707,9 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         fetch_budget: Duration::from_secs(args.timeout.saturating_mul(2)),
         wake: config.home_wake.unwrap_or(true),
         stop: None,
+        // A desktop or server mailbox has no platform that says a network
+        // change; its connection's keepalive (1176) finds a dead one.
+        network: Default::default(),
     })
     .await;
     match outcome {

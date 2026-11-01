@@ -289,6 +289,11 @@ impl Shell {
         for effect in effects {
             match effect {
                 UiEffect::Store(read) => answers.extend(self.read(read)),
+                // A terminal attached to a daemon dials nothing itself; a
+                // leaf's rotation hears it (1298).
+                UiEffect::Network { kind, changed } => {
+                    self.attached.network().say(kind, changed);
+                }
                 UiEffect::Send { to, body, fields } => {
                     self.log_receipt(&to, &body, &fields);
                     self.sends.push_back((to, body, fields));

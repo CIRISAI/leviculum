@@ -41,6 +41,7 @@
 //! | `Message::ToggleEmoji` | `Emoji` |
 //! | `Request::Pull`, `Command::Fetch` | `Pull` |
 //! | `Request::Front` | `Front` |
+//! | `Request::Network`, `UiEvent::Network` (1298) | `Network` |
 //! | `Request::Viewport` (1231) | `Viewport` |
 //! | `Request::Name` | `Name` |
 //! | `Request::Rename`, `UiEvent::Rename`, `Command::Rename` | `Rename` |
@@ -440,6 +441,12 @@ pub enum Intent {
     Pull,
     /// The app came to the front, or left it.
     Front(bool),
+    /// The platform's network changed (1298): a fact the platform says,
+    /// never a button.
+    Network {
+        kind: crate::home::NetworkKind,
+        changed: bool,
+    },
     /// These bubbles of `peer`'s chat are on screen, at least half of
     /// each (1231): the core decides from it what was read.
     Viewport {
@@ -610,6 +617,8 @@ impl Intent {
             Intent::MapDrawing => StrId::MapDrawing,
             Intent::Pull => StrId::Pull,
             Intent::Front(_) => StrId::Front,
+            // A fact of the platform as the front is, never a button.
+            Intent::Network { .. } => StrId::Front,
             // A fact of the screen as the front is, never a button.
             Intent::Viewport { .. } => StrId::Front,
             Intent::Theme => StrId::Theme,
