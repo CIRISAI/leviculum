@@ -8,6 +8,15 @@
 //! |---|---|---|
 //! | `0x00` | uint | capabilities; bit 0: "I send read receipts and want them" |
 //! | `0x01` | `[uint32 read_at, [bin32 message id, ...]]` | a read receipt |
+//! | `0x02` | `[bin16 sender, uint64 sent_ms, uint epoch]` | a group copy: who wrote it, when by their clock, the membership it was sent under |
+//! | `0x04` | `[bin16 group, bin64 public key, str name, str admin's name, uint epoch]` | an invitation to a group |
+//! | `0x05` | `[uint epoch, [[bin16 address, str name, uint flags], ...]]` | a group's membership; a member leaving sends itself alone, flagged [`MEMBER_LEFT`] |
+//!
+//! Capability bit 1 says "I understand groups": a group's home sends such a
+//! member its copies with key `0x02` and the bare text, and every other
+//! member the text with the sender's name in front
+//! (`docs/drafts/group-chats-study-2026-11.md`, 2.2 and 3.1). Keys `0x03`
+//! and `0x06` are the study's group status and digest, kept free for them.
 //!
 //! Versions move by keys, never by the type: a reader skips a key it does
 //! not know, and a later key never changes what an earlier one means. The
@@ -36,8 +45,30 @@ pub const KEY_CAPABILITIES: i64 = 0x00;
 /// The map key of a read receipt.
 pub const KEY_RECEIPT: i64 = 0x01;
 
+/// The map key of a group copy's sender and time.
+pub const KEY_GROUP_COPY: i64 = 0x02;
+
+/// The map key of a group invitation.
+pub const KEY_GROUP_INVITE: i64 = 0x04;
+
+/// The map key of a group's membership.
+pub const KEY_GROUP_MEMBERS: i64 = 0x05;
+
 /// Capability bit 0: the sender sends read receipts and wants them.
 pub const CAP_READ_RECEIPTS: u64 = 1;
+
+/// Capability bit 1: the sender understands groups.
+pub const CAP_GROUPS: u64 = 2;
+
+/// A member's flag in [`Members`]: it has left, or was removed.
+pub const MEMBER_LEFT: u64 = 1;
+
+/// A member's flag in [`Members`]: it is the group's admin.
+pub const MEMBER_ADMIN: u64 = 2;
+
+/// The length of an identity's public key, X25519 then Ed25519, as an
+/// invitation carries it (the `lxma://` code carries the same 64 bytes).
+pub const PUBLIC_KEY_BYTES: usize = 64;
 
 /// The most message ids one receipt lists: what fits a single-packet
 /// (opportunistic) message, 295 bytes of content
@@ -65,6 +96,50 @@ impl Receipt {
     }
 }
 
+/// What a group's home adds to the copy of a member's message it sends a
+/// member that understands groups: the copy's LXMF source is the group, so
+/// the writer goes here, with the writer's own timestamp, which together
+/// with the writer is the copy's dedup key (study 6.2), and the membership
+/// epoch the home sent it under ("your list is stale" when it is newer
+/// than the reader's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupCopy {
+    /// The writer's LXMF address.
+    pub sender: [u8; 16],
+    /// The writer's message timestamp, milliseconds since the epoch.
+    pub sent_ms: u64,
+    /// The membership epoch.
+    pub epoch: u64,
+}
+
+/// "Join this group": its address and key, so the reader can write to it
+/// before any announce of it was heard, its name, the admin's name for the
+/// trust sentence, and the membership epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invite {
+    pub group: [u8; 16],
+    pub public_key: [u8; PUBLIC_KEY_BYTES],
+    pub name: alloc::string::String,
+    pub admin_name: alloc::string::String,
+    pub epoch: u64,
+}
+
+/// One member as [`Members`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub address: [u8; 16],
+    pub name: alloc::string::String,
+    /// [`MEMBER_LEFT`], [`MEMBER_ADMIN`]; unknown bits are kept.
+    pub flags: u64,
+}
+
+/// A group's membership at an epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Members {
+    pub epoch: u64,
+    pub members: Vec<Member>,
+}
+
 /// What the `lev` namespace of one message says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lev {
@@ -72,6 +147,12 @@ pub struct Lev {
     pub capabilities: Option<u64>,
     /// Key `0x01`.
     pub receipt: Option<Receipt>,
+    /// Key `0x02`.
+    pub group_copy: Option<GroupCopy>,
+    /// Key `0x04`.
+    pub invite: Option<Invite>,
+    /// Key `0x05`.
+    pub members: Option<Members>,
 }
 
 impl Lev {
@@ -80,7 +161,7 @@ impl Lev {
     pub fn mark() -> Self {
         Self {
             capabilities: Some(CAP_READ_RECEIPTS),
-            receipt: None,
+            ..Self::default()
         }
     }
 
@@ -98,12 +179,22 @@ impl Lev {
             .is_some_and(|caps| caps & CAP_READ_RECEIPTS != 0)
     }
 
-    /// The two fields, `FIELD_CUSTOM_TYPE` first.
+    /// Whether the sender said it understands groups.
+    pub fn supports_groups(&self) -> bool {
+        self.capabilities.is_some_and(|caps| caps & CAP_GROUPS != 0)
+    }
+
+    /// The two fields, `FIELD_CUSTOM_TYPE` first. The map's keys go in
+    /// ascending order, each once, so the same [`Lev`] is always the same
+    /// bytes: a group copy must be (study 2.4).
     pub fn fields(&self) -> [Field; 2] {
         let mut kind = Vec::new();
         msgpack::bin(&mut kind, LEV_TYPE);
-        let entries =
-            usize::from(self.capabilities.is_some()) + usize::from(self.receipt.is_some());
+        let entries = usize::from(self.capabilities.is_some())
+            + usize::from(self.receipt.is_some())
+            + usize::from(self.group_copy.is_some())
+            + usize::from(self.invite.is_some())
+            + usize::from(self.members.is_some());
         let mut data = Vec::new();
         msgpack::map(&mut data, entries);
         if let Some(caps) = self.capabilities {
@@ -117,6 +208,34 @@ impl Lev {
             msgpack::array(&mut data, receipt.ids.len());
             for id in &receipt.ids {
                 msgpack::bin(&mut data, id);
+            }
+        }
+        if let Some(copy) = &self.group_copy {
+            msgpack::int(&mut data, KEY_GROUP_COPY);
+            msgpack::array(&mut data, 3);
+            msgpack::bin(&mut data, &copy.sender);
+            msgpack::uint(&mut data, copy.sent_ms);
+            msgpack::uint(&mut data, copy.epoch);
+        }
+        if let Some(invite) = &self.invite {
+            msgpack::int(&mut data, KEY_GROUP_INVITE);
+            msgpack::array(&mut data, 5);
+            msgpack::bin(&mut data, &invite.group);
+            msgpack::bin(&mut data, &invite.public_key);
+            msgpack::string(&mut data, &invite.name);
+            msgpack::string(&mut data, &invite.admin_name);
+            msgpack::uint(&mut data, invite.epoch);
+        }
+        if let Some(members) = &self.members {
+            msgpack::int(&mut data, KEY_GROUP_MEMBERS);
+            msgpack::array(&mut data, 2);
+            msgpack::uint(&mut data, members.epoch);
+            msgpack::array(&mut data, members.members.len());
+            for member in &members.members {
+                msgpack::array(&mut data, 3);
+                msgpack::bin(&mut data, &member.address);
+                msgpack::string(&mut data, &member.name);
+                msgpack::uint(&mut data, member.flags);
             }
         }
         [(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)]
@@ -134,7 +253,9 @@ impl Lev {
     /// a map says nothing: `Some` of the empty [`Lev`]. Unknown keys are
     /// skipped, a repeated key resolves to its last occurrence, as a Python
     /// dict does, and a receipt that is not `[uint32, [bin32, ...]]` is
-    /// none; an id of another length in it is passed over.
+    /// none; an id of another length in it is passed over. A group key of
+    /// another shape is none too; elements after the ones listed are
+    /// skipped, so a later version may append to an array.
     pub fn from_fields(fields: &[Field]) -> Option<Self> {
         let value = |want: i64| {
             fields
@@ -165,6 +286,9 @@ impl Lev {
                     lev.capabilities = msgpack::read_uint(value, &mut vp).ok();
                 }
                 Ok(KEY_RECEIPT) => lev.receipt = receipt(value),
+                Ok(KEY_GROUP_COPY) => lev.group_copy = group_copy(value),
+                Ok(KEY_GROUP_INVITE) => lev.invite = invite(value),
+                Ok(KEY_GROUP_MEMBERS) => lev.members = members(value),
                 _ => {}
             }
         }
@@ -189,6 +313,76 @@ fn receipt(d: &[u8]) -> Option<Receipt> {
     Some(Receipt { read_at, ids })
 }
 
+fn group_copy(d: &[u8]) -> Option<GroupCopy> {
+    let mut p = 0;
+    if msgpack::array_len(d, &mut p).ok()? < 3 {
+        return None;
+    }
+    let sender = fixed(d, &mut p)?;
+    let sent_ms = msgpack::read_uint(d, &mut p).ok()?;
+    let epoch = msgpack::read_uint(d, &mut p).ok()?;
+    Some(GroupCopy {
+        sender,
+        sent_ms,
+        epoch,
+    })
+}
+
+fn invite(d: &[u8]) -> Option<Invite> {
+    let mut p = 0;
+    if msgpack::array_len(d, &mut p).ok()? < 5 {
+        return None;
+    }
+    Some(Invite {
+        group: fixed(d, &mut p)?,
+        public_key: fixed(d, &mut p)?,
+        name: text(d, &mut p)?,
+        admin_name: text(d, &mut p)?,
+        epoch: msgpack::read_uint(d, &mut p).ok()?,
+    })
+}
+
+fn members(d: &[u8]) -> Option<Members> {
+    let mut p = 0;
+    if msgpack::array_len(d, &mut p).ok()? < 2 {
+        return None;
+    }
+    let epoch = msgpack::read_uint(d, &mut p).ok()?;
+    let count = msgpack::array_len(d, &mut p).ok()?;
+    let mut members = Vec::new();
+    for _ in 0..count {
+        let raw = msgpack::raw(d, &mut p).ok()?;
+        members.push(member(raw)?);
+    }
+    Some(Members { epoch, members })
+}
+
+fn member(d: &[u8]) -> Option<Member> {
+    let mut p = 0;
+    if msgpack::array_len(d, &mut p).ok()? < 3 {
+        return None;
+    }
+    Some(Member {
+        address: fixed(d, &mut p)?,
+        name: text(d, &mut p)?,
+        flags: msgpack::read_uint(d, &mut p).ok()?,
+    })
+}
+
+/// The next value as exactly `N` bytes.
+fn fixed<const N: usize>(d: &[u8], p: &mut usize) -> Option<[u8; N]> {
+    let raw = msgpack::raw(d, p).ok()?;
+    bytes(raw).and_then(|b| <[u8; N]>::try_from(b).ok())
+}
+
+/// The next value as text: a `str`, or a `bin` holding UTF-8.
+fn text(d: &[u8], p: &mut usize) -> Option<alloc::string::String> {
+    let raw = msgpack::raw(d, p).ok()?;
+    core::str::from_utf8(bytes(raw)?)
+        .ok()
+        .map(alloc::string::String::from)
+}
+
 /// The bytes of a `bin` or a `str` value.
 fn bytes(value: &[u8]) -> Option<&[u8]> {
     let mut p = 0;
@@ -201,6 +395,7 @@ fn bytes(value: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::borrow::ToOwned;
 
     fn hex(bytes: &[u8]) -> alloc::string::String {
         bytes.iter().map(|b| alloc::format!("{b:02x}")).collect()
@@ -307,5 +502,122 @@ mod tests {
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0].0, 0x30);
         assert_eq!(Lev::from_fields(&fields), Some(Lev::mark()));
+    }
+
+    fn copy() -> GroupCopy {
+        GroupCopy {
+            sender: [0x11; 16],
+            sent_ms: 1_700_000_000_123,
+            epoch: 3,
+        }
+    }
+
+    /// The study's 0x02 as bytes: `02` the key, `93` an array of three,
+    /// `c4 10` and the sixteen bytes of the writer, `cf` and the eight of
+    /// its timestamp in milliseconds, `03` the epoch.
+    #[test]
+    fn a_group_copy_is_the_studys_bytes() {
+        let lev = Lev {
+            capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+            group_copy: Some(copy()),
+            ..Lev::default()
+        };
+        let [_, (_, data)] = lev.fields();
+        assert_eq!(
+            hex(&data),
+            alloc::format!(
+                "82{}{}{}",
+                "0003",
+                "0293c410".to_owned() + &"11".repeat(16),
+                "cf0000018bcfe5687b03"
+            )
+        );
+        let read = Lev::from_fields(&lev.fields()).expect("lev");
+        assert_eq!(read, lev);
+        assert!(read.supports_groups() && read.supports_receipts());
+        assert!(!Lev::mark().supports_groups());
+    }
+
+    #[test]
+    fn an_invitation_and_a_membership_read_back_as_written() {
+        let lev = Lev {
+            capabilities: Some(CAP_GROUPS),
+            invite: Some(Invite {
+                group: [0x22; 16],
+                public_key: [0x33; PUBLIC_KEY_BYTES],
+                name: "Familie".into(),
+                admin_name: "Lew".into(),
+                epoch: 1,
+            }),
+            members: Some(Members {
+                epoch: 1,
+                members: alloc::vec![
+                    Member {
+                        address: [0x44; 16],
+                        name: "Lew".into(),
+                        flags: MEMBER_ADMIN,
+                    },
+                    Member {
+                        address: [0x55; 16],
+                        name: "Anna".into(),
+                        flags: 0,
+                    },
+                ],
+            }),
+            ..Lev::default()
+        };
+        let [_, (_, data)] = lev.fields();
+        let h = hex(&data);
+        // map 3; 0: 2; 4: [bin16, bin64 (`c4 40`), "Familie", "Lew", 1].
+        assert!(h.starts_with("83000204" /* map 3, 0:2, key 4 */), "{h}");
+        assert!(
+            h.contains(&("95c410".to_owned() + &"22".repeat(16) + "c440")),
+            "{h}"
+        );
+        assert!(h.contains("a746616d696c6965a34c657701"), "{h}");
+        // 5: [1, [[bin16, "Lew", 2], [bin16, "Anna", 0]]].
+        assert!(h.contains(&("0592019293c410".to_owned() + &"44".repeat(16) + "a34c657702")));
+        assert!(h.ends_with(&("93c410".to_owned() + &"55".repeat(16) + "a4416e6e6100")));
+        assert_eq!(Lev::from_fields(&lev.fields()), Some(lev));
+    }
+
+    #[test]
+    fn a_group_key_of_another_shape_says_nothing_and_a_longer_one_is_read() {
+        let mut kind = Vec::new();
+        msgpack::bin(&mut kind, LEV_TYPE);
+        let mut data = Vec::new();
+        msgpack::map(&mut data, 2);
+        // A writer of 8 bytes: not a copy.
+        msgpack::int(&mut data, KEY_GROUP_COPY);
+        msgpack::array(&mut data, 3);
+        msgpack::bin(&mut data, &[1; 8]);
+        msgpack::uint(&mut data, 5);
+        msgpack::uint(&mut data, 1);
+        // A membership whose arrays carry a fourth element a later version
+        // added.
+        msgpack::int(&mut data, KEY_GROUP_MEMBERS);
+        msgpack::array(&mut data, 3);
+        msgpack::uint(&mut data, 7);
+        msgpack::array(&mut data, 1);
+        msgpack::array(&mut data, 4);
+        msgpack::bin(&mut data, &[9; 16]);
+        msgpack::string(&mut data, "Anna");
+        msgpack::uint(&mut data, MEMBER_LEFT);
+        msgpack::string(&mut data, "later");
+        msgpack::string(&mut data, "later too");
+        let lev =
+            Lev::from_fields(&[(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)]).expect("lev");
+        assert_eq!(lev.group_copy, None);
+        assert_eq!(
+            lev.members,
+            Some(Members {
+                epoch: 7,
+                members: alloc::vec![Member {
+                    address: [9; 16],
+                    name: "Anna".into(),
+                    flags: MEMBER_LEFT,
+                }],
+            })
+        );
     }
 }

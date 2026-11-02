@@ -6082,7 +6082,7 @@ mod tests {
         assert!(!receipts(&model), "the latest message decides");
         let off = Lev {
             capabilities: Some(0),
-            receipt: None,
+            ..Lev::default()
         };
         engine(&mut model, with_lev(PEER, [4; 32], "turned off", &off));
         assert!(!receipts(&model));
@@ -6092,6 +6092,7 @@ mod tests {
                 read_at: 1,
                 ids: Vec::new(),
             }),
+            ..Lev::default()
         };
         engine(&mut model, with_lev(PEER, [5; 32], "", &bare));
         assert!(receipts(&model), "a receipt proves it");
