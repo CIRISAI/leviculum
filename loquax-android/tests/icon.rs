@@ -75,7 +75,16 @@ fn the_adaptive_icon_has_its_layers_and_the_manifest_names_it() {
 fn the_linux_package_has_a_256_px_icon_and_a_launcher_entry() {
     let (w, h, _) = decode(&tree("../packaging/loquax/loquax.png"));
     assert_eq!((w, h), (256, 256));
+    // The window's entry (amd64, arm64) and the terminal's (armhf, whose
+    // build carries no window), both installed as loquax.desktop (1342).
     let entry = read(&tree("../packaging/loquax/loquax.desktop"));
     assert!(entry.contains("\nIcon=loquax\n"));
-    assert!(entry.contains("\nExec=loquax\n"));
+    assert!(entry.contains("\nExec=loquax gui\n"));
+    assert!(entry.contains("\nTerminal=false\n"));
+    // The window's WM_CLASS and Wayland app id, `desktop::APP`.
+    assert!(entry.contains("\nStartupWMClass=loquax\n"));
+    let terminal = read(&tree("../packaging/loquax/loquax-terminal.desktop"));
+    assert!(terminal.contains("\nIcon=loquax\n"));
+    assert!(terminal.contains("\nExec=loquax tui\n"));
+    assert!(terminal.contains("\nTerminal=true\n"));
 }

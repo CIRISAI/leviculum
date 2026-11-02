@@ -203,11 +203,30 @@ check_package() {
         # Both spellings mean no interpreter: plain static, and static-pie
         # for a position-independent static binary, which is what rustc
         # produces for the musl targets by default.
-        case "$desc" in
-            *"statically linked"* | *"static-pie linked"*)
-                pass "/usr/bin/${binaries[0]} is statically linked" ;;
-            *) fail "/usr/bin/${binaries[0]} is not static: ${desc#*: }" ;;
-        esac
+        # loquax on amd64 and arm64 is the exception (1342): the window
+        # needs glibc, so it is linked against the floor scripts/build-deb.sh
+        # names, and no symbol it takes may be newer than that.
+        if [ "$pkg" = loquax ] && [ "$ARCH" != armhf ]; then
+            local newest
+            newest="$(readelf --dyn-syms --wide "$tmp/usr/bin/${binaries[0]}" |
+                grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n1 || true)"
+            case "$desc" in
+                *"dynamically linked"*) pass "/usr/bin/${binaries[0]} links against glibc" ;;
+                *) fail "/usr/bin/${binaries[0]} is not the glibc build: ${desc#*: }" ;;
+            esac
+            if [ -n "$newest" ] &&
+                [ "$(printf '%s\n' "$newest" GLIBC_2.31 | sort -V | tail -n1)" = GLIBC_2.31 ]; then
+                pass "/usr/bin/${binaries[0]} needs glibc 2.31 at most (newest symbol ${newest})"
+            else
+                fail "/usr/bin/${binaries[0]} needs a glibc past 2.31 (newest symbol ${newest:-none})"
+            fi
+        else
+            case "$desc" in
+                *"statically linked"* | *"static-pie linked"*)
+                    pass "/usr/bin/${binaries[0]} is statically linked" ;;
+                *) fail "/usr/bin/${binaries[0]} is not static: ${desc#*: }" ;;
+            esac
+        fi
         rm -rf "$tmp"
     else
         skip "file(1) not installed; cannot check static linkage"
@@ -401,27 +420,78 @@ case ", ${LOQUAX_DEPENDS}," in
 *", leviculum,"* | *", leviculum ("*) pass "loquax depends on leviculum, which brings lnsd" ;;
 *) fail "loquax does not depend on leviculum (Depends: ${LOQUAX_DEPENDS})" ;;
 esac
-# The marker is the `Tui` subcommand's doc comment in loquax/src/main.rs,
-# compiled in only with the feature; it has to follow that comment.
-check_loquax_tui() {
-    local deb tmp
+# The markers are the `Tui` and `Gui` subcommands' doc comments in
+# loquax/src/main.rs, compiled in only with each feature; they have to follow
+# those comments. amd64's and arm64's package is the glibc build with both
+# frontends (1342), armhf's the musl one with the terminal alone, and the
+# launcher entry is the one that build can open.
+check_loquax_frontends() {
+    local deb tmp entry
     deb="$(find_deb loquax)"
     [ -n "$deb" ] || return 0
     tmp="$(mktemp -d)"
     dpkg-deb -x "$deb" "$tmp"
-    if grep -qaF 'The terminal messenger, as plain `loquax`: conversations, messages and a compose line' "$tmp/usr/bin/loquax"; then
+    if grep -qaF 'The terminal messenger, as plain `loquax` where there is no display: conversations, messages and a compose line' "$tmp/usr/bin/loquax"; then
         pass "loquax is built with its tui"
     else
         fail "loquax is built without --features tui; \`loquax tui\` is missing"
     fi
+    entry="$(cat "$tmp/usr/share/applications/loquax.desktop" 2>/dev/null || true)"
+    case "$ARCH" in
+    amd64 | arm64)
+        if grep -qaF 'The messenger in a window, as plain `loquax` on a desktop, attached as the terminal one is' "$tmp/usr/bin/loquax"; then
+            pass "loquax is built with its window"
+        else
+            fail "loquax is built without --features gui; \`loquax gui\` is missing"
+        fi
+        contains "$entry" $'\nExec=loquax gui\n' "the launcher entry opens the window"
+        contains "$entry" $'\nTerminal=false\n' "the launcher entry needs no terminal"
+        contains "$entry" $'\nStartupWMClass=loquax\n' "the launcher entry names the window's class"
+        contains "$(dpkg-deb -f "$deb" Depends)" "libc6 (>= 2.31)" "loquax depends on the glibc it links against"
+        # The window opened on a display and its first frame drawn, from
+        # the packaged bytes: what a test run of the crate cannot show, that
+        # winit finds X11 through dlopen in the shipped binary. No daemon:
+        # the probe does not attach.
+        if [ "$ARCH" != "$(dpkg --print-architecture 2>/dev/null || echo amd64)" ]; then
+            skip "the ${ARCH} window cannot start on this host"
+        elif ! command -v xvfb-run >/dev/null 2>&1; then
+            skip "no xvfb-run; the window's start is unchecked (apt install xvfb)"
+        else
+            local out
+            mkdir -p "$tmp/home"
+            if out="$(HOME="$tmp/home" timeout 60 xvfb-run -a "$tmp/usr/bin/loquax" gui --exit-after-first-frame 2>&1)" &&
+                [[ "$out" == *"the window drew its first frame"* ]]; then
+                pass "the packaged window starts headless under xvfb-run"
+            else
+                fail "the packaged window does not start under xvfb-run: ${out}"
+            fi
+        fi
+        ;;
+    *)
+        if grep -qaF 'The messenger in a window, as plain `loquax` on a desktop' "$tmp/usr/bin/loquax"; then
+            fail "the ${ARCH} loquax carries a window, which its musl build cannot open"
+        else
+            pass "the ${ARCH} loquax is the terminal build"
+        fi
+        contains "$entry" $'\nExec=loquax tui\n' "the launcher entry opens the terminal view"
+        contains "$entry" $'\nTerminal=true\n' "the launcher entry runs in a terminal"
+        ;;
+    esac
     rm -rf "$tmp"
 }
-check_loquax_tui
+check_loquax_frontends
 rm -rf "$CTRL_DIR"
 echo
 
 # amd64 only: packaged from the firmware bundle (scripts/build-lnflash-deb.sh).
-if [ "$ARCH" = amd64 ]; then
+# Only when its .deb is there: check_package skips a missing one, and the
+# checks below would then read the previous package's CONTENTS (loquax's),
+# which a build-deb.sh run without build-lnflash-deb.sh always is.
+if [ "$ARCH" = amd64 ] && [ -z "$(find_deb lnflash)" ]; then
+    echo "== lnflash (amd64)"
+    skip "no lnflash .deb for amd64 under ${DEB_DIR}/ (scripts/build-lnflash-deb.sh builds it)"
+    echo
+elif [ "$ARCH" = amd64 ]; then
     check_package lnflash lnflash lnflash
     # The bundle sits where lnflash looks last (SYSTEM_BUNDLE), with its
     # manifest at the top; build-lnflash-deb.sh has already let the packaged

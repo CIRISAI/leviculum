@@ -457,7 +457,7 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      step for either.
    - The host toolchain pin stays at 1.97.1 until esp-rs ships a
      non-prerelease Xtensa toolchain of the same generation (decided
-     2026-10-05, `scripts/install-ci.sh:420-424`, `rust-toolchain.toml:17`).
+     2026-10-05, `scripts/install-ci.sh:430-434`, `rust-toolchain.toml:17`).
    - **2026-10-25, how the rig should recognise an M9 (#473).** USB
      cannot: the CH340K publishes `1a86:7522`, no manufacturer string and
      no serial number, so it looks like every other CH340, and periculum's

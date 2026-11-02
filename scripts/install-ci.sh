@@ -105,6 +105,14 @@ if ! command -v lintian >/dev/null 2>&1; then
     echo "[install-ci] Hint: sudo apt install lintian (needed for the just verify-deb policy checks)"
 fi
 
+# Optional test dependency: xvfb-run gives scripts/verify-deb-packaging.sh a
+# display to open the packaged loquax window on (`loquax gui
+# --exit-after-first-frame`, 1342); without it that one check is skipped.
+if ! command -v xvfb-run >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional test dependency 'xvfb-run' not found"
+    echo "[install-ci] Hint: sudo apt install xvfb (the packaged loquax window's start check)"
+fi
+
 # Optional test dependency: cargo-fuzz plus the nightly toolchain run the
 # wire-parser fuzz targets (`just fuzz`, `just fuzz-nightly`, `just
 # fuzz-regress`, scripts/run-fuzz.sh, Codeberg #290 and #23).
@@ -373,10 +381,12 @@ echo "[install-ci] book renderer: mdbook 0.4.48 (scripts/build-docs-tarball.sh)"
 #     and publishes the nightly on the tier-2 nightly host, so the forge's
 #     build steps' tools live here now: both musl targets, cargo-deb for
 #     the packages, and cargo-zigbuild with a pip-installed ziglang as the
-#     arm64 and armhf cross linker (scripts/build-deb.sh). musl-gcc, which
-#     links the amd64 build, is the apt package musl-tools.
+#     arm64 and armhf cross linker (scripts/build-deb.sh), and the linker of
+#     loquax's glibc build on amd64 and arm64 (1342), whose two gnu targets
+#     are added here too. musl-gcc, which links the amd64 build, is the apt
+#     package musl-tools.
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-    armv7-unknown-linux-musleabihf
+    armv7-unknown-linux-musleabihf x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 cargo install --locked cargo-deb
 cargo install --locked cargo-zigbuild
 python3 -c 'import ziglang' 2>/dev/null ||
