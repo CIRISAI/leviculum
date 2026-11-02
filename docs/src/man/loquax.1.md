@@ -2,7 +2,7 @@
 
 ## NAME
 
-loquax -- terminal LXMF messenger for Reticulum
+loquax -- LXMF messenger for Reticulum, in a window or the terminal
 
 ## SYNOPSIS
 
@@ -13,6 +13,7 @@ loquax -- terminal LXMF messenger for Reticulum
 **loquax import** [**--dry-run**] [**--key** | *path*] [**--ratchets** *file*]
 **loquax export** *dir*
 **loquax tui** [**--to** *address*]... [*options*]
+**loquax gui** [**--exit-after-first-frame**] [*options*]
 **loquax mailbox setup** [**--store** `system`|`account`] [**--reach** `rendezvous`|`fixed`] [**--address** *host*:*port*] [**--phone-port** *port*] [**--name** *name*] [**--yes**]
 **loquax mailbox run** [*options*]
 **loquax mailbox enable** | **disable**
@@ -25,7 +26,7 @@ loquax -- terminal LXMF messenger for Reticulum
 
 ## DESCRIPTION
 
-**loquax** is the Leviculum messenger: with no subcommand it opens the conversation view, and **send**, **fetch** and **address** are the commands for scripts. It sends and receives LXMF messages over Reticulum, attaches to a shared instance that is already running -- **lnsd**(1), or Python's **rnsd** -- and runs its own LXMF router; it never starts a Reticulum stack of its own. The package depends on the `leviculum` package, whose **lnsd** is enabled and started as `lnsd.service` when it is installed. When no daemon answers, Loquax says one sentence and the command that starts one, `sudo systemctl start lnsd` where the unit is installed, `cargo run --release --bin lnsd` from a source checkout, else `lnsd`, and exits 1; **--verbose** prints the instance and what the stack said instead. Its address is a pure function of the identity in its state directory, minted on first use and never replaced silently.
+**loquax** is the Leviculum messenger: with no subcommand it opens the messenger in a window on a desktop and in the terminal elsewhere (see WINDOW OR TERMINAL), and **send**, **fetch** and **address** are the commands for scripts. It sends and receives LXMF messages over Reticulum, attaches to a shared instance that is already running -- **lnsd**(1), or Python's **rnsd** -- and runs its own LXMF router; it never starts a Reticulum stack of its own. The package depends on the `leviculum` package, whose **lnsd** is enabled and started as `lnsd.service` when it is installed. When no daemon answers, Loquax says one sentence and the command that starts one, `sudo systemctl start lnsd` where the unit is installed, `cargo run --release --bin lnsd` from a source checkout, else `lnsd`, and exits 1; **--verbose** prints the instance and what the stack said instead. Its address is a pure function of the identity in its state directory, minted on first use and never replaced silently.
 
 **send** queues one message. The body is the argument, or standard input when the argument is missing or `-`, one trailing newline removed. A send that worked prints nothing and exits 0, which means the message was queued and handed to the network, not that it was delivered. **--via auto**, the default, tries a direct delivery link first and falls back to a propagation node when none comes up; exit 3 says a propagation node holds the message. A message that went onto the link and got no delivery proof in time is not sent again through a propagation node, which would deliver it twice; the run says so and exits 1.
 
@@ -35,7 +36,15 @@ loquax -- terminal LXMF messenger for Reticulum
 
 **import** and **export** bring a user's identity, contacts and history over from another messenger, and take them out again (see IMPORT AND EXPORT).
 
-**loquax** without a subcommand, or **loquax tui** under its old name, is the interactive messenger: conversations on the left, the open conversation on the right with a compose box under it (see THE SCREEN). A message sent from it travels the way **send --via auto** sends it, and each sent message carries a delivery mark (see DELIVERY MARKS). A restart shows every conversation again from the history (see HISTORY); **--to** lists a correspondent the history does not hold yet, to write first, as the palette's `new conversation` does from inside. The packages ship it; a build from source without the `tui` cargo feature has only the script commands, and a plain **loquax** there says so and exits 2.
+**loquax tui**, or **loquax** without a subcommand where there is no display, is the interactive messenger in the terminal: conversations on the left, the open conversation on the right with a compose box under it (see THE SCREEN). A message sent from it travels the way **send --via auto** sends it, and each sent message carries a delivery mark (see DELIVERY MARKS). A restart shows every conversation again from the history (see HISTORY); **--to** lists a correspondent the history does not hold yet, to write first, as the palette's `new conversation` does from inside. The packages ship it; a build from source without the `tui` cargo feature has only the script commands, and a plain **loquax** there says so and exits 2.
+
+**loquax gui**, or **loquax** without a subcommand on a desktop, is the same messenger in a window, attached to the daemon as the terminal one is, on the same history, contacts and config: the conversations and the open one beside them, the map, and the settings. Its launcher entry is `loquax.desktop`, the window's X11 class and Wayland application id `loquax`.
+
+## WINDOW OR TERMINAL
+
+The packages for amd64 and arm64 carry both frontends in one binary; the armhf package and the static tarballs carry the terminal alone. **loquax** without a subcommand opens the window when a graphical session is there, `WAYLAND_DISPLAY` or `DISPLAY` set and not empty, and the binary carries the window. Without a session it starts the terminal view and says on standard error why: `no display, starting the terminal view; "loquax gui" to insist`. A binary without the window always starts the terminal view and says nothing about it. One of the terminal's own options (**--to**, **--ascii**, **--no-color**, **--color**, **--theme**, **--no-mouse**, **--graphics**, **--script**) asks for the terminal view too; **--pn**, **--instance**, **--config**, **--timeout** and **--sync-interval** go to whichever opens.
+
+**loquax tui** insists on the terminal view. **loquax gui** insists on the window and, with no display, says so in one sentence and exits 1. **loquax mailbox** and the script commands are the same in every case.
 
 ## OPTIONS
 
@@ -67,7 +76,10 @@ loquax -- terminal LXMF messenger for Reticulum
 :   **send** only: send this picture with the message, as Columba and Sideband send a photo (see PHOTOS). It is turned upright and scaled by **--photo-size**, else by the config's `photo_size`, else to **phone**; its EXIF (the place it was taken, the camera) never goes. Without a body the message is the photo alone and stdin is not read. A file that is no picture this build reads (JPEG, PNG, WebP, GIF) is a usage error and nothing is sent.
 
 **--sync-interval** *interval*
-:   **tui** only: the longest the propagation node goes unsynced (see PROPAGATION NODE), `15m` by default, over the config file's `sync_interval`. A number with `s`, `m` or `h`, minutes without one; `off` or `0` turns the timer off, and the propagation node is then synced at start, on resume from suspend and on `Ctrl-r` only. A key script syncs by itself only when its command line names this option.
+:   **tui** and **gui**: the longest the propagation node goes unsynced (see PROPAGATION NODE), `15m` by default, over the config file's `sync_interval`. A number with `s`, `m` or `h`, minutes without one; `off` or `0` turns the timer off, and the propagation node is then synced at start, on resume from suspend and on `Ctrl-r` only. A key script syncs by itself only when its command line names this option.
+
+**--exit-after-first-frame**
+:   **gui** only: open the window, draw its first frame and exit 0, without attaching to a daemon; the check that the window starts on this display, which the packaging runs under `xvfb-run`.
 
 **--to** *address*
 :   **tui** only, repeatable: a correspondent to list from the start, for writing first to someone the history (see HISTORY) does not hold yet.

@@ -168,7 +168,7 @@ pub async fn run(options: ShellOptions) -> ExitCode {
     let driver = tokio::spawn(drive(shell, leave_rx, seen_tx, asks_rx));
     // iced runs its own loop on this thread until the window closes; the
     // runtime's other threads drive the shell meanwhile.
-    let shown = tokio::task::block_in_place(|| window(frames, seen_rx, asks_tx));
+    let shown = tokio::task::block_in_place(|| window(Some((frames, seen_rx, asks_tx)), false));
     let _ = leave_tx.send(());
     let shell = match driver.await {
         Ok(shell) => shell,
@@ -275,15 +275,35 @@ fn picture(
     })
 }
 
-/// Open the window and run it until it is closed.
-fn window(frames: Frames, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::Result {
+/// `loquax gui --exit-after-first-frame` (1342): the window opened on the
+/// display there is and closed once its first frame is drawn, without the
+/// shell, so no daemon, identity or history is needed. What it proves is
+/// the packaged binary's half that a test run cannot: winit finds X11 or
+/// Wayland through dlopen and the software renderer puts a frame on it.
+/// `scripts/verify-deb-packaging.sh` runs it under `xvfb-run`.
+pub fn probe() -> ExitCode {
+    match tokio::task::block_in_place(|| window(None, true)) {
+        Ok(()) => {
+            println!("loquax: the window drew its first frame");
+            ExitCode::SUCCESS
+        }
+        Err(error) => crate::failure(error, "failed"),
+    }
+}
+
+/// Open the window and run it until it is closed, or, as the packaging
+/// probe, until its first frame is drawn. Without the shell's half the
+/// window is the empty one [`App::boot`] makes.
+fn window(taken: Option<(Frames, UnboundedReceiver<Seen>, Asks)>, probe: bool) -> iced::Result {
     // iced asks its boot function for the first state; it is asked once,
     // and what it needs is handed over through this slot.
-    let slot = Mutex::new(Some((frames, seen, asks)));
+    let slot = Mutex::new(taken);
     iced::application(
         move || {
             let taken = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
-            App::boot(taken)
+            let (mut app, task) = App::boot(taken);
+            app.probe = probe.then_some(0);
+            (app, task)
         },
         App::update,
         App::view,
@@ -375,6 +395,8 @@ pub enum Message {
     PickCode,
     /// The chooser's answer for it.
     CodePicked(Result<Option<std::path::PathBuf>, String>),
+    /// A frame is due while the packaging probe runs ([`probe`]).
+    Probed,
 }
 
 impl Message {
@@ -400,6 +422,7 @@ impl Message {
                 | Message::Picked { .. }
                 | Message::PickCode
                 | Message::CodePicked(_)
+                | Message::Probed
         )
     }
 }
@@ -605,6 +628,9 @@ struct App {
     rec_held: Option<[u8; 16]>,
     rec_origin: Option<Point>,
     rec_over_lock: bool,
+    /// The packaging probe's frames so far ([`probe`]); `None` in a window
+    /// a person uses.
+    probe: Option<u32>,
 }
 
 impl App {
@@ -681,6 +707,7 @@ impl App {
             rec_held: None,
             rec_origin: None,
             rec_over_lock: false,
+            probe: None,
         }
     }
 
@@ -1212,6 +1239,9 @@ impl App {
         if self.rec_held.is_some() {
             all.push(iced::event::listen_with(held_pointer));
         }
+        if self.probe.is_some() {
+            all.push(window::frames().map(|_| Message::Probed));
+        }
         Subscription::batch(all)
     }
 
@@ -1253,6 +1283,16 @@ impl App {
             return Task::none();
         }
         match message {
+            // A frame is due when iced is about to draw one, so the first
+            // is on the screen once the second is due.
+            Message::Probed => {
+                let frames = self.probe.map_or(0, |n| n + 1);
+                self.probe = Some(frames);
+                return match frames >= 2 {
+                    true => iced::exit(),
+                    false => Task::none(),
+                };
+            }
             Message::Viewer(input) => {
                 if let Some(viewer) = &mut self.viewer {
                     viewer.input(input, Instant::now());

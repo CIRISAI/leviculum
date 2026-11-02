@@ -75,18 +75,33 @@ fn help_exits_zero_and_documents_the_send_subcommand() {
     );
 }
 
-/// Plain `loquax` is the messenger (Lew, 2026-10-26), and its help says so
-/// first, then lists the commands for scripts.
+/// Plain `loquax` is the messenger (Lew, 2026-10-26), in the window where
+/// there is a display (2026-11-02, 1342), and its help says so first, says
+/// how it picks and how to insist, then lists the commands for scripts.
 #[test]
 fn bare_help_names_the_messenger_first_then_the_subcommands() {
     let run = run(&["--help"], b"");
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
     assert_eq!(
         run.stdout.lines().next(),
-        Some("the Leviculum messenger; with no arguments it opens the conversation view"),
+        Some(
+            "the Leviculum messenger; with no arguments it opens the window, or the terminal \
+             view where there is no display"
+        ),
         "{}",
         run.stdout
     );
+    for words in [
+        "WAYLAND_DISPLAY or DISPLAY",
+        "`loquax gui` insists on the window",
+        "`loquax tui` insists on the terminal view",
+    ] {
+        assert!(
+            run.stdout.contains(words),
+            "{words} missing: {}",
+            run.stdout
+        );
+    }
     for command in ["send", "fetch", "address"] {
         assert!(
             run.stdout.contains(&format!("  {command} ")),
