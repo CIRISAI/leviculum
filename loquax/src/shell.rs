@@ -774,6 +774,46 @@ impl Shell {
         self.apply(UiEvent::Record { peer, input });
     }
 
+    /// A file the desktop's chooser picked for `peer`'s chat (1341), sent
+    /// as the phone sends what its picker hands over: a picture scaled and
+    /// stripped at the reader's photo size, any other file whole up to
+    /// what a receiver takes; what will not go is said in the reader's
+    /// words, as the phone's status line says it.
+    #[cfg(feature = "gui")]
+    pub(crate) fn attach(&mut self, peer: [u8; 16], path: &std::path::Path, photo: bool) {
+        let lang = self.model.lang;
+        let event = std::fs::metadata(path)
+            .map_err(|e| format!("{}: {e}", path.display()))
+            .and_then(|meta| {
+                let whole = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+                match loquax::ui::files::refusal(whole).filter(|_| !photo) {
+                    Some(why) => Err(why.resolve(lang)),
+                    None => std::fs::read(path).map_err(|e| format!("{}: {e}", path.display())),
+                }
+            })
+            .and_then(|data| match photo {
+                true => loquax::photo::prepare(&data, self.model.photo_size)
+                    .map(|prepared| UiEvent::SendPhoto {
+                        peer,
+                        format: prepared.format.to_string(),
+                        data: prepared.data,
+                    })
+                    .map_err(|e| format!("{}: {e}", path.display())),
+                false => Ok(UiEvent::SendFile {
+                    peer,
+                    name: path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    data,
+                }),
+            });
+        match event {
+            Ok(event) => self.apply(event),
+            Err(line) => self.apply(UiEvent::Notice(line)),
+        }
+    }
+
     /// The clock's tick, every [`TICK_MS`]: the time of day to the model,
     /// a suspend said and folded where the wall clock ran ahead of the
     /// monotonic one (`clocks` holds both as last read), then the

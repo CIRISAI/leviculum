@@ -436,6 +436,11 @@ impl App {
                 .on_input(Message::NewAddress)
                 .on_submit(Message::NewGo);
             pane = pane.push(container(new).padding([0, 12]));
+            // A contact code as a picture, the desktop's camera (1341).
+            pane = pane.push(
+                container(link(super::code_title(self.lang), Message::PickCode, t))
+                    .padding([0, 12]),
+            );
             // "New group" at the top of the new chat (1307, study 4.1).
             pane = pane.push(
                 container(link(
@@ -1161,6 +1166,44 @@ impl App {
                 .align_y(Alignment::Center),
             );
         }
+        // The plus's sheet or the position sheet (1270), over the bar as
+        // the phone's bottom sheet: its title, a row a line, Dismiss.
+        if let Some(sheet) = &self.scene.sheet {
+            let mut rows = column![row![
+                text(sheet.title.resolve(self.lang))
+                    .size(15)
+                    .color(colour(t.text))
+                    .width(Length::Fill),
+                link(
+                    self.word(Intent::CloseSheet.label()),
+                    Message::Intent(Intent::CloseSheet),
+                    t
+                ),
+            ]
+            .align_y(Alignment::Center)]
+            .spacing(6);
+            if let Some(whereabouts) = &self.scene.whereabouts {
+                rows = rows.push(
+                    text(whereabouts.words.resolve(self.lang))
+                        .size(14)
+                        .color(colour(t.text_secondary)),
+                );
+            }
+            for action in sheet.actions.iter().filter(|a| a.enabled) {
+                rows = rows.push(link(
+                    self.word(action.label_key),
+                    Message::Intent(action.intent.clone()),
+                    t,
+                ));
+            }
+            bar = bar.push(container(rows).padding([8, 12]).width(Length::Fill).style(
+                move |_: &Theme| container::Style {
+                    background: Some(Background::Color(colour(t.bar))),
+                    border: border::rounded(size::COMPOSE_CORNER),
+                    ..container::Style::default()
+                },
+            ));
+        }
         if self.emoji {
             let picks = SIGNAL_QUICK.iter().fold(row![].spacing(6), |picks, e| {
                 picks.push(
@@ -1184,7 +1227,8 @@ impl App {
         )
         .padding(6);
         // The scene's buttons in the field's right edge (1270): those the
-        // window can do; today it has none of them, so none show.
+        // window can do, the microphone where a recorder is found; no
+        // camera and no position, which a desktop does not read.
         let tail = open
             .compose
             .buttons
@@ -1215,8 +1259,8 @@ impl App {
                 }
             });
         // The round one: the plus while there is nothing to send, Send
-        // once there is (the scene's rule); the window's plus has no row
-        // yet, so the round button is Send.
+        // once there is (the scene's rule); the plus opens the sheet with
+        // the desktop chooser's Gallery and File (1341).
         let plus = open
             .compose
             .buttons

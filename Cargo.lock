@@ -3476,6 +3476,7 @@ dependencies = [
  "tracing",
  "tui-input",
  "unicode-segmentation",
+ "zbus",
 ]
 
 [[package]]

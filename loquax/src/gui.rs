@@ -59,6 +59,7 @@ use loquax::keys::{self, MapCmd};
 use loquax::mapframe::{hold, onto, Ask, Frames};
 use loquax::picture::map_theme;
 use loquax::tiles::Motion;
+use loquax::ui::compose::Sheet;
 use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
 use loquax::ui::scene::{LayoutClass, NodeId, Scene, TabId};
@@ -66,6 +67,7 @@ use loquax::ui::strings::{Lang, StrId};
 use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY};
 use loquax::when::WallTime;
 
+use crate::desktop;
 use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 
 /// The list of peers on the left, in logical pixels.
@@ -136,16 +138,29 @@ pub enum Want {
         peer: [u8; 16],
         input: loquax::ui::recording::Input,
     },
+    /// A file the desktop's chooser picked for `peer`'s chat (1341): a
+    /// picture to scale or a file to send whole.
+    Attach {
+        peer: [u8; 16],
+        path: std::path::PathBuf,
+        photo: bool,
+    },
+    /// The window gained or lost the focus: a notification only shows
+    /// while it has none (1341).
+    Front(bool),
 }
 
 /// `loquax gui`: the shell started as the terminal starts it, driven on
 /// the runtime while the window runs, and finished as the terminal
 /// finishes it.
 pub async fn run(options: ShellOptions) -> ExitCode {
-    let (shell, _config) = match shell::start(&options).await {
+    let (mut shell, _config) = match shell::start(&options).await {
         Ok(started) => started,
         Err(code) => return code,
     };
+    // The desktop's portal is the window's picker (1341): Gallery and
+    // File in the plus, as on the phone.
+    shell.model.bar.abilities.picker = true;
     let frames = Frames::new(shell.maps.clone());
     let (seen_tx, seen_rx) = unbounded();
     let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -179,6 +194,8 @@ async fn drive(
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
     let mut last: Option<Seen> = None;
     let mut photo: Option<viewer::Picture> = None;
+    let mut notices = desktop::Notices::default();
+    let mut front = true;
     loop {
         // The map view asks for no copy, link or mouse capture; what the
         // model asks of a terminal has no meaning in the window yet, but a
@@ -211,6 +228,16 @@ async fn drive(
                 break;
             }
             last = Some(now);
+            // New mail while the window is in the background (1341): the
+            // desktop's notification, as the phone's service posts one.
+            let rows = desktop::Count::of(&loquax::ui::chat::list_rows(&shell.model));
+            for notice in notices.look(&rows, front, None) {
+                tokio::spawn(async move {
+                    if let Err(error) = desktop::post(&notice).await {
+                        tracing::debug!("no notification: {error}");
+                    }
+                });
+            }
         }
         if shell.model.quit {
             break;
@@ -221,6 +248,8 @@ async fn drive(
                 Want::Map(want) => shell.map_ask(want),
                 Want::Ui(event) => shell.apply(event),
                 Want::Record { peer, input } => shell.record(peer, input),
+                Want::Attach { peer, path, photo } => shell.attach(peer, &path, photo),
+                Want::Front(is) => front = is,
             },
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => shell.tick(&mut clocks),
@@ -264,6 +293,13 @@ fn window(frames: Frames, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::Re
     .theme(App::theme)
     .window(iced::window::Settings {
         icon: leviculum_ui_iced::window_icon(),
+        // Wayland names the window's icon and its launcher entry by the
+        // application id (1341): the desktop file's basename,
+        // packaging/loquax/loquax.desktop.
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: desktop::APP.to_string(),
+            ..Default::default()
+        },
         ..iced::window::Settings::default()
     })
     .window_size(Size::new(WINDOW.0, WINDOW.1))
@@ -327,6 +363,18 @@ pub enum Message {
     RecOverLock(bool),
     /// The map list's "Add" on a node nearby that is no contact (1302).
     AddNearby([u8; 16]),
+    /// The desktop's chooser answered for `peer`'s chat (1341): the path,
+    /// none when cancelled, or why there was no chooser.
+    Picked {
+        peer: [u8; 16],
+        photo: bool,
+        path: Result<Option<std::path::PathBuf>, String>,
+    },
+    /// The new conversation's "Read a code from a picture" (1341): the
+    /// chooser for a picture of a contact code.
+    PickCode,
+    /// The chooser's answer for it.
+    CodePicked(Result<Option<std::path::PathBuf>, String>),
 }
 
 impl Message {
@@ -349,6 +397,9 @@ impl Message {
                 | Message::Viewer(_)
                 | Message::ViewerClose
                 | Message::AddNearby(_)
+                | Message::Picked { .. }
+                | Message::PickCode
+                | Message::CodePicked(_)
         )
     }
 }
@@ -653,6 +704,29 @@ impl App {
         }
     }
 
+    /// The window gained or lost the focus: it prefetches only with it,
+    /// and the shell notifies only without it (1341).
+    fn front(&mut self, focused: bool) {
+        self.focused = focused;
+        if let Some(asks) = &self.asks {
+            let _ = asks.send(Want::Front(focused));
+        }
+    }
+
+    /// The desktop's chooser for `peer`'s chat, the sheet closed (1341).
+    fn pick(&self, peer: [u8; 16], what: desktop::Pick, title: StrId) -> Task<Message> {
+        self.tell(UiEvent::CloseSheet);
+        let title = title.text(self.lang);
+        Task::perform(
+            async move { desktop::pick(title, what).await },
+            move |path| Message::Picked {
+                peer,
+                photo: what == desktop::Pick::Picture,
+                path,
+            },
+        )
+    }
+
     /// Hand a gesture or a button of the recording to the model, through
     /// the shell's clock (1276).
     fn record(&self, peer: [u8; 16], input: loquax::ui::recording::Input) {
@@ -830,6 +904,21 @@ impl App {
             Intent::CloseChat => {
                 self.menu = None;
                 self.tell(UiEvent::Close);
+            }
+            // The plus's sheet and the position sheet (1270) are the
+            // model's; the window draws them from the scene.
+            Intent::Attach { peer } => self.tell(UiEvent::OpenSheet(Sheet::Attach { peer })),
+            Intent::Locate { peer } => self.tell(UiEvent::OpenSheet(Sheet::Position { peer })),
+            Intent::CloseSheet => self.tell(UiEvent::CloseSheet),
+            // Gallery and File: the desktop's chooser picks (1341).
+            Intent::SendPhoto { peer, .. } => {
+                return self.pick(peer, desktop::Pick::Picture, StrId::AttachPhoto)
+            }
+            Intent::SendFile { peer, .. } => {
+                return self.pick(peer, desktop::Pick::File, StrId::AttachFile)
+            }
+            Intent::Back | Intent::Dismiss if self.menu.is_none() && self.scene.sheet.is_some() => {
+                self.tell(UiEvent::CloseSheet)
             }
             Intent::Back | Intent::Dismiss => match (self.menu, self.screen) {
                 (Some(_), _) => {
@@ -1179,6 +1268,36 @@ impl App {
                 self.tell(UiEvent::AddNearby { peer });
                 return Task::none();
             }
+            Message::Picked { peer, photo, path } => {
+                match path {
+                    Ok(Some(path)) => {
+                        if let Some(asks) = &self.asks {
+                            let _ = asks.send(Want::Attach { peer, path, photo });
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(why) => self.seen.notice = Some(why),
+                }
+                return Task::none();
+            }
+            Message::PickCode => {
+                let title = code_title(self.lang);
+                return Task::perform(
+                    async move { desktop::pick(title, desktop::Pick::Picture).await },
+                    Message::CodePicked,
+                );
+            }
+            Message::CodePicked(path) => {
+                match path.and_then(|p| p.map(|p| read_code(&p)).transpose()) {
+                    Ok(Some(code)) => {
+                        self.new_address = Some(code);
+                        return self.chat(Message::NewGo);
+                    }
+                    Ok(None) => {}
+                    Err(why) => self.seen.notice = Some(why),
+                }
+                return Task::none();
+            }
             Message::Intent(intent) => return self.intent(intent),
             Message::Settings => {
                 self.screen = Screen::Settings;
@@ -1242,8 +1361,8 @@ impl App {
                 self.rescene();
                 return false;
             }
-            Message::Window(window::Event::Focused) => self.focused = true,
-            Message::Window(window::Event::Unfocused) => self.focused = false,
+            Message::Window(window::Event::Focused) => self.front(true),
+            Message::Window(window::Event::Unfocused) => self.front(false),
             Message::Window(_) => return false,
             Message::Pointer(pointer) => self.pointer(pointer),
             Message::Select(peer) => {
@@ -1798,6 +1917,26 @@ fn held_pointer(
 
 /// The language the desktop's locale names: the scene's words are said in
 /// it.
+/// The chooser's title for a picture of a code, in the window's words.
+pub(crate) fn code_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::De => "Code aus einem Bild lesen",
+        Lang::En => "Read a code from a picture",
+    }
+}
+
+/// The first QR code in the picture at `path` (1341), the phone's
+/// scanner's decoder over the file's pixels; a picture without one is
+/// said.
+fn read_code(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    loquax::scan::image_codes(&bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("{}: no QR code in this picture", path.display()))
+}
+
 fn locale() -> Lang {
     loquax::engine::locale()
 }
@@ -2510,6 +2649,136 @@ mod tests {
         assert_eq!(px(&dark, ground.0, ground.1), [0x17, 0x18, 0x1b]);
         map::tests::same_as("gui-chat-light.png", &light, w, h);
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
+    }
+
+    /// The window with the desktop's chooser (1341): the round button is
+    /// the plus while the field is empty, the plus opens the attachment
+    /// sheet over the bar with Gallery and File, pixel for pixel the
+    /// golden; a row closes the sheet for the chooser, whose path goes to
+    /// the shell as the attachment, a cancel to nothing and a missing
+    /// portal to the notice; Esc closes an open sheet.
+    #[test]
+    fn the_plus_opens_the_desktop_choosers_sheet() {
+        use loquax::ui::compose::Round;
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        model.bar.abilities.picker = true;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let compose = &app.scene.chat.as_ref().expect("a chat").compose;
+        assert_eq!(compose.round, Round::Plus);
+        let peer = ANNA;
+        let plus = compose
+            .buttons
+            .iter()
+            .find(|b| b.button == loquax::ui::compose::Button::Plus)
+            .map(|b| b.action.intent.clone())
+            .expect("the plus");
+        let _ = app.update(Message::Intent(plus));
+        let opened = told(&mut rx);
+        assert_eq!(opened, [UiEvent::OpenSheet(Sheet::Attach { peer })]);
+        for event in opened {
+            update(&mut model, event);
+        }
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let sheet = app.scene.sheet.clone().expect("the sheet");
+        let rows: Vec<_> = sheet.actions.iter().map(|a| a.label_key).collect();
+        assert_eq!(rows, [StrId::AttachPhoto, StrId::AttachFile]);
+        map::tests::same_as("gui-attach-sheet-light.png", &shoot(&app, w, h), w, h);
+
+        let _ = app.update(Message::Intent(sheet.actions[0].intent.clone()));
+        assert_eq!(told(&mut rx), [UiEvent::CloseSheet]);
+        let path = std::path::PathBuf::from("/home/mia/Pictures/hill.jpg");
+        let _ = app.update(Message::Picked {
+            peer,
+            photo: true,
+            path: Ok(Some(path.clone())),
+        });
+        match rx.try_recv() {
+            Ok(Want::Attach {
+                peer: to,
+                path: picked,
+                photo: true,
+            }) => assert_eq!((to, picked), (peer, path)),
+            other => panic!("not the attachment: {other:?}"),
+        }
+        let _ = app.update(Message::Picked {
+            peer,
+            photo: false,
+            path: Ok(None),
+        });
+        assert!(rx.try_recv().is_err(), "a cancel sends nothing");
+        let _ = app.update(Message::Picked {
+            peer,
+            photo: false,
+            path: Err("no portal".to_string()),
+        });
+        assert_eq!(app.seen.notice.as_deref(), Some("no portal"));
+
+        let _ = app.intent(Intent::Dismiss);
+        assert_eq!(told(&mut rx), [UiEvent::CloseSheet]);
+    }
+
+    /// The new conversation's picture of a code (1341): the chooser's
+    /// picture decoded by the phone's scanner opens the chat of the
+    /// address in it; a picture without a code says so.
+    #[test]
+    fn a_picture_of_a_contact_code_opens_its_chat() {
+        let dir = tempfile::tempdir().expect("dir");
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key).expect("a code");
+        let peer = loquax::home::lxmf_address(&key).expect("an address");
+        let (size, modules) = loquax::home::qr::verbatim_modules(&code).expect("modules");
+        let (size, scale) = (size as usize, 4);
+        let side = ((size + 8) * scale) as u32;
+        let mut rgb = Vec::new();
+        for y in 0..side as usize {
+            for x in 0..side as usize {
+                let (mx, my) = (x / scale, y / scale);
+                let dark = (4..size + 4).contains(&mx)
+                    && (4..size + 4).contains(&my)
+                    && modules[(my - 4) * size + mx - 4];
+                rgb.extend_from_slice(&[if dark { 10 } else { 240 }; 3]);
+            }
+        }
+        let picture = dir.path().join("code.png");
+        let mut png = Vec::new();
+        let mut e = png::Encoder::new(&mut png, side, side);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header()
+            .expect("header")
+            .write_image_data(&rgb)
+            .expect("data");
+        std::fs::write(&picture, &png).expect("write");
+
+        let (mut app, mut rx) = chat_window();
+        let _ = app.intent(Intent::NewConversation);
+        let _ = app.update(Message::CodePicked(Ok(Some(picture))));
+        assert_eq!(told(&mut rx), [UiEvent::Open { peer }]);
+        assert_eq!(app.new_address, None);
+
+        let blank = dir.path().join("blank.png");
+        let mut png = Vec::new();
+        let mut e = png::Encoder::new(&mut png, 8, 8);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header()
+            .expect("header")
+            .write_image_data(&[200; 8 * 8 * 3])
+            .expect("data");
+        std::fs::write(&blank, &png).expect("write");
+        let _ = app.update(Message::CodePicked(Ok(Some(blank))));
+        assert!(app
+            .seen
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.ends_with("no QR code in this picture")));
     }
 
     /// A photo, a file and a voice message without words (1268): each is

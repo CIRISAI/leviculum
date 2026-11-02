@@ -145,6 +145,7 @@ tui = [
     "scan",
     "photos",
     "voice",
+    "dep:zbus",
 ]
 # QR codes (`loquax::home::qr`): the admission code in the terminal, and an
 # address for the phone's contact screen to show (1146).
@@ -179,9 +180,11 @@ gui = [
     "dep:iced",
     "dep:leviculum-ui-iced",
     "dep:open",
+    "qr",
     "scan",
     "photos",
     "voice",
+    "dep:zbus",
 ]
 
 [dependencies]
@@ -259,6 +262,12 @@ leviculum-ui-iced = { path = "../leviculum-ui-iced", optional = true }
 # A web or mail link in a message body, clicked, goes to the system's
 # handler as lnomad hands it one (`xdg-open` on Linux).
 open = { version = "5", optional = true }
+# The desktop's file chooser and notifications (`desktop`, 1341): the XDG
+# portal's FileChooser and org.freedesktop.Notifications over the session
+# bus. The version and the reactor the window's theme reader already put
+# in the lock (leviculum-ui-iced, mundy); pure Rust, so the musl-static
+# terminal carries it as well.
+zbus = { version = "5", default-features = false, features = ["async-io"], optional = true }
 # `loquax home admit` prints its code as a QR code too, for a phone to
 # take in one go: Nayuki's encoder, MIT, one file, no dependencies.
 qrcodegen = { version = "1.8.0", optional = true }

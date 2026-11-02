@@ -19,6 +19,8 @@
 //! `--via propagated` return so a script can tell the two successes apart
 //! (`loquax/src/send.rs`, `EXIT_PROPAGATED`).
 
+#[cfg(any(feature = "tui", feature = "gui"))]
+mod desktop;
 #[cfg(feature = "gui")]
 mod gui;
 #[cfg(any(feature = "tui", feature = "gui"))]

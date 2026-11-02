@@ -301,6 +301,8 @@ async fn run_terminal(
     // The wall clock against the monotonic one, read on every tick: the
     // wall running ahead is a suspend the monotonic clock slept through.
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
+    let mut notices = crate::desktop::Notices::default();
+    let mut counts: Vec<([u8; 16], usize)> = Vec::new();
 
     let result = loop {
         for output in std::mem::take(&mut shell.outputs) {
@@ -343,6 +345,7 @@ async fn run_terminal(
             }
         }
         say_viewport(shell);
+        notify(shell, &mut notices, &mut counts);
         let view = ui::view(&shell.model);
         // A frame that panics is skipped, not the messenger: the panic hook
         // has left the alternate screen by then, so it is entered again and
@@ -394,6 +397,44 @@ async fn run_terminal(
     remember(shell, &mut memory);
     guard.restore_now().map_err(|e| e.to_string())?;
     result
+}
+
+/// New mail in a conversation other than the open one (1341): the
+/// terminal's bell, and the desktop's notification where a session bus
+/// carries one, by the phone's rule ([`crate::desktop::Notices`]). A
+/// terminal does not say whether it is in front, so only the open chat,
+/// which the reader sees, stays quiet. The list is read again only when
+/// an unread count moved (`counts`).
+fn notify(
+    shell: &Shell,
+    notices: &mut crate::desktop::Notices,
+    counts: &mut Vec<([u8; 16], usize)>,
+) {
+    let now: Vec<_> = (shell.model.conversations.iter())
+        .map(|c| (c.peer, c.unread))
+        .collect();
+    if &now == counts {
+        return;
+    }
+    *counts = now;
+    let open = shell
+        .model
+        .conversations
+        .get(shell.model.selected)
+        .map(|c| c.peer);
+    let rows = crate::desktop::Count::of(&loquax::ui::chat::list_rows(&shell.model));
+    let fresh = notices.look(&rows, false, open);
+    if fresh.is_empty() {
+        return;
+    }
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::style::Print('\u{7}'));
+    for notice in fresh {
+        tokio::spawn(async move {
+            if let Err(error) = crate::desktop::post(&notice).await {
+                tracing::debug!("no notification: {error}");
+            }
+        });
+    }
 }
 
 /// Tell the model which bubbles are on screen when that changed (1231).
