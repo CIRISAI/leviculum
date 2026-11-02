@@ -538,9 +538,11 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
             };
             let copy = super::groups::copy_of(&message.body, &message.fields)
                 .filter(|_| group && !message.outbound);
+            // The reader's own word for the writer, else the admin's
+            // (1307); the bare name, as a group's sender line has it.
             let writer = copy.map(|(address, name, _)| {
                 let shown = match model.names.shown(&address) {
-                    Some(_) => model.names.label(&address),
+                    Some(shown) => shown.to_string(),
                     None if !name.is_empty() => name.to_string(),
                     None => model.names.label(&address),
                 };

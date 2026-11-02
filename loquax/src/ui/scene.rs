@@ -142,6 +142,14 @@ pub enum NodeId {
     /// A running share in Settings, Privacy, by its peer (1273); its Stop.
     ShareRow([u8; 16]),
     ShareRowStop([u8; 16]),
+    /// Group chats (1307): "New group" and a friend's row in its picker,
+    /// an invitation's card by its group, the member sheet and a member's
+    /// row in it.
+    NewGroup,
+    PickRow([u8; 16]),
+    Join([u8; 16]),
+    Members,
+    Member([u8; 16]),
 }
 
 impl NodeId {
@@ -186,6 +194,11 @@ impl NodeId {
             NodeId::ShareStop => "share_stop".to_string(),
             NodeId::ShareRow(peer) => format!("share_{}", to_hex(peer)),
             NodeId::ShareRowStop(peer) => format!("share_stop_{}", to_hex(peer)),
+            NodeId::NewGroup => "new_group".to_string(),
+            NodeId::PickRow(peer) => format!("pick_{}", to_hex(peer)),
+            NodeId::Join(group) => format!("join_{}", to_hex(group)),
+            NodeId::Members => "members".to_string(),
+            NodeId::Member(peer) => format!("member_{}", to_hex(peer)),
         }
     }
 }
@@ -349,7 +362,7 @@ pub struct Avatar {
 }
 
 impl Avatar {
-    fn of(
+    pub(super) fn of(
         initials: String,
         peer: &[u8; 16],
         icon: Option<&(String, String)>,
@@ -387,6 +400,9 @@ pub struct Row {
     /// A share of our position runs in this chat (1273): the row shows a
     /// small ⌖ in the accent colour on our side.
     pub sharing: bool,
+    /// A group's row (1307): its avatar is the member count, its line
+    /// "Invitation" until the Join.
+    pub group: Option<super::group_scene::GroupBadge>,
 }
 
 /// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
@@ -447,6 +463,8 @@ pub struct BubbleNode {
     /// The voice message it carries (1222): its play or pause button,
     /// length and level bar.
     pub voice: Option<VoiceNode>,
+    /// The invitation it carries, as a card (1307).
+    pub invite: Option<super::group_scene::InviteNode>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
@@ -539,8 +557,12 @@ pub fn mark_words(mark: chat::Mark, read_at: Option<u32>, now: Option<WallTime>)
 pub struct Group {
     pub id: NodeId,
     pub ours: bool,
-    /// Who wrote: the reader, or the peer's name.
+    /// Who wrote: the reader, or the peer's name; in a group's chat the
+    /// writer's (1307).
     pub sender: Text,
+    /// The renderer draws [`Group::sender`] above the first bubble: a
+    /// group's chat, a group of bubbles that is not the reader's.
+    pub named: bool,
     /// A new day begins with the group.
     pub day: Option<DayLine>,
     pub bubbles: Vec<BubbleNode>,
@@ -898,6 +920,9 @@ pub struct Chat {
     /// Our share's chip, while one runs here (1273).
     pub share: Option<ShareChip>,
     pub groups: Vec<Group>,
+    /// A group's chat while the reader is only invited (1307): the card
+    /// with Join above the compose bar.
+    pub invite: Option<super::group_scene::InviteNode>,
     pub compose: Compose,
     pub a11y: A11y,
 }
@@ -934,6 +959,10 @@ pub struct Scene {
     pub whereabouts: Option<Whereabouts>,
     pub card: Option<Card>,
     pub chips: Vec<Chip>,
+    /// "New group", while it is open (1307).
+    pub new_group: Option<super::group_scene::NewGroupNode>,
+    /// A group's member sheet, while it is open (1307).
+    pub members: Option<super::group_scene::MemberSheet>,
 }
 
 impl<B> UiModel<B> {
@@ -960,6 +989,8 @@ impl<B> UiModel<B> {
             whereabouts,
             card: None,
             chips: Vec::new(),
+            new_group: super::group_scene::new_group(self),
+            members: super::group_scene::member_sheet(self),
         }
         .in_class(class)
     }
@@ -1050,6 +1081,31 @@ impl Scene {
                 .as_ref()
                 .and_then(|chat| chat.share.as_ref())
                 .map(|chip| &chip.stop),
+            NodeId::PickRow(peer) => self
+                .new_group
+                .as_ref()
+                .and_then(|n| n.rows.iter().find(|r| r.peer == peer))
+                .map(|r| &r.toggle),
+            NodeId::Join(group) => self
+                .chat
+                .as_ref()
+                .and_then(|chat| {
+                    chat.invite
+                        .iter()
+                        .chain(
+                            chat.groups
+                                .iter()
+                                .flat_map(|g| &g.bubbles)
+                                .filter_map(|b| b.invite.as_ref()),
+                        )
+                        .find(|i| i.group == group)
+                })
+                .and_then(|i| i.join.as_ref()),
+            NodeId::Member(member) => self
+                .members
+                .as_ref()
+                .and_then(|m| m.rows.iter().find(|r| r.address == member))
+                .and_then(|r| r.remove.as_ref()),
             NodeId::SheetRow(row) => self.sheet.as_ref().and_then(|sheet| {
                 sheet
                     .actions
@@ -1183,8 +1239,14 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         .conversations
         .get(model.selected)
         .is_some_and(|c| c.peer == *peer);
-    // The pin says the position in the list (1224), the ring does not.
-    let avatar = Avatar::of(row.initials.clone(), peer, row.icon.as_ref(), None);
+    // The pin says the position in the list (1224), the ring does not. A
+    // group's avatar is how many are in it (1307).
+    let group = super::group_scene::badge(model, peer);
+    let initials = match &group {
+        Some(badge) => super::group_scene::initials(model, peer, badge),
+        None => row.initials.clone(),
+    };
+    let avatar = Avatar::of(initials, peer, row.icon.as_ref(), None);
     let position = PositionBadge::of(peer, &row.name, &row.liveness, now);
     let target = Target::Peer(*peer);
     let menu = Vec::from([
@@ -1234,6 +1296,7 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         position,
         draft,
         sharing: model.share(peer).is_some(),
+        group,
         row,
     }
 }
@@ -1311,12 +1374,25 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         .get(c)
         .map_or(&[][..], |c| c.messages.as_slice());
     let liveness = model.liveness(&peer);
+    let badge = super::group_scene::badge(model, &peer);
     let avatar = Avatar::of(
-        chat::initials(model.names.shown(&peer), &peer),
+        match &badge {
+            Some(badge) => super::group_scene::initials(model, &peer, badge),
+            None => chat::initials(model.names.shown(&peer), &peer),
+        },
         &peer,
         chat::latest_appearance(messages).as_ref(),
         Ring::of(liveness.state),
     );
+    // A group's bar opens its member sheet (1307), where the map would be.
+    let bar_actions = match &badge {
+        Some(_) => Vec::from([Action::of(Intent::Group(super::groups::Verb::Members {
+            group: Target::Peer(peer),
+        }))]),
+        None => Vec::from([Action::of(Intent::OpenMapAt {
+            peer: Target::Peer(peer),
+        })]),
+    };
     let bar = TopBar {
         id: NodeId::ChatBar,
         lead: Lead::Back {
@@ -1325,9 +1401,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         },
         title: Text::Raw(name.clone()),
         // The list's pin and the chat's bar open the map alike (1224).
-        actions: Vec::from([Action::of(Intent::OpenMapAt {
-            peer: Target::Peer(peer),
-        })]),
+        actions: bar_actions,
         a11y: A11y::of(NodeId::ChatBar, Role::Bar, Text::Raw(name.clone())),
     };
     let bubbles = chat::bubbles(model, c);
@@ -1341,15 +1415,22 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
                 key: bubble.key,
             });
         let track = model.voice_track(peer, bubble.key);
-        let node = bubble_node(peer, bubble, place, now, playing, track);
+        let invite = bubble
+            .invite
+            .and_then(|group| super::group_scene::invite(model, &group, bubble.ours));
+        let mut node = bubble_node(peer, bubble, place, now, playing, track);
+        node.invite = invite;
         match groups.last_mut() {
             Some(group) if place.joins_before => group.bubbles.push(node),
             _ => {
                 let id = NodeId::Group(node.bubble.key);
                 let ours = node.bubble.ours;
-                let sender = match ours {
-                    true => Text::key(StrId::QuoteYou),
-                    false => Text::Raw(name.clone()),
+                let writer = node.bubble.writer.as_ref().map(|w| w.1.clone());
+                let named = !ours && writer.is_some();
+                let sender = match (ours, writer) {
+                    (true, _) => Text::key(StrId::QuoteYou),
+                    (false, Some(writer)) => Text::Raw(writer),
+                    (false, None) => Text::Raw(name.clone()),
                 };
                 let day = match (place.day, node.bubble.at) {
                     (true, Some(at)) => Some(DayLine {
@@ -1361,6 +1442,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
                 groups.push(Group {
                     id,
                     ours,
+                    named,
                     a11y: A11y::of(id, Role::Group, sender.clone()),
                     sender,
                     day,
@@ -1375,6 +1457,9 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         bar,
         share: share_chip(model, &peer),
         groups,
+        invite: badge
+            .filter(|b| b.standing == super::groups::Standing::Invited)
+            .and_then(|_| super::group_scene::invite(model, &peer, false)),
         compose: compose(model, c),
         a11y: A11y::of(NodeId::Chat, Role::Chat, Text::Raw(name)),
     }
@@ -1661,6 +1746,7 @@ fn bubble_node(
         photo,
         files,
         voice,
+        invite: None,
         actions,
     }
 }
@@ -1826,7 +1912,7 @@ impl PositionBadge {
 impl Row {
     pub fn to_json(&self) -> Value {
         let r = &self.row;
-        json!({
+        let mut value = json!({
             "id": self.item.id.resource(),
             "name": r.name,
             "last": r.last,
@@ -1849,14 +1935,18 @@ impl Row {
             "activate": self.item.activate.to_json(),
             "menu": actions(&self.item.menu),
             "a11y": self.item.a11y.to_json(),
-        })
+        });
+        if let (Some(group), Value::Object(map)) = (&self.group, &mut value) {
+            map.insert("group".into(), group.to_json());
+        }
+        value
     }
 }
 
 impl BubbleNode {
     pub fn to_json(&self) -> Value {
         let b = &self.bubble;
-        json!({
+        let mut value = json!({
             "id": self.id.resource(),
             "msg_id": opt(b.id, |id| hex(&id)),
             "ours": b.ours,
@@ -1913,13 +2003,27 @@ impl BubbleNode {
             })),
             "actions": actions(&self.actions),
             "a11y": self.a11y.to_json(),
-        })
+        });
+        // A group's keys only where there is a group (1307): the goldens
+        // of a plain chat stay as they were.
+        if let Value::Object(map) = &mut value {
+            if let Some(invite) = &self.invite {
+                map.insert("invite".into(), invite.to_json());
+            }
+            if let Some((writer, name)) = &b.writer {
+                map.insert(
+                    "writer".into(),
+                    json!({ "address": hex(writer), "name": name }),
+                );
+            }
+        }
+        value
     }
 }
 
 impl Chat {
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "id": self.id.resource(),
             "peer": hex(&self.peer),
             "bar": self.bar.to_json(),
@@ -1929,14 +2033,20 @@ impl Chat {
                 "stop": chip.stop.to_json(),
                 "a11y": chip.a11y.to_json(),
             })),
-            "groups": self.groups.iter().map(|g| json!({
-                "id": g.id.resource(),
-                "ours": g.ours,
-                "sender": g.sender.to_json(),
-                "day": opt(g.day.as_ref(), |d| json!({ "at": d.at.unix_secs, "words": d.words.to_json() })),
-                "bubbles": g.bubbles.iter().map(BubbleNode::to_json).collect::<Vec<_>>(),
-                "a11y": g.a11y.to_json(),
-            })).collect::<Vec<_>>(),
+            "groups": self.groups.iter().map(|g| {
+                let mut group = json!({
+                    "id": g.id.resource(),
+                    "ours": g.ours,
+                    "sender": g.sender.to_json(),
+                    "day": opt(g.day.as_ref(), |d| json!({ "at": d.at.unix_secs, "words": d.words.to_json() })),
+                    "bubbles": g.bubbles.iter().map(BubbleNode::to_json).collect::<Vec<_>>(),
+                    "a11y": g.a11y.to_json(),
+                });
+                if let (true, Value::Object(map)) = (g.named, &mut group) {
+                    map.insert("named".into(), json!(true));
+                }
+                group
+            }).collect::<Vec<_>>(),
             "compose": {
                 "id": self.compose.id.resource(),
                 "hint": self.compose.hint.to_json(),
@@ -1962,7 +2072,11 @@ impl Chat {
                 "a11y": self.compose.a11y.to_json(),
             },
             "a11y": self.a11y.to_json(),
-        })
+        });
+        if let (Some(invite), Value::Object(map)) = (&self.invite, &mut value) {
+            map.insert("invite".into(), invite.to_json());
+        }
+        value
     }
 }
 
@@ -2017,6 +2131,12 @@ impl Scene {
             "chips".into(),
             Value::Array(self.chips.iter().map(|c| json!(c.id.resource())).collect()),
         );
+        if let Some(new_group) = &self.new_group {
+            map.insert("new_group".into(), new_group.to_json());
+        }
+        if let Some(members) = &self.members {
+            map.insert("members".into(), members.to_json());
+        }
         Value::Object(map)
     }
 }

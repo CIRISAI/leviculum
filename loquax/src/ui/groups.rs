@@ -555,7 +555,7 @@ impl<B> UiModel<B> {
             return "You".to_string();
         }
         match self.names.shown(&member.address) {
-            Some(_) => self.names.label(&member.address),
+            Some(shown) => shown.to_string(),
             None if !member.name.is_empty() => member.name.clone(),
             None => self.names.label(&member.address),
         }

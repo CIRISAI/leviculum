@@ -136,6 +136,7 @@ pub mod chat;
 pub mod compose;
 pub mod contacts;
 pub mod files;
+pub mod group_scene;
 pub mod groups;
 pub mod history;
 pub mod hit;
