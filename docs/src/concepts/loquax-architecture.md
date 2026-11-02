@@ -187,7 +187,7 @@ Note that `LxmfRouter`, `RouterEvent`, `RouterOutput`, `RouterConfig` and
 `MessageState` are *not* re-exported at the crate root — the crate root
 exports only `BuiltResource`, `DeliveryStampRequest`, `InboundStampRequest`,
 `PendingResourceBuild` and `PropagationStampRequest` from that module
-(`leviculum-lxmf/src/lib.rs:133-136`) — so they are reachable as
+(`leviculum-lxmf/src/lib.rs:134-137`) — so they are reachable as
 `leviculum_lxmf::router::*` only.
 
 ### Events are return values, not a channel

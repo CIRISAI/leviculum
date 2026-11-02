@@ -456,6 +456,20 @@ pub fn send_pn_config(
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Set whom the board shares its position with (order 1301,
+/// `TYPE_POSITION_SHARE`). Persisted before the ack (#358) and applied at
+/// once, so a positive answer means the next position announce follows it.
+pub fn send_position_share(fd: &Fd, setting: u8) -> io::Result<ControlOutcome> {
+    let payload = leviculum_core::envelope::encode_position_share(setting);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_POSITION_SHARE),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// Replace one of the propagation node's operator lists (audit 2026-10-12
 /// D4, D18, `TYPE_PN_LIST`). Acked only once the board's store holds it;
 /// the role reads its lists at boot, so a positive answer means a reset

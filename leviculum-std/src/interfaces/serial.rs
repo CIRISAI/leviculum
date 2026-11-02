@@ -1231,7 +1231,7 @@ const MEDIA_QUERY_ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 /// The profile is the one media frame the board answers only after a flash
 /// write: the firmware applies it, then waits for the store task to settle
 /// the page (`crate::telemetry::confirm`) for up to `PERSIST_CONFIRM_WITHIN`,
-/// 2500 ms (`leviculum-nrf/src/telemetry.rs:415`), before it writes either
+/// 2500 ms (`leviculum-nrf/src/telemetry.rs:424`), before it writes either
 /// the report or [`leviculum_core::envelope::REFUSE_PERSIST`]. A 2 s window
 /// called a board whose save was merely slow unanswered although it had
 /// taken the profile (470). The firmware sized its bound to land inside
@@ -2263,7 +2263,7 @@ mod tests {
     /// `SerialInterface` block naming one builds, spawns, and puts a value on
     /// the wire that `RadioConfig::from_wire_config` returns `None` for. The
     /// legacy contract for a config the driver cannot take is silence
-    /// (`leviculum-nrf/src/usb.rs:828-848`), so the board stays on the PHY it
+    /// (`leviculum-nrf/src/usb.rs:829-849`), so the board stays on the PHY it
     /// already had while the host's airtime bucket goes on pricing every
     /// frame at the bandwidth it asked for.
     #[test]

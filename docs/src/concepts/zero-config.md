@@ -259,7 +259,7 @@ their consent.
 ## Serial: LNodes by their name, RNodes by silence, then a probe
 
 **LNodes** need no probe. Our firmware sets its USB manufacturer and
-product strings itself (`leviculum-nrf/src/usb.rs:160-161`), so an LNode
+product strings itself (`leviculum-nrf/src/usb.rs:161-162`), so an LNode
 appears as `/dev/serial/by-id/usb-leviculum_leviculum_<Board>_<Serial>-if02`.
 The string is ours; the test PID beside it (`1209:0001` to `1209:0004`)
 is shared, which is why an own PID (#460) stays wanted but is not a

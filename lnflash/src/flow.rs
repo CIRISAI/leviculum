@@ -1776,6 +1776,67 @@ pub fn set_pn_config(
     Ok(all_took_it)
 }
 
+/// The `--share-position` session (order 1301): set whom every running
+/// LNode shares its position with, then exit. No flashing.
+///
+/// Persisted, like the costs, and applied at once: the board writes the
+/// record, acks, and its next position announce follows the setting. The
+/// board's `[POSITION] share=` line on the debug port says what it now
+/// runs, which for `default` depends on whether it reports as a tracker.
+pub fn set_position_share(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    setting: u8,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --share-position talks to flashed boards; a board in its bootloader has no config page owner.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty).and_then(|fd| {
+            crate::envelope::probed(&fd, leviculum_core::envelope::TYPE_POSITION_SHARE, |fd| {
+                crate::envelope::send_position_share(fd, setting)
+            })
+        }) {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: persisted and in force. The [POSITION] share= line on the debug port (if00) says whom the board now shares with."
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the setting: {}.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer, so assume nothing was persisted."
+            )),
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so nothing was sent. {}",
+                crate::envelope::PROBE_SILENCE_HINT
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware does not announce a position. Flash the current bundle first."
+            )),
+        }
+    }
+    Ok(all_took_it)
+}
+
 /// The operator-list session (audit 2026-10-12 D4, D18): send each list
 /// the command line named to every running LNode, then exit. No flashing.
 /// Each frame replaces its list whole; the board acks once the list is in

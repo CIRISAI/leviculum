@@ -718,6 +718,7 @@ pub async fn run(
     // miner task is the peering-key grinder — cooperative, off the main
     // loop, results harvested by the engine.
     let pn_config = crate::pn::load_config_at_boot(board.config.telemetry_flash_page);
+    crate::position::load_at_boot(board.config.telemetry_flash_page);
     let mut pn_engine = crate::pn::Engine::new(&mut node, pn_config);
     if let Some(pn) = pn_engine.as_ref() {
         leviculum_firmware::identity::note_propagation(*pn.destination_hash().as_bytes());

@@ -197,7 +197,7 @@ If the board enumerates nothing on USB after a flash or a bad image:
    [Structured event logs](../structured-event-logs.md). The same port
    replays the previous boot's HardFault/panic post-mortem and the
    persistent log: look for `[HARDFAULT_PMRT]`, `[PANIC_PMRT]`, and
-   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:656-665`;
+   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:657-665`;
    `leviculum-nrf/README.md:59-60`).
 4. **Only now force the bootloader manually.** On a T114, double-tap
    RESET to get the UF2 drive regardless of the running image

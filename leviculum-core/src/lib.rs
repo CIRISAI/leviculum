@@ -139,6 +139,7 @@ pub mod node_name_store;
 pub mod packet;
 pub mod packet_hash_store;
 pub mod pn_config_store;
+pub mod position_share_store;
 pub mod radio_config_store;
 pub(crate) mod ratchet;
 pub mod ratchet_store;

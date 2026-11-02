@@ -650,6 +650,7 @@ async fn main(spawner: Spawner) {
     // miner task is the peering-key grinder — cooperative, off the main
     // loop, results harvested by the engine.
     let pn_config = leviculum_nrf::pn::load_config_at_boot(rak4631::CONFIG.telemetry_flash_page);
+    leviculum_nrf::position::load_at_boot(rak4631::CONFIG.telemetry_flash_page);
     let mut pn_engine = leviculum_nrf::pn::Engine::new(&mut node, pn_config);
     if let Some(pn) = pn_engine.as_ref() {
         leviculum_firmware::identity::note_propagation(*pn.destination_hash().as_bytes());

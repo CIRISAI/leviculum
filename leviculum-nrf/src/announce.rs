@@ -150,17 +150,39 @@ pub fn with_cadence<T>(f: impl FnOnce(&mut AnnounceCadence) -> T) -> T {
 /// halves are decided together and a budget for one of them would be a
 /// budget for a cadence nobody runs.
 pub fn note_duty_budget(now_ms: u64, frame_airtime_ms: u64, lawful_duty_e4: u16) {
-    let frames_per_set = if leviculum_firmware::identity::propagation_hash().is_some() {
-        2
-    } else {
-        1
-    };
     let budget = DutyBudget {
         frame_airtime_ms,
-        frames_per_set,
+        frames_per_set: frames_per_set(),
         lawful_duty_e4,
     };
     if with_cadence(|cadence| cadence.set_budget(budget)) {
+        log_stretch(now_ms);
+    }
+}
+
+/// The frames one announce set puts on the air: the board's own, the
+/// propagation role's when this boot registered one, and the position
+/// announce's when the board shares it (two for the sealed form, which
+/// LoRa carries as two frames; [`crate::position::frames`]).
+fn frames_per_set() -> u32 {
+    let propagation = u32::from(leviculum_firmware::identity::propagation_hash().is_some());
+    1 + propagation + crate::position::frames()
+}
+
+/// Keep the budget's set current when the position share changes at
+/// runtime, which [`note_duty_budget`] (called on a PHY change) would
+/// not see.
+fn refresh_frames(now_ms: u64) {
+    let frames = frames_per_set();
+    let changed = with_cadence(|cadence| {
+        let budget = cadence.budget();
+        budget.frame_airtime_ms != 0
+            && cadence.set_budget(DutyBudget {
+                frames_per_set: frames,
+                ..budget
+            })
+    });
+    if changed {
         log_stretch(now_ms);
     }
 }
@@ -260,7 +282,7 @@ pub fn movement_fix() -> Option<leviculum_telemetry_policy::Fix> {
 /// What the receiver last said, `None` on a binary without one or before
 /// its first sentence.
 #[cfg(feature = "gnss")]
-fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
+pub(crate) fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
     let fix = leviculum_firmware::board_state::GNSS_FIX.try_get()?;
     Some(leviculum_announce_policy::GnssReading {
         valid: fix.valid,
@@ -272,7 +294,7 @@ fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
 
 /// See the `gnss` twin: no receiver in this binary.
 #[cfg(not(feature = "gnss"))]
-fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
+pub(crate) fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
     None
 }
 
@@ -313,7 +335,14 @@ impl AnnounceGate {
     /// [`MOVEMENT_SAMPLE_INTERVAL_MS`]: leviculum_announce_policy::MOVEMENT_SAMPLE_INTERVAL_MS
     #[must_use]
     pub fn periodic_wait_ms(&self, now_ms: u64) -> u64 {
-        let announce = with_cadence(|cadence| cadence.wait_ms(AnnounceSlot::Own, now_ms));
+        let announce = with_cadence(|cadence| {
+            let own = cadence.wait_ms(AnnounceSlot::Own, now_ms);
+            if crate::position::share() == leviculum_announce_policy::PositionShare::Off {
+                own
+            } else {
+                own.min(cadence.wait_ms(AnnounceSlot::Position, now_ms))
+            }
+        });
         announce.min(self.sampler.wait_ms(now_ms))
     }
 
@@ -328,6 +357,7 @@ impl AnnounceGate {
         }
         let fix = movement_fix();
         let resumed = with_cadence(|cadence| cadence.note_fix(now_ms, fix));
+        crate::position::sample(now_ms);
         if resumed {
             crate::log::log_fmt_critical(
                 "[INFO!] ",
@@ -400,13 +430,12 @@ impl AnnounceGate {
     {
         let now_ms = node.now_ms();
         self.sample_movement(now_ms);
+        refresh_frames(now_ms);
         let clock_ok = node.has_plausible_wall_clock();
         let polled = with_cadence(|cadence| cadence.poll(AnnounceSlot::Own, now_ms, clock_ok));
-        let Some((decision, hash)) = own_announce(polled, delivery_hash) else {
-            return Vec::new();
-        };
-        match decision {
-            Decision::Announce => {
+        let mut actions = match own_announce(polled, delivery_hash) {
+            None => Vec::new(),
+            Some((Decision::Announce, hash)) => {
                 self.last_withheld = None;
                 let app_data = crate::telemetry::announce_app_data(node.identity());
                 match node.announce_destination(hash, Some(&app_data)) {
@@ -417,11 +446,13 @@ impl AnnounceGate {
                     Err(_) => Vec::new(),
                 }
             }
-            Decision::Withheld(reason) => {
+            Some((Decision::Withheld(reason), _)) => {
                 self.log_withheld(reason, None);
                 Vec::new()
             }
-        }
+        };
+        actions.extend(crate::position::periodic(node));
+        actions
     }
 }
 
@@ -520,7 +551,7 @@ where
 /// desk recipe greps for. Critical, like the `reason=host` line the
 /// `lnflash --announce` arm already writes: an announce is the event a
 /// capture is opened for.
-fn log_sent(hash: &DestinationHash, reason: &str, peer: Option<&[u8; 16]>) {
+pub(crate) fn log_sent(hash: &DestinationHash, reason: &str, peer: Option<&[u8; 16]>) {
     let d = hash.as_bytes();
     crate::log::log_fmt_critical(
         "[INFO!] ",

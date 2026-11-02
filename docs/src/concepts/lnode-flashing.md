@@ -45,9 +45,9 @@ Automatic today:
   the binary, then `/usr/share/lnflash` (`locate`,
   `lnflash/src/manifest.rs:1018`).
 - **The self check**: `--check-bundle` verifies the manifest and every
-  payload checksum (`verify_all`, `lnflash/src/main.rs:1008`).
+  payload checksum (`verify_all`, `lnflash/src/main.rs:1043`).
 - **Entry** by the 1200-baud touch, then waiting for the bootloader
-  (`enter_bootloader`, `lnflash/src/flow.rs:3928`).
+  (`enter_bootloader`, `lnflash/src/flow.rs:3989`).
 - **Identity from the bootloader**, never from the running firmware
   (`resolve_identity`, `lnflash/src/flow.rs:530`), the SoftDevice
   precondition with its remedy, and the read back of the `[FW_BUILD]`
@@ -65,11 +65,11 @@ Where it asks:
 - A board at level *expected*: type yes, which `--yes` deliberately never
   gives (`put_level_question`, `lnflash/src/flow.rs:408`).
 - "Overwrite the firmware on this board?" on both transports (`Cancelled`,
-  `lnflash/src/flow.rs:3292` and `lnflash/src/flow.rs:3471`).
+  `lnflash/src/flow.rs:3353` and `lnflash/src/flow.rs:3532`).
 - A double-tap when no software trigger worked (`wait_for_human`,
-  `lnflash/src/flow.rs:3973`); under `--yes` this fails the board.
+  `lnflash/src/flow.rs:4034`); under `--yes` this fails the board.
 - After the flash, without the matching flags: the radio settings, eu868
-  on Enter (`ask_for_radio`, `lnflash/src/flow.rs:3846`); remote status
+  on Enter (`ask_for_radio`, `lnflash/src/flow.rs:3907`); remote status
   queries, no on Enter (`ASK_MANAGEMENT`, `lnflash/src/mgmt.rs:111`);
   telemetry, no on Enter (`ASK_TELEMETRY`, `lnflash/src/telemetry.rs:97`).
 
@@ -83,21 +83,21 @@ Where it stops, nothing written:
   (`NeedsConfirmation`, `lnflash/src/flow.rs:424`).
 - A dfu-serial bootloader on an ID no board claims (`UnknownBootloader`,
   `lnflash/src/flow.rs:452`); a running ID shared beyond the boards
-  `--board` names (`SharedRunningId`, `lnflash/src/flow.rs:3058`); a
+  `--board` names (`SharedRunningId`, `lnflash/src/flow.rs:3119`); a
   board touched into its bootloader that turns out not named
-  (`TouchedNotNamed`, `lnflash/src/flow.rs:3145`); a bootloader that
-  never appeared (`NoBootloader`, `lnflash/src/flow.rs:3992`).
+  (`TouchedNotNamed`, `lnflash/src/flow.rs:3206`); a bootloader that
+  never appeared (`NoBootloader`, `lnflash/src/flow.rs:4053`).
 - A SoftDevice the bundle has no remedy for (`NoRemedy`,
-  `lnflash/src/flow.rs:2810`), or a remedy that did not take
+  `lnflash/src/flow.rs:2871`), or a remedy that did not take
   (`RemedyDidNotTake`, `lnflash/src/flow.rs:658`).
 - Not root: said in the first lines (`is_root`,
-  `lnflash/src/main.rs:1015`), the run identifies and then cannot write.
-- An empty bus fails a real run (`lnflash/src/main.rs:1042`).
+  `lnflash/src/main.rs:1050`), the run identifies and then cannot write.
+- An empty bus fails a real run (`lnflash/src/main.rs:1077`).
 
 No estimate yet:
 
 - **Region**: none is guessed. The offered default is always eu868
-  (`default_preset`, `lnflash/src/flow.rs:3836`).
+  (`default_preset`, `lnflash/src/flow.rs:3897`).
 - **Radio settings**: a preset or the fields, prompted or given; nothing
   is derived from the board or the place.
 - **Revision**: nothing in `lnflash/src/` reads a board revision; the
@@ -114,7 +114,7 @@ No estimate yet:
 `leviculum-nrf/src/boards/rak4631.rs:183`. Two CDC ports: interface 00
 is the debug log, interface 02 the Reticulum transport. Both IDs are
 squatted pid.codes test IDs, flagged as a TODO at
-`leviculum-nrf/src/usb.rs:127`. Heltec stock firmware uses `239a:8071`.
+`leviculum-nrf/src/usb.rs:128`. Heltec stock firmware uses `239a:8071`.
 Meshtastic on the SenseCAP Solar Node uses `2886:0059`, and calls itself
 "XIAO-BOOT" while doing so. Nothing stops an application from naming
 itself after a bootloader, which is the sharpest available argument for
@@ -143,7 +143,7 @@ Two mechanisms, and only one of them is ours to control.
 
 **1200-baud touch.** The host opens a CDC port at exactly 1200 baud.
 Our firmware answers the resulting `SET_LINE_CODING` in
-`leviculum-nrf/src/usb.rs:197`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
+`leviculum-nrf/src/usb.rs:198`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
 `GPREGRET` at `0x4000_051C` and resets. The bootloader reads that
 retained register on the next boot and stays in mass-storage mode.
 Measured latency from `stty ... 1200` to the bootloader appearing on

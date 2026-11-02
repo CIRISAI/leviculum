@@ -87,6 +87,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_MGMT_ALLOW_QUERY,
     envelope::TYPE_CHANNEL_STATS_QUERY,
     envelope::TYPE_PN_LIST,
+    envelope::TYPE_POSITION_SHARE,
 ];
 
 /// nRF52840 FICR base address
@@ -1211,6 +1212,31 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log_write_failed("pn-config answer");
+                                    }
+                                }
+                                ControlAction::PositionShare(setting) => {
+                                    // Applied at once and persisted on this
+                                    // task, like the costs: the ack must
+                                    // not leave before the record is on the
+                                    // page (#358). The `[POSITION] share=`
+                                    // line says what the board now runs.
+                                    let persist = crate::telemetry::confirm(
+                                        crate::position::apply_setting(setting),
+                                    )
+                                    .await;
+                                    let answer = match persist {
+                                        envelope::Persist::Durable => {
+                                            envelope::encode_ack(envelope::TYPE_POSITION_SHARE)
+                                        }
+                                        envelope::Persist::Lost => envelope::encode_refusal(
+                                            envelope::TYPE_POSITION_SHARE,
+                                            envelope::REFUSE_PERSIST,
+                                        ),
+                                    };
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log_write_failed("position-share answer");
                                     }
                                 }
                                 ControlAction::MgmtAllow(list) => {

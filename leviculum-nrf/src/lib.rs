@@ -89,6 +89,7 @@ pub mod name;
 /// engine, over the record-log adapters of `leviculum-pn-store`.
 #[cfg(feature = "softdevice")]
 pub mod pn;
+pub mod position;
 pub mod qspi;
 // The LoRa transceiver driver this build links, behind one set of names
 // for `lora`. Documented inside, where its links resolve.
