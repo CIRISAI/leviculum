@@ -206,6 +206,8 @@ pub enum Message {
     Key(keyboard::Event),
     /// The wheel over the page, lines down (positive) or up.
     Wheel(f32),
+    /// The pointer over the page, where on it; `None` once it left.
+    Pointer(Option<iced::Point>),
     /// The window has this logical size.
     Resized(Size),
     /// A transfer's outcome.
@@ -345,6 +347,29 @@ impl Window {
                     ));
                 }
                 effects
+            }
+            Message::Pointer(at) => {
+                // The page's cell under the pointer, as the terminal's mouse
+                // reports it: below the top bar's row. Off the page, the top
+                // bar's row, where no link is.
+                let (column, row) =
+                    at.filter(|at| at.x >= PAGE_PAD && at.y >= PAGE_PAD)
+                        .map_or((0, 0), |at| {
+                            (
+                                ((at.x - PAGE_PAD) / CELL_W) as u16,
+                                (((at.y - PAGE_PAD) / CELL_H) as u16)
+                                    .saturating_add(crate::app::model::TOPBAR_ROWS),
+                            )
+                        });
+                update(
+                    &mut self.model,
+                    AppEvent::Mouse(MouseEvent {
+                        kind: MouseEventKind::Moved,
+                        column,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                )
             }
             Message::Resized(size) => {
                 let (cols, rows) = cells(size.width, size.height);
@@ -605,7 +630,11 @@ impl Window {
         let bar = top_bar(&scene, lang, p);
         let address = address_row(&scene.address, &scene, lang, p);
         let page = page_view(&scene.page, &self.model, &self.pictures, p);
-        let page: Element<'_, Message> = mouse_area(page).on_scroll(wheel).into();
+        let page: Element<'_, Message> = mouse_area(page)
+            .on_scroll(wheel)
+            .on_move(|at| Message::Pointer(Some(at)))
+            .on_exit(Message::Pointer(None))
+            .into();
         let sheet = scene
             .names
             .as_ref()
@@ -1425,6 +1454,16 @@ mod tests {
         same_as("gui-page-dark.png", &shoot(&readme(Theme::Dark)), w, h);
     }
 
+    /// The messages a click at `at` publishes, less the pointer's move
+    /// the click begins with.
+    fn pressed(window: &Window, at: iced::Point) -> Vec<Message> {
+        leviculum_ui_iced::headless::click(window.view(), at, WINDOW.0 as u32, WINDOW.1 as u32)
+            .expect("the software renderer")
+            .into_iter()
+            .filter(|m| !matches!(m, Message::Pointer(_)))
+            .collect()
+    }
+
     /// Where on the window the first cell of link `n` is, from the
     /// scene's runs on the cell grid; its line and its link.
     fn first_link(window: &Window) -> (iced::Point, usize) {
@@ -1449,9 +1488,7 @@ mod tests {
     fn a_click_on_a_link_activates_it() {
         let mut window = readme(Theme::Light);
         let (at, n) = first_link(&window);
-        let clicked =
-            leviculum_ui_iced::headless::click(window.view(), at, WINDOW.0 as u32, WINDOW.1 as u32)
-                .expect("the software renderer");
+        let clicked = pressed(&window, at);
         assert!(
             matches!(
                 clicked.as_slice(),
@@ -1460,13 +1497,7 @@ mod tests {
             "{clicked:?}"
         );
         let blank = iced::Point::new(WINDOW.0 - 2.0 * PAGE_PAD, at.y);
-        let beside = leviculum_ui_iced::headless::click(
-            window.view(),
-            blank,
-            WINDOW.0 as u32,
-            WINDOW.1 as u32,
-        )
-        .expect("the software renderer");
+        let beside = pressed(&window, blank);
         assert!(beside.is_empty(), "{beside:?}");
         let before = window.model.pending.clone();
         let _ = window.update(clicked.into_iter().next().expect("one message"));
@@ -1617,9 +1648,7 @@ mod tests {
         let field = crate::app::model::visible_fields(&window.model)[0].clone();
         let row = usize::from(field.row - crate::app::model::TOPBAR_ROWS);
         let at = cell(usize::from(field.col_start) + 1, row);
-        let clicked =
-            leviculum_ui_iced::headless::click(window.view(), at, WINDOW.0 as u32, WINDOW.1 as u32)
-                .expect("the software renderer");
+        let clicked = pressed(&window, at);
         assert!(
             matches!(
                 clicked.as_slice(),
@@ -1895,6 +1924,20 @@ Text unter dem Bild.
         assert!(narrow.0 < wide.0, "{narrow:?} {wide:?}");
         assert!(usize::from(narrow.0) <= window.model.width, "{narrow:?}");
         assert!(narrow.1 < wide.1, "{narrow:?} {wide:?}");
+    }
+
+    /// The pointer over a link run sets the model's hover, so the status
+    /// line says where it goes, as in the terminal; off it, nothing.
+    #[test]
+    fn the_pointer_over_a_link_shows_where_it_goes() {
+        let mut window = readme(Theme::Light);
+        let (at, n) = first_link(&window);
+        let page = iced::Point::new(at.x, at.y - BAR - ADDRESS_ROW);
+        let _ = window.update(Message::Pointer(Some(page)));
+        assert_eq!(window.model.hover, Some(n));
+        assert!(window.model.scene().status.is_some(), "the status says");
+        let _ = window.update(Message::Pointer(None));
+        assert_eq!(window.model.hover, None);
     }
 
     /// The xterm table: the cube's corners and the grey ramp's ends.
