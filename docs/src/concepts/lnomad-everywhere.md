@@ -27,7 +27,7 @@ lines**; the integration tests under `lnomad/tests` add 1,155. The
 | Fetch and navigation | `fetch.rs` 620, `url.rs` 191, `browser.rs` 182, `page_cache.rs` 113 | 1,106 | `url`, `page_cache` yes; `fetch` and `browser` need `leviculum-std` and tokio |
 | Micron layout | `render.rs` 1,004 (and the parser crate `leviculum-micron`, 1,194) | 1,004 | yes |
 | Terminal frontend | `tui.rs` 1,709, `main.rs` 289, `cli.rs` 37 | 2,035 | no (`tui.rs`, `main.rs`) |
-| Discovery | `discovery.rs` 329 | 329 | yes, but `SystemTime` (`lnomad/src/discovery.rs:24`) |
+| Discovery | `discovery.rs` 329 | 329 | yes, but `SystemTime` (`lnomad/src/discovery.rs:29`) |
 | Bookmarks | `bookmarks.rs` 143 | 143 | the list yes, the file IO no |
 | Images | `image.rs` 307, `image_cache.rs` 135 | 442 | the arithmetic yes; the decoder is `std` |
 | Downloads | `download.rs` 157 | 157 | no (files) |
@@ -45,29 +45,29 @@ lnomad-core-no-tui` (`Justfile:628`) and stated in the module doc of
 `lnomad/src/app/mod.rs:1`. Two qualifications, both measured:
 
 - **The core speaks cells.** Events arrive as raw keys and cell-addressed
-  mouse events (`AppEvent`, `lnomad/src/app/event.rs:30`). The key handlers
+  mouse events (`AppEvent`, `lnomad/src/app/event.rs:36`). The key handlers
   were hand-written `match`es per mode (`update_browse_key`,
   `update_address_key`, `update_places_key`), and only the scroll keys came
   from the shared table. Slice 1b made them one table (`ROWS`,
-  `lnomad/src/app/keys.rs:148`; `resolve`, `lnomad/src/app/keys.rs:384`). The top
-  bar is a cell layout (`TopBar`, `lnomad/src/app/chrome.rs:24`), and the
+  `lnomad/src/app/keys.rs:150`; `resolve`, `lnomad/src/app/keys.rs:386`). The top
+  bar is a cell layout (`TopBar`, `lnomad/src/app/chrome.rs:29`), and the
   click and hover tests run against it (`handle_click`,
   `lnomad/src/app/event.rs:1744`). There is no intent and no scene.
-- **The core is `std`.** `PathBuf` (`lnomad/src/app/model.rs:5`, for
-  `bookmarks_path`), `SystemTime` in discovery, and the parser crate uses
-  `std::collections::BTreeMap` (`leviculum-micron/src/model.rs:10`) and
-  `std::borrow::Cow` (`leviculum-micron/src/parser.rs:100`), all of which
-  `alloc` has. The crate as a whole links `leviculum-std` and tokio for
-  `fetch`, so a firmware cannot take it as it is
+- **The core was `std`.** `PathBuf` for `bookmarks_path`, `SystemTime`
+  in discovery, and the parser crate used `std::collections::BTreeMap`
+  and `std::borrow::Cow`, all of which `alloc` has. The crate as a whole
+  linked `leviculum-std` and tokio for `fetch`, so a firmware could not
+  take it as it was
   ([A messenger whose core runs anywhere](handheld-messenger.md) says the
-  same).
+  same). Slice 4a made the core `no_std` behind a `std` feature (see the
+  slice's paragraph in section 5).
 
 The user-visible words were literals: 37 `set_toast(` calls (23 in
 `app/event.rs`, 1 in `app/model.rs`, 13 in `tui.rs`), the start page and
 the help groups. Nothing was translated. Slice 1 moved them into the
 catalogue; the start page is now `start_page`
-(`lnomad/src/app/event.rs:377`) and the help groups `help_groups_in`
-(`lnomad/src/app/chrome.rs:352`), both in the reader's language.
+(`lnomad/src/app/event.rs:383`) and the help groups `help_groups_in`
+(`lnomad/src/app/chrome.rs:357`), both in the reader's language.
 
 ### 1.2 What lnomad shares with Loquax today
 
@@ -104,20 +104,20 @@ means only the browser has it. Catalogue keys named `browser_*` are new.
 
 | lnomad concept, today | Scene node | Intent | Catalogue | Status |
 |---|---|---|---|---|
-| Top bar: title, address, star, identity, cache bolt, hops (`topbar_layout`, `lnomad/src/app/chrome.rs:96`) | `TopBar` (`leviculum-ui/src/scene.rs:203`) with `Lead::Back` while history has a past, title, and `actions` (star, identify, reload) | `Back`, `Bookmark{on}`, `Identify{on}`, `Reload` | `browser_bookmark`, `browser_identify`, `browser_reload`, `browser_hops` | shared, moved; the actions browser |
-| Address field (the `Address` arm of `Mode`, `lnomad/src/app/model.rs:96`) | a field node: the platform's text field, the scene names its hint and its go, as `Compose` does (`loquax/src/ui/scene.rs:556`) | `Go` (the URL is the platform's text, as Loquax's `Search` is) | `browser_address_hint` | browser node, shared shape |
-| Page view (`model.page`, laid out by `layout`, `lnomad/src/render.rs:182`) | `Page`: a window of `PageLine`s, each a list of runs (see 2.2) | `Scroll(ScrollCmd)` (exists) | none: page text is `Text::Raw` | browser |
-| Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:911`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:162`); the link node browser |
-| Form fields (`RenderedField`, `lnomad/src/render.rs:109`) | a run carries its field index; the edited field is a platform text field like the address | `Edit`, `Toggle(field)`, `Submit` | `browser_submit` | browser |
+| Top bar: title, address, star, identity, cache bolt, hops (`topbar_layout`, `lnomad/src/app/chrome.rs:101`) | `TopBar` (`leviculum-ui/src/scene.rs:203`) with `Lead::Back` while history has a past, title, and `actions` (star, identify, reload) | `Back`, `Bookmark{on}`, `Identify{on}`, `Reload` | `browser_bookmark`, `browser_identify`, `browser_reload`, `browser_hops` | shared, moved; the actions browser |
+| Address field (the `Address` arm of `Mode`, `lnomad/src/app/model.rs:101`) | a field node: the platform's text field, the scene names its hint and its go, as `Compose` does (`loquax/src/ui/scene.rs:556`) | `Go` (the URL is the platform's text, as Loquax's `Search` is) | `browser_address_hint` | browser node, shared shape |
+| Page view (`model.page`, laid out by `layout`, `lnomad/src/render.rs:187`) | `Page`: a window of `PageLine`s, each a list of runs (see 2.2) | `Scroll(ScrollCmd)` (exists) | none: page text is `Text::Raw` | browser |
+| Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:923`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:162`); the link node browser |
+| Form fields (`RenderedField`, `lnomad/src/render.rs:114`) | a run carries its field index; the edited field is a platform text field like the address | `Edit`, `Toggle(field)`, `Submit` | `browser_submit` | browser |
 | Back and forward (`go_back`, `lnomad/src/app/event.rs:1443`; `go_forward`, `lnomad/src/app/event.rs:1453`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
-| History (`History`, `lnomad/src/app/model.rs:298`) | a `Sheet` of rows | `Activate(row)` | `browser_history` | sheet exists, rows browser |
+| History (`History`, `lnomad/src/app/model.rs:303`) | a `Sheet` of rows | `Activate(row)` | `browser_history` | sheet exists, rows browser |
 | Places: bookmarks and discovered nodes (`Place`, `lnomad/src/app/event.rs:733`; `places`, `lnomad/src/app/event.rs:771`) | `Sheet` (`leviculum-ui/src/scene.rs:286`) of list rows | `Activate(row)`, `Menu(row)` → `Rename`, `Forget` | `browser_places`, `browser_nodes` | sheet exists; `Rename` and `Forget` exist |
 | The name search of 1227 (not in this tree: no `1227` in `lnomad/` or `docs/src/` at `af8fa5c1`) | the address field's results: the places `Sheet`, rows from 1227's announce search | `Search` (exists), `Bookmark{on}` for its pinning | `browser_find_name` | lands with 1227 into the shapes above, no new node |
-| In-page search (`Mode::Search`, matches as `Match`, `lnomad/src/app/model.rs:168`) | the shared search field; matches as a run flag | `Search`, `Match(next)` (both exist) | `search` | exists |
-| Images (`SlotState`, `lnomad/src/image.rs:214`) | `Image` node in the page window: name, state, the decoded picture by reference (pixels never enter the scene, as for the map) | `Activate` opens, `Menu` saves | `browser_image_loading`, `_failed`, `_too_many` | browser |
-| Downloads (`Effect::Download`, `Effect`, `lnomad/src/app/model.rs:396`) | `Chip` (`leviculum-ui/src/scene.rs:296`) while one runs, a toast when done | `Download` | `browser_downloaded` (the toast of `lnomad/src/app/event.rs:132`) | chip exists |
+| In-page search (`Mode::Search`, matches as `Match`, `lnomad/src/app/model.rs:173`) | the shared search field; matches as a run flag | `Search`, `Match(next)` (both exist) | `search` | exists |
+| Images (`SlotState`, `lnomad/src/image.rs:221`) | `Image` node in the page window: name, state, the decoded picture by reference (pixels never enter the scene, as for the map) | `Activate` opens, `Menu` saves | `browser_image_loading`, `_failed`, `_too_many` | browser |
+| Downloads (`Effect::Download`, `Effect`, `lnomad/src/app/model.rs:401`) | `Chip` (`leviculum-ui/src/scene.rs:296`) while one runs, a toast when done | `Download` | `browser_downloaded` (the toast of `lnomad/src/app/event.rs:138`) | chip exists |
 | Identify (`IdentifyStore`, `lnomad/src/identify.rs:28`) | the marker as a `TopBar` action whose state is on or off | `Identify{on}` | `browser_identify_on`, `_off` | browser |
-| Status line: focused link target, footer (`footer_items`, `lnomad/src/app/chrome.rs:299`) | no node of its own: the footer is the renderer's way to show `Action`s with chords (study, table 3.5); the link target is the focused link's text | none | the actions' labels | exists as a rule |
+| Status line: focused link target, footer (`footer_items`, `lnomad/src/app/chrome.rs:304`) | no node of its own: the footer is the renderer's way to show `Action`s with chords (study, table 3.5); the link target is the focused link's text | none | the actions' labels | exists as a rule |
 | Toast (`Toast`, `leviculum-ui/src/toast.rs:23`) | the scene's toast | none | per message | shared already |
 | Help overlay | the renderer draws the keymap rows | `Help` (exists) | row labels | shared mechanism |
 
@@ -172,7 +172,7 @@ built for the visible window plus a margin, never for the whole page.
 
 - One layout means one set of bugs: the wrap, the table columns, the
   anchors and the hit-test ranges (`RenderedLink`,
-  `lnomad/src/render.rs:62`) are the ones the terminal has today, and the
+  `lnomad/src/render.rs:67`) are the ones the terminal has today, and the
   goldens of `lnomad/tests/render_golden.rs` pin them for every target.
 - The scene window is small: at most 67 to 90 runs and 1,018 to 2,871
   cells of text. A per-frame build is cheap, a msgpack crossing to Java is cheap.
@@ -312,23 +312,23 @@ so `just loquax-core-no-std` still builds it for the board.
 **Slice 1, pass one built 2026-11-01 (1255).** Three commits on this
 branch; pass two starts where the last list below ends.
 
-- **The scene.** `Model::scene()` (`lnomad/src/app/scene.rs:283`) builds a
-  `Scene` (`lnomad/src/app/scene.rs:266`): the shared `TopBar` with
+- **The scene.** `Model::scene()` (`lnomad/src/app/scene.rs:290`) builds a
+  `Scene` (`lnomad/src/app/scene.rs:273`): the shared `TopBar` with
   `Lead::Back` while history has a past and forward, reload, the star and
-  identify as actions; an `AddressField` (`lnomad/src/app/scene.rs:205`)
+  identify as actions; an `AddressField` (`lnomad/src/app/scene.rs:212`)
   with its value, hint, caret and go; the top bar's state as chips
-  (identity, cache, hops); the `Page` (`lnomad/src/app/scene.rs:245`), a
-  window of `PageLine`s of `Run`s (`lnomad/src/app/scene.rs:226`), one
+  (identity, cache, hops); the `Page` (`lnomad/src/app/scene.rs:252`), a
+  window of `PageLine`s of `Run`s (`lnomad/src/app/scene.rs:233`), one
   style, link, field and search state per run; the status chip; the
   places panel and the 1227 name results as `Sheet`s of lnomad's `Row`
-  (`lnomad/src/app/scene.rs:162`: a heading, a placeholder, a list item,
+  (`lnomad/src/app/scene.rs:169`: a heading, a placeholder, a list item,
   a note); the toast in the catalogue's words. The contract's marker is
-  `Lnomad` (`lnomad/src/app/scene.rs:125`); the standalone browser has no
+  `Lnomad` (`lnomad/src/app/scene.rs:132`); the standalone browser has no
   tab, so its `Tab` is `()`. `Role` gained `Page`, `Link`, `Field` and
   `Image`.
-- **The intents.** `lnomad::Intent` (`lnomad/src/app/intent.rs:64`) has
+- **The intents.** `lnomad::Intent` (`lnomad/src/app/intent.rs:69`) has
   22 arms; its module doc holds the table from today's keys to them, and
-  `apply` (`lnomad/src/app/intent.rs:232`) folds one through the
+  `apply` (`lnomad/src/app/intent.rs:237`) folds one through the
   functions the keys reach. `an_intent_does_what_its_key_does` holds 14
   of them to their key: the same effects, the same scene after.
 - **The catalogue.** `lnomad/src/app/strings.rs`, 87 strings in English
@@ -389,19 +389,19 @@ branch close the slice.
 **Slice 1b, built 2026-11-01 (1285).** The per-mode `match`es are gone.
 
 - **The table.** `lnomad/src/app/keys.rs` holds lnomad's rows
-  (`ROWS`, `lnomad/src/app/keys.rs:148`) over `leviculum_ui::keymap`,
+  (`ROWS`, `lnomad/src/app/keys.rs:150`) over `leviculum_ui::keymap`,
   beside the shared `SCROLL_ROWS`, the way Loquax holds its own
   (`loquax/src/keys.rs:216`). A mode is a pane: browse, address, search,
   field, hint, and the overlays that own the keys while open (help,
   places, the name list, and the name list while it asks). Two contexts:
   a fetch in flight (`Esc` and `Ctrl-g` cancel it) and a checkbox or radio
   focused (`Space` toggles it rather than typing). `resolve`
-  (`lnomad/src/app/keys.rs:384`) is Loquax's rule: the most specific chord,
+  (`lnomad/src/app/keys.rs:386`) is Loquax's rule: the most specific chord,
   lnomad's rows first among equals. A key's `Action` becomes a
   `lnomad::Intent` through `Intent::of_key`
-  (`lnomad/src/app/intent.rs:143`), which reads what it acts on (the
+  (`lnomad/src/app/intent.rs:148`), which reads what it acts on (the
   focused link, the selection, the bookmark), and `update_key`
-  (`lnomad/src/app/event.rs:432`) folds it with `apply`, as a tap does.
+  (`lnomad/src/app/event.rs:438`) folds it with `apply`, as a tap does.
   What a table cannot hold stays with the handler: the text the editors
   take, hint labels, and the "no" any key but `y` gives the pin question.
 - **Size per mode**, chords in force over both tables: browse 47, address
@@ -425,16 +425,16 @@ branch close the slice.
   and a text field's footer drops `Space toggle`. The search footer's
   `n`/`N` are gone too; that footer is never drawn.
 - **Acceptance.** `every_old_chord_resolves_to_the_same_action`
-  (`lnomad/src/app/keys.rs:816`) transcribes the old `match`es and
+  (`lnomad/src/app/keys.rs:818`) transcribes the old `match`es and
   compares them with the table for every printable ASCII key, `ä` and
   every special key under every mix of Shift, Ctrl and Alt, in 9 panes and
   4 settings; the only key the table adds is `F1`.
   `no_chord_resolves_to_two_actions_in_one_pane`
-  (`lnomad/src/app/keys.rs:600`) resolves each chord's own key in every
+  (`lnomad/src/app/keys.rs:602`) resolves each chord's own key in every
   pane and setting it is in force. Positive controls: `m` made
   `Mods::Any` fails the first (`Ctrl-m` reached Mark), a second action on
   `y` fails the second. `the_help_lists_exactly_the_tables_chords`
-  (`lnomad/src/app/keys.rs:879`) holds the help to the table.
+  (`lnomad/src/app/keys.rs:881`) holds the help to the table.
 
 **Slice 2, built 2026-11-02 (1286).** Seven commits on this branch; the
 window draws, clicks and is measured. What it does not do yet is listed
@@ -505,6 +505,59 @@ last, and is where a second pass starts.
   window's palette as tokens shared with Loquax's (each has its own
   today); a screenshot of the real window over a live node (the goldens
   are the headless renders).
+
+**Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
+`just lnomad-core-no-std` (`Justfile:2527`) holds it.
+
+- **`leviculum-micron` is `no_std` always** (`leviculum-micron/src/lib.rs:25`):
+  a parser has no use for a file or a clock, and its `std` paths were
+  `BTreeMap`, `Cow` and `mem::take`.
+- **lnomad has a default `std` feature** (`lnomad/Cargo.toml:74`;
+  `lnomad/src/lib.rs:36`), and `ble`, `serial`, `tui` and `gui` imply it.
+  Behind it: the modules `fetch`, `browser`, `transfer`, `cli` and
+  `identify`; the file halves of `download` (the metadata name, the
+  output path, the save), `identity` (the config dir, the identity
+  file), `bookmarks` and `names` (load, save, the default path);
+  `probe` and `decode` in `image`; `now_unix_secs` in discovery; the
+  model's two store paths; and the crates `leviculum-std`, tokio, rmpv,
+  toml, clap, futures, tui-input, open and image. thiserror, serde and
+  serde_json stay, without their own `std`. Everything else is the core:
+  `app/` (model, `update`, keys, chrome, scene, intents, catalogue),
+  `render`, `url`, the page and image caches, discovery, `color`,
+  `theme`, and the pure halves above (`basename`, `choose_name`,
+  `fingerprint_hex`, the lists of bookmarks and pins, the image
+  arithmetic and its status lines).
+- **Three moves, not rewrites.** `resolve_link` moved from `browser`
+  into `url` (`lnomad/src/url.rs:294`; `browser` re-exports it). A text
+  field is `input::Field` (`lnomad/src/app/input.rs:16`): tui-input with
+  `std`, and without it `leviculum_ui::input::Line`
+  (`leviculum-ui/src/input.rs:291`), a field whose platform brings its
+  own editor and hands the text in, as the address field of section 2.1
+  says the platform's text field does. The core reads and edits a field
+  through `InputBuffer` only, its caret column through `visual_cursor`
+  (`leviculum-ui/src/input.rs:260`) and its scroll through
+  `visual_scroll` (`leviculum-ui/src/input.rs:272`), both computed as
+  tui-input computes them (a test holds them equal over wide
+  characters), and a key edits through `InputBuffer::edit`, the
+  shared line table, so Alt-< and Alt-> now go to a field's start and
+  end as in Loquax's compose. `fit_cells` truncates where it called
+  `f64::floor`, which core lacks; for its non-negative products the
+  values are the same (`lnomad/src/image.rs:213`). Without a system
+  clock the model's wall clock is `Model::clock` or the epoch
+  (`lnomad/src/app/model.rs:668`); a board sets it.
+- **The check.** A `std::fs` call injected into a temp copy of
+  `lnomad/src/app/model.rs` is refused first; then `cargo check -p
+  leviculum-micron -p lnomad --lib --no-default-features --target
+  thumbv7em-none-eabihf`, and the same through the esp fork with `-Z
+  build-std=core,alloc` for `xtensa-esp32s3-none-elf`, the M9's
+  ESP32-S3. A host without the fork says SKIP on its own line. 7.4 s
+  standing alone after touching `leviculum-core`, so it is in `guards`.
+  `just lnomad-core-no-tui` now checks the `std` build without the
+  terminal, which is what it always meant.
+- **Unchanged.** `cargo test -p lnomad -p leviculum-micron`: lnomad's
+  419 library tests and every integration target green, the terminal
+  goldens among them; `just lnomad-gui` (465 tests) with the window's
+  goldens byte identical.
 
 ## 6. What not to do
 

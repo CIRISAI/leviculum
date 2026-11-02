@@ -470,6 +470,6 @@ relay auto-selection, and three states cover that: only **known** contacts
 qualify.
 
 The identity file itself must not behave like `lnomad`'s
-(`load_or_create`, `lnomad/src/identity.rs:39-53`, silently regenerating on
+(`load_or_create`, `lnomad/src/identity.rs:48-62`, silently regenerating on
 a decode failure). A corrupt identity is a refusal to start with a clear
 message, because minting a new one silently changes the user's address.
