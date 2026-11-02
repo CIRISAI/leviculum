@@ -118,13 +118,16 @@ leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", features = ["images"]
 leviculum-ui-iced = { path = "../leviculum-ui-iced", optional = true }
 # The window (`gui`): iced 0.14 as Loquax's window has it, the software
 # renderer alone; `advanced` for loading the page's face into the font
-# system a view drawn without a window uses; Fira Sans embedded for the
-# chrome, so a picture and its golden agree on every host.
+# system a view drawn without a window uses; raster images without iced's
+# decoders, since a page's pictures are decoded by the `image` crate the
+# terminal decodes them with; Fira Sans embedded for the chrome, so a
+# picture and its golden agree on every host.
 iced = { version = "0.14", default-features = false, features = [
     "tiny-skia",
     "x11",
     "wayland",
     "thread-pool",
+    "image-without-codecs",
     "advanced",
     "fira-sans",
 ], optional = true }

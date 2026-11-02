@@ -13,8 +13,14 @@
 //! Two halves, as in the terminal: the model and its view on iced's
 //! thread, and the transfers ([`crate::transfer`]) on a tokio runtime
 //! beside it, which the window hands the effects that leave the process
-//! and which answers with outcomes the window folds into the model. The
-//! window draws no inline pictures yet; a picture link stays a link.
+//! and which answers with outcomes the window folds into the model.
+//!
+//! A page's pictures are fetched one after another by the queue the
+//! terminal runs ([`crate::transfer::spawn_image_queue`]), decoded by the
+//! same `image` crate and drawn in the rows the layout reserves under their
+//! link, at their natural size on the cell grid and never enlarged; a
+//! payload is kept in the same byte-bounded cache, so a revisit costs no
+//! airtime.
 //!
 //! A form field is a box in the terminal's chrome colours, reversed while
 //! focused, with a block caret on its editor's cell; a click on it is
@@ -22,13 +28,16 @@
 //! through the rows table, as in the terminal.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::widget::text::Span;
 use iced::widget::{
-    column, container, mouse_area, opaque, rich_text, row, scrollable, stack, text, Space,
+    column, container, image, mouse_area, opaque, pin, rich_text, row, scrollable, stack, text,
+    Space,
 };
 use iced::{
     border, keyboard, mouse, Alignment, Background, Color, Element, Font, Length, Size,
@@ -51,9 +60,12 @@ use crate::app::{
 use crate::browser::BrowserOptions;
 use crate::discovery::DiscoveredNode;
 use crate::fetch::Session;
+use crate::image::{Probe, SlotState};
+use crate::image_cache::ImageCache;
 use crate::theme::Theme;
 use crate::transfer::{
-    close_session, spawn_discovery, spawn_download, spawn_fetch, FetchOutcome, LoadResult,
+    close_session, open_saved, save_picture, say_saved, spawn_discovery, spawn_download,
+    spawn_fetch, spawn_image_queue, FetchOutcome, ImageOutcome, ImageResult, LoadResult,
 };
 use crate::url::Target;
 use tui_input::Input;
@@ -222,6 +234,30 @@ pub enum Outcome {
     DownloadFailed(Text),
     Node(DiscoveredNode),
     Say(ToastKind, Text),
+    /// A picture of the page: its transfer started, its bytes, or why not.
+    Picture {
+        link: usize,
+        target: Target,
+        result: Picture,
+    },
+}
+
+/// What the image queue says about one picture.
+#[derive(Clone, Debug)]
+pub enum Picture {
+    Started,
+    Bytes(Vec<u8>),
+    Failed(String),
+}
+
+/// A picture the window holds for the current page: the payload, kept for
+/// saving and a resize, its pixels as iced draws them, its size.
+struct Held {
+    name: String,
+    bytes: Vec<u8>,
+    handle: image::Handle,
+    px: (u32, u32),
+    saved: Option<PathBuf>,
 }
 
 /// The browser's window: the model, and where effects that leave the
@@ -234,15 +270,16 @@ pub struct Window {
     /// Under `--theme auto`, the theme the desktop last set: the window
     /// follows the desktop until the reader flips the theme away from it.
     follows: Option<Theme>,
+    /// The current page's pictures, by link.
+    pictures: HashMap<usize, Held>,
+    /// Payloads held across pages, bounded by bytes, as the terminal's.
+    cache: ImageCache,
 }
 
 impl Window {
     /// A window over `model`, `jobs` the transfers' inbox; none in a test,
     /// where an effect that would leave the process is dropped.
     pub fn new(mut model: Model, jobs: Option<tokio_mpsc::UnboundedSender<Effect>>) -> Self {
-        // No inline pictures in the window yet: the model does not ask for
-        // them, and a picture link stays a link.
-        model.no_images = true;
         let (cols, rows) = cells(WINDOW.0, WINDOW.1);
         update(&mut model, AppEvent::Resize(cols, rows));
         Window {
@@ -250,6 +287,8 @@ impl Window {
             jobs,
             ticked: None,
             follows: None,
+            pictures: HashMap::new(),
+            cache: ImageCache::default(),
         }
     }
 
@@ -309,7 +348,9 @@ impl Window {
             }
             Message::Resized(size) => {
                 let (cols, rows) = cells(size.width, size.height);
-                update(&mut self.model, AppEvent::Resize(cols, rows))
+                let effects = update(&mut self.model, AppEvent::Resize(cols, rows));
+                self.refit();
+                effects
             }
             Message::Outcome(outcome) => self.fold(outcome),
             Message::SystemTheme(mode) => {
@@ -366,7 +407,106 @@ impl Window {
                 self.model.say(kind, text);
                 Vec::new()
             }
+            Outcome::Picture {
+                link,
+                target,
+                result,
+            } => {
+                let event = match result {
+                    Picture::Started => AppEvent::ImageLoading { link },
+                    Picture::Failed(reason) => AppEvent::ImageFailed { link, reason },
+                    Picture::Bytes(bytes) => {
+                        // Cached before it is drawn, so it survives the page:
+                        // the airtime is already spent either way.
+                        self.cache.insert(target, bytes.clone());
+                        self.accept(link, bytes)
+                    }
+                };
+                update(&mut self.model, event)
+            }
         }
+    }
+
+    /// Take a picture's payload: decoded, held and fitted to the page, or a
+    /// line saying why not, as the terminal tells it.
+    fn accept(&mut self, link: usize, bytes: Vec<u8>) -> AppEvent {
+        let Some(probe) = crate::image::probe(&bytes) else {
+            return AppEvent::ImageText {
+                link,
+                probe: None,
+                reason: "not a format this browser decodes".to_string(),
+            };
+        };
+        let rgba = match crate::image::decode(&bytes) {
+            Ok(decoded) => decoded.into_rgba8(),
+            Err(reason) => {
+                return AppEvent::ImageText {
+                    link,
+                    probe: Some(probe),
+                    reason,
+                }
+            }
+        };
+        let px = rgba.dimensions();
+        let name = self
+            .model
+            .image_slot(link)
+            .map_or_else(|| "image".to_string(), |slot| slot.name.clone());
+        self.pictures.insert(
+            link,
+            Held {
+                name,
+                bytes,
+                handle: image::Handle::from_rgba(px.0, px.1, rgba.into_raw()),
+                px,
+                saved: None,
+            },
+        );
+        AppEvent::ImageReady {
+            link,
+            cells: self.fit(px),
+            probe,
+        }
+    }
+
+    /// The cells a picture of `px` pixels takes on the page: its natural
+    /// size on the cell grid, shrunk to the page's width and the picture
+    /// row ceiling, never enlarged.
+    fn fit(&self, px: (u32, u32)) -> (u16, u16) {
+        crate::image::fit_cells(
+            px,
+            (CELL_W.round() as u16, CELL_H as u16),
+            self.model.width.min(usize::from(u16::MAX)) as u16,
+            crate::image::picture_rows(self.model.viewport()),
+        )
+    }
+
+    /// Fit every drawn picture again after a resize, so the rows it
+    /// reserves follow the page's width.
+    fn refit(&mut self) {
+        let ready: Vec<(usize, Probe)> = self
+            .model
+            .images
+            .iter()
+            .filter_map(|slot| match slot.state {
+                SlotState::Ready { probe, .. } => Some((slot.link, probe)),
+                _ => None,
+            })
+            .collect();
+        for (link, probe) in ready {
+            if let Some(px) = self.pictures.get(&link).map(|held| held.px) {
+                let cells = self.fit(px);
+                update(&mut self.model, AppEvent::ImageReady { link, cells, probe });
+            }
+        }
+    }
+
+    /// A held picture saved once into the download directory.
+    fn save(&mut self, link: usize) -> Result<(PathBuf, usize), Text> {
+        let Some(held) = self.pictures.get_mut(&link) else {
+            return Err(Text::key(StrId::ImageNotArrived));
+        };
+        save_picture(&held.name, &held.bytes, &mut held.saved)
     }
 
     /// The effects the window does itself, the rest handed to the
@@ -398,16 +538,47 @@ impl Window {
                         .model
                         .say(ToastKind::Error, with(StrId::FailedToOpen, url)),
                 },
-                // No pictures in the window yet (see the module's doc).
-                Effect::FetchImages(_) | Effect::SaveImage { .. } | Effect::OpenImage { .. } => {}
-                leaving => {
-                    if let Some(jobs) = &self.jobs {
-                        let _ = jobs.send(leaving);
-                    }
+                Effect::Navigate(target) => {
+                    // The pictures of the page being left are of no use.
+                    self.pictures.clear();
+                    self.send(Effect::Navigate(target));
                 }
+                Effect::FetchImages(requests) => {
+                    self.pictures.clear();
+                    // A payload the cache holds is drawn at once, as a fetched
+                    // one would be; the rest go to the queue.
+                    let mut pending = Vec::new();
+                    for request in requests {
+                        match self.cache.get(&request.target).map(<[u8]>::to_vec) {
+                            Some(bytes) => {
+                                let event = self.accept(request.link, bytes);
+                                update(&mut self.model, event);
+                            }
+                            None => pending.push(request),
+                        }
+                    }
+                    // Even an empty list goes: it stops the last page's queue.
+                    self.send(Effect::FetchImages(pending));
+                }
+                Effect::SaveImage { link } => {
+                    let saved = self.save(link);
+                    say_saved(&mut self.model, saved);
+                }
+                Effect::OpenImage { link } => {
+                    let saved = self.save(link);
+                    open_saved(&mut self.model, saved);
+                }
+                leaving => self.send(leaving),
             }
         }
         Task::batch(tasks)
+    }
+
+    /// Hand an effect that leaves the process to the transfers.
+    fn send(&self, effect: Effect) {
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(effect);
+        }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -433,7 +604,7 @@ impl Window {
         let lang = self.model.lang;
         let bar = top_bar(&scene, lang, p);
         let address = address_row(&scene.address, &scene, lang, p);
-        let page = page_view(&scene.page, &self.model, p);
+        let page = page_view(&scene.page, &self.model, &self.pictures, p);
         let page: Element<'_, Message> = mouse_area(page).on_scroll(wheel).into();
         let sheet = scene
             .names
@@ -574,12 +745,13 @@ fn address_row<'a>(
 /// The address field's id.
 pub const ADDRESS_FIELD: &str = "address";
 
-/// A chip's words on the panel's ground.
+/// A chip's words on the bar's ground, the address field's: the light
+/// theme's panel is its screen's white.
 fn pill<'a>(words: String, p: Palette) -> Element<'a, Message> {
     container(text(words).size(13).color(p.text_secondary))
         .padding([3, 10])
         .style(move |_: &IcedTheme| container::Style {
-            background: Some(Background::Color(p.panel)),
+            background: Some(Background::Color(p.bar)),
             border: border::rounded(12),
             ..container::Style::default()
         })
@@ -730,7 +902,12 @@ fn line_spans<'a>(line: &crate::app::scene::PageLine, g: &Ground) -> Vec<Span<'a
 
 /// The page: its window of lines on the cell grid, one rich text per
 /// line, a click on a link run its activation, on a field run the field's.
-fn page_view<'a>(page: &Page, model: &Model, p: Palette) -> Element<'a, Message> {
+fn page_view<'a>(
+    page: &Page,
+    model: &Model,
+    pictures: &HashMap<usize, Held>,
+    p: Palette,
+) -> Element<'a, Message> {
     let words = model.theme.chrome_fg();
     let ground = model.theme.chrome_bg();
     let g = Ground {
@@ -756,12 +933,67 @@ fn page_view<'a>(page: &Page, model: &Model, p: Palette) -> Element<'a, Message>
         };
         lines.push(container(line).height(CELL_H))
     });
+    let lines: Element<'a, Message> = match model.images.is_empty() {
+        true => lines.into(),
+        false => stack![lines, picture_layer(model, pictures, p)]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+    };
     container(lines)
         .padding(PAGE_PAD)
         .width(Length::Fill)
         .height(Length::Fill)
         .clip(true)
         .into()
+}
+
+/// The page's pictures over the rows the layout reserved under their
+/// links, and a line of status for each that is not a picture (queued,
+/// loading, failed, not decodable), as the terminal draws them. A picture
+/// half-scrolled off the top is drawn from its middle; the page clips it.
+fn picture_layer<'a>(
+    model: &Model,
+    pictures: &HashMap<usize, Held>,
+    p: Palette,
+) -> Element<'a, Message> {
+    let viewport = model.viewport() as i64;
+    let mut layer = stack![].width(Length::Fill).height(Length::Fill);
+    for slot in &model.images {
+        let Some(link) = model.links.iter().find(|l| l.index == slot.link) else {
+            continue;
+        };
+        // The reserved rows sit directly under the link's line.
+        let y = link.line as i64 + 1 - model.scroll as i64;
+        let x = link.col_start as f32 * CELL_W;
+        let at = |item: Element<'a, Message>| pin(item).x(x).y(y as f32 * CELL_H);
+        match (&slot.state, pictures.get(&slot.link)) {
+            (SlotState::Ready { cells, .. }, Some(held)) => {
+                if y + i64::from(cells.1) <= 0 || y >= viewport {
+                    continue;
+                }
+                let picture = image(held.handle.clone())
+                    .width(f32::from(cells.0) * CELL_W)
+                    .height(f32::from(cells.1) * CELL_H)
+                    .content_fit(iced::ContentFit::ScaleDown);
+                layer = layer.push(at(picture.into()));
+            }
+            (state, _) => {
+                if y < 0 || y >= viewport {
+                    continue;
+                }
+                let words = crate::image::status_text(&slot.name, state).resolve(model.lang);
+                let line = text(words)
+                    .font(MONO)
+                    .size(PAGE_TEXT)
+                    .line_height(iced::Pixels(CELL_H))
+                    .color(p.text_secondary)
+                    .wrapping(text::Wrapping::None);
+                layer = layer.push(at(line.into()));
+            }
+        }
+    }
+    layer.into()
 }
 
 /// A sheet beside the page: the places panel or the name results, each
@@ -876,6 +1108,9 @@ async fn transfers(
     let (tx, mut rx) = tokio_mpsc::unbounded_channel::<FetchOutcome>();
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let mut generation: u64 = 0;
+    let (image_tx, mut image_rx) = tokio_mpsc::unbounded_channel::<ImageOutcome>();
+    let mut pictures: Option<tokio::task::JoinHandle<()>> = None;
+    let mut picture_generation: u64 = 0;
     let discovery = spawn_discovery(&session);
     if let Some(target) = initial {
         spawn_fetch(
@@ -891,7 +1126,16 @@ async fn transfers(
         tokio::select! {
             job = jobs.recv() => match job {
                 Some(Effect::Navigate(target)) => {
+                    stop_pictures(&mut pictures, &mut picture_generation);
                     spawn_fetch(&mut inflight, &mut generation, &session, &tx, timeout, target);
+                }
+                Some(Effect::FetchImages(requests)) => {
+                    let current = stop_pictures(&mut pictures, &mut picture_generation);
+                    if !requests.is_empty() {
+                        pictures = Some(spawn_image_queue(
+                            &session, &image_tx, timeout, requests, current,
+                        ));
+                    }
                 }
                 Some(Effect::Download(target)) => {
                     spawn_download(&mut inflight, &mut generation, &session, &tx, timeout, target);
@@ -901,6 +1145,7 @@ async fn transfers(
                         handle.abort();
                     }
                     generation = generation.wrapping_add(1);
+                    stop_pictures(&mut pictures, &mut picture_generation);
                 }
                 Some(Effect::SetIdentify { dest, on }) => {
                     if let Some(handle) = inflight.take() {
@@ -936,9 +1181,28 @@ async fn transfers(
             Some(node) = node_rx.recv() => {
                 let _ = out.unbounded_send(Outcome::Node(node));
             }
+            Some(picture) = image_rx.recv() => {
+                // A stale generation belongs to a page the reader has left.
+                if picture.generation == picture_generation {
+                    let result = match picture.result {
+                        ImageResult::Started => Picture::Started,
+                        ImageResult::Bytes(bytes) => Picture::Bytes(bytes),
+                        ImageResult::Failed(reason) => Picture::Failed(reason),
+                    };
+                    let _ = out.unbounded_send(Outcome::Picture {
+                        link: picture.link,
+                        target: picture.target,
+                        result,
+                    });
+                }
+            }
         }
     }
     if let Some(handle) = inflight.take() {
+        handle.abort();
+        let _ = handle.await;
+    }
+    if let Some(handle) = pictures.take() {
         handle.abort();
         let _ = handle.await;
     }
@@ -948,6 +1212,16 @@ async fn transfers(
     if let Some(message) = close_session(session).await {
         eprintln!("{message}");
     }
+}
+
+/// Stop the last page's picture queue, whose pictures are nobody's now:
+/// the task aborted and the generation moved on, which is returned.
+fn stop_pictures(task: &mut Option<tokio::task::JoinHandle<()>>, generation: &mut u64) -> u64 {
+    if let Some(handle) = task.take() {
+        handle.abort();
+    }
+    *generation = generation.wrapping_add(1);
+    *generation
 }
 
 /// Open the window over `session` and run it until it is closed: the
@@ -973,6 +1247,7 @@ pub async fn run_gui(
         .unwrap_or_default();
     let mut model = Model {
         no_color: opts.no_color,
+        no_images: opts.no_images,
         depth: opts.depth,
         theme: theme.unwrap_or(Theme::Dark),
         bookmarks,
@@ -1481,6 +1756,145 @@ mod tests {
         let mut fixed = readme(Theme::Light);
         let _ = fixed.update(Message::SystemTheme(iced::theme::Mode::Dark));
         assert_eq!(fixed.model.theme, Theme::Light, "--theme light is light");
+    }
+
+    /// A blog page with one picture, a standalone link to the node's file
+    /// area, the terminal tests' page.
+    const PICTURE_PAGE: &str = "\
+>>Antennenbau
+
+Der Mast steht.
+
+`[Antenne`:/file/antenne.png]
+
+Text unter dem Bild.
+";
+
+    /// A PNG of `w` by `h` pixels, a gradient.
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let mut img = ::image::RgbaImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = ::image::Rgba([(x * 2 % 256) as u8, (y * 4 % 256) as u8, 200, 255]);
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        ::image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, ::image::ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    /// The window with the picture page loaded through the ordinary load
+    /// path, its effects run: the picture asked for, the request returned.
+    fn picture_window() -> (Window, crate::app::ImageRequest) {
+        load_mono();
+        let mut model = Model {
+            current_dest: Some([0xab; 16]),
+            theme: Theme::Light,
+            ..Model::default()
+        };
+        model.pending = Some(Pending {
+            target: crate::url::parse_url(&format!("{}:/page/blog.mu", "ab".repeat(16)), None)
+                .expect("url"),
+            action: HistoryAction::Push,
+        });
+        let mut window = Window::new(model, None);
+        let effects = update(
+            &mut window.model,
+            AppEvent::PageLoaded {
+                doc: parse(PICTURE_PAGE),
+                title: "Blog".to_string(),
+            },
+        );
+        let request = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::FetchImages(requests) => requests.first().cloned(),
+                _ => None,
+            })
+            .expect("the page asks for its picture");
+        let _ = window.run(effects);
+        (window, request)
+    }
+
+    fn picture(window: &mut Window, request: &crate::app::ImageRequest, result: Picture) {
+        let _ = window.update(Message::Outcome(Outcome::Picture {
+            link: request.link,
+            target: request.target.clone(),
+            result,
+        }));
+    }
+
+    /// The picture is fetched, decoded and drawn under its link at its
+    /// natural size on the cell grid: 240 by 96 pixels are 30 by 6 cells.
+    /// While it loads, the line under the link says so. The window with
+    /// the picture is the golden.
+    #[test]
+    fn a_picture_is_drawn_under_its_link() {
+        let (mut window, request) = picture_window();
+        picture(&mut window, &request, Picture::Started);
+        assert_eq!(window.model.images[0].state, SlotState::Loading);
+        picture(&mut window, &request, Picture::Bytes(png_bytes(240, 96)));
+        let SlotState::Ready { cells, .. } = window.model.images[0].state else {
+            panic!("{:?}", window.model.images[0].state);
+        };
+        assert_eq!(cells, (30, 6));
+        let (w, h) = (WINDOW.0 as u32, WINDOW.1 as u32);
+        same_as("gui-picture-light.png", &shoot(&window), w, h);
+    }
+
+    /// A picture that is no picture is a line saying so, as in the
+    /// terminal; a failed transfer the same.
+    #[test]
+    fn a_payload_that_does_not_decode_is_a_line() {
+        let (mut window, request) = picture_window();
+        picture(&mut window, &request, Picture::Bytes(b"not a png".to_vec()));
+        assert!(
+            matches!(window.model.images[0].state, SlotState::Text { .. }),
+            "{:?}",
+            window.model.images[0].state
+        );
+        picture(
+            &mut window,
+            &request,
+            Picture::Failed("timeout".to_string()),
+        );
+        assert!(matches!(window.model.images[0].state, SlotState::Failed(_)));
+    }
+
+    /// A revisit draws the picture from the cache at once, with no request
+    /// to the queue.
+    #[test]
+    fn a_revisit_draws_the_picture_from_the_cache() {
+        let (mut window, request) = picture_window();
+        picture(&mut window, &request, Picture::Bytes(png_bytes(240, 96)));
+        window.pictures.clear();
+        let effects = crate::app::event::plan_images(&mut window.model);
+        assert_eq!(window.model.images[0].state, SlotState::Queued);
+        let _ = window.run(effects);
+        assert!(
+            matches!(window.model.images[0].state, SlotState::Ready { .. }),
+            "{:?}",
+            window.model.images[0].state
+        );
+        assert!(window.pictures.contains_key(&request.link));
+    }
+
+    /// A narrower window fits a wide picture to the page again: never
+    /// wider than the page's columns, its height shrunk with it.
+    #[test]
+    fn a_resize_fits_the_picture_to_the_page_again() {
+        let (mut window, request) = picture_window();
+        picture(&mut window, &request, Picture::Bytes(png_bytes(1200, 120)));
+        let SlotState::Ready { cells: wide, .. } = window.model.images[0].state else {
+            panic!("ready");
+        };
+        let _ = window.update(Message::Resized(Size::new(500.0, 800.0)));
+        let SlotState::Ready { cells: narrow, .. } = window.model.images[0].state else {
+            panic!("ready");
+        };
+        assert!(narrow.0 < wide.0, "{narrow:?} {wide:?}");
+        assert!(usize::from(narrow.0) <= window.model.width, "{narrow:?}");
+        assert!(narrow.1 < wide.1, "{narrow:?} {wide:?}");
     }
 
     /// The xterm table: the cube's corners and the grey ramp's ends.
