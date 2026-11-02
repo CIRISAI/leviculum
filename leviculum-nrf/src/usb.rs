@@ -301,6 +301,7 @@ async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
     use leviculum_usb_policy::{drain_continues, drain_wake, DebugWrite, DrainWake};
 
     let mut chunk = [0u8; 64];
+    let mut dropped_reported = 0;
     loop {
         // Wait for new data, or wake every poll period: that is what sees a
         // DTR change and the headless deadline.
@@ -317,6 +318,14 @@ async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
                 continue;
             }
             DrainWake::Drain => crate::log::open_runtime_drain(),
+        }
+
+        // What the ring lost since the last drain, cumulative bytes, ahead of
+        // what it still holds: a hole in a capture is then named, not guessed.
+        let dropped = LOG_RING.dropped();
+        if dropped != dropped_reported {
+            dropped_reported = dropped;
+            crate::log::log_fmt("", format_args!("LOG_DROPPED n={}", dropped));
         }
 
         // Drain ring buffer to USB
@@ -403,6 +412,14 @@ fn log_u32(msg: &str, val: u32) {
     log_fmt("[SER ] ", format_args!("{} {}", msg, val));
 }
 
+/// `SER: <what> write failed`, the line twenty-five answer and report
+/// writers print. One format string instead of twenty-five whole ones: the
+/// shared words cost the Pocket image 18 B a site, and its flash is the
+/// tightest of the four (order 1300). The line is byte-identical.
+fn log_write_failed(what: &str) {
+    log_fmt("[SER ] ", format_args!("SER: {} write failed", what));
+}
+
 /// Serial HW_MTU (matches Python SerialInterface)
 const SERIAL_HW_MTU: usize = 564;
 
@@ -462,7 +479,7 @@ async fn commanded_reset(
                 .await;
                 match acked {
                     Ok(true) => {}
-                    Ok(false) => log("SER: reset ACK write failed"),
+                    Ok(false) => log_write_failed("reset ACK"),
                     Err(_) => log_u32("SER: reset ACK abandoned after ms", within_ms as u32),
                 }
             }
@@ -827,7 +844,7 @@ async fn retic_serial_task(
                                     )
                                     .await
                                     {
-                                        log("SER: config ACK write failed");
+                                        log_write_failed("config ACK");
                                     }
                                 }
                                 ControlAction::RadioConfig(wire) => {
@@ -843,7 +860,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: config answer write failed");
+                                        log_write_failed("config answer");
                                     }
                                 }
                                 ControlAction::LegacyRadioConfigInvalid => {
@@ -868,7 +885,7 @@ async fn retic_serial_task(
                                         )
                                         .await
                                         {
-                                            log("SER: wall-time refusal write failed");
+                                            log_write_failed("wall-time refusal");
                                         }
                                     }
                                 }
@@ -918,7 +935,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: telemetry answer write failed");
+                                        log_write_failed("telemetry answer");
                                     }
                                 }
                                 ControlAction::FixedPosition(position) => {
@@ -939,7 +956,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: fixed-position answer write failed");
+                                        log_write_failed("fixed-position answer");
                                     }
                                 }
                                 ControlAction::MediaProfile(profile) => {
@@ -969,7 +986,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: media answer write failed");
+                                        log_write_failed("media answer");
                                     }
                                 }
                                 ControlAction::MediaQuery => {
@@ -986,7 +1003,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: media report write failed");
+                                        log_write_failed("media report");
                                     }
                                     // The duty hold as it stands, right
                                     // behind the report (leviculum#501): a
@@ -997,7 +1014,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &state, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: duty-hold state write failed");
+                                        log_write_failed("duty-hold state");
                                     }
                                 }
                                 ControlAction::PositionSourceQuery => {
@@ -1018,7 +1035,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: position-source report write failed");
+                                        log_write_failed("position-source report");
                                     }
                                 }
                                 ControlAction::NodeName(chosen) => {
@@ -1057,7 +1074,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: node-name answer write failed");
+                                        log_write_failed("node-name answer");
                                     }
                                 }
                                 ControlAction::NodeNameQuery => {
@@ -1076,7 +1093,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: node-name report write failed");
+                                        log_write_failed("node-name report");
                                     }
                                 }
                                 ControlAction::IdentityQuery => {
@@ -1090,7 +1107,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: identity report write failed");
+                                        log_write_failed("identity report");
                                     }
                                 }
                                 ControlAction::AnnounceNow => {
@@ -1113,7 +1130,7 @@ async fn retic_serial_task(
                                         )
                                         .await
                                         {
-                                            log("SER: announce refusal write failed");
+                                            log_write_failed("announce refusal");
                                         }
                                     }
                                 }
@@ -1131,7 +1148,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: ble-tx-gap answer write failed");
+                                        log_write_failed("ble-tx-gap answer");
                                     }
                                 }
                                 ControlAction::StoreStorm(storm) => {
@@ -1165,7 +1182,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: store-storm answer write failed");
+                                        log_write_failed("store-storm answer");
                                     }
                                 }
                                 ControlAction::PnConfig(config) => {
@@ -1193,7 +1210,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: pn-config answer write failed");
+                                        log_write_failed("pn-config answer");
                                     }
                                 }
                                 ControlAction::MgmtAllow(list) => {
@@ -1238,7 +1255,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: mgmt-allow answer write failed");
+                                        log_write_failed("mgmt-allow answer");
                                     }
                                 }
                                 ControlAction::PnList(wire) => {
@@ -1276,7 +1293,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: pn-list answer write failed");
+                                        log_write_failed("pn-list answer");
                                     }
                                 }
                                 ControlAction::MgmtAllowQuery => {
@@ -1304,7 +1321,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: mgmt-allow report write failed");
+                                        log_write_failed("mgmt-allow report");
                                     }
                                 }
                                 ControlAction::ChannelStatsQuery => {
@@ -1326,7 +1343,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: channel-stats report write failed");
+                                        log_write_failed("channel-stats report");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {
@@ -1350,7 +1367,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: tx-spacing answer write failed");
+                                        log_write_failed("tx-spacing answer");
                                     }
                                 }
                                 ControlAction::CapabilityQuery => {
@@ -1359,7 +1376,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &report, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: capability report write failed");
+                                        log_write_failed("capability report");
                                     }
                                 }
                                 ControlAction::RadioQuery => {
@@ -1383,7 +1400,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: radio report write failed");
+                                        log_write_failed("radio report");
                                     }
                                 }
                                 ControlAction::Refuse {
@@ -1398,7 +1415,7 @@ async fn retic_serial_task(
                                     if !write_framed(&mut tx, &control, &refusal, &mut frame_buf)
                                         .await
                                     {
-                                        log("SER: refusal write failed");
+                                        log_write_failed("refusal");
                                     }
                                 }
                             }
