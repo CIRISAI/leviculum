@@ -23,13 +23,16 @@
 //! (`Interface.py:151-152`), and a quiet connection never collects them, so
 //! every release (`Interface.py:234-251`) is held again.
 //!
-//! The Rust half, how two destinations became three announces, is the other
-//! mvr of this order, `an_announce_committed_before_an_interface_registers_reaches_it_twice`.
+//! The Rust half, how two destinations became three announces, is the
+//! driver mvr `an_announce_committed_before_a_new_interface_reaches_it_once`
+//! (`leviculum-std/src/driver/mod.rs`).
 //!
 //! Here: one Rust node with one TCP client to a Python daemon, the
-//! connection up, then announces A, A again and B, back to back. Python
-//! learns A; it does not learn B within 5 s. Red on master until the order
-//! that fixes this lands, hence `#[ignore]`.
+//! connection up, then announces A, A again and B, back to back. Before
+//! order 1320 Python learned A and not B within 5 s. Since 1320 the core
+//! spaces its own announces on a fresh interface
+//! (`leviculum-core/src/transport/fresh_announce_pacing.rs`), and Python
+//! learns both; the third test holds five destinations to the same.
 
 use std::time::Duration;
 
@@ -50,7 +53,6 @@ fn destination(aspect: &str) -> Destination {
 }
 
 #[tokio::test]
-#[ignore = "order 1317: red on master until the fix for the third announce of a fresh interface lands"]
 async fn a_third_announce_on_a_fresh_interface_waits_at_python() {
     let daemon = TestDaemon::start().await.expect("start daemon");
 
@@ -148,5 +150,60 @@ async fn control_two_announces_on_a_fresh_interface_both_arrive() {
     assert!(
         knows_both,
         "Python did not learn both of two announces on a fresh interface"
+    );
+}
+
+/// Five destinations announced back to back on a fresh connection: Python
+/// learns all five within 5 s (order 1320). Unpaced, the third and every
+/// later one arrive inside a millisecond of the first and are held.
+#[tokio::test]
+async fn five_destinations_on_a_fresh_interface_all_arrive_at_python() {
+    let daemon = TestDaemon::start().await.expect("start daemon");
+
+    let storage = tempfile::tempdir().expect("tempdir");
+    let mut node = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(daemon.rns_addr())
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build node");
+    node.start().await.expect("start node");
+    node.wait_for_interface_ready(0, Duration::from_secs(5))
+        .await
+        .expect("the TCP client connects");
+
+    let mut hashes = Vec::new();
+    for aspect in ["one", "two", "three", "four", "five"] {
+        let dest = destination(aspect);
+        hashes.push(*dest.hash());
+        node.register_destination(dest);
+    }
+    for hash in &hashes {
+        node.announce_destination(hash, None)
+            .await
+            .expect("announce");
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut unknown = hashes.clone();
+    while tokio::time::Instant::now() < deadline && !unknown.is_empty() {
+        let mut still = Vec::new();
+        for hash in unknown {
+            if !daemon.has_path(hash.as_bytes()).await {
+                still.push(hash);
+            }
+        }
+        unknown = still;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        unknown.is_empty(),
+        "Python did not learn {} of five destinations within 5 s: {:?}",
+        unknown.len(),
+        unknown
+            .iter()
+            .map(|h| hex::encode(h.as_bytes()))
+            .collect::<Vec<_>>()
     );
 }

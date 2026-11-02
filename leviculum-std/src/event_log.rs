@@ -459,6 +459,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_QUEUE_STALE",
         required_keys: &["dst", "hops", "iface", "age_ms"],
     },
+    // An own announce held back on a fresh interface so a Python peer's
+    // ingress control learns every destination (order 1320). `release_ms`
+    // is the core clock at which the interface takes its next one.
+    EventSchema {
+        name: "ANN_PACED",
+        required_keys: &["dst", "iface", "release_ms"],
+    },
     // A received announce that found a targeted path response still in its
     // grace (1262): the response stays, carrying this newer emission, and
     // the announce's rebroadcast waits in the held slot until the response

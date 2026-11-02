@@ -3471,6 +3471,12 @@ pub struct Transport<C: Clock, S: Storage> {
     /// interfaces that never registered a name (e.g. in tests).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
     interface_ingress_burst: BTreeMap<usize, IngressBurstState>,
+    /// Own-announce pacing while an interface is fresh (order 1320,
+    /// `fresh_announce_pacing`), created in `set_interface_name`. Boxed like
+    /// `torn_down_interfaces`: the board's node box has 8 B of slack, a map
+    /// is 12 B. Removed in handle_interface_down via remove_announce_freq_tracking().
+    #[allow(clippy::box_collection)]
+    fresh_announce_pacers: Option<Box<BTreeMap<usize, fresh_announce_pacing::FreshAnnouncePacer>>>,
 
     /// Per-interface held-announce queue (Codeberg #87; Python
     /// `Interface.held_announces`, Interface.py:131). Keyed by destination hash
@@ -3663,6 +3669,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_incoming_pr_times: BTreeMap::new(),
             interface_outgoing_pr_times: BTreeMap::new(),
             interface_ingress_burst: BTreeMap::new(),
+            fresh_announce_pacers: None,
             interface_held_announces: BTreeMap::new(),
             held_announce_entries: BTreeMap::new(),
             pending_local_path_requests: BTreeMap::new(),
@@ -4895,21 +4902,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // the unpack cost when a non-Full or duty-held interface exists; with
         // an all-Full, no-hold stack the blocked set is empty and behaviour
         // is identical to before.
-        let exclude_ifaces: Vec<InterfaceId> =
-            if self.interface_modes.is_empty() && self.duty_hold_ifaces.is_empty() {
-                Vec::new()
-            } else {
-                match Packet::unpack(data) {
-                    Ok(pkt) if pkt.flags.packet_type == PacketType::Announce => {
-                        let is_local = self.local_destinations.contains(&pkt.destination_hash);
-                        self.announce_blocked_ifaces(&pkt.destination_hash, is_local)
-                            .into_iter()
-                            .map(InterfaceId)
-                            .collect()
-                    }
-                    _ => Vec::new(),
+        //
+        // Order 1320: an announce also leaves out each fresh interface that
+        // must not take it yet; that interface has queued its copy
+        // (`fresh_announce_pacing`).
+        let exclude_ifaces: Vec<InterfaceId> = if self.interface_modes.is_empty()
+            && self.duty_hold_ifaces.is_empty()
+            && self.fresh_announce_pacers.is_none()
+        {
+            Vec::new()
+        } else {
+            match Packet::unpack(data) {
+                Ok(pkt) if pkt.flags.packet_type == PacketType::Announce => {
+                    let is_local = self.local_destinations.contains(&pkt.destination_hash);
+                    let mut blocked = self.announce_blocked_ifaces(&pkt.destination_hash, is_local);
+                    let paced =
+                        self.paced_broadcast_exclusions(data, pkt.destination_hash, &blocked);
+                    blocked.extend(paced);
+                    blocked.into_iter().map(InterfaceId).collect()
                 }
-            };
+                _ => Vec::new(),
+            }
+        };
 
         self.push_broadcast(
             data.to_vec(),
@@ -5133,6 +5147,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.check_receipt_timeouts(now);
         self.check_announce_rebroadcasts(now);
         self.drain_announce_queues(now);
+        self.drain_fresh_announce_queues(now);
         self.clean_link_table(now);
         self.clean_path_states();
         self.expire_pending_local_path_requests(now);
@@ -5331,6 +5346,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 update(cap.allowed_at_ms);
             }
         }
+        if let Some(deadline) = self.fresh_announce_deadline() {
+            update(deadline);
+        }
 
         // Discovery path request retry deadline
         if !self.storage.discovery_path_request_dest_hashes().is_empty() {
@@ -5510,6 +5528,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         for cap in self.interface_announce_caps.values() {
             bytes += hc::vec_deque_bytes(&cap.queue);
             for queued in &cap.queue {
+                bytes += queued.raw.capacity();
+            }
+        }
+        if let Some(pacers) = self.fresh_announce_pacers.as_deref() {
+            bytes +=
+                core::mem::size_of::<BTreeMap<usize, fresh_announce_pacing::FreshAnnouncePacer>>()
+                    + hc::btree_map_bytes(pacers);
+        }
+        for pacer in self.fresh_announce_pacers.iter().flat_map(|p| p.values()) {
+            bytes += hc::vec_deque_bytes(&pacer.queue);
+            for queued in &pacer.queue {
                 bytes += queued.raw.capacity();
             }
         }
@@ -6298,7 +6327,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4455. A destination with no cached
+    /// link-request path uses at transport.rs:4462. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -9664,15 +9693,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // (leviculum#493). In the common all-`Full`, no-hold case the
             // blocked set is empty and the single Broadcast reaches every
             // interface as before.
-            let exclude_ifaces = if packet.flags.packet_type == PacketType::Announce {
-                let is_local = self.local_destinations.contains(&packet.destination_hash);
-                self.announce_blocked_ifaces(&packet.destination_hash, is_local)
-                    .into_iter()
-                    .map(InterfaceId)
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let mut exclude_ifaces: Vec<InterfaceId> =
+                if packet.flags.packet_type == PacketType::Announce {
+                    let is_local = self.local_destinations.contains(&packet.destination_hash);
+                    self.announce_blocked_ifaces(&packet.destination_hash, is_local)
+                        .into_iter()
+                        .map(InterfaceId)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
             // The link of our own next hop for this destination gets no
             // copy (leviculum#854): its interface is named as the excluded
@@ -9684,6 +9714,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .map_or((None, None), |h| (Some(InterfaceId(h.iface)), Some(h.peer))),
                 _ => (None, None),
             };
+
+            // An announce this node originated (its own retry) is paced on a
+            // fresh interface like the first emission (order 1320).
+            if packet.flags.packet_type == PacketType::Announce
+                && packet.hops == 0
+                && self.fresh_announce_pacers.is_some()
+            {
+                let mut skip: Vec<usize> = exclude_ifaces.iter().map(|i| i.0).collect();
+                skip.extend(spare_iface.map(|i| i.0));
+                let paced =
+                    self.paced_broadcast_exclusions(&buf[..len], packet.destination_hash, &skip);
+                exclude_ifaces.extend(paced.into_iter().map(InterfaceId));
+            }
 
             // The packed buffer is the frame; no second copy of it.
             buf.truncate(len);
@@ -10036,6 +10079,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_ingress_burst
             .entry(id)
             .or_insert_with(|| IngressBurstState::new(now));
+        self.register_fresh_pacer(id);
     }
 
     /// Remove interface name (called during handle_interface_down cleanup).
@@ -11754,6 +11798,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_held_announces.remove(&iface);
         self.interface_ingress_control.remove(&iface);
         self.interface_egress_control.remove(&iface);
+        self.remove_fresh_pacer(iface);
     }
 
     // Public: Announce-Rate Config API (Codeberg #67 Stage 2a)
@@ -18726,7 +18771,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7859), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7888), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -37275,3 +37320,7 @@ mod table_export_tests {
 }
 
 mod received_announce;
+
+mod fresh_announce_pacing;
+#[cfg(test)]
+pub(crate) use fresh_announce_pacing::FRESH_ANNOUNCE_SPACING_MS;

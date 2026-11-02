@@ -100,6 +100,12 @@ fn host() -> (Node, Vec<DestinationHash>) {
         let _ = host.announce_destination(&hash, None).unwrap();
         hashes.push(hash);
     }
+    // The setup's announces leave paced on the fresh interfaces (order
+    // 1320); let them all go so the interface-up starts with empty queues.
+    let _ = host.release_paced_announces();
+    host.transport
+        .clock()
+        .advance(crate::transport::FRESH_ANNOUNCE_SPACING_MS);
     (host, hashes)
 }
 
@@ -156,7 +162,9 @@ fn an_interface_up_after_the_teardown_announces_nothing() {
 #[test]
 fn control_a_live_interface_up_reannounces_every_destination() {
     let (mut host, hashes) = host();
-    let out = host.handle_interface_up(GONE);
+    let mut out = host.handle_interface_up(GONE);
+    // The first at once, the others a spacing apart (order 1320).
+    out.actions.extend(host.release_paced_announces());
     let announces = announces_to(&out, GONE);
     assert_eq!(
         announces.len(),
@@ -183,7 +191,8 @@ fn control_a_reregistered_index_reannounces() {
     let (mut host, hashes) = host();
     let _ = host.handle_interface_down(InterfaceId(GONE));
     host.set_interface_name(GONE, String::from("gone-again"));
-    let out = host.handle_interface_up(GONE);
+    let mut out = host.handle_interface_up(GONE);
+    out.actions.extend(host.release_paced_announces());
     assert_eq!(
         announces_to(&out, GONE).len(),
         hashes.len(),

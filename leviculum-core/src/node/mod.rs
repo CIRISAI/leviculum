@@ -1104,9 +1104,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.transport
                     .storage_mut()
                     .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
-                let _ = self
-                    .transport
-                    .send_on_interface_to_peer(idx, &buf[..len], peer);
+                self.transport.send_own_announce_on_interface(
+                    idx,
+                    &buf[..len],
+                    dest_hash.into_bytes(),
+                    peer,
+                );
             }
             None => self.transport.send_on_all_interfaces(&buf[..len]),
         }
@@ -3541,6 +3544,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             crate::tracing::debug!(event = "IFACE_UP_STALE", idx = interface_index,);
             return self.process_events_and_actions();
         }
+        // The peer counts our announces on a new interface from now (order
+        // 1320): the re-announce below goes out paced.
+        self.transport.mark_interface_fresh(interface_index);
         self.announce_local_destinations(interface_index, None);
         self.process_events_and_actions()
     }
@@ -3639,9 +3645,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.transport
                                 .storage_mut()
                                 .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
-                            let _ = self.transport.send_on_interface_to_peer(
+                            // Paced on a fresh interface (order 1320): the
+                            // first at once, every further one a spacing on.
+                            self.transport.send_own_announce_on_interface(
                                 interface_index,
                                 &buf[..len],
+                                dest_hash.into_bytes(),
                                 peer,
                             );
                             sent += 1;
@@ -3679,9 +3688,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     self.transport
                         .storage_mut()
                         .add_packet_hash(crate::packet::packet_hash(&cached_raw));
-                    let _ = self.transport.send_on_interface_to_peer(
+                    self.transport.send_own_announce_on_interface(
                         interface_index,
                         &cached_raw,
+                        *hash,
                         peer,
                     );
                     sent += 1;
@@ -10662,8 +10672,11 @@ mod tests {
         node.transport.clock().advance(300);
         let _ = node.handle_timeout();
 
-        // Now simulate interface recovery: call handle_interface_up
-        let output = node.handle_interface_up(0);
+        // Now simulate interface recovery: call handle_interface_up. The
+        // second announce on the fresh interface leaves a spacing after the
+        // first (order 1320).
+        let mut output = node.handle_interface_up(0);
+        output.actions.extend(node.release_paced_announces());
 
         // We expect two sends targeting the recovered interface (Codeberg
         // #132: no longer broadcasts): one fresh announce for daemon_dest,
@@ -13334,3 +13347,19 @@ mod mvr_path_response_survives_reannounce;
 
 #[cfg(test)]
 mod mvr_announce_committed_before_interface_up;
+
+#[cfg(test)]
+impl<R: CryptoRngCore, S: Storage> NodeCore<R, crate::test_utils::MockClock, S> {
+    /// Walk the clock through every own announce a fresh interface paced
+    /// (order 1320) and return the actions that released them, in order.
+    pub(crate) fn release_paced_announces(&mut self) -> Vec<crate::transport::Action> {
+        let mut actions = Vec::new();
+        while self.transport.fresh_announces_waiting() > 0 {
+            self.transport
+                .clock()
+                .advance(crate::transport::FRESH_ANNOUNCE_SPACING_MS);
+            actions.extend(self.handle_timeout().actions);
+        }
+        actions
+    }
+}

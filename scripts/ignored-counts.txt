@@ -57,10 +57,7 @@
 # changes. Nothing in the release path re-measures it.
 5    -p leviculum-std --lib
 1    -p leviculum-std --doc
-# 9 -> 10 (2026-11-02, order 1317): the mvr
-# a_third_announce_on_a_fresh_interface_waits_at_python is red by design
-# until the fix lands; its control runs.
-10   -p leviculum-std --test mvr
+9    -p leviculum-std --test mvr
 
 # 20 in rnsd_interop, of which the status_parity_tests::* are NOT
 # unobserved: `just standard` runs them by name through
