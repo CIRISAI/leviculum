@@ -47,6 +47,8 @@ pub enum Ask {
     Members([u8; 16]),
     /// Leave the group: `Enter` leaves.
     LeaveGroup([u8; 16]),
+    /// "delete group" (1307 pass four): Enter deletes it for everyone.
+    DeleteGroup([u8; 16]),
     /// A member's name: `Enter` removes it from the group.
     RemoveMember([u8; 16]),
 }

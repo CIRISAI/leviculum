@@ -3608,6 +3608,41 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             }
             effects
         }
+        // 1307 pass four: the admin's delete asks in the palette, as leave
+        // does; start again opens the name, Enter keeps the old one.
+        PaletteCommand::DeleteGroup => match model
+            .conversations
+            .get(model.selected)
+            .map(|c| c.peer)
+            .filter(|p| model.groups.get(p).is_some_and(|g| g.ours))
+        {
+            Some(group) => {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::DeleteGroup(group)),
+                    ..Palette::default()
+                });
+                Vec::new()
+            }
+            None => {
+                model.toast(
+                    ToastKind::Info,
+                    "only the group's admin deletes it".to_string(),
+                );
+                Vec::new()
+            }
+        },
+        PaletteCommand::StartAgain => {
+            let effects = model.group_verb(groups::Verb::Again {
+                group: intent::Target::Open,
+            });
+            if model.group_draft.is_some() {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::GroupName),
+                    ..Palette::default()
+                });
+            }
+            effects
+        }
         PaletteCommand::RemoveMember => model.group_verb(groups::Verb::Remove {
             group: intent::Target::Open,
             member: None,

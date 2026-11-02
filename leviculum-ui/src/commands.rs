@@ -109,6 +109,12 @@ pub enum Command {
     /// Add members to the open group, its admin's (Loquax 1307 G2): tick
     /// the friends, then Enter.
     AddMembers,
+    /// Delete the open group for everyone, its admin's, after asking
+    /// (Loquax 1307 pass four).
+    DeleteGroup,
+    /// Make the open group again with the same people, once the reader
+    /// left it or it ended (Loquax 1307 pass four): Enter keeps its name.
+    StartAgain,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -123,7 +129,7 @@ pub struct PaletteEntry {
 /// The table, in the order the palette lists it unfiltered. A first user's
 /// two commands stand right under `send`, where an open palette shows them
 /// (1263), and the code a friend adds us by right after them (1279).
-pub const COMMANDS: [PaletteEntry; 41] = [
+pub const COMMANDS: [PaletteEntry; 43] = [
     entry("send", Command::Send),
     entry("new conversation", Command::NewConversation),
     entry("add contact", Command::AddContact),
@@ -165,6 +171,8 @@ pub const COMMANDS: [PaletteEntry; 41] = [
     entry("leave group", Command::LeaveGroup),
     entry("remove member", Command::RemoveMember),
     entry("add members", Command::AddMembers),
+    entry("delete group", Command::DeleteGroup),
+    entry("start again", Command::StartAgain),
 ];
 
 /// The entry that runs `command`.

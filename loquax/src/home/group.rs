@@ -401,7 +401,12 @@ pub fn delete(
     let mut out = Vec::new();
     for member in members.iter().filter(|m| m.present()) {
         let mut fields = Vec::new();
-        let content = match member.understands_groups() || member.address == group.admin {
+        // As an invitation is: a member that never wrote to the group yet
+        // but said bit 1 to the owner is a Loquax too.
+        let loquax = member.understands_groups()
+            || member.address == group.admin
+            || understands_groups(store, &member.address)?;
+        let content = match loquax {
             true => {
                 Lev {
                     capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),

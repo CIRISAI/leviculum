@@ -971,6 +971,10 @@ impl<B> UiModel<B> {
                 "leave {}? Enter leaves, Esc stays",
                 self.names.label(&group)
             ),],
+            Ask::DeleteGroup(group) => alloc::vec![alloc::format!(
+                "delete {} for everyone? Enter deletes, Esc keeps it",
+                self.names.label(&group)
+            ),],
             Ask::RemoveMember(group) => alloc::vec![alloc::format!(
                 "remove whom from {}? type a name, Enter",
                 self.names.label(&group)
@@ -1043,9 +1047,17 @@ impl<B: Default> UiModel<B> {
                 Vec::new()
             }
             Ask::GroupName => {
-                self.group_verb(Verb::Name(typed));
+                // An empty Enter keeps the name the draft has: a group
+                // started again keeps its old one (1307 pass four).
+                if !typed.is_empty() {
+                    self.group_verb(Verb::Name(typed));
+                }
                 self.group_verb(Verb::Create)
             }
+            Ask::DeleteGroup(group) => self.group_verb(Verb::Delete {
+                group: Target::Peer(group),
+                confirmed: true,
+            }),
             Ask::Members(_) => Vec::new(),
             Ask::LeaveGroup(group) => self.group_verb(Verb::Leave {
                 group: Target::Peer(group),
@@ -2826,5 +2838,50 @@ mod tests {
         };
         assert_eq!(name, "Familie");
         assert_eq!(members.len(), 3);
+    }
+
+    /// 1307 pass four, the terminal's way: `delete group` asks in the
+    /// palette and Enter asks the home; `start again` on an ended group
+    /// opens its name, and an empty Enter keeps the old one. Controls: a
+    /// member's `delete group` asks nothing and says why, and `start again`
+    /// in a group the reader is in opens nothing.
+    #[test]
+    fn the_palette_deletes_and_starts_again() {
+        use leviculum_ui::commands::Command;
+        use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+        let enter = |model: &mut UiModel<Line>| {
+            update(
+                model,
+                UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            )
+        };
+        let mut owner = in_familie(true);
+        update(&mut owner, UiEvent::Run(Command::DeleteGroup));
+        assert_eq!(
+            owner.palette.as_ref().and_then(|p| p.ask),
+            Some(Ask::DeleteGroup(GROUP))
+        );
+        assert_eq!(enter(&mut owner), [UiEffect::DeleteGroup { group: GROUP }]);
+
+        let mut member = in_familie(false);
+        assert!(update(&mut member, UiEvent::Run(Command::DeleteGroup)).is_empty());
+        assert!(member.palette.as_ref().and_then(|p| p.ask).is_none());
+        assert!(member.current_toast().is_some());
+        update(&mut member, UiEvent::Run(Command::StartAgain));
+        assert!(member.group_draft.is_none(), "control: still in it");
+        arrive(
+            &mut member,
+            GROUP,
+            31,
+            "",
+            ended(2, &[(LEW, "Lew", 2 | 1), (ME, "Me", 5), (ANNA, "Anna", 5)]),
+        );
+        update(&mut member, UiEvent::Run(Command::StartAgain));
+        let effects = enter(&mut member);
+        let [UiEffect::CreateGroup { name, members, .. }] = effects.as_slice() else {
+            panic!("one ask: {effects:?}");
+        };
+        assert_eq!(name, "Familie");
+        assert_eq!(members.iter().map(|m| m.0).collect::<Vec<_>>(), [LEW, ANNA]);
     }
 }

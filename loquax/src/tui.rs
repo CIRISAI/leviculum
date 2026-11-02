@@ -600,6 +600,10 @@ enum Until {
     Groups(usize),
     /// This many invitations wait for a Join (1307).
     Invited(usize),
+    /// This many groups their admin deleted (1307 pass four).
+    Ended(usize),
+    /// No group is known any more: the admin's own device after a delete.
+    NoGroups,
 }
 
 impl Until {
@@ -643,6 +647,15 @@ impl Until {
                     .count()
                     >= *count
             }
+            Self::Ended(count) => {
+                model
+                    .groups
+                    .values()
+                    .filter(|g| g.standing == loquax::ui::groups::Standing::Ended)
+                    .count()
+                    >= *count
+            }
+            Self::NoGroups => model.groups.is_empty(),
             Self::Verified(count) => {
                 model
                     .conversations
@@ -866,6 +879,8 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// until synced <n> [secs]        n fetches (pulls on a client) have ended
 /// until groups <n> [secs]        the reader is in n groups (1307)
 /// until invited <n> [secs]       n invitations wait for a Join (1307)
+/// until ended <n> [secs]         n groups their admin deleted (1307 pass four)
+/// until nogroups [secs]          the reader knows no group any more
 /// until leg <direct|propagated> [secs]
 ///                                the runner is on that leg for the newest
 ///                                sent message
@@ -1006,6 +1021,16 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                         ),
                         secs(tail.first().copied()).map_err(at)?,
                     ),
+                    ["ended", n, tail @ ..] => Step::Until(
+                        Until::Ended(
+                            n.parse()
+                                .map_err(|_| at(format!("bad group count {n:?}")))?,
+                        ),
+                        secs(tail.first().copied()).map_err(at)?,
+                    ),
+                    ["nogroups", tail @ ..] => {
+                        Step::Until(Until::NoGroups, secs(tail.first().copied()).map_err(at)?)
+                    }
                     ["named", n, tail @ ..] => Step::Until(
                         Until::Named(n.parse().map_err(|_| at(format!("bad peer count {n:?}")))?),
                         secs(tail.first().copied()).map_err(at)?,

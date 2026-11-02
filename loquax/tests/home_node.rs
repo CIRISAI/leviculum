@@ -2860,3 +2860,188 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
          to the group is kept"
     );
 }
+
+/// 1307 pass four, item 8: Lew deletes "Familie" from his laptop's
+/// palette (`delete group`, Enter on its question). The home tells every
+/// present member and forgets the group: Bob, stock, reads "Lew ended
+/// Familie." from the group; Anna's Loquax keeps the group as ended and a
+/// line she types in it goes nowhere; Lew's laptop knows no group any
+/// more; the home hosts nothing and the key file is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_deletes_a_group_and_every_member_is_told() {
+    use loquax::home::group;
+    use loquax::store::{groups, Store};
+
+    let peer = PythonPeer::start();
+    let bob = peer.lxmf_init();
+    let mesh = Mesh::start(peer.rns_port).await;
+    let home = mesh.home.path().to_path_buf();
+    let address_of = |home: &std::path::Path| -> [u8; 16] {
+        let address = local(home, &["address"]);
+        assert_eq!(address.code, Some(0), "{address}");
+        hex::decode(address.stdout.trim())
+            .expect("hex")
+            .try_into()
+            .expect("16 bytes")
+    };
+    let owner = address_of(&home);
+    let anna_home = tempfile::tempdir().expect("Anna's home");
+    let anna = address_of(anna_home.path());
+    let code = admit(&home, "laptop");
+    let anna_code = admit(anna_home.path(), "phone");
+    let node = HomeNode::start_as(&home, &mesh.instance, &[], Some("Lew")).await;
+    let anna_node = HomeNode::start_as(anna_home.path(), &mesh.instance, &[], Some("Anna")).await;
+    let client = joined(&mesh, &node, &code).await;
+    let annas_phone = joined(&mesh, &anna_node, &anna_code).await;
+    peer.lxmf_announce();
+
+    // Anna's phone says bit 1 to Lew first, so Lew's home takes her for a
+    // Loquax; then Lew's laptop makes the group and Anna joins its card.
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &hex::encode(owner),
+        "until ready 20\nkey enter\nkey i\ntype Hallo Lew\nkey enter\nsleep 1000\n\
+         key esc\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        if group::understands_groups(&store, &anna).expect("archive") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's line never reached Lew's archive:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    tui(
+        &mesh,
+        client.path(),
+        &bob,
+        &format!(
+            "until ready 20\nkey :\ntype new group\nkey enter\ntype {}\nkey enter\n\
+             type {bob}\nkey enter\nkey enter\ntype Familie\nkey enter\n\
+             until groups 1 40\nkey q\n",
+            hex::encode(anna)
+        ),
+        &node,
+    )
+    .await;
+    node.wait_for("GROUP hosted name=Familie address=", 20)
+        .await;
+    let hosted = {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        group::hosted(&home, &store)
+            .expect("hosted")
+            .pop()
+            .expect("Familie")
+    };
+    let group_hex = hex::encode(hosted.group.address);
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &hex::encode(owner),
+        "until ready 20\nuntil invited 1 60\nkey :\ntype join group\nkey enter\n\
+         until groups 1 20\nsleep 2000\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        let joined = store
+            .group_members(&hosted.group.address)
+            .expect("members")
+            .iter()
+            .any(|m| m.address == anna && m.flags & groups::MEMBER_JOINED != 0);
+        if joined {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's Join never reached the group:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // Lew deletes it.
+    tui(
+        &mesh,
+        client.path(),
+        &group_hex,
+        "until ready 20\nuntil groups 1 30\nkey :\ntype delete group\nkey enter\n\
+         key enter\nuntil nogroups 40\nkey q\n",
+        &node,
+    )
+    .await;
+    node.wait_for("GROUP Familie deleted address=", 20).await;
+    received_by(&peer, "Lew ended Familie.", 60, &node).await;
+    let bobs = peer
+        .received()
+        .into_iter()
+        .find(|m| {
+            m.get("content").and_then(|v| v.as_str()) == Some(&hex::encode("Lew ended Familie."))
+        })
+        .expect("Bob's");
+    assert_eq!(bobs["source_hash"], group_hex, "from the group: {bobs}");
+    {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        assert!(
+            group::hosted(&home, &store).expect("hosted").is_empty(),
+            "the home hosts nothing"
+        );
+        assert!(store
+            .group_members(&hosted.group.address)
+            .expect("members")
+            .is_empty());
+    }
+    assert!(
+        !group::key_path(&home, &hosted.group.address).exists(),
+        "the group's key is gone"
+    );
+
+    // Anna's Loquax: the group ended, and what she types goes nowhere.
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &group_hex,
+        "until ready 20\nuntil ended 1 60\nkey i\ntype noch da?\nkey enter\nsleep 1500\n\
+         key esc\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    let annas = Store::open_in(annas_phone.path(), anna)
+        .expect("Anna's phone's store")
+        .client_groups()
+        .expect("groups");
+    assert_eq!(
+        annas.get(&hosted.group.address).map(|g| g.standing),
+        Some(loquax::ui::groups::Standing::Ended),
+        "Anna's Loquax keeps Familie as ended"
+    );
+    let typed: Vec<_> = Store::open_in(anna_home.path(), anna)
+        .expect("Anna's home's store")
+        .archive_since(0, usize::MAX)
+        .expect("archive")
+        .entries
+        .into_iter()
+        .filter(|e| e.kind == loquax::home::KIND_SENT)
+        .filter_map(|e| {
+            leviculum_lxmf::Message::unpack(
+                &e.packed,
+                None,
+                None,
+                leviculum_lxmf::DeliveryMethod::Direct,
+            )
+            .ok()
+        })
+        .filter(|m| m.content == b"noch da?")
+        .collect();
+    assert!(typed.is_empty(), "compose is closed: nothing went");
+}

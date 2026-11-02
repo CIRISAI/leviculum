@@ -751,6 +751,13 @@ impl From<Command> for Intent {
             Command::AddMembers => Intent::Group(Verb::Add {
                 group: Target::Open,
             }),
+            Command::DeleteGroup => Intent::Group(Verb::Delete {
+                group: Target::Open,
+                confirmed: false,
+            }),
+            Command::StartAgain => Intent::Group(Verb::Again {
+                group: Target::Open,
+            }),
         }
     }
 }
