@@ -200,6 +200,8 @@ pub enum Message {
     Outcome(Outcome),
     /// A frame is drawn: the spinner's and the toast's clock.
     Frame(Instant),
+    /// The desktop's light or dark, asked at the start and on each change.
+    SystemTheme(iced::theme::Mode),
 }
 
 /// What the transfers answer.
@@ -229,6 +231,9 @@ pub struct Window {
     jobs: Option<tokio_mpsc::UnboundedSender<Effect>>,
     /// When the model last ticked.
     ticked: Option<Instant>,
+    /// Under `--theme auto`, the theme the desktop last set: the window
+    /// follows the desktop until the reader flips the theme away from it.
+    follows: Option<Theme>,
 }
 
 impl Window {
@@ -244,7 +249,15 @@ impl Window {
             model,
             jobs,
             ticked: None,
+            follows: None,
         }
+    }
+
+    /// The window following the desktop's light or dark, as `--theme
+    /// auto` asks: the model's theme until the desktop answers.
+    pub fn following(mut self) -> Self {
+        self.follows = Some(self.model.theme);
+        self
     }
 
     pub fn palette(&self) -> Palette {
@@ -299,6 +312,22 @@ impl Window {
                 update(&mut self.model, AppEvent::Resize(cols, rows))
             }
             Message::Outcome(outcome) => self.fold(outcome),
+            Message::SystemTheme(mode) => {
+                let desktop = match mode {
+                    iced::theme::Mode::Light => Some(Theme::Light),
+                    iced::theme::Mode::Dark => Some(Theme::Dark),
+                    iced::theme::Mode::None => None,
+                };
+                // Only while the reader has not flipped the theme away from
+                // what the desktop last set.
+                if let (Some(desktop), Some(last)) = (desktop, self.follows) {
+                    if self.model.theme == last {
+                        self.model.theme = desktop;
+                        self.follows = Some(desktop);
+                    }
+                }
+                Vec::new()
+            }
             Message::Frame(now) => match self.ticked {
                 Some(last) if now.duration_since(last) < Duration::from_millis(SPINNER_TICK_MS) => {
                     Vec::new()
@@ -391,6 +420,9 @@ impl Window {
         // terminal's tick.
         if self.model.needs_tick() {
             all.push(iced::window::frames().map(Message::Frame));
+        }
+        if self.follows.is_some() {
+            all.push(iced::system::theme_changes().map(Message::SystemTheme));
         }
         Subscription::batch(all)
     }
@@ -921,11 +953,13 @@ async fn transfers(
 /// Open the window over `session` and run it until it is closed: the
 /// model as the terminal sets it up, the transfers on the runtime the
 /// session was made on, the window on this thread.
+/// `theme` is the window's theme, or `None` for the desktop's (`--theme
+/// auto`), dark until the desktop says.
 pub async fn run_gui(
     session: Session,
     initial: Option<Target>,
     opts: BrowserOptions,
-    theme: Theme,
+    theme: Option<Theme>,
 ) -> iced::Result {
     let bookmarks_path = crate::bookmarks::default_path();
     let bookmarks = bookmarks_path
@@ -940,7 +974,7 @@ pub async fn run_gui(
     let mut model = Model {
         no_color: opts.no_color,
         depth: opts.depth,
-        theme,
+        theme: theme.unwrap_or(Theme::Dark),
         bookmarks,
         bookmarks_path,
         pins,
@@ -969,7 +1003,7 @@ pub async fn run_gui(
     let driver = tokio::spawn(transfers(session, initial, opts.timeout, jobs_rx, out_tx));
     // iced asks its boot function for the first state once; what it needs
     // is handed over through this slot.
-    let slot = Mutex::new(Some((model, jobs_tx, out_rx)));
+    let slot = Mutex::new(Some((model, theme.is_none(), jobs_tx, out_rx)));
     // The window's loop blocks this thread, which winit wants to be the
     // main one; the runtime's other workers keep the transfers going.
     let result = tokio::task::block_in_place(move || {
@@ -991,18 +1025,28 @@ pub async fn run_gui(
     result
 }
 
+/// The model, whether the window follows the desktop's theme, the
+/// transfers' inbox and their answers.
 type Handed = (
     Model,
+    bool,
     tokio_mpsc::UnboundedSender<Effect>,
     UnboundedReceiver<Outcome>,
 );
 
 fn boot(handed: Option<Handed>) -> (Window, Task<Message>) {
     match handed {
-        Some((model, jobs, outcomes)) => (
-            Window::new(model, Some(jobs)),
-            Task::run(outcomes, Message::Outcome),
-        ),
+        Some((model, follow, jobs, outcomes)) => {
+            let window = Window::new(model, Some(jobs));
+            let outcomes = Task::run(outcomes, Message::Outcome);
+            match follow {
+                true => (
+                    window.following(),
+                    Task::batch([outcomes, iced::system::theme().map(Message::SystemTheme)]),
+                ),
+                false => (window, outcomes),
+            }
+        }
         None => (Window::new(Model::default(), None), Task::none()),
     }
 }
@@ -1415,6 +1459,28 @@ mod tests {
         );
         let _ = window.update(clicked.into_iter().next().expect("one message"));
         assert!(!window.model.scene().help);
+    }
+
+    /// Under `--theme auto` the window takes the desktop's light or dark
+    /// and each change of it, until the reader flips the theme; without
+    /// it the desktop is not asked.
+    #[test]
+    fn the_window_follows_the_desktop_until_the_reader_flips() {
+        let mut window = readme(Theme::Dark).following();
+        let _ = window.update(Message::SystemTheme(iced::theme::Mode::Light));
+        assert_eq!(window.model.theme, Theme::Light);
+        let _ = window.update(Message::SystemTheme(iced::theme::Mode::None));
+        assert_eq!(window.model.theme, Theme::Light, "no tone keeps it");
+        let _ = window.update(Message::SystemTheme(iced::theme::Mode::Dark));
+        assert_eq!(window.model.theme, Theme::Dark);
+        let _ = window.update(Message::Intent(Intent::Theme));
+        assert_eq!(window.model.theme, Theme::Light, "the reader flips");
+        let _ = window.update(Message::SystemTheme(iced::theme::Mode::Dark));
+        assert_eq!(window.model.theme, Theme::Light, "the flip holds");
+
+        let mut fixed = readme(Theme::Light);
+        let _ = fixed.update(Message::SystemTheme(iced::theme::Mode::Dark));
+        assert_eq!(fixed.model.theme, Theme::Light, "--theme light is light");
     }
 
     /// The xterm table: the cube's corners and the grey ramp's ends.

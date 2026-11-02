@@ -100,7 +100,8 @@ struct Args {
     print: bool,
 
     /// Open the browser in a window instead of the terminal. `--theme auto`
-    /// is dark there, `light` and `dark` force a theme.
+    /// follows the desktop's light or dark there, `light` and `dark` force a
+    /// theme.
     #[arg(long, conflicts_with = "print")]
     gui: bool,
 }
@@ -246,7 +247,11 @@ async fn main() -> ExitCode {
     #[cfg(feature = "gui")]
     if args.gui && !downloading {
         // The window owns the session as the TUI does, below.
-        let theme = lnomad::resolve_theme(None, args.theme.into());
+        // `auto` is the desktop's light or dark, not a terminal's.
+        let theme = match args.theme {
+            ThemeArg::Auto => None,
+            chosen => Some(lnomad::resolve_theme(None, chosen.into())),
+        };
         return match lnomad::gui::run_gui(session, target, opts, theme).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
