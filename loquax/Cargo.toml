@@ -194,6 +194,14 @@ tokio = { workspace = true, optional = true }
 # key events, the styled lines. `no_std` without its `std` feature, so the
 # model stays core.
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The Browse tab (`ui::browse`, 1337): lnomad's browser core, `no_std` plus
+# `alloc` without its `std` feature (`just lnomad-core-no-std`), hosted as a
+# tab on the phone and the M9 (docs/src/concepts/lnomad-everywhere.md,
+# section 4). Its model, layout, scene, intents and catalogue; the fetch is
+# the host's.
+lnomad = { path = "../lnomad", default-features = false }
+# The tab parses the page a fetch brought, so no platform parses micron.
+leviculum-micron = { path = "../leviculum-micron" }
 # The map's model (`ui::map`): the projection, the viewport, fitting and
 # placing the pins. `no_std` with `alloc` without its `std` feature, held
 # there by `just map-core-no-std`, so the model stays core.

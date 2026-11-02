@@ -41,6 +41,7 @@ leviculum_ui::catalogue! {
     TabChats = "tab_chats", "Chats", "Chats";
     TabChatsUnread = "tab_chats_unread", "Chats, %1$d with unread messages", "Chats, %1$d mit ungelesenen Nachrichten";
     Map = "map", "Map", "Karte";
+    TabBrowse = "tab_browse", "Browse", "Seiten";
     Settings = "settings", "Settings", "Einstellungen";
     MailboxConnected = "mailbox_connected", "You. Your mailbox is connected.", "Du. Dein Postfach ist verbunden.";
     MailboxNotConnected = "mailbox_not_connected", "You. Your mailbox is not connected.", "Du. Dein Postfach ist nicht verbunden.";

@@ -309,6 +309,10 @@ impl Shell {
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
                 UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
+                // The terminal and the window enable no Browse tab (1337):
+                // lnomad is its own program on a PC, and the model drops a
+                // browser verb while the tab is off.
+                UiEffect::Browse(_) => {}
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
                 UiEffect::MapDrawing(n) => self.outputs.push(Output::MapDrawing(n)),

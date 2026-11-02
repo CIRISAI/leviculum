@@ -4,6 +4,7 @@
     <string name="tab_chats">Chats</string>
     <string name="tab_chats_unread">Chats, %1$d with unread messages</string>
     <string name="map">Map</string>
+    <string name="tab_browse">Browse</string>
     <string name="settings">Settings</string>
     <string name="mailbox_connected">You. Your mailbox is connected.</string>
     <string name="mailbox_not_connected">You. Your mailbox is not connected.</string>

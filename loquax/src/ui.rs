@@ -132,6 +132,7 @@ use leviculum_lxmf::Field;
 
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
+pub mod browse;
 pub mod chat;
 pub mod compose;
 pub mod contacts;
@@ -854,6 +855,8 @@ pub struct UiModel<B> {
     /// The groups whose state changed since the store last learned it
     /// (1307 G2): written by [`UiModel::take_writes`].
     groups_changed: BTreeSet<[u8; 16]>,
+    /// The Browse tab and the browser in it (1337).
+    pub browse: browse::Browse,
     /// The language the model's own sentences from the catalogue are said
     /// in ([`strings::StrId`]): English unless the shell knows better, as
     /// the phone does.
@@ -959,6 +962,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             group_draft: None,
             group_sheet: None,
             groups_changed: BTreeSet::new(),
+            browse: browse::Browse::default(),
             lang: strings::Lang::En,
         };
         for peer in peers {
@@ -1607,6 +1611,12 @@ pub enum UiEvent {
     /// The home's answer to [`UiEffect::DeleteGroup`] (1307 pass four):
     /// the group, or why not.
     GroupDeleted(Result<[u8; 16], String>),
+    /// A tab of the bar was chosen (1337): the Browse tab comes to the
+    /// front, or leaves it for the chats or the map.
+    Tab(scene::TabId),
+    /// What the hosted browser of the Browse tab is told (1337): a verb,
+    /// the page a fetch brought, a NomadNet node an announce named.
+    Browse(browse::BrowseEvent),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1653,6 +1663,11 @@ pub enum UiEffect {
     Redraw,
     /// Put this text on the clipboard (OSC 52 in the terminal).
     Copy(String),
+    /// What the hosted browser of the Browse tab asks of the platform
+    /// (1337): a fetch, a download, the clipboard, its stores. Never
+    /// [`lnomad::Effect::Write`] or [`lnomad::Effect::Quit`], which the
+    /// core does itself ([`browse::effects_of`]).
+    Browse(lnomad::Effect),
     /// Make the contacts file say this about its peer, its other lines kept
     /// ([`crate::names::save_contact`]).
     Contact(Contact),
@@ -1763,6 +1778,8 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
 
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
+        UiEvent::Tab(tab) => browse::tab(model, tab),
+        UiEvent::Browse(event) => browse::fold(model, event),
         UiEvent::MapSetup(setup) => {
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
@@ -3015,7 +3032,8 @@ fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16)
 
 /// A link in a body, followed as lnomad follows one ([`classify_link`]): a
 /// web or mail URL goes to the system's handler, an `lxmf@` address opens
-/// its conversation for writing, a NomadNet page is copied for a browser.
+/// its conversation for writing, a NomadNet page opens in the Browse tab
+/// where the host has one (1337) and is copied for lnomad where not.
 fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec<UiEffect> {
     match classify_link(target) {
         LinkKind::External(url) => {
@@ -3035,6 +3053,7 @@ fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec
             }
             Err(_) => Vec::new(),
         },
+        LinkKind::Rns if model.browse.enabled => browse::open_page(model, target.to_string()),
         LinkKind::Rns => {
             model.toast(
                 ToastKind::Info,
@@ -8832,6 +8851,41 @@ pub(crate) mod tests {
         assert_eq!(press(&mut model, lxmf), []);
         assert_eq!(model.conversations[model.selected].peer, OTHER);
         assert_eq!(model.focus, Pane::Compose);
+    }
+
+    #[test]
+    fn a_page_link_in_a_chat_opens_the_browse_tab_where_the_host_has_one() {
+        let node = to_hex(&OTHER);
+        let body = format!("my node: {node}:/page/index.mu");
+        // The terminal has no Browse tab: the link is copied for lnomad
+        // (the control).
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        receive(&mut model, PEER, 1, &body);
+        let link = cell_of(&model, &node[..8], 0);
+        assert_eq!(
+            press(&mut model, link),
+            [UiEffect::Copy(format!("{node}:/page/index.mu"))]
+        );
+        assert!(!model.browse.open);
+        // The phone has one: the tab comes to the front at that page.
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.browse.enabled = true;
+        receive(&mut model, PEER, 1, &body);
+        let link = cell_of(&model, &node[..8], 0);
+        assert_eq!(
+            press(&mut model, link),
+            [UiEffect::Browse(lnomad::Effect::Navigate(lnomad::Target {
+                dest_hash: OTHER,
+                path: "/page/index.mu".to_string(),
+                fields: Vec::new(),
+                is_file: false,
+            }))]
+        );
+        assert!(model.browse.open);
+        assert_eq!(
+            model.scene(scene::LayoutClass::Compact).screen,
+            scene::ScreenId::Browse
+        );
     }
 
     #[test]

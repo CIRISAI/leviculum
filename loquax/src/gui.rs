@@ -927,6 +927,9 @@ impl App {
             }
             Intent::Tab(TabId::Map) => return self.intent(Intent::ShowMap { peer: None }),
             Intent::Tab(TabId::Chats) => self.screen = Screen::Chats,
+            // lnomad is its own program on a PC (1337): the window enables
+            // no Browse tab and hosts no browser.
+            Intent::Tab(TabId::Browse) | Intent::Browse(_) => {}
             Intent::Menu(id) => {
                 self.menu = id;
                 self.deleting = None;

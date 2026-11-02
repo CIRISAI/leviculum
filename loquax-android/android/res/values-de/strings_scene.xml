@@ -4,6 +4,7 @@
     <string name="tab_chats">Chats</string>
     <string name="tab_chats_unread">Chats, %1$d mit ungelesenen Nachrichten</string>
     <string name="map">Karte</string>
+    <string name="tab_browse">Seiten</string>
     <string name="settings">Einstellungen</string>
     <string name="mailbox_connected">Du. Dein Postfach ist verbunden.</string>
     <string name="mailbox_not_connected">Du. Dein Postfach ist nicht verbunden.</string>

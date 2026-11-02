@@ -165,6 +165,10 @@ pub enum Intent {
     // Navigation.
     /// A tab of the bar.
     Tab(TabId),
+    /// A verb of the hosted browser in the Browse tab (1337): lnomad's own
+    /// intent, carried, never one of Loquax's arms. A frontend hands it to
+    /// the model as [`super::UiEvent::Browse`].
+    Browse(lnomad::Intent),
     /// Back out one level: compose to messages to the list, an overlay
     /// closes, the map gives the conversation back.
     Back,
@@ -511,6 +515,7 @@ impl Intent {
         match self {
             Intent::Tab(TabId::Chats) => StrId::TabChats,
             Intent::Tab(TabId::Map) => StrId::Map,
+            Intent::Tab(TabId::Browse) | Intent::Browse(_) => StrId::TabBrowse,
             Intent::Back => StrId::Back,
             Intent::OpenChat { .. } => StrId::Open,
             Intent::CloseChat => StrId::Close,
