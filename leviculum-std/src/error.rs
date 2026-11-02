@@ -73,6 +73,11 @@ pub enum Error {
     /// A direct-link upgrade could not start (+ciris, leviculum#70)
     #[error("direct link: {0}")]
     DirectLink(leviculum_core::node::DirectLinkError),
+
+    /// `connect_via`: the destination was not heard through that relay
+    /// (+ciris, leviculum#91)
+    #[error("the destination was not heard through that relay")]
+    NoRouteViaRelay,
 }
 
 impl From<AnnounceError> for Error {
@@ -102,6 +107,15 @@ impl From<ResourceError> for Error {
 impl From<RequestError> for Error {
     fn from(e: RequestError) -> Self {
         Error::Request(e)
+    }
+}
+
+impl From<leviculum_core::node::ConnectViaError> for Error {
+    fn from(e: leviculum_core::node::ConnectViaError) -> Self {
+        match e {
+            leviculum_core::node::ConnectViaError::NoRouteViaRelay => Error::NoRouteViaRelay,
+            leviculum_core::node::ConnectViaError::Link(e) => Error::Link(e),
+        }
     }
 }
 

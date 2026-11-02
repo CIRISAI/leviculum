@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.33.0+ciris.1] — CIRIS fork
+
+Steering, metering and live-media asks from CIRISEdge for the CIRIS mesh
+(#91, #92, #93, #94).
+
+### Added
+
+- Links steered through a chosen relay (leviculum#91).
+  - The node now records every relay a destination has been heard through.
+    Each validated announce or path response that arrives through a relay
+    adds a row: relay transport id, interface, hops and time. The learned
+    path table is unchanged, and links opened with `connect` route as
+    before.
+  - `ReticulumNode::relay_routes(&dest)` lists the rows, freshest first.
+  - `connect_via(&dest, &key, relay, establish_timeout)` sends the link
+    request to that relay, on the interface it was heard on, for every
+    attempt. It fails at once with `Error::NoRouteViaRelay` when the
+    destination has no row for that relay.
+  - `establish_timeout` is the caller's budget per relay: one attempt that
+    long, with no retry. A relay that silently drops the request therefore
+    fails in time to try the next.
+  - Two links to one destination through different relays can be up at once,
+    for make-before-break and a warm standby.
+  - `LinkInfo::via_relay` and `link_via_relay(&LinkId)` report a link's relay.
+    This is exact for `connect_via` links. For other links it is inferred:
+    the one relay heard on the link's interface, if exactly one was.
+  - `NodeEvent::RelayRouteLearned` fires when a destination is heard through
+    a new relay, through a known relay on another interface or hop count, or
+    in a path response.
+  - The table is bounded at 4 relays per destination and 1024 destinations,
+    adjustable with `set_relay_route_bounds`. A row that a live link uses is
+    never evicted. Otherwise the table keeps relays on distinct interfaces
+    before it keeps the freshest rows.
+  - The table is off in core (boards spend no heap on it) and on in a std
+    node.
+  - Witnesses: `leviculum-core/src/node/mvr_relay_route.rs` and
+    `leviculum-std/tests/relay_steering.rs` (two relays over TCP).
+- `ReticulumNode::request_path_on(&dest, interface)` (leviculum#92): a path
+  request on one interface only, so a single relay can be asked. Not
+  throttled.
+
+### Fixed
+
+- Direct links: a punch completes only once its path is proven in both
+  directions on one address: an ack has come back from an address this end
+  punched, and a punch has been heard from that address (and acked). In
+  v0.32.0 the ack alone was enough. A side could then finish before it had
+  acked even one of the peer's punches, and the peer completed only on the
+  new interface's late acks. Production converged that way, but a Windows CI
+  run of `a_dual_stack_socket_punches_an_ipv4_peer` lost the race on the
+  v0.32.0 tag.
+
+### Consumer notes
+
+- `leviculum_std::Error` gained `NoRouteViaRelay`; an exhaustive match must
+  add it. The FFI maps it to `LEV_ERR_LINK`.
+- `LinkInfo` gained `via_relay`.
+
 ## [0.32.0+ciris.1] — CIRIS fork
 
 The fork carried onto current upstream master (+572 since the Oct 13 base),

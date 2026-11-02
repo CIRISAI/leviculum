@@ -116,8 +116,9 @@ pub(crate) fn map_error(e: &leviculum_std::Error) -> c_int {
         Error::Send(leviculum_std::SendError::NoPath) => LEV_ERR_NO_PATH,
         Error::Announce(_) | Error::Send(_) => LEV_ERR_SEND,
         // A direct-link upgrade (leviculum#70) is an operation on a link; the
-        // detail string says which precondition failed.
-        Error::Link(_) | Error::DirectLink(_) => LEV_ERR_LINK,
+        // detail string says which precondition failed. So is a link through
+        // a relay the destination was not heard through (leviculum#91).
+        Error::Link(_) | Error::DirectLink(_) | Error::NoRouteViaRelay => LEV_ERR_LINK,
         Error::Resource(_) => LEV_ERR_RESOURCE,
         Error::Request(_) => LEV_ERR_REQUEST,
     }

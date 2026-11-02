@@ -509,6 +509,9 @@ pub struct Link {
     /// shared instance client from the daemon's `first_hop_timeout` answer.
     /// Zero for fast interfaces (TCP, etc).
     first_hop_timeout_extra_ms: u64,
+    /// +ciris (leviculum#91): the relay this link was opened through, when
+    /// the host chose one (`NodeCore::connect_via`).
+    via: Option<crate::relay_routes::LinkVia>,
     /// What one frame costs the frame behind it on the interface this link
     /// runs over, in milliseconds (`Interface::frame_turnaround_ms`). Zero
     /// for a medium with no post-TX wait, which is every interface but LoRa.
@@ -641,6 +644,7 @@ impl Link {
             phase: LinkPhase::Established,
             channel: None,
             first_hop_timeout_extra_ms: 0,
+            via: None,
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
             outgoing_resource: None,
@@ -776,6 +780,7 @@ impl Link {
             phase: LinkPhase::Established,
             channel: None,
             first_hop_timeout_extra_ms: 0,
+            via: None,
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
             outgoing_resource: None,
@@ -1216,6 +1221,15 @@ impl Link {
     /// [`Self::establishment_timeout_ms`] folds into its hop term, so the
     /// stored extra is the answer minus one per-hop timeout: an answer of
     /// exactly the per-hop default (the daemon knows no bitrate) adds nothing.
+    /// +ciris (leviculum#91): the relay this link was opened through.
+    pub fn via(&self) -> Option<&crate::relay_routes::LinkVia> {
+        self.via.as_ref()
+    }
+
+    pub(crate) fn set_via(&mut self, via: Option<crate::relay_routes::LinkVia>) {
+        self.via = via;
+    }
+
     pub(crate) fn set_first_hop_timeout_ms(&mut self, first_hop_timeout_ms: u64) {
         self.first_hop_timeout_extra_ms =
             first_hop_timeout_ms.saturating_sub(ESTABLISHMENT_TIMEOUT_PER_HOP_MS);

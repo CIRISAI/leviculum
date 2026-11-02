@@ -143,6 +143,8 @@ pub mod radio_config_store;
 pub(crate) mod ratchet;
 pub mod ratchet_store;
 pub(crate) mod receipt;
+/// +ciris (leviculum#91).
+pub mod relay_routes;
 pub mod resource;
 pub mod rnode;
 pub mod status_bundle;

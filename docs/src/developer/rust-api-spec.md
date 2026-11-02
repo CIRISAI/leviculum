@@ -56,7 +56,7 @@ returns `self`.
 | `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:284` | Identity / known-destinations / ratchet store dir |
 | `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:863` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
 | `fn without_events(self) -> Self` — `builder.rs:233` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1346` | Build the node (not yet running) |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1352` | Build the node (not yet running) |
 | `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:1030` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
@@ -165,7 +165,7 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 
 The core is the no_std engine the std layer drives. You use these types directly
 only when building on `leviculum-core` — see [Embedded development](embedded.md).
-All are re-exported from `leviculum-core/src/lib.rs:162-187`.
+All are re-exported from `leviculum-core/src/lib.rs:164-189`.
 
 ### `NodeCore<R, C, S>`
 
@@ -182,8 +182,8 @@ caller must dispatch.
 | `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:1060` | Build and queue an announce |
 | `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1269` | Build an unreliable data packet |
 | `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:319` | Build a link request |
-| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:912` | Send on an established link |
-| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:730` | Close a link |
+| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:959` | Send on an established link |
+| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:777` | Close a link |
 | `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2708` | Feed received bytes from an interface |
 | `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2963` | Run periodic maintenance (call at the next deadline) |
 | `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2994` | Earliest timer deadline (ms); when to call `handle_timeout` |

@@ -343,6 +343,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         dest_signing_key: &[u8; 32],
         first_hop_timeout_ms: Option<u64>,
     ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
+        self.connect_routed(dest_hash, dest_signing_key, first_hop_timeout_ms, None)
+    }
+
+    /// [`Self::connect_with_first_hop_timeout`], through `via` when it is
+    /// set (+ciris, leviculum#91): the request names `via.relay` as its next
+    /// hop and goes out on `via.interface_index` only, on every attempt.
+    pub(super) fn connect_routed(
+        &mut self,
+        dest_hash: DestinationHash,
+        dest_signing_key: &[u8; 32],
+        first_hop_timeout_ms: Option<u64>,
+        via: Option<crate::relay_routes::LinkVia>,
+    ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
         if let Some(max) = self.transport_config().max_links {
             if self.links.len() >= max {
                 self.log_link_refused(&dest_hash, max);
@@ -350,7 +363,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         }
         // Check if we have path info for this destination
-        let (next_hop, hops) = if let Some(path) = self.transport.path(dest_hash.as_bytes()) {
+        let (next_hop, hops) = if let Some(v) = &via {
+            (Some(v.relay), v.hops.max(1))
+        } else if let Some(path) = self.transport.path(dest_hash.as_bytes()) {
             if path.needs_relay() {
                 (path.next_hop, path.hops)
             } else {
@@ -363,9 +378,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
 
         // Look up HW_MTU for next-hop interface (for link MTU negotiation)
-        let hw_mtu = self
-            .transport
-            .next_hop_interface_hw_mtu(dest_hash.as_bytes());
+        let hw_mtu = match &via {
+            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
+            None => self
+                .transport
+                .next_hop_interface_hw_mtu(dest_hash.as_bytes()),
+        };
 
         // Create new outgoing link
         let mut link = Link::new_outgoing(dest_hash, &mut self.rng);
@@ -381,11 +399,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // on LoRa), use it. When unknown and hops > 1 (path traverses relay
         // nodes whose interfaces we can't see), use a conservative estimate,
         // which is what a client whose daemon did not answer is left with.
+        // (+ciris: through a chosen relay the learned path's interface is
+        // not the one used, so its figures do not apply.)
         if let Some(first_hop_ms) = first_hop_timeout_ms {
             link.set_first_hop_timeout_ms(first_hop_ms);
-        } else if let Some(bitrate) = self
-            .transport
-            .next_hop_interface_bitrate(dest_hash.as_bytes())
+        } else if let Some(bitrate) = via
+            .is_none()
+            .then(|| {
+                self.transport
+                    .next_hop_interface_bitrate(dest_hash.as_bytes())
+            })
+            .flatten()
         {
             link.set_first_hop_timeout_from_bitrate(bitrate);
         } else if hops > 1 {
@@ -416,6 +440,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         {
             link.note_acquisition_ms(acquisition);
         }
+        link.set_via(via);
         let link_id = *link.id();
         if let Err(e) = link.set_destination_keys(dest_signing_key) {
             crate::tracing::debug!(%e, "set_destination_keys failed");
@@ -429,7 +454,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Retry count is hop-aware: multi-hop paths need more attempts because
         // each hop is an independent loss opportunity. A 3-hop path has 3×
         // the chance of losing the request or proof compared to 1-hop.
-        let retries = core::cmp::max(LINK_REQUEST_MAX_RETRIES, hops);
+        // +ciris (leviculum#91): a host-set budget is one attempt; failover
+        // to another relay is the host's.
+        let retries = if via.is_some_and(|v| v.establish_timeout_ms.is_some()) {
+            0
+        } else {
+            core::cmp::max(LINK_REQUEST_MAX_RETRIES, hops)
+        };
         self.link_retry_state.insert(
             link_id,
             LinkRetryState {
@@ -446,13 +477,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.register_destination(*link_id.as_bytes());
 
         // Route through transport: path lookup first, broadcast if no path
-        let was_routed = self
-            .transport
-            .send_to_destination(dest_hash.as_bytes(), &packet)
-            .is_ok();
-        if !was_routed {
-            self.transport.send_on_all_interfaces(&packet);
-        }
+        let was_routed = if let Some(v) = &via {
+            self.transport
+                .relay_routes_mut()
+                .pin(*dest_hash.as_bytes(), v.relay);
+            self.transport
+                .send_on_interface(v.interface_index, &packet)
+                .is_ok()
+        } else {
+            let routed = self
+                .transport
+                .send_to_destination(dest_hash.as_bytes(), &packet)
+                .is_ok();
+            if !routed {
+                self.transport.send_on_all_interfaces(&packet);
+            }
+            routed
+        };
 
         // Establishment packet-level instrumentation (initiator TX). Pairs with
         // LINK_REQUEST_RX / LINK_PROOF_TX / LINK_PROOF_RX so a hardware run can
@@ -655,7 +696,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
         }
-        self.links.remove(link_id);
+        if let Some(link) = self.links.remove(link_id) {
+            if let Some(v) = link.via() {
+                self.transport
+                    .relay_routes_mut()
+                    .unpin(link.destination_hash().as_bytes(), &v.relay);
+            }
+        }
         self.link_retry_state.remove(link_id);
         if let Some(split) = self.split_internal.as_mut() {
             split.reassembly.retain(|(link, _), _| link != link_id);
@@ -4149,8 +4196,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 let Some(started_at) = link.pending_since_ms() else {
                     return false;
                 };
-                now_ms.saturating_sub(started_at)
-                    > link.establishment_timeout_ms_with(timeout_override)
+                // +ciris (leviculum#91): a host-set budget wins.
+                let budget = link
+                    .via()
+                    .and_then(|v| v.establish_timeout_ms)
+                    .or(timeout_override);
+                now_ms.saturating_sub(started_at) > link.establishment_timeout_ms_with(budget)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -4184,17 +4235,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     let now_ms = self.transport.clock().now_ms();
                     if let Some(mut link) = self.links.remove(&link_id) {
                         let dest_hash_bytes = *destination_hash.as_bytes();
-                        let (next_hop, hops) =
-                            if let Some(path) = self.transport.path(&dest_hash_bytes) {
-                                if path.needs_relay() {
-                                    (path.next_hop, path.hops)
-                                } else {
-                                    (None, path.hops)
-                                }
+                        let via = link.via().copied();
+                        let (next_hop, hops) = if let Some(v) = &via {
+                            (Some(v.relay), v.hops.max(1))
+                        } else if let Some(path) = self.transport.path(&dest_hash_bytes) {
+                            if path.needs_relay() {
+                                (path.next_hop, path.hops)
                             } else {
-                                (None, 1)
-                            };
-                        let hw_mtu = self.transport.next_hop_interface_hw_mtu(&dest_hash_bytes);
+                                (None, path.hops)
+                            }
+                        } else {
+                            (None, 1)
+                        };
+                        let hw_mtu = match &via {
+                            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
+                            None => self.transport.next_hop_interface_hw_mtu(&dest_hash_bytes),
+                        };
                         link.regenerate_ephemeral_keys(&mut self.rng);
                         // Codeberg #129: fresh timeout jitter per retry so
                         // concurrent initiators keep de-syncing instead of
@@ -4249,14 +4305,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         let origin = self.link_origin_ids.remove(&link_id).unwrap_or(link_id);
                         self.link_origin_ids.insert(new_link_id, origin);
 
-                        // Route the retried request
-                        let was_routed = self
-                            .transport
-                            .send_to_destination(&dest_hash_bytes, &packet)
-                            .is_ok();
-                        if !was_routed {
-                            self.transport.send_on_all_interfaces(&packet);
-                        }
+                        // Route the retried request (+ciris: through the
+                        // same relay when one was chosen).
+                        let was_routed = if let Some(v) = &via {
+                            self.transport
+                                .send_on_interface(v.interface_index, &packet)
+                                .is_ok()
+                        } else {
+                            let routed = self
+                                .transport
+                                .send_to_destination(&dest_hash_bytes, &packet)
+                                .is_ok();
+                            if !routed {
+                                self.transport.send_on_all_interfaces(&packet);
+                            }
+                            routed
+                        };
 
                         // Same target as LINK_REQUEST_TX, because a hardware
                         // run enables `leviculum_core::link` and nothing

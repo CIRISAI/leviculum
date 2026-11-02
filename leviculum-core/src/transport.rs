@@ -2973,6 +2973,10 @@ pub enum TransportEvent {
         discovery: DiscoveryWindow,
     },
 
+    /// +ciris (leviculum#91): see `NodeEvent::RelayRouteLearned`.
+    #[rustfmt::skip]
+    RelayRouteLearned { destination_hash: [u8; TRUNCATED_HASHBYTES], route: crate::relay_routes::RelayRoute },
+
     /// What this node did with ONE packet a neighbour addressed to it for
     /// relay (Codeberg #346).
     ///
@@ -3171,6 +3175,7 @@ pub struct Transport<C: Clock, S: Storage> {
     clock: C,
     storage: S,
     identity: Identity,
+    relay_routes: crate::relay_routes::RelayRoutes, // +ciris leviculum#91
 
     // path_table: migrated to Storage trait
     // path_states: migrated to Storage trait
@@ -3620,6 +3625,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             clock,
             storage,
             identity,
+            relay_routes: crate::relay_routes::RelayRoutes::default(),
             // path_table: migrated to Storage
             // path_states: migrated to Storage
             // announce_table: migrated to Storage
@@ -5551,6 +5557,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_map_bytes(&self.interface_ingress_control)
             + hc::btree_map_bytes(&self.interface_egress_control)
             + hc::btree_map_bytes(&self.interface_hw_mtus)
+            + self.relay_routes.heap_bytes()
             + hc::btree_map_bytes(&self.interface_link_profiles)
             + hc::btree_map_bytes(&self.shared_instance_first_hop_answers)
             + hc::btree_map_bytes(&self.direct_link_evidence)
@@ -6301,7 +6308,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4458. A destination with no cached
+    /// link-request path uses at transport.rs:4464. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6493,6 +6500,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         &mut self,
         iface_idx: usize,
     ) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+        self.relay_routes.interface_down(iface_idx);
         self.storage.remove_paths_for_interface(iface_idx)
     }
 
@@ -7120,6 +7128,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.stats.record_drop(DropReason::AnnounceOverMaxHops);
             return Ok(());
         }
+
+        // +ciris (leviculum#91): before the replay check; see note_relay_route.
+        self.note_relay_route(&packet, dest_hash, interface_index, is_path_response, now);
 
         let random_hash = *announce.random_hash();
 
@@ -14009,6 +14020,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Expire local client dests not refreshed within expiry window.
         let now = self.clock.now_ms();
+        self.relay_routes.expire(now);
         self.storage
             .expire_local_client_known_dests(now, LOCAL_CLIENT_DEST_EXPIRY_MS);
 
@@ -18792,7 +18804,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7870), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7881,), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -37337,5 +37349,57 @@ mod table_export_tests {
         assert_eq!((links[0].hops, links[0].remaining_hops), (2, 4));
         assert!(!links[0].validated);
         assert_eq!(links[0].destination_hash, [0x03u8; TRUNCATED_HASHBYTES]);
+    }
+}
+
+// +ciris (leviculum#91): the relay table, kept at the end of the file so the
+// fork moves no line an upstream citation points at.
+impl<C: Clock, S: Storage> Transport<C, S> {
+    /// Record the relay a validated announce came through, if any. Called
+    /// before the replay check, whatever the path table then makes of the
+    /// announce: a second relay's copy of an emission already taken is a
+    /// replay to the path table, and the one record of that alternative.
+    fn note_relay_route(
+        &mut self,
+        packet: &Packet,
+        dest: [u8; TRUNCATED_HASHBYTES],
+        interface_index: usize,
+        is_path_response: bool,
+        now: u64,
+    ) {
+        let Some(relay) = packet.transport_id else {
+            return;
+        };
+        let hops = packet.hops;
+        let route = crate::relay_routes::RelayRoute {
+            relay,
+            interface_index,
+            hops,
+            heard_at_ms: now,
+            expires_ms: now + self.path_expiry_ms_for_interface(interface_index),
+        };
+        use crate::relay_routes::Recorded;
+        let recorded = self.relay_routes.record(dest, route);
+        let tell = match recorded {
+            Recorded::New | Recorded::Changed => true,
+            Recorded::Refreshed => is_path_response,
+            Recorded::Dropped => false,
+        };
+        if tell {
+            self.events.push(TransportEvent::RelayRouteLearned {
+                destination_hash: dest,
+                route,
+            });
+        }
+    }
+
+    /// +ciris (leviculum#91): the relay table.
+    pub fn relay_routes(&self) -> &crate::relay_routes::RelayRoutes {
+        &self.relay_routes
+    }
+
+    /// +ciris (leviculum#91): the relay table, to pin and unpin rows.
+    pub fn relay_routes_mut(&mut self) -> &mut crate::relay_routes::RelayRoutes {
+        &mut self.relay_routes
     }
 }

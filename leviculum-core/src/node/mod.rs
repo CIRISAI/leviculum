@@ -4629,6 +4629,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
 
+            TransportEvent::RelayRouteLearned {
+                destination_hash,
+                route,
+            } => {
+                self.events.push(NodeEvent::RelayRouteLearned {
+                    destination_hash: DestinationHash::new(destination_hash),
+                    relay: route.relay,
+                    interface_index: route.interface_index,
+                    hops: route.hops,
+                });
+            }
+
             TransportEvent::AnnounceLearnedNotRelayed {
                 destination_hash,
                 closed,
@@ -13570,3 +13582,9 @@ pub use direct_link::{
 };
 #[cfg(test)]
 mod mvr_direct_link;
+// Steering a link through a chosen relay (+ciris, leviculum#91), declared
+// last for the same reason.
+mod relay_route;
+pub use relay_route::ConnectViaError;
+#[cfg(test)]
+mod mvr_relay_route;

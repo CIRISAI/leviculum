@@ -47,7 +47,7 @@ A board does not accept compressed resources. The firmware builds
 megabytes of working memory against a 96 KiB heap. A board therefore
 refuses a compressed advertisement at once with a receiver cancel, before
 it requests a single part, and the sender fails that transfer immediately
-(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:2978`;
+(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:3025`;
 the refusal logs `RESOURCE_ADV_REFUSED reason=compressed` where tracing is
 compiled in). A Python sender compresses by default whenever bz2 shrinks
 the data (`auto_compress=True`, `reference/Reticulum/RNS/Resource.py:248`);

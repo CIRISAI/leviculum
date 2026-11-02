@@ -1250,6 +1250,12 @@ impl ReticulumNodeBuilder {
             facilitator: None,
             protocol: direct_link.protocol,
         });
+        // +ciris (leviculum#91): the relay table is off in core (boards);
+        // a std node keeps it.
+        node_core.set_relay_route_bounds(
+            leviculum_core::relay_routes::DEFAULT_RELAYS_PER_DESTINATION,
+            leviculum_core::relay_routes::DEFAULT_RELAY_DESTINATIONS,
+        );
 
         let mut node = ReticulumNode::new(
             node_core,

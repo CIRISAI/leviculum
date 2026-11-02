@@ -247,11 +247,11 @@ reach the bounded channel at all, because `PacketSender::send`
 block and releases it *before* its `.await`. It deadlocks one line
 earlier, on the mutex.
 
-And no `block_on` is needed. The number is **72** in this fork (58 upstream), and it is a number
+And no `block_on` is needed. The number is **76** in this fork (58 upstream), and it is a number
 rather than a phrase on purpose: `scripts/check-core-lock-census.py`
 rebuilds the list of public methods that lock the core out of the
 sources on every `just fast` and pins it, name by name, in a
-checked-in file (the `TOTAL` line, `scripts/core-lock-census.txt:30`). Two
+checked-in file (its `TOTAL` line, `scripts/core-lock-census.txt:30`). Two
 earlier revisions of this page estimated the size of this set in words
 and were low by nearly half — which is what an estimate nothing can
 check is worth.
@@ -384,7 +384,7 @@ informatively:
 
 | event | where | says |
 | --- | --- | --- |
-| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6895`) | announce handling itself took ≥ 100 ms |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6903`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:5073`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1809`) | one batch write to the log file took ≥ 50 ms |
 
