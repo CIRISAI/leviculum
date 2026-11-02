@@ -394,11 +394,10 @@ the answer: a node keeps no history, so the current reading is the
 answer to every timebase.
 
 The command id is 0x01 and the value is a list of command maps. Sideband
-reads it as `Commands.TELEMETRY_REQUEST` (Sideband `sbapp/sideband/core.py:1357`),
+reads it as `Commands.TELEMETRY_REQUEST` (`Sideband/sbapp/sideband/core.py:1357`),
 and Columba writes it the same way in its collector request,
 `[{0x01: [<timebase>, <is collector request>]}]` with the timebase in
-unix seconds (Columba
-`rns-backend-py/src/main/kotlin/network/columba/app/rns/backend/py/PythonRnsTelemetry.kt:134`).
+unix seconds (`columba/rns-backend-py/src/main/kotlin/network/columba/app/rns/backend/py/PythonRnsTelemetry.kt:134`).
 Neither source is vendored under `reference/`. The reader is
 `COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:790`),
 which takes the timebase alone or as the first element of that list.
