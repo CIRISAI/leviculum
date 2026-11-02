@@ -47,7 +47,7 @@ settles the conflicts.
 **How the conflicts are actually resolved.** Three layers, in this order.
 
 1. *Global escapes*, before any mode dispatch
-   (`update_key`, `lnomad/src/app/event.rs:438-470`; `pane`,
+   (`update_key`, `lnomad/src/app/event.rs:447-479`; `pane`,
    `lnomad/src/app/keys.rs:339`): any key dismisses the
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
@@ -55,8 +55,8 @@ settles the conflicts.
    (`lnomad/src/app/model.rs:101-120`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
-   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:477`,
-   whitelist at `lnomad/src/app/event.rs:487-493`).
+   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:486`,
+   whitelist at `lnomad/src/app/event.rs:496-502`).
 3. *Modifier discrimination*. Nearly every single-letter binding is guarded
    `&& !ctrl && !alt`, which is what lets `f` (hint mode) and `Ctrl-f`
    (page down), `d` (places) and `Ctrl-d` (half page), `n` (next match) and
@@ -97,11 +97,11 @@ anything else for a messenger, and the answer is yes.
 `AppEvent::NodeDiscovered` (`lnomad/src/app/event.rs:105`) arrives from
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
-(`set_announce_sink`, `lnomad/src/fetch.rs:243-245`, wiring comment at
+(`set_announce_sink`, `lnomad/src/fetch.rs:350-352`, wiring comment at
 `lnomad/src/tui.rs:1295-1298`), a non-blocking unbounded send on every
-recorded announce (`note_announce`, `lnomad/src/fetch.rs:387-407`), a
+recorded announce (`note_announce`, `lnomad/src/fetch.rs:494-515`), a
 dedicated background task parked on the shared session in 250 ms lock
-slices (`spawn_discovery`, `lnomad/src/transfer.rs:166-186`), and a
+slices (`spawn_discovery`, `lnomad/src/transfer.rs:207-229`), and a
 `tokio::select!` arm that folds the result into the model
 (`lnomad/src/tui.rs:1454-1456`). The main loop has five arms
 (`lnomad/src/tui.rs:1358-1461`), and the timer arm is conditionally enabled
@@ -175,9 +175,9 @@ colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1513-1516`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1522-1525`). The messenger is the natural target of that
 handoff: hosted as Loquax's Browse tab (1337) the browser hands the address
-over instead (`lnomad/src/app/event.rs:1509-1512`), and Loquax opens that chat.
+over instead (`lnomad/src/app/event.rs:1518-1521`), and Loquax opens that chat.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
@@ -821,7 +821,7 @@ Three specific things `lnomad` does that must change:
    (`leviculum-lxmf/src/router.rs:2254`).
 
 Things to carry over unchanged: the generation counter for stale-result
-rejection (`spawn_fetch`, `lnomad/src/transfer.rs:53-89`), the tick-counted
+rejection (`spawn_fetch`, `lnomad/src/transfer.rs:53-85`), the tick-counted
 toast whose expiry is a pure function and therefore unit-testable without
 real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
 `lnomad/src/tui.rs:2554`),
