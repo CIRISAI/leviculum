@@ -361,6 +361,12 @@ pub struct Engine<S> {
     profile: HookProfile,
     /// What the last finished invocation spent, section by section.
     last_profile: HookTimes,
+    /// Where the role's departed ids persist across restarts
+    /// ([`Self::with_departures_path`]); `None` keeps them in RAM only.
+    departures_path: Option<std::path::PathBuf>,
+    /// A message left the store early since the departures were last
+    /// saved; the next tick saves them.
+    departures_dirty: bool,
 }
 
 /// An accepted upload whose proof waits until its append is durable.
@@ -547,6 +553,8 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 unproven: VecDeque::new(),
                 profile: HookProfile::start("-"),
                 last_profile: HookTimes::default(),
+                departures_path: None,
+                departures_dirty: false,
             },
             receiver,
         )
@@ -558,6 +566,29 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
     pub fn with_sync_interval(mut self, interval: std::time::Duration) -> Self {
         self.sync_interval_ms = interval.as_millis() as u64;
         self
+    }
+
+    /// Persist the duplicate list's departed ids at `path`, and re-seed
+    /// them from it when the role registers (`crate::departures`): a
+    /// message collected or displaced before a restart is then still a
+    /// duplicate after it.
+    pub fn with_departures_path(mut self, path: std::path::PathBuf) -> Self {
+        self.departures_path = Some(path);
+        self
+    }
+
+    /// Write the departed ids if they moved, or always when `force`.
+    fn save_departures(&mut self, ready: &Ready<S>, force: bool) {
+        let Some(path) = &self.departures_path else {
+            return;
+        };
+        if !(force || self.departures_dirty) {
+            return;
+        }
+        match crate::departures::save(path, ready.node.departures()) {
+            Ok(()) => self.departures_dirty = false,
+            Err(error) => tracing::warn!("lnpnd: departures {}: {error}", path.display()),
+        }
     }
 
     /// Run rotation passes every `interval` instead of the reference's
@@ -709,6 +740,18 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             ..node_config
         };
         let mut node = PropagationNode::new(store, node_config);
+        if let Some(path) = &self.departures_path {
+            match crate::departures::load(path) {
+                Ok(entries) => {
+                    let restored = node.restore_departures(entries, unix_secs());
+                    tracing::info!("lnpnd: {restored} departed message id(s) restored");
+                }
+                Err(error) => {
+                    node.track_departures();
+                    tracing::warn!("lnpnd: departures ignored, {error}");
+                }
+            }
+        }
         let min_cost = node.min_accepted_cost();
         let mut peering =
             PeeringRuntime::new(peering, peer_store, identity_copy, self.events.clone());
@@ -882,6 +925,9 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 evicted,
             } => {
                 log_evictions(&evicted, &self.events);
+                if !evicted.is_empty() {
+                    self.departures_dirty = true;
+                }
                 tracing::debug!(
                     event = "PN_ACCEPT",
                     tid = short_hex(&transient_id),
@@ -1008,6 +1054,9 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 self.respond(core, link_id, request_id, &response, out);
             }
             Ok(GetOutcome::Fetch { plan, purged }) => {
+                if !purged.is_empty() {
+                    self.departures_dirty = true;
+                }
                 tracing::debug!(
                     event = "PN_GET",
                     dst = full_hex(&mailbox),
@@ -1248,8 +1297,14 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         }
         let unstamped = &stamped[..stamped.len() - STAMP_SIZE];
         mailbox.deliver_propagated(core, unstamped, out);
-        if let Err(error) = ready.node.store_mut().purge(transient_id) {
-            tracing::warn!("lnpnd: own-mailbox purge failed: {error}");
+        match ready.node.store_mut().purge(transient_id) {
+            Ok(_) => {
+                ready
+                    .node
+                    .note_confirmed_deletion(transient_id, unix_secs());
+                self.departures_dirty = true;
+            }
+            Err(error) => tracing::warn!("lnpnd: own-mailbox purge failed: {error}"),
         }
     }
 
@@ -2030,12 +2085,16 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
                 count = store.count().unwrap_or(0),
             );
             ready.peering.store_swept();
+            // Every sweep, so a displacement during a peer's sync, which
+            // the engine does not see, is on disk within one period.
+            self.save_departures(&ready, true);
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
         }
         self.profile.lap(Section::Tick);
 
         self.drain_pending(&mut ready, core, &mut out);
         self.release_proofs(&mut ready, core, &mut out);
+        self.save_departures(&ready, false);
         self.profile.lap(Section::Drain);
         self.close_idle_links(core, now_ms, &mut out);
         self.profile.lap(Section::Links);
@@ -2378,6 +2437,39 @@ mod tests {
             vec![ANNOUNCE_DELAY_SECS, second, second + 3600],
             "router announce, deferred start announce, then the interval \
              from the second (seconds after start)"
+        );
+    }
+
+    /// The engine re-seeds the role from the departures file when it
+    /// registers and writes it back at the sweep, so what a previous run
+    /// collected survives this one too (order 1294).
+    #[test]
+    fn the_engine_restores_its_departures_and_saves_them_at_the_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("departures");
+        let left = [0x6e; 32];
+        let at = unix_secs() - 60;
+        crate::departures::save(&path, [(&left, &at)].into_iter()).expect("saves");
+
+        let mut core = core(dir.path());
+        let (engine, _events) = engine_with(Vec::new(), None);
+        let mut engine = engine.with_departures_path(path.clone());
+        let now = core.now_ms();
+        let _ = engine.on_tick(&mut core, now);
+        match &engine.state {
+            State::Ready(ready) => assert_eq!(
+                ready.node.departures().collect::<Vec<_>>(),
+                vec![(&left, &at)]
+            ),
+            _ => panic!("engine must be ready"),
+        }
+        std::fs::remove_file(&path).expect("the restored file was there");
+        // The next sweep writes it again.
+        engine.next_maintenance_at = 0;
+        let _ = engine.on_tick(&mut core, now + 1);
+        assert_eq!(
+            crate::departures::load(&path).expect("saved at the sweep"),
+            vec![(left, at)]
         );
     }
 
@@ -4029,8 +4121,8 @@ mod tests {
             full[0]
         );
 
-        let mut offer = |engine: &mut Engine<MemoryPropagationStore>,
-                         server: &mut leviculum_std::driver::StdNodeCore| {
+        let offer = |engine: &mut Engine<MemoryPropagationStore>,
+                     server: &mut leviculum_std::driver::StdNodeCore| {
             let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
                 State::Ready(ready) => ready,
                 _ => panic!("engine must be ready"),

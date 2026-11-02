@@ -916,17 +916,23 @@ pub struct PropagationNode<S> {
     /// `locally_processed_transient_ids`,
     /// `reference/LXMF/LXMF/LXMRouter.py:2496,2499`).
     ///
-    /// **Deviation:** the reference persists this set across restarts; ours
-    /// is RAM-only and starts empty. Wire format is untouched; semantically
-    /// a client that re-uploads an already-drained message after our restart
-    /// sees it accepted again, which its own `has_message` filter already
-    /// tolerates (`message_list_response`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:1581`). What it buys is Priority 1
-    /// on the board: no per-message state outside the log — a rewritten
+    /// **Deviation:** the reference persists this whole set across
+    /// restarts; ours is RAM-only and starts empty. A host persists the part
+    /// a restart cannot rebuild from the store's own index, the ids that
+    /// left the store early ([`Self::track_departures`]); a message still
+    /// in the store is a duplicate by [`PropagationStore::contains`] alone.
+    /// The board keeps no per-message state outside the log — a rewritten
     /// metadata page is the 18.6-day endurance failure the concept paper's
-    /// §2 forbids — and the host keeps the same shape so both run one code
-    /// path.
+    /// §2 forbids — so after its restart a client that re-uploads an
+    /// already-drained message sees it accepted again, which its own
+    /// `has_message` filter tolerates (`message_list_response`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1581`).
     processed: alloc::collections::BTreeMap<TransientId, u64>,
+    /// Ids that left the store before they expired (a confirmed
+    /// collection, an own-mailbox delivery, a displacement), with when,
+    /// for a host to persist: `None` unless [`Self::track_departures`]
+    /// asked for it, so a board pays nothing.
+    departed: Option<alloc::collections::BTreeMap<TransientId, u64>>,
     /// Compute true stamp values even when our own accepted cost is 0.
     /// Set by the engine while any known peer requires a stamp value above
     /// 0 of the messages it takes (`docs/src/concepts/
@@ -950,6 +956,10 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// adapter accounts for its own queued writes.
     pub fn heap_bytes(&self) -> usize {
         leviculum_core::heap_census::btree_map_bytes(&self.processed)
+            + self
+                .departed
+                .as_ref()
+                .map_or(0, leviculum_core::heap_census::btree_map_bytes)
             + self.config.name.as_ref().map_or(0, |name| name.capacity())
     }
 
@@ -958,6 +968,7 @@ impl<S: PropagationStore> PropagationNode<S> {
             store,
             config,
             processed: alloc::collections::BTreeMap::new(),
+            departed: None,
             compute_stamp_value: false,
             calendar_jump_floor: 0,
         }
@@ -1538,6 +1549,54 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// has committed, including an independently verified uncertain receipt.
     pub fn note_confirmed_deletion(&mut self, transient_id: &TransientId, now_secs: u64) {
         self.processed.insert(*transient_id, now_secs);
+        self.note_departure(transient_id, now_secs);
+    }
+
+    fn note_departure(&mut self, transient_id: &TransientId, now_secs: u64) {
+        if let Some(departed) = self.departed.as_mut() {
+            departed.insert(*transient_id, now_secs);
+        }
+    }
+
+    /// Keep the ids that leave the store before they expire, so a host can
+    /// persist them ([`Self::departures`]) and a restart does not turn a
+    /// re-offered, already-collected message into a revenant: the
+    /// reference persists its whole duplicate set
+    /// (`locally_processed_transient_ids`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2496`, saved at `:1018-1024`).
+    /// Expired ones are not kept: past the expiry window a peer re-offers
+    /// what it received after us, and it is a new copy for us too.
+    pub fn track_departures(&mut self) {
+        self.departed
+            .get_or_insert_with(alloc::collections::BTreeMap::new);
+    }
+
+    /// The departed ids and when they left, held to the expiry window by
+    /// [`Self::tick`]; empty unless [`Self::track_departures`] was called.
+    pub fn departures(&self) -> impl Iterator<Item = (&TransientId, &u64)> {
+        self.departed.iter().flat_map(|departed| departed.iter())
+    }
+
+    /// Re-seed the duplicate cache with persisted departures, skipping
+    /// any older than the expiry window. Tracking is switched on, so what
+    /// was restored is persisted again.
+    pub fn restore_departures(
+        &mut self,
+        entries: impl IntoIterator<Item = (TransientId, u64)>,
+        now_secs: u64,
+    ) -> usize {
+        self.track_departures();
+        let window = self.config.message_expiry_secs;
+        let mut restored = 0;
+        for (transient_id, departed_at) in entries {
+            if now_secs.saturating_sub(departed_at) > window {
+                continue;
+            }
+            self.processed.insert(transient_id, departed_at);
+            self.note_departure(&transient_id, departed_at);
+            restored += 1;
+        }
+        restored
     }
 
     fn complete_get(&mut self, prepared: PreparedFetch) -> GetOutcome {
@@ -1603,6 +1662,9 @@ impl<S: PropagationStore> PropagationNode<S> {
 
         self.processed
             .retain(|_, received| now_secs.saturating_sub(*received) <= PROCESSED_ID_EXPIRY_SECS);
+        if let Some(departed) = self.departed.as_mut() {
+            departed.retain(|_, left| now_secs.saturating_sub(*left) <= expiry);
+        }
         expired
     }
 
@@ -1647,6 +1709,7 @@ impl<S: PropagationStore> PropagationNode<S> {
                 break;
             }
             if self.store.purge(&eviction.transient_id).unwrap_or(false) {
+                self.note_departure(&eviction.transient_id, now_secs);
                 evicted.push(eviction);
             }
         }

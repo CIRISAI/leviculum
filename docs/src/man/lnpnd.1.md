@@ -119,7 +119,7 @@ On the first start over a store it did not price itself (lxmd's, or one an lnpnd
 :   Destination hashes (one per line) whose messages the daemon's own mailbox drops.
 
 *storage/*
-:   The data directory (unless **--data-dir** moves it): `lxmf/messagestore/` (the propagation store, at the path lxmd keeps it; a store found at the older `messagestore/` is moved there on start), `peers/` (the peer table), `messages/` (the daemon's own received mail, one packed-container file per message, readable by the reference's `LXMessage.unpack_from_file`), and the node's client state.
+:   The data directory (unless **--data-dir** moves it): `lxmf/messagestore/` (the propagation store, at the path lxmd keeps it; a store found at the older `messagestore/` is moved there on start), `peers/` (the peer table), `departures` (the ids of messages that left the store before they expired, collected, delivered or displaced, kept for the 30-day expiry window so a peer or client offering one again after a restart is answered as a duplicate; lnpnd's own, lxmd keeps its whole duplicate list elsewhere), `messages/` (the daemon's own received mail, one packed-container file per message, readable by the reference's `LXMessage.unpack_from_file`), and the node's client state.
 
 The Debian package installs the config directory at */etc/lnpnd* and the data directory at */var/lib/lnpnd*, both owned by the `lnpnd` service user. It enables the unit but does not start it: at install time neither an identity nor a configuration is in place, and a daemon started then would mint an address of its own and announce it. Place the identity, then `systemctl start lnpnd`. An upgrade over a running node restarts it and mints nothing; an upgrade over a stopped one leaves it stopped.
 

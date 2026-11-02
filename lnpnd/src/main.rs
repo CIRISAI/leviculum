@@ -732,6 +732,10 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         delivery_limit_kb: effective.delivery_limit_kb,
     });
 
+    // The duplicate list's departed ids, beside the message store: a
+    // message collected before a restart stays a duplicate after it.
+    let engine = engine.with_departures_path(data_dir.join("departures"));
+
     // `node_builder` owns the driver configuration, including the reason
     // this daemon has no application event channel (Codeberg #419).
     let mut node = match lnpnd::node_builder(engine, data_dir.join("storage"))
