@@ -1769,6 +1769,15 @@ pub struct MessageRow {
     pub invite_state: String,
     #[serde(default)]
     pub invite_join: bool,
+    /// A group's line of its own (1307 G2, pass four): "Anna joined.",
+    /// "Lew ended the group."; the app draws `body` as a centred system
+    /// line, no one's bubble.
+    #[serde(default)]
+    pub note: bool,
+    /// A group's line that came after newer ones (1307 pass four): the
+    /// words under the bubble ("arrived late"), empty for any other.
+    #[serde(default)]
+    pub late: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1895,6 +1904,11 @@ pub struct Messages {
     pub invite_title: String,
     #[serde(default)]
     pub invite_trust: String,
+    /// A group its admin deleted (1307 pass four): the line drawn where
+    /// the compose bar was ("Lew ended the group"); empty for any other
+    /// chat, whose compose bar stays.
+    #[serde(default)]
+    pub ended: String,
 }
 
 /// What [`Query::Group`] answers (1307): "New group" while it is open,
@@ -1934,6 +1948,13 @@ pub struct GroupScreen {
     /// The admin's "Add members" words (1307 G2), empty for none.
     #[serde(default)]
     pub add: String,
+    /// The admin's "Delete group" words (1307 pass four), empty for none.
+    #[serde(default)]
+    pub delete: String,
+    /// "Start again with the same people" in a group the reader left or
+    /// that ended (study 4.7), empty for none.
+    #[serde(default)]
+    pub again: String,
     #[serde(default)]
     pub ask: String,
     #[serde(default)]

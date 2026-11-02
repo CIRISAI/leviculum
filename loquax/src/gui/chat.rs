@@ -493,7 +493,20 @@ impl App {
         if let Some(invite) = &open.invite {
             pane = pane.push(container(self.invite_card(invite, false, t)).padding([8, 12]));
         }
-        pane.push(self.compose_bar(open, t))
+        // A group its admin deleted (1307 pass four): its line where the
+        // compose bar was; nothing can be written to it.
+        let bottom: Element<'_, Message> = match &open.ended {
+            Some(ended) => container(
+                text(ended.resolve(self.lang))
+                    .size(15)
+                    .color(colour(t.text_secondary)),
+            )
+            .center_x(Length::Fill)
+            .padding([14, 12])
+            .into(),
+            None => self.compose_bar(open, t),
+        };
+        pane.push(bottom)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -632,12 +645,30 @@ impl App {
                         t,
                     ));
                 }
+                // Start again with the same people (1307 pass four), in a
+                // group the reader left or that ended.
+                if let Some(again) = &sheet.again {
+                    pane = pane.push(link(
+                        self.word(again.label_key),
+                        Message::Intent(again.intent.clone()),
+                        t,
+                    ));
+                }
                 if let Some(leave) = &sheet.leave {
                     pane = pane.push(flat(
                         text(self.word(leave.label_key))
                             .size(15)
                             .color(colour(t.failed_mark_on_panel)),
                         Message::Intent(leave.intent.clone()),
+                    ));
+                }
+                // The admin's Delete group (pass four), under Leave.
+                if let Some(delete) = &sheet.delete {
+                    pane = pane.push(flat(
+                        text(self.word(delete.label_key))
+                            .size(15)
+                            .color(colour(t.failed_mark_on_panel)),
+                        Message::Intent(delete.intent.clone()),
                     ));
                 }
             }
@@ -819,6 +850,14 @@ impl App {
             };
             list = list.push(Space::new().height(gap));
             list = list.push(self.bubble(open, node, width, t));
+            // A line that came after newer ones (1307 pass four).
+            if node.bubble.late {
+                list = list.push(
+                    text(self.word(StrId::GroupArrivedLate))
+                        .size(size::META)
+                        .color(colour(t.text_secondary)),
+                );
+            }
             if self.menu == Some(node.id) {
                 list = list.push(self.actions(node, t));
             }

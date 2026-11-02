@@ -2306,6 +2306,16 @@ impl Inner {
                 .as_ref()
                 .map(|a| a.label_key.text(lang).to_string())
                 .unwrap_or_default(),
+            delete: sheet
+                .delete
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
+            again: sheet
+                .again
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
             ask: sheet
                 .ask
                 .as_ref()
@@ -2511,6 +2521,9 @@ impl Inner {
                 .unwrap_or_default(),
             invite_trust: invite
                 .map(|i| i.trust.resolve(self.lang))
+                .unwrap_or_default(),
+            ended: loquax::ui::group_scene::ended(&self.model, &peer)
+                .map(|t| t.resolve(self.lang))
                 .unwrap_or_default(),
         }
     }
@@ -2741,7 +2754,11 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                 _ => String::new(),
             };
             let invite = node.invite.clone();
+            let late = node.bubble.late;
             let mut row = row(node.bubble);
+            if late {
+                row.late = StrId::GroupArrivedLate.text(lang).to_string();
+            }
             row.writer = writer;
             if let Some(invite) = invite {
                 row.invite_group = loquax::address::to_hex(&invite.group);
@@ -2863,6 +2880,8 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         invite_trust: String::new(),
         invite_state: String::new(),
         invite_join: false,
+        note: bubble.note,
+        late: String::new(),
     }
 }
 

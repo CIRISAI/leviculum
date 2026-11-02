@@ -92,6 +92,9 @@ final class GroupDialogs {
         Map<String, Object> shown = Core.groupScreen();
         final EditText field = new EditText(screen);
         field.setHint(Core.str(shown, "hint"));
+        // The draft's name: empty for a new group, the old one when it
+        // starts again (1307 pass four).
+        field.setText(Core.str(shown, "name"));
         field.setSingleLine(true);
         new AlertDialog.Builder(screen)
                 .setTitle(Core.str(shown, "title"))
@@ -138,18 +141,30 @@ final class GroupDialogs {
         say(screen, Core.group("members", group, "", "", false));
         final Map<String, Object> shown = Core.groupScreen();
         final List<Map<String, Object>> rows = Core.list(shown, "rows");
-        String[] lines = new String[rows.size()];
+        // The admin's "Delete group" (1307 pass four) is the list's last
+        // line: the dialog's three buttons are taken by Cancel, Add and
+        // Leave.
+        final String delete = Core.str(shown, "delete");
+        String[] lines = new String[rows.size() + (delete.isEmpty() ? 0 : 1)];
         for (int i = 0; i < rows.size(); i++) {
             Map<String, Object> row = rows.get(i);
             String remove = Core.str(row, "remove");
             lines[i] = Core.str(row, "name") + " · " + Core.str(row, "state")
                     + (remove.isEmpty() ? "" : "  (" + remove + ")");
         }
+        if (!delete.isEmpty()) {
+            lines[rows.size()] = delete;
+        }
         AlertDialog.Builder dialog = new AlertDialog.Builder(screen)
                 .setTitle(Core.str(shown, "title") + " · " + Core.str(shown, "line"))
                 .setItems(lines, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
+                        if (which == rows.size()) {
+                            say(screen, Core.group("delete", group, "", "", false));
+                            ask(screen, "delete", group, "", after);
+                            return;
+                        }
                         Map<String, Object> row = rows.get(which);
                         if (Core.str(row, "remove").isEmpty()) {
                             Core.group("close", "", "", "", false);
@@ -172,6 +187,19 @@ final class GroupDialogs {
                 @Override
                 public void onClick(DialogInterface d, int which) {
                     addMembers(screen, group);
+                }
+            });
+        }
+        // "Start again with the same people" (study 4.7), where Add never
+        // is: a group the reader left or that ended. "New group" opens at
+        // its name, the people ticked; its Create makes it.
+        String again = Core.str(shown, "again");
+        if (!again.isEmpty() && add.isEmpty()) {
+            dialog.setNeutralButton(again, new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface d, int which) {
+                    say(screen, Core.group("again", group, "", "", false));
+                    name(screen);
                 }
             });
         }
