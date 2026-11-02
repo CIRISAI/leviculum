@@ -2,6 +2,11 @@
 //! the help text. Shared by the frontend that draws it and by the click and
 //! hover hit-tests in [`update`](super::event::update), which is why it lives in the core.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use unicode_width::UnicodeWidthStr;
 
 use super::geometry::Rect;

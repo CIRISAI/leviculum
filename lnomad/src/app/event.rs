@@ -1,22 +1,28 @@
 //! Events in: [`AppEvent`], and [`update`], which folds one into the
 //! [`Model`] and returns the effects it asks the shell to perform.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use leviculum_micron::{FieldKind, MicronDocument};
 
 use crate::bookmarks::Bookmark;
-use crate::browser::{self};
 use crate::discovery::DiscoveredNode;
 use crate::image::{ImageSlot, Probe, SlotState, MAX_INLINE_IMAGES};
 use crate::names::{direct_hit, search, VisitOutcome};
 use crate::page_cache::CacheEntry;
 use crate::render::{standalone_links, RenderedLink};
 use crate::url::{
-    classify_link, is_nururl, parse_nururl, parse_url, LinkKind, Target, UrlError, DEFAULT_PATH,
+    classify_link, is_nururl, parse_nururl, parse_url, resolve_link, LinkKind, Target, UrlError,
+    DEFAULT_PATH,
 };
 
 use super::chrome::*;
 use super::geometry::{rect_contains, regions, Rect};
-use super::input::{input_request, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use super::input::{InputBuffer, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use super::intent::{apply, Intent};
 use super::keys;
 use super::model::*;
@@ -342,7 +348,7 @@ pub(crate) fn plan_images(model: &mut Model) -> Vec<Effect> {
             });
             continue;
         }
-        let Ok((target, _)) = browser::resolve_link(link, model.current_dest) else {
+        let Ok((target, _)) = resolve_link(link, model.current_dest) else {
             continue;
         };
         requests.push(ImageRequest {
@@ -450,15 +456,11 @@ pub(crate) fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     }
     match model.mode {
         Mode::Address => {
-            if let Some(req) = input_request(&key) {
-                model.input.handle(req);
-            }
+            model.input.edit(&key);
             Vec::new()
         }
         Mode::Search => {
-            if let Some(req) = input_request(&key) {
-                model.search_input.handle(req);
-            }
+            model.search_input.edit(&key);
             Vec::new()
         }
         Mode::Hint => type_hint(model, key),
@@ -492,9 +494,7 @@ pub(crate) fn type_field(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     );
     if fe.kind == FieldKind::Text && editing {
         if let Some(fe) = model.field_state.get_mut(fi - 1) {
-            if let Some(req) = input_request(&key) {
-                fe.input.handle(req);
-            }
+            fe.input.edit(&key);
         }
         // The widget text changed width: re-lay the page out so the box
         // and every downstream position stay correct, keeping the scroll.
@@ -596,7 +596,7 @@ pub(crate) fn go_to(model: &mut Model, raw: &str) -> Vec<Effect> {
         return match parse_nururl(&raw) {
             Ok(nur) => {
                 model.mode = Mode::Browse;
-                model.input.reset();
+                model.input.set_value("");
                 let effects = begin_navigation(model, nur.target, HistoryAction::Push, None);
                 // After begin_navigation, whose toast dismissal must not
                 // clear this one.
@@ -617,7 +617,7 @@ pub(crate) fn go_to(model: &mut Model, raw: &str) -> Vec<Effect> {
     match parse_url(&raw, model.current_dest) {
         Ok(target) => {
             model.mode = Mode::Browse;
-            model.input.reset();
+            model.input.set_value("");
             begin_navigation(model, target, HistoryAction::Push, None)
         }
         Err(_) if is_name_query(&raw) => search_names(model, &raw),
@@ -631,7 +631,7 @@ pub(crate) fn go_to(model: &mut Model, raw: &str) -> Vec<Effect> {
 /// Enter address-entry mode with a cleared editor.
 pub(crate) fn enter_address(model: &mut Model) {
     model.mode = Mode::Address;
-    model.input.reset();
+    model.input.set_value("");
     model.dismiss_toast();
 }
 
@@ -652,7 +652,7 @@ pub(crate) fn exit_hint(model: &mut Model) {
 /// match highlights so the reader starts from a clean slate.
 pub(crate) fn enter_search(model: &mut Model) {
     model.mode = Mode::Search;
-    model.search_input.reset();
+    model.search_input.set_value("");
     model.matches.clear();
     model.current_match = None;
     model.dismiss_toast();
@@ -662,7 +662,7 @@ pub(crate) fn enter_search(model: &mut Model) {
 /// highlights plus the current-match marker.
 pub(crate) fn exit_search(model: &mut Model) {
     model.mode = Mode::Browse;
-    model.search_input.reset();
+    model.search_input.set_value("");
     model.matches.clear();
     model.current_match = None;
     model.dismiss_toast();
@@ -1045,7 +1045,7 @@ pub(crate) fn search_names(model: &mut Model, raw: &str) -> Vec<Effect> {
         return Vec::new();
     }
     model.mode = Mode::Browse;
-    model.input.reset();
+    model.input.set_value("");
     if let Some(hit) = direct_hit(&hits, raw) {
         let dest = hit.dest;
         return begin_navigation(model, node_target(dest), HistoryAction::Push, None);
@@ -1222,7 +1222,7 @@ pub(crate) fn yank_url(model: &mut Model) -> Vec<Effect> {
 pub(crate) fn focused_link_url(model: &Model) -> Option<String> {
     let idx = model.focus?;
     let link = model.links.iter().find(|l| l.index == idx)?;
-    let (target, _anchor) = browser::resolve_link(link, model.current_dest).ok()?;
+    let (target, _anchor) = resolve_link(link, model.current_dest).ok()?;
     Some(target_url(&target))
 }
 
@@ -1492,7 +1492,7 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
             model.say(ToastKind::Info, with(StrId::LxmfCopied, hash.clone()));
             vec![Effect::Copy(hash)]
         }
-        LinkKind::Rns => match browser::resolve_link(&link, model.current_dest) {
+        LinkKind::Rns => match resolve_link(&link, model.current_dest) {
             Ok((mut target, anchor)) => {
                 // A submit link (one that references form fields, or `*` for all)
                 // carries the CURRENT field values, packaged as NomadNet expects:
@@ -1566,7 +1566,7 @@ pub(crate) fn bad_url_note(what: StrId, raw: &str, err: UrlError) -> Text {
 /// under a `field_` prefix. A text field is always included; a checkbox/radio is
 /// included only when checked (its submit value), and several checked checkboxes
 /// sharing a name are comma-joined. The `k=v` preset components are handled by
-/// [`browser::resolve_link`] as `var_<k>`, so they are ignored here.
+/// [`resolve_link`] as `var_<k>`, so they are ignored here.
 pub(crate) fn collect_submit_fields(model: &Model, link: &RenderedLink) -> Vec<(String, String)> {
     let mut all = false;
     let mut referenced: Vec<&str> = Vec::new();
@@ -1591,7 +1591,7 @@ pub(crate) fn collect_submit_fields(model: &Model, link: &RenderedLink) -> Vec<(
         }
         let key = format!("field_{}", fe.name);
         match fe.kind {
-            FieldKind::Text => out.push((key, fe.input.value().to_string())),
+            FieldKind::Text => out.push((key, InputBuffer::value(&fe.input).to_string())),
             FieldKind::Checkbox => {
                 if fe.checked {
                     if let Some(existing) = out.iter_mut().find(|(k, _)| *k == key) {

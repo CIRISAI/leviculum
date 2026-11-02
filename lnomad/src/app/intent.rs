@@ -47,6 +47,10 @@
 //! [`super::keys::Action`]s become these through [`Intent::of_key`],
 //! and the key handler folds them with [`apply`] as a tap does.
 
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use leviculum_ui::keymap::ScrollCmd;
 use leviculum_ui::scene::Labelled;
 
@@ -54,6 +58,7 @@ use crate::names::PinMark;
 
 use super::chrome::help_scroll_geometry;
 use super::event::*;
+use super::input::InputBuffer;
 use super::keys::Action;
 use super::model::*;
 use super::scene::NodeId;
@@ -232,7 +237,7 @@ impl Labelled for Intent {
 pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
     match intent {
         Intent::Go { url } => {
-            let raw = url.unwrap_or_else(|| model.input.value().to_string());
+            let raw = url.unwrap_or_else(|| InputBuffer::value(&model.input).to_string());
             go_to(model, raw.trim())
         }
         Intent::Back => go_back(model),
@@ -279,7 +284,8 @@ pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
             Vec::new()
         }
         Intent::Search { query } => {
-            let query = query.unwrap_or_else(|| model.search_input.value().to_string());
+            let query =
+                query.unwrap_or_else(|| InputBuffer::value(&model.search_input).to_string());
             model.mode = Mode::Browse;
             commit_search(model, &query);
             Vec::new()
@@ -415,7 +421,7 @@ fn dismiss(model: &mut Model) {
         exit_search(model);
     } else if model.mode == Mode::Address {
         model.mode = Mode::Browse;
-        model.input.reset();
+        model.input.set_value("");
         model.dismiss_toast();
     } else if model.mode == Mode::Field {
         model.field_focus = None;

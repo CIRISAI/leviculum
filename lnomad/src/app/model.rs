@@ -2,9 +2,13 @@
 //! shell, and the pure queries over them (which links are on screen, where the
 //! hints go).
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use std::path::PathBuf;
 
-use tui_input::Input;
 use unicode_width::UnicodeWidthChar;
 
 use leviculum_micron::{FieldKind, MicronDocument};
@@ -26,6 +30,7 @@ use leviculum_ui::tokens::{tokens, Tokens};
 use super::chrome::*;
 use super::event::*;
 use super::geometry::{regions, Rect};
+use super::input::{field_with, visual_scroll, Field, InputBuffer};
 use super::strings::{Lang, Text};
 
 /// The number of columns reserved on the right for the scrollbar.
@@ -150,7 +155,7 @@ pub struct FieldEdit {
     /// The field kind.
     pub kind: FieldKind,
     /// The text editor for a text field (unused for checkbox/radio).
-    pub input: Input,
+    pub input: Field,
     /// The current checked state of a checkbox/radio (unused for text).
     pub checked: bool,
     /// The submit value of a checkbox/radio: its explicit value, or its label
@@ -489,9 +494,9 @@ pub struct Model {
     /// The current interaction mode (browse, address entry, hint, or search).
     pub mode: Mode,
     /// The address-bar editor.
-    pub input: Input,
+    pub input: Field,
     /// The in-page search query editor (`/`).
-    pub search_input: Input,
+    pub search_input: Field,
     /// The current query's matches over the laid-out page, highlighted while set.
     pub matches: Vec<Match>,
     /// Index into `matches` of the current match (the one scrolled to and drawn
@@ -563,19 +568,21 @@ pub struct Model {
     pub bookmarks: Bookmarks,
     /// Where the bookmarks are persisted, or `None` when no config dir is
     /// resolvable (the browser then runs without persistence).
+    #[cfg(feature = "std")]
     pub bookmarks_path: Option<PathBuf>,
     /// The pinned `name -> hash` pairs ([`crate::names`]), loaded at startup
     /// and saved on change.
     pub pins: PinStore,
     /// Where the pins are persisted, or `None` when no config dir is
     /// resolvable (pins then last for the session only).
+    #[cfg(feature = "std")]
     pub pins_path: Option<PathBuf>,
     /// The open name-search result list, or `None`. Modal like the places
     /// panel: it owns the keys until closed.
     pub names: Option<NameResults>,
-    /// A fixed wall clock in Unix seconds for tests; `None` reads the system
-    /// clock ([`Model::wall_now`]). Only pins and the result list's "last
-    /// seen" read it.
+    /// A fixed wall clock in Unix seconds for tests and for a board's own
+    /// clock; `None` reads the system clock ([`Model::wall_now`]). Only pins
+    /// and the result list's "last seen" read it.
     pub clock: Option<u64>,
     /// Whether the places panel (bookmarks + discovered nodes) overlay is shown.
     pub show_places: bool,
@@ -623,7 +630,7 @@ pub struct Model {
     /// asks the session nothing) reads [`identifying`](Model::identifying) from
     /// here; the page cache only holds pages fetched this run, so the answer was
     /// always learned first.
-    pub identify_known: std::collections::BTreeSet<[u8; 16]>,
+    pub identify_known: alloc::collections::BTreeSet<[u8; 16]>,
     /// The current page's inline images, one slot per standalone image link,
     /// in link order. Rebuilt on every page load; drives both the rows the
     /// relayout reserves and what is drawn into them.
@@ -656,9 +663,14 @@ pub struct NameResults {
 
 impl Model {
     /// The wall clock in Unix seconds: [`clock`](Model::clock) when set, else
-    /// the system time.
+    /// the system time. Without `std` there is no system time: a board sets
+    /// the clock from its own, and until it does pins read the epoch.
     pub fn wall_now(&self) -> u64 {
-        self.clock.unwrap_or_else(crate::discovery::now_unix_secs)
+        #[cfg(feature = "std")]
+        let now = self.clock.unwrap_or_else(crate::discovery::now_unix_secs);
+        #[cfg(not(feature = "std"))]
+        let now = self.clock.unwrap_or(0);
+        now
     }
 
     /// Lay a parsed document out at `width` and build a model from it, keeping
@@ -698,7 +710,7 @@ impl Model {
             .map(|f| FieldEdit {
                 name: f.name.clone(),
                 kind: f.kind,
-                input: Input::new(f.value.clone()),
+                input: field_with(&f.value),
                 checked: f.checked,
                 value: f.value.clone(),
             })
@@ -719,9 +731,9 @@ impl Model {
                 // relayouts, so reading them here is sound.
                 let w = self.field_defs.get(i).map_or(1, |d| d.width.max(1));
                 FieldValue {
-                    text: fe.input.value().to_string(),
+                    text: InputBuffer::value(&fe.input).to_string(),
                     checked: fe.checked,
-                    scroll: fe.input.visual_scroll(w.saturating_sub(1)),
+                    scroll: visual_scroll(&fe.input, w.saturating_sub(1)),
                 }
             })
             .collect()

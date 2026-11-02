@@ -32,6 +32,11 @@
 //! - Tables lay out `|`-separated rows in aligned columns bounded by
 //!   `MAX_TABLE_WIDTH = 100` (lines 37, 197-218).
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use leviculum_micron::{Align, Block, Field, FieldKind, Line, MicronDocument, Style};
 use unicode_width::UnicodeWidthChar;
 
@@ -338,7 +343,7 @@ pub fn insert_image_rows(
             Some((link.line, *rows))
         })
         .collect();
-    pending.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    pending.sort_by_key(|entry| core::cmp::Reverse(entry.0));
 
     for (line, rows) in pending {
         if line >= lines.len() {
@@ -783,12 +788,12 @@ fn wrap(chars: Vec<StyledChar>, width: usize) -> Vec<Vec<StyledChar>> {
                     while cur.last().is_some_and(|c| c.ch == ' ') {
                         cur.pop();
                     }
-                    lines.push(std::mem::take(&mut cur));
+                    lines.push(core::mem::take(&mut cur));
                     cur = rest;
                 }
                 None => {
                     let rest = cur.split_off(width);
-                    lines.push(std::mem::take(&mut cur));
+                    lines.push(core::mem::take(&mut cur));
                     cur = rest;
                 }
             }

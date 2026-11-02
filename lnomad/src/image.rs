@@ -13,6 +13,9 @@
 //! and the drawing live in [`crate::tui`]; what this module owns is the
 //! arithmetic and the decisions, so they can be tested without a terminal.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+
 #[cfg(feature = "tui")]
 pub use leviculum_ui_ratatui::images::{choose_backend, Backend};
 
@@ -141,6 +144,7 @@ pub struct Probe {
 ///
 /// Cheap enough to run on arrival, and it is what lets a failure still say
 /// something useful about what the file was.
+#[cfg(feature = "std")]
 pub fn probe(bytes: &[u8]) -> Option<Probe> {
     let reader = ::image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -165,6 +169,7 @@ pub fn probe(bytes: &[u8]) -> Option<Probe> {
 /// The bytes come from somebody else's node, so this must never panic and
 /// never trust a declared size: `image` is asked for a plain decode and any
 /// failure becomes a message the reader sees in the text box.
+#[cfg(feature = "std")]
 pub fn decode(bytes: &[u8]) -> Result<::image::DynamicImage, String> {
     ::image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -203,8 +208,10 @@ pub fn fit_cells(px: (u32, u32), cell_px: (u16, u16), max_cols: u16, max_rows: u
     let by_height = (rows_limit as f64) / (natural_rows as f64);
     let scale = by_width.min(by_height).min(1.0);
 
-    let cols = ((natural_cols as f64) * scale).floor().max(1.0) as u16;
-    let rows = ((natural_rows as f64) * scale).floor().max(1.0) as u16;
+    // The cast truncates, which for these non-negative products is the floor
+    // (`f64::floor` is std's, not core's).
+    let cols = (((natural_cols as f64) * scale) as u16).max(1);
+    let rows = (((natural_rows as f64) * scale) as u16).max(1);
     (cols.min(max_cols), rows.min(max_rows))
 }
 

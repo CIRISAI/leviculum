@@ -19,6 +19,12 @@
 //! a board and a JNI crossing pay for the rows a reader sees. No renderer
 //! parses or lays out micron.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use serde_json::{json, Value};
 use unicode_width::UnicodeWidthChar;
 
@@ -29,6 +35,7 @@ use leviculum_ui::style::RStyle;
 
 use super::chrome::*;
 use super::event::*;
+use super::input::{visual_cursor, InputBuffer};
 use super::intent::Intent;
 use super::model::*;
 use super::strings::{with, Arg, StrId, Text};
@@ -354,7 +361,7 @@ pub(crate) fn top_bar(model: &Model) -> TopBar {
 pub(crate) fn address(model: &Model) -> AddressField {
     let editing = model.mode == Mode::Address;
     let value = match (editing, model.history.current()) {
-        (true, _) => model.input.value().to_string(),
+        (true, _) => InputBuffer::value(&model.input).to_string(),
         (false, Some(_)) => breadcrumb(model),
         (false, None) => String::new(),
     };
@@ -363,7 +370,7 @@ pub(crate) fn address(model: &Model) -> AddressField {
         value,
         hint: Text::key(StrId::AddressHint),
         editing,
-        cursor: editing.then(|| model.input.visual_cursor()),
+        cursor: editing.then(|| visual_cursor(&model.input)),
         activate: Action::of(Intent::Activate(NodeId::Address)),
         go: Action::of(Intent::Go { url: None }),
         a11y: A11y {

@@ -16,6 +16,10 @@
 //!
 //! The texts keep Android's positional format (`%1$s`, `%1$d`).
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 pub use leviculum_ui::strings::Lang;
 
 /// A value for a text's `%n$s` or `%n$d`, of lnomad's catalogue.

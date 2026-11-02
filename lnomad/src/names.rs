@@ -32,6 +32,13 @@
 //! Loading tolerates a missing or corrupt file by starting empty; a row whose
 //! `dest` is not a 32-hex hash is dropped on load.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -206,6 +213,7 @@ impl PinStore {
 
     /// Load the pins from `path`, tolerating a missing or corrupt file by
     /// starting empty, and dropping any row whose hash is not 32 hex digits.
+    #[cfg(feature = "std")]
     pub fn load(path: &Path) -> Self {
         let mut store: Self = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).unwrap_or_default(),
@@ -219,6 +227,7 @@ impl PinStore {
     }
 
     /// Write the pins to `path` as TOML, creating parent directories.
+    #[cfg(feature = "std")]
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -231,6 +240,7 @@ impl PinStore {
 /// The default pin-store path: `${XDG_CONFIG_HOME:-~/.config}/lnomad/
 /// pins.toml`. `None` when no config dir can be resolved; pins then last for
 /// the session only.
+#[cfg(feature = "std")]
 pub fn default_path() -> Option<PathBuf> {
     Some(crate::identity::app_config_dir()?.join("pins.toml"))
 }

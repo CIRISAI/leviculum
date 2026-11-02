@@ -29,6 +29,8 @@
 //! drawn in the reader's language; `every_row_speaks_the_catalogue` holds
 //! that each one resolves.
 
+use alloc::vec::Vec;
+
 use leviculum_micron::FieldKind;
 use leviculum_ui::help::{HelpEntry, HelpGroup};
 use leviculum_ui::input::{KeyCode, KeyEvent};

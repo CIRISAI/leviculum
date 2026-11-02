@@ -20,7 +20,12 @@
 //! discovery loop (or the browser, opportunistically) can present a live list of
 //! reachable nodes to open.
 
-use std::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use alloc::collections::BTreeMap;
+#[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::constants::NAME_HASHBYTES;
@@ -111,7 +116,9 @@ pub fn decode_node_name(app_data: &[u8]) -> Option<String> {
 }
 
 /// Current wall-clock time in whole seconds since the Unix epoch, or `0` if the
-/// clock is before the epoch. Used to stamp `first_seen`/`last_seen`.
+/// clock is before the epoch. Used to stamp `first_seen`/`last_seen`. A
+/// platform layer's: a board without a wall clock hands its time in.
+#[cfg(feature = "std")]
 pub fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
