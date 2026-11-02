@@ -144,6 +144,23 @@ Codeberg #359 has paid that price once already: the recurrence of
 `prev_magic=absent reset_reason=0x00000000` on the next boot, which is
 the instrument being honest, not the instrument failing.
 
+A board that still shows up in `lsusb -v` is not necessarily alive. The
+Pocket that froze on 2026-10-31 seemed to answer USB control requests
+for 23 hours afterwards. That was `lsusb` returning descriptors, and the
+firmware cannot have served them: embassy-usb answers the control pipe
+from `usb_task`, which runs on the thread-mode executor, and the dying
+boot's persistent tail shows that thread mode had stopped (the LoRa task,
+on its own interrupt executor, went on logging, but the two-second
+`[STACK] tag=tick` line was missing). What answered was the hub or the
+kernel's cached descriptors. The evidence that counts is the debug port
+or the persistent tail. When the LoRa task finds the main loop not
+taking frames and thread mode has not beaten for 5 s, it writes
+`THREAD_STALL beat_age_ms=.. site=.. site_age_ms=.. waiting=lora` into
+that tail. `site` names the blocking call thread mode was in, or `none`
+(`leviculum-nrf/firmware/src/thread_watch.rs`). Separately,
+`LOG_DROPPED n=` counts the bytes the debug ring lost to a writer that
+lapped its reader, so a gap in a capture is not mistaken for silence.
+
 If the board enumerates nothing on USB after a flash or a bad image:
 
 1. **Do not remove power, and on a board with a battery do not pull the
