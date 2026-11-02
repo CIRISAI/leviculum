@@ -124,7 +124,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -317,6 +317,45 @@ CREATE TABLE shares(
     PRIMARY KEY (identity, peer));
 ";
 
+/// What schema 11 adds to schema 10: the groups this home hosts (1307,
+/// `docs/drafts/group-chats-study-2026-11.md` 5.4), their members and the
+/// fan-out's bookkeeping, one row a copy of a member's message to another
+/// member. The group's private key is not here: it is a file beside the
+/// identity's ([`crate::home::group`]). See [`groups`] for the columns.
+const SCHEMA_V11: &str = "
+CREATE TABLE groups(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admin BLOB NOT NULL,
+    epoch INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, address));
+CREATE TABLE group_members(
+    identity BLOB NOT NULL,
+    grp BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    flags INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL,
+    left_at INTEGER,
+    PRIMARY KEY (identity, grp, address));
+CREATE TABLE group_fanout(
+    identity BLOB NOT NULL,
+    grp BLOB NOT NULL,
+    original BLOB NOT NULL,
+    member BLOB NOT NULL,
+    copy BLOB NOT NULL,
+    state INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    proven_at INTEGER,
+    read_at INTEGER,
+    PRIMARY KEY (identity, grp, original, member));
+CREATE UNIQUE INDEX group_fanout_by_copy ON group_fanout(identity, copy);
+";
+
+pub mod groups;
+
 /// The model's key of the row at seq 0. The model counts keys unsigned
 /// ([`Message::activity`]) and imported history sits below seq 0, so a key is
 /// the seq with its sign bit flipped: the same order, and every row of an
@@ -359,6 +398,9 @@ const TABLES_V8: [&str; 1] = ["drafts"];
 
 /// The table schema 10 adds.
 const TABLES_V10: [&str; 1] = ["shares"];
+
+/// The tables schema 11 adds.
+const TABLES_V11: [&str; 3] = ["groups", "group_members", "group_fanout"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -486,7 +528,7 @@ impl Store {
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
-             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} \
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -569,6 +611,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 11 {
+            if let Some(missing) = missing(&TABLES_V11) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate();
         }
@@ -610,7 +657,10 @@ impl Store {
                 if version < 9 {
                     batch.push_str(SCHEMA_V9);
                 }
-                batch.push_str(SCHEMA_V10);
+                if version < 10 {
+                    batch.push_str(SCHEMA_V10);
+                }
+                batch.push_str(SCHEMA_V11);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
