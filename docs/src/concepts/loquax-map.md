@@ -28,11 +28,11 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:478`, `loquax/src/outbox.rs:268`). The core reads
+(`loquax/src/engine.rs:478`, `loquax/src/outbox.rs:269`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:144`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3967`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:3969`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:2691`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:191`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -1284,18 +1284,27 @@ Lew, 2026-11-01: the map shows every position the mesh announces,
 mailbox or not. A node announces a second destination, `lev.position`
 (SINGLE, of its identity), beside its delivery destination; its app data
 is the fix (the mailbox for friends study of order 1296, section 4.3,
-on master). The board side and the final codec are order 1301; until it lands
-`loquax/src/mesh_position.rs` reads one plain layout, version 1, 18
-bytes (`lat_e7`, `lon_e7` as i32, `alt_m` i16, `fix_time` u32, `speed`
-u16 in cm/s, all big endian), and any other version is no position.
+on master). The codec is the board side's, `leviculum_lxmf::lev_position`
+(order 1301): a msgpack map with the coordinates, the fix's age and the
+node's name, either plain or sealed to the owner's identity
+(`mesh_position::read`, 1313).
+
+**Who sees what.** A plain position is read by everyone: a board set to
+share with everyone nearby, and `loquax announce`. A sealed one opens only
+with the identity it was sealed to, so the owner's own boards show on the
+owner's Loquax, which holds the home identity. A stranger's sealed
+announce is recognised (`AppData::parse` says `Sealed`) and shown
+nowhere. A client of a home node holds no private key and shows the
+plain ones only. Privacy over visibility: plain is the board's opt-in.
 
 **The event.** The engine sees every announce its core hears
 (`engine.rs`, `on_event`), a client of a home node too, since the check
 needs no router: a `lev.position` announce whose app data decodes
-becomes `OutboxEvent::MeshPosition { identity, location }`, the identity
-hash the announce proved. The model takes it as
+becomes `OutboxEvent::MeshPosition { identity, location, name }`, the
+identity hash the announce proved, the fix timed by when the node heard
+it less the fix's age, and the announced name. The model takes it as
 `UiEvent::MeshPosition { identity, fix, name, age }` (the engine's
-event folds the same way, with no name and age 0); a shell that holds an
+event folds the same way, with its name and age 0); a shell that holds an
 announce itself hands its name and how long ago it heard it.
 
 **The merge rule.** The peer is the identity's `lxmf.delivery` address
@@ -1327,8 +1336,9 @@ the line and an Add button. No setting: nearby nodes are a fact of the
 mesh; hiding them is a later option if someone asks.
 
 **Seeding one.** `loquax announce --position LAT,LON [--from NAME]`
-attaches as `send` does and announces the position once
-(`Command::AnnouncePosition`, which registers the `lev.position`
+attaches as `send` does and announces the position once, plain and
+named, as a manual one (`mesh_position::manual`,
+`Command::AnnouncePosition`, which registers the `lev.position`
 destination of our identity on first use). The device walk's
 `offgrid_positions` uses it with the mailbox stopped
 ([device walk](loquax-device-walk.md)).

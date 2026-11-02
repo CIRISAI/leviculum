@@ -133,8 +133,9 @@ pub enum Command {
     /// [`crate::mesh_position`]), registering the destination of our
     /// identity on first use: `loquax announce`, the device walk's seed of
     /// a node nearby. A client has no identity of its own and ignores it.
+    /// It goes out as it is, plain ([`crate::mesh_position::manual`]).
     AnnouncePosition {
-        location: leviculum_lxmf::telemetry::Location,
+        position: leviculum_lxmf::lev_position::Position,
     },
     /// On a client: the home node accepted a message the shell handed it
     /// with `/send`; reported as [`OutboxEvent::Queued`], so the screen
@@ -310,11 +311,15 @@ pub enum OutboxEvent {
     NodeAnnounced { destination: [u8; 16] },
     /// A node announced its position on `lev.position` (1302,
     /// [`crate::mesh_position`]): `identity` is the hash of the identity
-    /// the announce proved, `location` what its app data said. Handed to
-    /// the screen as [`crate::ui::UiEvent::MeshPosition`].
+    /// the announce proved, `location` what its app data said, timed by
+    /// when the node heard it, `name` the name it carried. A position
+    /// sealed to somebody else never becomes one
+    /// ([`crate::mesh_position::read`]). Handed to the screen as
+    /// [`crate::ui::UiEvent::MeshPosition`].
     MeshPosition {
         identity: [u8; 16],
         location: leviculum_lxmf::telemetry::Location,
+        name: Option<String>,
     },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.

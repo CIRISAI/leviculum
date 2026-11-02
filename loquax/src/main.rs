@@ -1553,6 +1553,8 @@ async fn run_announce(args: AnnounceArgs) -> ExitCode {
         Ok(resolved) => resolved,
         Err(error) => return usage(error),
     };
+    // Plain and named, so every node in range shows it (1313).
+    let position = loquax::mesh_position::manual(&location, Some(display_name.name.clone()));
     let home = match identity::home_dir() {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
@@ -1589,7 +1591,7 @@ async fn run_announce(args: AnnounceArgs) -> ExitCode {
     const TOKEN: u64 = 1302;
     let submitted = attached
         .outbox
-        .submit(Command::AnnouncePosition { location })
+        .submit(Command::AnnouncePosition { position })
         .and_then(|()| attached.outbox.submit(Command::Fence { token: TOKEN }));
     if let Err(gone) = submitted {
         eprintln!("loquax: {gone}");

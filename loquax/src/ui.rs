@@ -3745,9 +3745,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             message_id,
             last: Some(state),
         } => apply_state(model, message_id, state),
-        OutboxEvent::MeshPosition { identity, location } => {
-            model.mesh_position(identity, location, None, 0)
-        }
+        OutboxEvent::MeshPosition {
+            identity,
+            location,
+            name,
+        } => model.mesh_position(identity, location, name.as_deref(), 0),
         // Our own announce, echoed back, names nobody.
         OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
         OutboxEvent::Announced { destination, name } => {
@@ -5339,7 +5341,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// `fields` as the model sends them: with the read-receipt mark (1230).
@@ -5362,7 +5364,7 @@ mod tests {
     /// places, which the next edit puts back at the end. The terminal's
     /// field is `tui_input::Input`.
     #[derive(Default, Clone, Debug)]
-    pub(super) struct Field(String, Option<usize>);
+    pub(crate) struct Field(String, Option<usize>);
 
     impl InputBuffer for Field {
         fn value(&self) -> &str {
@@ -10045,6 +10047,7 @@ mod tests {
             UiEvent::Engine(OutboxEvent::MeshPosition {
                 identity: ANNA,
                 location: fix_at(5_000_000, 0, two_pm()).location.expect("a location"),
+                name: None,
             }),
         );
         assert_eq!(model.positions[&peer].location.latitude_e6, 5_000_000);
