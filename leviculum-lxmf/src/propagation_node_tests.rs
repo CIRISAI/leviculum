@@ -326,6 +326,32 @@ fn a_full_store_displaces_by_age_times_size() {
     assert!(node.store().contains(&accepted_id(&outcome)).unwrap());
 }
 
+/// A prioritised destination's message outlives a heavier-by-age one of
+/// another destination: its weight is a tenth (`get_weight`,
+/// `reference/LXMF/LXMF/LXMRouter.py:1064`). Without the list the same
+/// store culls it first, being the oldest (order 1294).
+#[test]
+fn a_prioritised_destination_is_culled_last() {
+    let run = |prioritised: Vec<[u8; DESTINATION_LENGTH]>| {
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(340),
+            PropagationNodeConfig {
+                prioritised_destinations: prioritised,
+                ..cost_free()
+            },
+        );
+        let kept = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+        let other = accepted_id(&node.handle_upload(&envelope(9, 2), 9 * DAY, stamp_of_value_zero));
+        let _ = node.handle_upload(&envelope(9, 3), 10 * DAY, stamp_of_value_zero);
+        (
+            node.store().contains(&kept).unwrap(),
+            node.store().contains(&other).unwrap(),
+        )
+    };
+    assert_eq!(run(vec![[7; DESTINATION_LENGTH]]), (true, false));
+    assert_eq!(run(Vec::new()), (false, true), "the control: oldest goes");
+}
+
 /// A message bigger than the whole store fails without culling: every
 /// eviction would be for nothing, and the store would be empty after
 /// (the review's suspected fault, order 1294).

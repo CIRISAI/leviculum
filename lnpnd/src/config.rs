@@ -211,11 +211,6 @@ impl RawConfig {
         const INERT: &[(&str, &str, &str)] = &[
             (
                 "propagation",
-                "prioritise_destinations",
-                "eviction is size- and age-driven only; see lnpnd(1)",
-            ),
-            (
-                "propagation",
                 "static_peers_bypass_sequential",
                 "one validation worker serves all peers in arrival order; see lnpnd(1)",
             ),

@@ -424,6 +424,13 @@ pub struct PropagationNodeConfig {
     /// ([`PropagationNode::set_compute_stamp_value`]), saving the
     /// workblock expansion per message.
     pub always_compute_stamp_value: bool,
+    /// Destinations whose messages the cull keeps longest: their weight is
+    /// a tenth of another message's of the same age and size
+    /// (`priority_weight = 0.1`, `get_weight`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1064`), lxmd's
+    /// `prioritise_destinations` (`reference/LXMF/LXMF/Utilities/lxmd.py:214-217`,
+    /// applied at `:446-450`). Empty by default and on a board.
+    pub prioritised_destinations: Vec<[u8; DESTINATION_LENGTH]>,
 }
 
 impl Default for PropagationNodeConfig {
@@ -448,6 +455,7 @@ impl Default for PropagationNodeConfig {
             serve_limit_bytes: None,
             from_static_only: false,
             always_compute_stamp_value: true,
+            prioritised_destinations: Vec::new(),
         }
     }
 }
@@ -1669,10 +1677,11 @@ impl<S: PropagationStore> PropagationNode<S> {
     }
 
     /// Cull by the reference's weight until at least `needed` bytes are
-    /// free: `age_weight × size` with
-    /// `age_weight = max(1, age / 4 days)` (`get_weight`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:1056-1067`; the prioritised-list
-    /// factor is omitted — this node has no prioritised list). The trigger
+    /// free: `priority × age_weight × size` with
+    /// `age_weight = max(1, age / 4 days)` and `priority` 0.1 for a
+    /// destination in [`PropagationNodeConfig::prioritised_destinations`],
+    /// 1 otherwise (`get_weight`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1056-1067`). The trigger
     /// differs from the reference by necessity: it culls when a *configured*
     /// limit is exceeded on a periodic job (`:1183-1218`), our store has a
     /// hard capacity and culls when an append reports [`StorageError::Full`].
@@ -1683,11 +1692,17 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// reference computes over body bytes.
     fn make_room(&mut self, needed: u64, now_secs: u64) -> Vec<Eviction> {
         let mut weighted: Vec<(f64, Eviction)> = Vec::new();
+        let prioritised = &self.config.prioritised_destinations;
         let _ = self.store.for_each(&mut |meta: &StoredMessage| {
             let age_secs = now_secs.saturating_sub(meta.received_at);
             let age_weight = (age_secs as f64 / (4.0 * 24.0 * 60.0 * 60.0)).max(1.0);
+            let priority = if prioritised.contains(&meta.destination_hash) {
+                0.1
+            } else {
+                1.0
+            };
             weighted.push((
-                age_weight * meta.size as f64,
+                priority * age_weight * meta.size as f64,
                 Eviction {
                     transient_id: meta.transient_id,
                     size: meta.size,

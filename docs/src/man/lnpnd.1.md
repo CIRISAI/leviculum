@@ -80,12 +80,9 @@ Exit codes follow lxmd's: 200 timeout, 203 no identity / bad hash, 204 access de
 
 ## CONFIGURATION
 
-The config file is lxmd's format and keys (`lxmd --exampleconfig` and `lnpnd --exampleconfig` describe the same file). All keys of the reference's `[propagation]`, `[lxmf]` and `[logging]` sections are accepted. Most are honoured identically: announce intervals and costs, `announce_at_start`, autopeering and its depth, static peers, `max_peers`, `from_static_only`, `max_inbound_syncs`, `auth_required` (with the `allowed` file), `control_allowed`, storage and transfer limits, `display_name`, `stamp_cost`, `delivery_transfer_max_accepted_size`, `on_inbound`, `loglevel`, and the `ignored` file.
+The config file is lxmd's format and keys (`lxmd --exampleconfig` and `lnpnd --exampleconfig` describe the same file). All keys of the reference's `[propagation]`, `[lxmf]` and `[logging]` sections are accepted. Most are honoured identically: announce intervals and costs, `announce_at_start`, autopeering and its depth, static peers, `max_peers`, `from_static_only`, `max_inbound_syncs`, `auth_required` (with the `allowed` file), `control_allowed`, storage and transfer limits, `display_name`, `stamp_cost`, `delivery_transfer_max_accepted_size`, `on_inbound`, `loglevel`, `prioritise_destinations` (a listed destination's messages weigh a tenth in the cull when the store is full, as in lxmd), and the `ignored` file.
 
 Keys accepted but not acted on, so a config file shared with lxmd parses cleanly (each is warned about at startup):
-
-`prioritise_destinations`
-:   lnpnd's store eviction is size- and age-driven only. The reference uses this list to keep favoured destinations when the store overflows; lnpnd's store design (shared with the board-hosted node, where the list would not fit) does not carry per-destination priority.
 
 `sequential_pn_stamp_validation`, `static_peers_bypass_sequential`
 :   Stamp validation in lnpnd always runs sequentially on one worker thread, in arrival order, for every peer. The reference's toggles choose between parallel and sequential validation; lnpnd's single worker is the sequential behaviour, so `yes` is already the case and `no` has nothing to switch on.

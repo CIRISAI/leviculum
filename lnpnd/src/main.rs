@@ -391,6 +391,7 @@ struct Effective {
     remote_peering_cost_max: u8,
     max_peers: usize,
     static_peers: Vec<[u8; 16]>,
+    prioritised_destinations: Vec<[u8; 16]>,
     from_static_only: bool,
     max_inbound_syncs: usize,
     auth_required: bool,
@@ -517,6 +518,12 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             }
             hashes
         },
+        // lxmd reads the list and prioritises each valid hash
+        // (`reference/LXMF/LXMF/Utilities/lxmd.py:214-217`, `:446-450`);
+        // a bad hash is a config error here, as in `static_peers`.
+        prioritised_destinations: file
+            .get_hash_list("propagation", "prioritise_destinations")?
+            .unwrap_or_default(),
         from_static_only: args.from_static_only
             || file
                 .get_bool("propagation", "from_static_only")?
@@ -685,6 +692,7 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         stamp_cost_flexibility: effective.stamp_cost_flexibility,
         peering_cost: effective.peering_cost,
         name: effective.node_name.clone().map(String::into_bytes),
+        prioritised_destinations: effective.prioritised_destinations.clone(),
         ..leviculum_lxmf::PropagationNodeConfig::default()
     };
     // Honoured, but said: a message stamped below what a stock peer takes
@@ -1135,6 +1143,22 @@ mod tests {
             (effective.transfer_limit_kb, effective.sync_limit_kb),
             (256, 10_240)
         );
+    }
+
+    /// `prioritise_destinations` reaches the role (order 1294): it was
+    /// parsed, warned about and dropped.
+    #[test]
+    fn prioritise_destinations_is_honoured() {
+        let file = RawConfig::parse(
+            "[propagation]\nprioritise_destinations = \
+             41d20c727598a3fbbdf9106133a3a0ed, d924b81822ca24e68e2effea99bcb8cf\n",
+        )
+        .expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(effective.prioritised_destinations.len(), 2);
+        assert_eq!(effective.prioritised_destinations[0][0], 0x41);
+        assert!(file.inert_keys().is_empty());
     }
 
     /// A config that names no autopeer depth peers six hops deep, the depth
