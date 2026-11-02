@@ -94,6 +94,7 @@ STEPS = [
     "map",
     "fling",
     "friends",
+    "offgrid_positions",
     "settings",
     "receipts",
     "profile",
@@ -1240,6 +1241,44 @@ def friends_sheet_problems(nodes: list[Node], allowed: set[str]) -> tuple[list[s
     if twice:
         problems.append(f"listed twice: {twice}")
     return names, problems
+
+
+# The pins the map drew (1302, MapPane.refresh's line): all, and how many
+# are nodes nearby.
+MAP_PINS = re.compile(r"map pins=(?P<pins>\d+) nearby=(?P<nearby>\d+)")
+# The card of a node nearby (strings_scene.xml, nearby_card).
+NEARBY_CARD = "Nearby, not in your contacts"
+# Two places near the Florence fixture, the nodes nearby announce.
+OFFGRID_PLACES = ["43.7741,11.2551", "43.7768,11.2589"]
+
+
+def map_pins(logcat: str) -> tuple[int, int] | None:
+    """The newest `map pins=N nearby=M` line of a logcat; None without one."""
+    found = list(MAP_PINS.finditer(logcat))
+    if not found:
+        return None
+    last = found[-1]
+    return int(last.group("pins")), int(last.group("nearby"))
+
+
+def offgrid_problems(
+    pins: tuple[int, int] | None, before: tuple[int, int] | None, names: list[str], wanted: list[str]
+) -> list[str]:
+    """What is wrong after two nodes announced (1302): fewer than two more
+    pins, not two more nearby ones, a seeded name missing from the sheet."""
+    problems = []
+    if pins is None:
+        problems.append("no 'map pins=' line in the logcat")
+    else:
+        was = before or (0, 0)
+        if pins[0] - was[0] < len(wanted):
+            problems.append(f"pins {was[0]} -> {pins[0]}, want {len(wanted)} more")
+        if pins[1] - was[1] < len(wanted):
+            problems.append(f"nearby pins {was[1]} -> {pins[1]}, want {len(wanted)} more")
+    missing = [w for w in wanted if not any(n.startswith(w) for n in names)]
+    if missing:
+        problems.append(f"not in the Friends sheet: {missing}; the sheet has {names}")
+    return problems
 
 
 def divider_above(nodes: list[Node]) -> bool:
@@ -3828,6 +3867,88 @@ class Walk:
         return (
             f"friends={len(names)} of {len(allowed)} with a position, first={names[0]!r} "
             f"card=ok navigate={'shown' if navigate else 'hidden (no app takes geo:)'} chat=ok back=card,chats"
+        )
+
+    def step_offgrid_positions(self) -> str:
+        """Positions the mesh announces need no mailbox (1302): with the
+        host's mailbox stopped, two nodes announce on `lev.position` over
+        the phone's node; the map draws two more pins, both nearby, and the
+        Friends sheet lists both by their announced names, the card of one
+        saying "Nearby, not in your contacts" with Add and no Chat."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        mailbox = fixture.procs[1] if len(fixture.procs) > 1 else None
+        for _ in range(3):
+            if find(dev.dump(), rid="tab_map"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        dev.tap_node(self.wait_id("tab_map", 10)[0])
+        time.sleep(1.0)
+        before = map_pins(dev.shell("logcat -d -s loquax:I", check=False))
+        wanted = [f"Walk Nearby {tag}{self.nonce}" for tag in ("A", "B")]
+        stopped = mailbox is not None and mailbox.poll() is None and not self.on_phone
+        if stopped:
+            mailbox.send_signal(signal.SIGSTOP)
+        try:
+            for name, place in zip(wanted, OFFGRID_PLACES):
+                home = fixture.root / ("nearby-" + name[-7:].replace(" ", "-"))
+                home.mkdir(parents=True, exist_ok=True)
+                said = subprocess.run(
+                    [
+                        self.args.loquax,
+                        "announce",
+                        "--config",
+                        str(fixture.cfg),
+                        "--position",
+                        place,
+                        "--from",
+                        name,
+                    ],
+                    env={**os.environ, "LNMSG_HOME": str(home)},
+                    capture_output=True,
+                    timeout=60,
+                )
+                if said.returncode != 0:
+                    raise StepFailed(
+                        f"loquax announce exit={said.returncode}: {said.stderr.decode()[-300:]}"
+                    )
+            seen = wait_for(
+                lambda: (lambda p: p if p and p[1] - (before or (0, 0))[1] >= 2 else None)(
+                    map_pins(dev.shell("logcat -d -s loquax:I", check=False))
+                ),
+                20,
+                every=1.0,
+            )
+            pins = seen or map_pins(dev.shell("logcat -d -s loquax:I", check=False))
+            dev.tap_node(self.wait_id("friends", 10)[0])
+            self.wait_id("friend_name", 10)
+            names = [n.text for n in by_top(find(dev.dump(), rid="friend_name"))]
+            self.note(f"offgrid: pins {before} -> {pins}, sheet {names}")
+            problems = offgrid_problems(pins, before, names, wanted)
+            if problems:
+                raise StepFailed("; ".join(problems))
+            sheet = dev.dump()
+            named = [n for n in find(sheet, rid="friend_name") if n.text.startswith(wanted[0])]
+            rows = [r for r in by_top(find(sheet, rid="friend_row")) if any(inside(n, r) for n in named)]
+            if not rows:
+                raise StepFailed(f"no row for {wanted[0]!r}")
+            dev.tap_node(rows[0])
+            self.wait_id("card_name", 10)
+            nodes = dev.dump()
+            line = " ".join(n.text for n in find(nodes, rid="card_line"))
+            if NEARBY_CARD not in line:
+                raise StepFailed(f"the card says {line!r}, want {NEARBY_CARD!r}")
+            if not find(nodes, rid="card_add") or find(nodes, rid="card_chat"):
+                raise StepFailed(f"the card's buttons: {texts(nodes)[-8:]}")
+            dev.key("KEYCODE_BACK")
+            dev.key("KEYCODE_BACK")
+        finally:
+            if stopped:
+                mailbox.send_signal(signal.SIGCONT)
+        return (
+            f"mailbox={'stopped' if stopped else 'not on the host'} pins={before}->{pins} "
+            f"sheet={len(names)} card=nearby,add"
         )
 
     def step_settings(self) -> str:

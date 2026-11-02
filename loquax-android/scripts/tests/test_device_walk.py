@@ -791,6 +791,41 @@ class RegionFillsIn(unittest.TestCase):
         self.assertLess(steps.index("region_fills_in"), steps.index("first_start_name"))
 
 
+class OffgridPositions(unittest.TestCase):
+    """The offgrid_positions step's reading (1302)."""
+
+    def test_the_newest_pins_line_counts(self):
+        log = (
+            "11-02 01:00:00.000 I/loquax: map pins=3 nearby=0\n"
+            "11-02 01:00:05.000 I/loquax: network wifi\n"
+            "11-02 01:00:09.000 I/loquax: map pins=5 nearby=2\n"
+        )
+        self.assertEqual(walk.map_pins(log), (5, 2))
+        self.assertIsNone(walk.map_pins("I/loquax: network wifi"))
+
+    def test_the_verdict(self):
+        wanted = ["Walk Nearby A1", "Walk Nearby B1"]
+        names = ["Walk Nearby B1 \u00b74f2a", "bob \u00b7abab", "Walk Nearby A1 \u00b70c1d"]
+        self.assertEqual(walk.offgrid_problems((5, 2), (3, 0), names, wanted), [])
+        self.assertEqual(
+            walk.offgrid_problems((4, 1), (3, 0), names[:2], wanted),
+            [
+                "pins 3 -> 4, want 2 more",
+                "nearby pins 0 -> 1, want 2 more",
+                "not in the Friends sheet: ['Walk Nearby A1']; the sheet has "
+                + repr(names[:2]),
+            ],
+        )
+        self.assertEqual(
+            walk.offgrid_problems(None, None, names, wanted), ["no 'map pins=' line in the logcat"]
+        )
+
+    def test_the_step_runs_after_the_friends_sheet_it_would_disturb(self):
+        steps = walk.STEPS
+        self.assertEqual(steps.index("offgrid_positions"), steps.index("friends") + 1)
+        self.assertLess(steps.index("offgrid_positions"), steps.index("first_start_name"))
+
+
 class Lines(unittest.TestCase):
     def test_a_step_line_round_trips(self):
         line = walk.walk_line("list", True, 1234.7, "rows=18 of 18\n named=12")
