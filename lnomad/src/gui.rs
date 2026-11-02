@@ -1001,9 +1001,16 @@ fn picture_layer<'a>(
                 if y + i64::from(cells.1) <= 0 || y >= viewport {
                     continue;
                 }
+                // Flush left, as the terminal draws it: the widget is the
+                // picture's own size fitted into its cells, not the cells,
+                // in which iced would centre it.
+                let size = iced::ContentFit::ScaleDown.fit(
+                    Size::new(held.px.0 as f32, held.px.1 as f32),
+                    Size::new(f32::from(cells.0) * CELL_W, f32::from(cells.1) * CELL_H),
+                );
                 let picture = image(held.handle.clone())
-                    .width(f32::from(cells.0) * CELL_W)
-                    .height(f32::from(cells.1) * CELL_H)
+                    .width(size.width)
+                    .height(size.height)
                     .content_fit(iced::ContentFit::ScaleDown);
                 layer = layer.push(at(picture.into()));
             }
