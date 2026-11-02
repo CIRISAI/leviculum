@@ -946,6 +946,7 @@ impl Store {
                     received_at,
                     location,
                     telemetry,
+                    source: crate::telemetry::Source::Telemetry,
                 })
             })
             .collect()
@@ -3466,6 +3467,7 @@ mod tests {
                 last_update: fix_time,
             },
             telemetry: vec![0x81, 0x01, 0x05],
+            source: crate::telemetry::Source::Telemetry,
         }
     }
 

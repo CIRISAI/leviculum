@@ -76,6 +76,10 @@ leviculum_ui::catalogue! {
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
     NoPosition = "no_position", "No position from this friend yet", "Noch keine Position von diesem Freund";
+    // A node the mesh shows on the map that is no contact (1302).
+    NearbyCard = "nearby_card", "Nearby, not in your contacts", "In der Nähe, nicht in deinen Kontakten";
+    NearbyAdd = "nearby_add", "Add", "Hinzufügen";
+    NearbyEnterAdds = "nearby_enter_adds", "Enter adds", "Enter fügt hinzu";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";

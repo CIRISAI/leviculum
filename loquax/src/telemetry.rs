@@ -63,6 +63,20 @@ pub struct Fix {
     /// The packed Telemeter the reading came from, for what we cannot decode
     /// yet.
     pub telemetry: Vec<u8>,
+    /// How it came: in a message, or announced to the mesh (1302).
+    pub source: Source,
+}
+
+/// How a position came.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// In a message's telemetry field: kept by the store with its message.
+    #[default]
+    Telemetry,
+    /// In a `lev.position` announce ([`crate::mesh_position`]): a state the
+    /// screen holds and the store does not, since the node announces it
+    /// again at its cadence.
+    Mesh,
 }
 
 impl Fix {
@@ -136,6 +150,7 @@ pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Rea
         received_at,
         location,
         telemetry: telemetry.to_vec(),
+        source: Source::Telemetry,
     };
     for (key, value) in fields {
         match *key {
@@ -716,6 +731,7 @@ mod tests {
             received_at: Some(NOW),
             location: location(1, 1, 0, NOW + 3600),
             telemetry: Vec::new(),
+            source: Source::Telemetry,
         };
         assert!(ahead.ahead());
         assert_eq!(ahead.order_time(), NOW);
@@ -768,6 +784,7 @@ mod tests {
             received_at: Some(NOW),
             location: location(1, 1, 0, NOW - STALE_AFTER_SECS),
             telemetry: Vec::new(),
+            source: Source::Telemetry,
         };
         assert!(!fix.stale(NOW), "exactly two hours is still current");
         assert!(fix.stale(NOW + 1));

@@ -164,6 +164,8 @@ pub struct Placed {
     /// The label's width, for a click on it.
     pub width: f32,
     pub stale: bool,
+    /// [`MapPin::nearby`]: drawn in a neutral grey.
+    pub nearby: bool,
     pub selected: bool,
 }
 
@@ -272,6 +274,7 @@ fn labelled(
             label: label.map(|l| (l.x as f32, l.y as f32, words)),
             width: width as f32,
             stale: pin.stale,
+            nearby: pin.nearby,
             selected: Some(pin.peer) == selected,
         })
         .collect();
@@ -308,10 +311,14 @@ struct PinInk {
 /// The window's pin colours (`gui::Map::draw`), the label's ground and
 /// text turned for the dark table.
 fn pin_ink(pin: &Placed, theme: MapTheme) -> PinInk {
+    let ground = match pin.nearby {
+        true => [0x80, 0x80, 0x80],
+        false => [0x20, 0x50, 0xc0],
+    };
     let marker = match (pin.selected, pin.stale) {
         (true, _) => ([0xd0, 0x30, 0x30], 1.0),
-        (false, false) => ([0x20, 0x50, 0xc0], 1.0),
-        (false, true) => ([0x20, 0x50, 0xc0], 0.45),
+        (false, false) => (ground, 1.0),
+        (false, true) => (ground, 0.45),
     };
     let (ground, text) = match theme {
         MapTheme::Dark => ([0x18, 0x18, 0x18], [0xe6, 0xe6, 0xe6]),

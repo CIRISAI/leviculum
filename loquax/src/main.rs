@@ -116,6 +116,11 @@ enum SubCommand {
     Fetch(FetchArgs),
     /// Print this machine's own LXMF address.
     Address,
+    /// Announce this machine's position to the mesh once, on `lev.position`
+    /// beside its delivery address: every Loquax in range shows it on the
+    /// map, a contact's pin or a node nearby, with no mailbox and no
+    /// message.
+    Announce(AnnounceArgs),
     /// Bring over the identity, contacts and history of another messenger:
     /// NomadNet's tree, a raw identity file of any app, a pasted Base32 key,
     /// or a loquax export. Without a path it looks in the apps' default
@@ -477,6 +482,30 @@ struct SendArgs {
     timeout: u64,
 }
 
+#[derive(clap::Args, Debug)]
+struct AnnounceArgs {
+    /// The place to announce, `LAT,LON` in degrees, timed now.
+    #[arg(long)]
+    position: String,
+
+    /// The name the delivery address announces beside it (default: as
+    /// `send --from`).
+    #[arg(long)]
+    from: Option<String>,
+
+    /// Shared-instance name to connect to (overrides the config file's).
+    #[arg(long)]
+    instance: Option<String>,
+
+    /// Reticulum config directory (default: the platform default, like `lncp`).
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Seconds to spend, after connecting, on getting the announce out.
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    timeout: u64,
+}
+
 #[cfg(feature = "history")]
 #[derive(clap::Args, Debug)]
 struct ImportArgs {
@@ -817,6 +846,7 @@ async fn main() -> ExitCode {
 
     match command {
         SubCommand::Send(send) => run(send).await,
+        SubCommand::Announce(args) => run_announce(args).await,
         SubCommand::Fetch(fetch) => run_fetch_command(fetch).await,
         SubCommand::Address => run_address(),
         #[cfg(feature = "history")]
@@ -1476,6 +1506,11 @@ fn send_photo(
 /// `--position`'s `LAT,LON` in degrees as the fields of a position report
 /// timed now ([`loquax::ui::position_fields`]).
 fn position_fields(text: &str) -> Result<Vec<leviculum_lxmf::Field>, String> {
+    position_location(text).map(loquax::ui::position_fields)
+}
+
+/// `--position`'s `LAT,LON` in degrees as a reading timed now.
+fn position_location(text: &str) -> Result<leviculum_lxmf::telemetry::Location, String> {
     let bad = || format!("--position {text}: expected LAT,LON in degrees, as 52.5163,13.3777");
     let (lat, lon) = text.split_once(',').ok_or_else(bad)?;
     let degrees = |part: &str, limit: f64| {
@@ -1489,17 +1524,97 @@ fn position_fields(text: &str) -> Result<Vec<leviculum_lxmf::Field>, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    Ok(loquax::ui::position_fields(
-        leviculum_lxmf::telemetry::Location {
-            latitude_e6: degrees(lat, 90.0)?,
-            longitude_e6: degrees(lon, 180.0)?,
-            altitude_e2: 0,
-            speed_e2: 0,
-            bearing_e2: 0,
-            accuracy_e2: 0,
-            last_update: now,
-        },
-    ))
+    Ok(leviculum_lxmf::telemetry::Location {
+        latitude_e6: degrees(lat, 90.0)?,
+        longitude_e6: degrees(lon, 180.0)?,
+        altitude_e2: 0,
+        speed_e2: 0,
+        bearing_e2: 0,
+        accuracy_e2: 0,
+        last_update: now,
+    })
+}
+
+/// `loquax announce`: attach as `send` does, announce the position once on
+/// `lev.position` (1302), and wait until the engine took it, then a moment
+/// for the driver to put it on the wire.
+async fn run_announce(args: AnnounceArgs) -> ExitCode {
+    let location = match position_location(&args.position) {
+        Ok(location) => location,
+        Err(error) => return usage(error),
+    };
+    let display_name = match display_name::from_process(args.from.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(error) => return usage(error),
+    };
+    let home = match identity::home_dir() {
+        Ok(home) => home,
+        Err(error) => return failure(error, "no-home"),
+    };
+    // The announce registers our destinations for its run, as a send does.
+    let _lock = match loquax::home::lock::DeliveryLock::share(&home) {
+        Ok(lock) => lock,
+        Err(error) => return failure(error, "locked"),
+    };
+    let identity = match identity::load_or_create(&home.join("identity")) {
+        Ok(identity) => identity,
+        Err(error) => return failure(error, "no-identity"),
+    };
+    let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+    let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
+    let storage_dir = match storage_dir(&home) {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let mut attached = match attach(AttachConfig {
+        instance,
+        config_dir: Some(config_dir),
+        storage_dir,
+        identity,
+        display_name: display_name.name.into_bytes(),
+        notices: Terminal::new(home.clone()),
+    })
+    .await
+    {
+        Ok(attached) => attached,
+        Err(error) => return no_daemon(&error),
+    };
+    use loquax::outbox::{Command, Outbox, OutboxEvent};
+    const TOKEN: u64 = 1302;
+    let submitted = attached
+        .outbox
+        .submit(Command::AnnouncePosition { location })
+        .and_then(|()| attached.outbox.submit(Command::Fence { token: TOKEN }));
+    if let Err(gone) = submitted {
+        eprintln!("loquax: {gone}");
+        return ExitCode::from(EXIT_FAILURE);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.timeout);
+    loop {
+        match attached.outbox.try_next_event() {
+            Ok(Some(OutboxEvent::Fenced { token: TOKEN })) => break,
+            Ok(Some(_)) => continue,
+            Ok(None) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(None) => {
+                eprintln!(
+                    "loquax: the engine did not take the announce within {}s",
+                    args.timeout
+                );
+                return ExitCode::from(EXIT_FAILURE);
+            }
+            Err(gone) => {
+                eprintln!("loquax: {gone}");
+                return ExitCode::from(EXIT_FAILURE);
+            }
+        }
+    }
+    // The packet left the engine with the fence; the driver writes it to
+    // the daemon's socket on its own task.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    println!("announced {}", args.position.trim());
+    ExitCode::SUCCESS
 }
 
 /// `loquax send` on a client of a home node: hand the message to the home

@@ -61,6 +61,7 @@ pub(super) mod tests {
             label: label.to_string(),
             age: Some("5m".to_string()),
             stale: peer == 3,
+            nearby: false,
         }
     }
 

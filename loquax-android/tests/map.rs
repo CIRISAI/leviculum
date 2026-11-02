@@ -83,6 +83,7 @@ fn pin(peer: u8, label: &str, lat: f64, lon: f64) -> MapPin {
         label: label.to_string(),
         age: Some("5m".to_string()),
         stale: false,
+        nearby: false,
     }
 }
 
@@ -607,6 +608,7 @@ fn a_position_in_the_store_makes_a_pin() {
                 last_update: NOW - 90,
             },
             telemetry: Vec::new(),
+            source: loquax::telemetry::Source::Telemetry,
         };
         store
             .write(&[StoreWrite::Position(fix)])

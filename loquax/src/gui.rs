@@ -62,7 +62,7 @@ use loquax::tiles::Motion;
 use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
 use loquax::ui::scene::{LayoutClass, NodeId, Scene, TabId};
-use loquax::ui::strings::Lang;
+use loquax::ui::strings::{Lang, StrId};
 use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY};
 use loquax::when::WallTime;
 
@@ -319,6 +319,8 @@ pub enum Message {
     RecRelease,
     /// The pointer went onto the lock chip, or off it, while held.
     RecOverLock(bool),
+    /// The map list's "Add" on a node nearby that is no contact (1302).
+    AddNearby([u8; 16]),
 }
 
 impl Message {
@@ -340,6 +342,7 @@ impl Message {
                 | Message::Settings
                 | Message::Viewer(_)
                 | Message::ViewerClose
+                | Message::AddNearby(_)
         )
     }
 }
@@ -1060,7 +1063,12 @@ impl App {
             MapCmd::Open => {
                 if let Some(peer) = self.selected {
                     self.screen = Screen::Chats;
-                    self.tell(UiEvent::Open { peer });
+                    // A node nearby is added, which opens its chat (1302).
+                    let nearby = self.seen.pins.iter().any(|p| p.peer == peer && p.nearby);
+                    self.tell(match nearby {
+                        true => UiEvent::AddNearby { peer },
+                        false => UiEvent::Open { peer },
+                    });
                 }
             }
             MapCmd::Close => self.screen = Screen::Chats,
@@ -1143,6 +1151,11 @@ impl App {
             }
             Message::ViewerClose => {
                 self.viewer = None;
+                return Task::none();
+            }
+            Message::AddNearby(peer) => {
+                self.screen = Screen::Chats;
+                self.tell(UiEvent::AddNearby { peer });
                 return Task::none();
             }
             Message::Intent(intent) => return self.intent(intent),
@@ -1479,7 +1492,18 @@ impl App {
             .fold(column![].spacing(2), |list, pin| {
                 let alpha = if pin.stale { 0.5 } else { 1.0 };
                 let age = pin.age.clone().unwrap_or_default();
-                let entry = column![text(pin.label.clone()).size(15), text(age).size(12),];
+                let mut entry = column![text(pin.label.clone()).size(15), text(age).size(12),];
+                // A node nearby that is no contact (1302): its card says
+                // so and offers to add it.
+                if pin.nearby {
+                    entry = entry
+                        .push(text(StrId::NearbyCard.text(Lang::En)).size(12))
+                        .push(
+                            button(text(StrId::NearbyAdd.text(Lang::En)).size(12))
+                                .on_press(Message::AddNearby(pin.peer))
+                                .padding([0, 6]),
+                        );
+                }
                 let style = match Some(pin.peer) == self.selected {
                     true => button::primary,
                     false => button::text,
@@ -1674,10 +1698,13 @@ impl canvas::Program<Message> for MapCanvas<'_> {
             )
         };
         for pin in &shown.placed {
-            let ink = match (pin.selected, pin.stale) {
-                (true, _) => Color::from_rgb8(0xd0, 0x30, 0x30),
-                (false, false) => Color::from_rgb8(0x20, 0x50, 0xc0),
-                (false, true) => Color::from_rgba8(0x20, 0x50, 0xc0, 0.45),
+            let ink = match (pin.selected, pin.nearby, pin.stale) {
+                (true, ..) => Color::from_rgb8(0xd0, 0x30, 0x30),
+                // A node nearby that is no contact (1302): a neutral grey.
+                (false, true, false) => Color::from_rgb8(0x80, 0x80, 0x80),
+                (false, true, true) => Color::from_rgba8(0x80, 0x80, 0x80, 0.45),
+                (false, false, false) => Color::from_rgb8(0x20, 0x50, 0xc0),
+                (false, false, true) => Color::from_rgba8(0x20, 0x50, 0xc0, 0.45),
             };
             let centre = to(pin.x, pin.y);
             let radius = map::MARKER / 2.0;

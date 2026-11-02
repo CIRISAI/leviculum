@@ -1504,6 +1504,22 @@ pub enum UiEvent {
     /// The shell's newest own fix, or none (1270): the position sheet
     /// shows it and its age.
     OwnFix(Option<leviculum_lxmf::telemetry::Location>),
+    /// A node announced its position to the mesh (1302,
+    /// [`crate::mesh_position`]): `identity` the hash of the identity the
+    /// announce proved, `fix` its position, `name` the name a shell knows
+    /// for it, if any, and `age` how many seconds ago the node heard it.
+    /// A state, not a message: it joins the peer's telemetry positions,
+    /// the newest fix winning ([`UiModel::mesh_position`]), and the store
+    /// keeps none of it.
+    MeshPosition {
+        identity: [u8; 16],
+        fix: leviculum_lxmf::telemetry::Location,
+        name: Option<String>,
+        age: u32,
+    },
+    /// The map card's "Add" on a node nearby that is no contact (1302):
+    /// its conversation opens, named by its announced name.
+    AddNearby { peer: [u8; 16] },
     /// The position sheet's "Now, once": the own fix goes to `peer` as a
     /// report.
     ShareFix { peer: [u8; 16] },
@@ -1783,6 +1799,16 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.bar.own_fix = fix;
             model.shares_due()
         }
+        UiEvent::MeshPosition {
+            identity,
+            fix,
+            name,
+            age,
+        } => {
+            model.mesh_position(identity, fix, name.as_deref(), age);
+            Vec::new()
+        }
+        UiEvent::AddNearby { peer } => model.add_nearby(peer),
         UiEvent::StartShare { peer, span } => model.start_share(peer, span),
         UiEvent::StopShare { peer } => model.stop_share(peer),
         UiEvent::ShareFix { peer } => model.share_fix(peer),
@@ -2479,11 +2505,16 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
     Vec::new()
 }
 
-/// A pin chosen by `Enter` or a click: that peer's conversation, opened.
+/// A pin chosen by `Enter` or a click: that peer's conversation, opened;
+/// a node nearby that is no contact is added so (1302), the card's "Add".
 fn open_pin<B: InputBuffer>(model: &mut UiModel<B>, peer: [u8; 16]) -> Vec<UiEffect> {
     if Some(peer) == model.address {
         model.toast(ToastKind::Info, "that pin is you".to_string());
         return Vec::new();
+    }
+    if model.is_nearby(&peer) {
+        model.map = None;
+        return model.add_nearby(peer);
     }
     let index = model.conversation(peer);
     model.select(index);
@@ -3635,6 +3666,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             message_id,
             last: Some(state),
         } => apply_state(model, message_id, state),
+        OutboxEvent::MeshPosition { identity, location } => {
+            model.mesh_position(identity, location, None, 0)
+        }
         // Our own announce, echoed back, names nobody.
         OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
         OutboxEvent::Announced { destination, name } => {
@@ -3910,6 +3944,7 @@ impl<B> UiModel<B> {
         map::pins_of(
             &shown,
             |peer| self.names.label(peer),
+            |peer| self.is_nearby(peer),
             self.address,
             self.now.map(|now| now.unix_secs),
         )
@@ -3918,11 +3953,30 @@ impl<B> UiModel<B> {
     /// Whether `peer`'s position is alive (1209), at the model's clock
     /// ([`Conversation::liveness`]); stale for a peer without one.
     pub fn liveness(&self, peer: &[u8; 16]) -> liveness::Liveness {
-        self.conversations
+        let now = self.now.map(|now| now.unix_secs);
+        let reports = self
+            .conversations
             .iter()
             .find(|c| c.peer == *peer)
-            .map(|c| c.liveness(self.now.map(|now| now.unix_secs)))
-            .unwrap_or_default()
+            .map(|c| c.liveness(now))
+            .unwrap_or_default();
+        // A position the mesh announced (1302) that is newer than every
+        // report is the peer's newest fix: the row's pin and ring go by it,
+        // judged as one report alone, and keep the reports' cadence.
+        let announced = self
+            .positions
+            .get(peer)
+            .filter(|fix| fix.source == telemetry::Source::Mesh)
+            .map(Fix::order_time)
+            .filter(|at| reports.last_fix_at.is_none_or(|last| *at > last));
+        match announced {
+            Some(at) => liveness::Liveness {
+                state: liveness::Liveness::of(&[at], now).state,
+                cadence_s: reports.cadence_s,
+                last_fix_at: Some(at),
+            },
+            None => reports,
+        }
     }
 
     /// The fix message `m` of conversation `c` carries ([`message_fix`]).
@@ -3998,6 +4052,80 @@ impl<B> UiModel<B> {
             if newer {
                 self.positions.insert(fix.peer, fix);
             }
+        }
+    }
+
+    /// A position the mesh announced (1302): the peer is the delivery
+    /// address of the identity that announced, so it joins the peer's
+    /// telemetry positions, and the newest fix wins by [`Fix::newer_than`]
+    /// whichever way it came; [`Fix::source`] says which. The store keeps
+    /// none of it: the node announces again at its cadence, and a node
+    /// nearby that is no contact leaves no trace once it is gone.
+    pub fn mesh_position(
+        &mut self,
+        identity: [u8; 16],
+        location: leviculum_lxmf::telemetry::Location,
+        name: Option<&str>,
+        age: u32,
+    ) {
+        let peer = crate::mesh_position::delivery_of(&identity);
+        if name.is_some() {
+            self.names.heard(peer, name);
+        }
+        let fix = Fix {
+            peer,
+            via: peer,
+            message: None,
+            received_at: self
+                .now
+                .map(|now| now.unix_secs.saturating_sub(i64::from(age))),
+            location,
+            telemetry: Vec::new(),
+            source: telemetry::Source::Mesh,
+        };
+        let newer = self
+            .positions
+            .get(&peer)
+            .is_none_or(|held| fix.newer_than(held));
+        if newer {
+            self.positions.insert(peer, fix);
+        }
+    }
+
+    /// Whether `peer` is one of the reader's people: ourselves, a peer
+    /// with a conversation, or one the reader named or linked. A node the
+    /// mesh shows on the map and is none of these is nearby (1302).
+    pub fn is_contact(&self, peer: &[u8; 16]) -> bool {
+        self.address == Some(*peer)
+            || self.conversations.iter().any(|c| c.peer == *peer)
+            || self.names.trust(peer) != Trust::Unknown
+    }
+
+    /// Whether `peer`'s pin is a node nearby (1302): its position came
+    /// from the mesh, and it is none of the reader's people. A peer known
+    /// from a collector's stream keeps the pin it had.
+    pub fn is_nearby(&self, peer: &[u8; 16]) -> bool {
+        self.positions
+            .get(peer)
+            .is_some_and(|fix| fix.source == telemetry::Source::Mesh)
+            && !self.is_contact(peer)
+    }
+
+    /// The card's "Add" on a node nearby (1302): its conversation is
+    /// listed and opened as a friend's code opens it (1263), and the name
+    /// it announced becomes the reader's name for it, so it stays a
+    /// contact by name whatever the mesh says next.
+    pub(crate) fn add_nearby(&mut self, peer: [u8; 16]) -> Vec<UiEffect> {
+        if self.address == Some(peer) {
+            return Vec::new();
+        }
+        self.show_blocked = false;
+        let index = self.conversation(peer);
+        self.select(index);
+        self.focus = Pane::Compose;
+        match self.names.announced(&peer).map(str::to_string) {
+            Some(name) if self.names.petname(&peer).is_none() => self.rename(peer, &name),
+            _ => Vec::new(),
         }
     }
 }
@@ -4812,9 +4940,26 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         .filter(|&until| model.tick < until)
         .and_then(|_| model.map_setup.drawings.get(model.map_setup.drawing))
         .map_or(String::new(), |d| format!("{} · ", d.name));
+    // The selected pin's card (1302): a node nearby that is no contact
+    // says so, and how to add it.
+    let card = model
+        .map
+        .as_ref()
+        .and_then(|state| state.selected)
+        .filter(|peer| {
+            map.as_ref()
+                .is_some_and(|m| m.pins.iter().any(|p| p.peer == *peer && p.nearby))
+        })
+        .map_or(String::new(), |_| {
+            format!(
+                " · {} · {}",
+                strings::StrId::NearbyCard.text(strings::Lang::En),
+                strings::StrId::NearbyEnterAdds.text(strings::Lang::En)
+            )
+        });
     let (messages_title, messages_title_right) = match &map {
         Some(shown) => (
-            MAP_TITLE.to_string(),
+            format!("{MAP_TITLE}{card}"),
             match &model.map_loading {
                 Some(word) => format!(
                     "{named}z{} · {} in view · {word}",
@@ -9719,11 +9864,168 @@ mod tests {
             received_at: Some(t),
             location: fix_at(lat, 0, t).location.expect("a location"),
             telemetry: Vec::new(),
+            source: crate::telemetry::Source::Telemetry,
         };
         model.restore_positions(vec![fix(2, 200), fix(1, 100)]);
         assert_eq!(model.positions[&PEER].location.latitude_e6, 2);
         model.delete_conversation(PEER, true);
         assert!(model.positions.is_empty());
+    }
+
+    /// A node's `lev.position` announce at `lat`, fixed `ago` seconds
+    /// before 14:00, heard `age` seconds ago (1302).
+    fn mesh_fix(identity: [u8; 16], lat: i32, ago: i64, age: u32) -> UiEvent {
+        UiEvent::MeshPosition {
+            identity,
+            fix: fix_at(lat, 11_260_000, two_pm() - ago)
+                .location
+                .expect("a location"),
+            name: None,
+            age,
+        }
+    }
+
+    /// 1302, the merge rule: an announced position joins the telemetry
+    /// positions of the identity's delivery address, the newest fix wins
+    /// whichever way it came, and the fix remembers how it came. The store
+    /// is handed none of the announced ones.
+    #[test]
+    fn an_announced_position_merges_with_telemetry_by_identity_the_newest_winning() {
+        const ANNA: [u8; 16] = [0x33; 16];
+        let peer = crate::mesh_position::delivery_of(&ANNA);
+        let mut model = UiModel::<Field>::new(&[peer]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            peer,
+            1,
+            "",
+            report_of(&fix_at(1_000_000, 11_260_000, two_pm() - 240)),
+        );
+        let _ = model.take_writes();
+        // Older than the report: the report stays.
+        update(&mut model, mesh_fix(ANNA, 2_000_000, 600, 0));
+        assert_eq!(model.positions[&peer].location.latitude_e6, 1_000_000);
+        assert_eq!(model.positions[&peer].source, telemetry::Source::Telemetry);
+        // Newer: the announce wins, and says so.
+        update(&mut model, mesh_fix(ANNA, 3_000_000, 60, 0));
+        assert_eq!(model.positions[&peer].location.latitude_e6, 3_000_000);
+        assert_eq!(model.positions[&peer].source, telemetry::Source::Mesh);
+        assert_eq!(model.positions[&peer].received_at, Some(two_pm()));
+        // Heard a while ago: received then, not now.
+        update(&mut model, mesh_fix(ANNA, 3_000_001, 30, 20));
+        assert_eq!(model.positions[&peer].received_at, Some(two_pm() - 20));
+        let positions = model
+            .take_writes()
+            .iter()
+            .filter(|w| matches!(w, StoreWrite::Position(_)))
+            .count();
+        assert_eq!(positions, 0, "the store keeps no announced position");
+        // A newer report wins back.
+        arrive(
+            &mut model,
+            peer,
+            2,
+            "",
+            report_of(&fix_at(4_000_000, 11_260_000, two_pm() - 5)),
+        );
+        assert_eq!(model.positions[&peer].location.latitude_e6, 4_000_000);
+        assert_eq!(model.positions[&peer].source, telemetry::Source::Telemetry);
+        // The same fix through the engine's seam.
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::MeshPosition {
+                identity: ANNA,
+                location: fix_at(5_000_000, 0, two_pm()).location.expect("a location"),
+            }),
+        );
+        assert_eq!(model.positions[&peer].location.latitude_e6, 5_000_000);
+    }
+
+    /// 1302: an announced position newer than every report is the row's
+    /// newest fix, so the list's pin (1224) and the ring see it; an older
+    /// one changes nothing.
+    #[test]
+    fn an_announced_position_is_the_rows_newest_fix() {
+        const ANNA: [u8; 16] = [0x33; 16];
+        let peer = crate::mesh_position::delivery_of(&ANNA);
+        let mut model = UiModel::<Field>::new(&[peer]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            peer,
+            1,
+            "",
+            report_of(&fix_at(1_000_000, 11_260_000, two_pm() - 3 * 3600)),
+        );
+        assert_eq!(model.liveness(&peer).state, liveness::State::Recent);
+        update(&mut model, mesh_fix(ANNA, 2_000_000, 4 * 3600, 0));
+        assert_eq!(
+            model.liveness(&peer).last_fix_at,
+            Some(two_pm() - 3 * 3600),
+            "an older announce is no newer fix"
+        );
+        update(&mut model, mesh_fix(ANNA, 2_000_000, 120, 0));
+        let l = model.liveness(&peer);
+        assert_eq!(l.last_fix_at, Some(two_pm() - 120));
+        assert_eq!(l.state, liveness::State::Live);
+        let row = chat::list_row(&model, &peer);
+        assert!(
+            scene::PositionBadge::of(&peer, &row.name, &row.liveness, Some(two_pm())).is_some(),
+            "the row carries its map pin"
+        );
+    }
+
+    /// 1302: a node the mesh shows that is no contact is a pin with its
+    /// announced name, marked nearby; the map's title is its card while it
+    /// is selected, and Enter adds it: its conversation opens, named by its
+    /// announce, and its pin is a friend's from then on. A contact's pin
+    /// and our own are never nearby.
+    #[test]
+    fn a_node_nearby_is_a_neutral_pin_with_a_card_and_enter_adds_it() {
+        const STRANGER: [u8; 16] = [0x44; 16];
+        let peer = crate::mesh_position::delivery_of(&STRANGER);
+        let mut model = mapped();
+        update(
+            &mut model,
+            UiEvent::MeshPosition {
+                identity: STRANGER,
+                fix: fix_at(43_775_500, 11_263_000, two_pm() - 120)
+                    .location
+                    .expect("a location"),
+                name: Some("Wanderer".to_string()),
+                age: 0,
+            },
+        );
+        let pins = model.map_pins();
+        let nearby: Vec<&map::MapPin> = pins.iter().filter(|p| p.nearby).collect();
+        assert_eq!(nearby.len(), 1, "{pins:?}");
+        assert_eq!(nearby[0].peer, peer);
+        assert!(
+            nearby[0].label.starts_with("Wanderer "),
+            "{}",
+            nearby[0].label
+        );
+        assert!(
+            pins.iter().filter(|p| p.peer != peer).all(|p| !p.nearby),
+            "bob, Alice and we are not nearby: {pins:?}"
+        );
+        update(&mut model, key(KeyCode::Char('M')));
+        let shown = model.map_view().expect("open");
+        assert!(shown.pins.iter().any(|p| p.peer == peer && p.nearby));
+        while model.map.and_then(|m| m.selected) != Some(peer) {
+            update(&mut model, key(KeyCode::Tab));
+        }
+        assert_eq!(
+            view(&model).messages_title,
+            "map · Nearby, not in your contacts · Enter adds"
+        );
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_none(), "the map gives way to the chat");
+        assert_eq!(model.conversations[model.selected].peer, peer);
+        assert_eq!(model.names.petname(&peer), Some("Wanderer"));
+        assert!(model.is_contact(&peer));
+        assert!(model.map_pins().iter().all(|p| !p.nearby));
     }
 
     /// The Florence fixture's header, z11 to z15: the region the map
@@ -9753,6 +10055,7 @@ mod tests {
                 .location
                 .expect("a location"),
             telemetry: Vec::new(),
+            source: crate::telemetry::Source::Telemetry,
         };
         model.restore_positions(vec![
             fix(PEER, 43_775_000, 11_261_000, 240),

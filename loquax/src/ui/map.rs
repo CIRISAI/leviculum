@@ -203,6 +203,9 @@ pub struct MapPin {
     /// How old the fix is, when the shell has said the time.
     pub age: Option<String>,
     pub stale: bool,
+    /// A node the mesh announced that is no contact (1302): a neutral pin,
+    /// grey, with its announced name and no avatar.
+    pub nearby: bool,
 }
 
 impl MapPin {
@@ -231,6 +234,8 @@ pub struct PinCell {
     /// neither side of it had room.
     pub apart: Option<LabelCell>,
     pub stale: bool,
+    /// [`MapPin::nearby`].
+    pub nearby: bool,
     pub selected: bool,
 }
 
@@ -425,6 +430,7 @@ pub const SELECTED: char = '◉';
 pub fn pins_of(
     positions: &alloc::collections::BTreeMap<[u8; 16], telemetry::Fix>,
     label: impl Fn(&[u8; 16]) -> String,
+    nearby: impl Fn(&[u8; 16]) -> bool,
     own: Option<[u8; 16]>,
     now: Option<i64>,
 ) -> Vec<MapPin> {
@@ -447,6 +453,7 @@ pub fn pins_of(
                 },
                 age,
                 stale: now.is_some_and(|now| fix.stale(now)),
+                nearby: Some(*peer) != own && nearby(peer),
             }
         })
         .collect();
@@ -640,6 +647,7 @@ pub fn place(
                 text,
                 apart,
                 stale: pin.stale,
+                nearby: pin.nearby,
                 selected,
             }
         })
@@ -955,6 +963,7 @@ mod tests {
             label: label.to_string(),
             age: None,
             stale: false,
+            nearby: false,
         };
         let pins = [pin(1, "you"), pin(2, "them")];
         let area = Rect::new(1, 1, 40, 10);
@@ -1003,6 +1012,7 @@ mod tests {
             label: "bob".to_string(),
             age: None,
             stale: false,
+            nearby: false,
         };
         let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &setup);
         assert_eq!(zoom, header.max_zoom);

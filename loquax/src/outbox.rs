@@ -129,6 +129,13 @@ pub enum Command {
     /// was taken: a runner that waits for it knows the events those
     /// commands caused were handed out before it.
     Fence { token: u64 },
+    /// Announce our own position on `lev.position` (1302,
+    /// [`crate::mesh_position`]), registering the destination of our
+    /// identity on first use: `loquax announce`, the device walk's seed of
+    /// a node nearby. A client has no identity of its own and ignores it.
+    AnnouncePosition {
+        location: leviculum_lxmf::telemetry::Location,
+    },
     /// On a client: the home node accepted a message the shell handed it
     /// with `/send`; reported as [`OutboxEvent::Queued`], so the screen
     /// names its bubble as it names one its own router queued.
@@ -301,6 +308,14 @@ pub enum OutboxEvent {
     /// screen's mailbox schedule syncs on its own node's
     /// (`crate::sync::SyncEvent::Announce`).
     NodeAnnounced { destination: [u8; 16] },
+    /// A node announced its position on `lev.position` (1302,
+    /// [`crate::mesh_position`]): `identity` is the hash of the identity
+    /// the announce proved, `location` what its app data said. Handed to
+    /// the screen as [`crate::ui::UiEvent::MeshPosition`].
+    MeshPosition {
+        identity: [u8; 16],
+        location: leviculum_lxmf::telemetry::Location,
+    },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
     SyncLinked,

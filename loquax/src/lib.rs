@@ -95,6 +95,7 @@ pub mod mapframe;
 pub mod mapload;
 #[cfg(feature = "screenmap")]
 pub mod mapnames;
+pub mod mesh_position;
 pub mod name_match;
 pub mod names;
 pub mod outbox;
