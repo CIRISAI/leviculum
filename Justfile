@@ -213,6 +213,21 @@ nrf-stack-frames:
 nrf-store-gap:
     bash scripts/check-nrf-store-gap.sh
 
+# Flash headroom gate (order 1300, #359). The store gap above is the same edge
+# measured for a different reason and with no floor: on 2026-11-02 the Pocket
+# image did not link at all, 56 B short, and on 2026-11-01 it had 32 B left,
+# so a 768 B diagnostic could not reach the one board it was written for.
+# This links all four images, prints `FLASH_HEADROOM board= used= free=` for
+# each, and is red below 8 KiB free (the reason for the number is in the
+# script's header). The selftest feeds it fake images, oversized ones among
+# them, through the same measurement. Seconds in `fast`, because
+# nrf-stack-frames linked the images first; standing alone after a firmware
+# change it relinks all four.
+[doc('Link every firmware image and refuse one with under 8 KiB of flash left')]
+nrf-flash-budget:
+    bash scripts/check-nrf-flash-budget.sh --selftest
+    bash scripts/check-nrf-flash-budget.sh
+
 # BLE event-buffer gate. nrf-softdevice sizes the `sd_ble_evt_get` buffer from
 # a cargo feature, defaults to 128 bytes when none is picked, and panics rather
 # than truncating when an event does not fit. Our characteristics are 251 bytes
@@ -333,7 +348,8 @@ nrf-shellcheck:
         scripts/lock-contention.sh scripts/test-lock-contention.sh \
         scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
-        scripts/check-nrf-store-gap.sh \
+        scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
+        scripts/nrf-elf.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/check-nrf-stack-frames.sh \
@@ -1434,6 +1450,11 @@ tree-clean-selftest:
 # not-in-guards: nrf-stack-frames -- 50 s (#316), it links the firmware ELFs
 # not-in-guards: nrf-store-gap -- 0.4 s in `fast` only because nrf-stack-frames
 #   linked those ELFs first; 40.3 s standing alone (74ec30ed)
+# not-in-guards: nrf-flash-budget -- 13 s in `fast` with the images already
+#   linked by nrf-stack-frames (measured 2026-11-02), and it relinks all four
+#   standing alone. RUN IT BY HAND INSTEAD whenever a pass touches firmware
+#   code: `just nrf-flash-budget`. The Pocket image went from 32 B free to 56 B
+#   short with no coder gate noticing (1300).
 # not-in-guards: hw-witness -- 33.5 s standing alone (measured 2026-09-27)
 # not-in-guards: fuzz-selftest -- ~16 s against a throwaway fuzz crate
 # not-in-guards: fuzz-regress -- 110 s (#316)
@@ -1547,7 +1568,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

@@ -278,9 +278,14 @@ application space as `0xEC000 - 0x27000` (788 KiB) — 8 KiB the
 bootloader would have refused to write. It now links the application
 against the bootloader's own window minus the record store's region,
 the boot-record page and the calendar checkpoint ring,
-`0xD7000 - 0x27000` = `0xB0000` (704 KiB); the
-image is ~660 KiB, so the change costs nothing today and the gate prints
-the remaining gap on every push (`scripts/check-nrf-store-gap.sh`).
+`0xD7000 - 0x27000` = `0xB0000` (704 KiB). The gate prints the remaining
+gap on every push (`scripts/check-nrf-store-gap.sh`), but with no floor, and
+the images grew into the window unnoticed: on 2026-11-02 the Pocket image
+(rak4631 with the baseboard) no longer linked, 56 B short. Three link and
+codegen flags in `leviculum-nrf/.cargo/config.toml` won about 8.4 KiB back on
+every image without changing what the code does, and `just nrf-flash-budget`
+(`scripts/check-nrf-flash-budget.sh`) now links all four images, prints
+`FLASH_HEADROOM board= used= free=` for each, and is red below 8 KiB free.
 
 Everything at or above `0xEA000` survives every UF2 flash, because the
 bootloader declines those blocks. All three persistence pages live there:
@@ -639,7 +644,7 @@ Start with how wide the field actually is. The Meshtastic tree carries
 
 **Two transports cover 155 of the 160 flashable variants**, and we
 already own both: the UF2 path in `leviculum-nrf/tools/uf2-runner.sh`
-and the ESP path behind `Justfile:882`, which drives `esptool`. The
+and the ESP path behind `Justfile:898`, which drives `esptool`. The
 work is not building 162 things. It is separating two mechanisms
 cleanly and turning everything else into data.
 

@@ -41,7 +41,7 @@ which is what the M9 needs, is less: `fetch.rs`, `browser.rs`,
 network IO and are the platform layer; the other 5,840 lines need only
 `alloc` after the mechanical changes of slice 4a, but for the file halves
 of `bookmarks.rs` and the decoder in `image.rs`. The line is held by `just
-lnomad-core-no-tui` (`Justfile:628`) and stated in the module doc of
+lnomad-core-no-tui` (`Justfile:644`) and stated in the module doc of
 `lnomad/src/app/mod.rs:1`. Two qualifications, both measured:
 
 - **The core speaks cells.** Events arrive as raw keys and cell-addressed
