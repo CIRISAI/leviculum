@@ -3394,7 +3394,10 @@ mod tests {
             hosted: true,
             ..Model::default()
         };
-        assert_eq!(follow_link(&mut m, 1), vec![Effect::Write(hash.to_string())]);
+        assert_eq!(
+            follow_link(&mut m, 1),
+            vec![Effect::Write(hash.to_string())]
+        );
         assert!(m.pending.is_none(), "an address must not start a fetch");
         assert!(m.toast.is_none(), "the chat opening says it all");
     }
