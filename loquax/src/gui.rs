@@ -565,7 +565,7 @@ impl App {
             Some(seen) => Task::run(seen, |seen| Message::Seen(Box::new(seen))),
             None => Task::none(),
         };
-        let theme = iced::system::theme().map(Message::SystemTheme);
+        let theme = leviculum_ui_iced::desktop::theme().map(Message::SystemTheme);
         (app, Task::batch([scale, seen, theme]))
     }
 
@@ -1094,7 +1094,7 @@ impl App {
         let mut all = vec![
             window::events().map(|(_, event)| Message::Window(event)),
             keyboard::listen().map(Message::Key),
-            iced::system::theme_changes().map(Message::SystemTheme),
+            leviculum_ui_iced::desktop::theme_changes().map(Message::SystemTheme),
         ];
         // The pointer anywhere in the window while the microphone is held
         // (1276): it may leave the button, and the release counts

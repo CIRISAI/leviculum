@@ -30,3 +30,13 @@ leviculum-ui = { path = "../leviculum-ui" }
 # program's. thread-pool, Loquax's executor: iced refuses to build without one.
 # advanced: the headless render and click (`headless`).
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "x11", "wayland", "thread-pool", "canvas", "advanced"] }
+
+# The desktop's light or dark on Linux (`desktop`, 1310): the freedesktop
+# colour scheme over D-Bus, the reader iced's `linux-theme-detection` uses.
+# Not that feature: with it iced blocks the window's start on the portal
+# for up to 200 ms (iced_winit 0.14.1, src/lib.rs:545), which measured
+# +203 ms to the first window on a desktop whose portal does not answer.
+# Here the same stream runs as a subscription and the window starts at once.
+# async-io: zbus's own reactor, so the stream runs on iced's thread pool.
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+mundy = { version = "0.2", default-features = false, features = ["async-io", "color-scheme"] }

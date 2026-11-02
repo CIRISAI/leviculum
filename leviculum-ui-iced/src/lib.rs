@@ -11,7 +11,8 @@
 //! field ([`chrome`]), the help overlay ([`help`]). A program keeps its own nodes, words and layout;
 //! these take them as arguments, coloured by a [`Palette`] each program
 //! fills from its own tokens. A key as the keymap's ([`key`]). And a view without a window ([`headless`]):
-//! drawn into pixels for the goldens, clicked for the tests.
+//! drawn into pixels for the goldens, clicked for the tests. The desktop's
+//! light or dark, which iced alone does not read on Linux ([`desktop`]).
 //!
 //! Generic over the program's message: a press is the `M` it was given.
 //!
@@ -26,6 +27,7 @@
 pub mod avatar;
 pub mod chrome;
 pub mod control;
+pub mod desktop;
 pub mod headless;
 pub mod help;
 pub mod icon;

@@ -70,6 +70,7 @@ run   leviculum-std   msgpack_single_decoder     # reads leviculum-core's source
 run   leviculum-std   nrf_boot_no_spin           # reads leviculum-nrf/src/bin/*.rs; no nop spin above 10 000 may hold the executor at boot
 run   leviculum-std   rak4631_gnss_pulse_pin     # reads the RAK firmware sources; the GNSS task claims no pulse pin and nothing claims P0.17
 run   leviculum-std   t114_boot_lines            # reads the T114 binary, the shared node loop and the board file; the boot lines are the pre-move ones plus D2 and D7
+skip  leviculum-ui-iced desktop_theme              # its subject is the code (the desktop tone stream), and it opens a D-Bus connection
 run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
 run   loquax          package_metadata           # reads loquax/Cargo.toml and leviculum-cli/Cargo.toml; the package depends on leviculum, which enables and starts lnsd
 

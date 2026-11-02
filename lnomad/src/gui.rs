@@ -618,7 +618,7 @@ impl Window {
             all.push(iced::window::frames().map(Message::Frame));
         }
         if self.follows.is_some() {
-            all.push(iced::system::theme_changes().map(Message::SystemTheme));
+            all.push(leviculum_ui_iced::desktop::theme_changes().map(Message::SystemTheme));
         }
         Subscription::batch(all)
     }
@@ -1346,7 +1346,10 @@ fn boot(handed: Option<Handed>) -> (Window, Task<Message>) {
             match follow {
                 true => (
                     window.following(),
-                    Task::batch([outcomes, iced::system::theme().map(Message::SystemTheme)]),
+                    Task::batch([
+                        outcomes,
+                        leviculum_ui_iced::desktop::theme().map(Message::SystemTheme),
+                    ]),
                 ),
                 false => (window, outcomes),
             }
