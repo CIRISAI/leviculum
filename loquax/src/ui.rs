@@ -3736,6 +3736,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let now = model.now;
             if let Some(&(c, m)) = model.sending.front() {
                 if let Some(message) = model.message_mut(c, m) {
+                    // Named already by its pulled sent entry (`home_sent`),
+                    // which is further along than queued.
+                    if message.id == Some(message_id) {
+                        return Vec::new();
+                    }
                     message.id = Some(message_id);
                     message.delivery = Some(DeliveryState::Queued);
                     let id = to_hex(&message_id[..4]);
@@ -4354,6 +4359,28 @@ fn home_sent<B>(
     }
     if found {
         return;
+    }
+    // The running send's own entry, pulled before the runner named it: the
+    // home node answered the send on one link and the pull read its log on
+    // another, so the pull can win (1335). Its bubble takes the id here and
+    // the late `Queued` finds it named.
+    if let Some(&(c, m)) = model.sending.front() {
+        let running = model
+            .conversations
+            .get(c)
+            .filter(|conversation| conversation.peer == destination)
+            .and_then(|conversation| conversation.messages.get(m))
+            .is_some_and(|message| {
+                message.outbound && message.id.is_none() && message.body.as_bytes() == body
+            });
+        if running {
+            if let Some(message) = model.message_mut(c, m) {
+                message.id = Some(message_id);
+                message.delivery = Some(DeliveryState::Sent);
+                message.note(now, "taken by the mailbox");
+            }
+            return;
+        }
     }
     let index = model.conversation(destination);
     let activity = model.bump();
@@ -6954,6 +6981,46 @@ pub(crate) mod tests {
         engine(&mut model, home_sent(ID2, PEER));
         assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
         assert_eq!(model.conversations[0].messages.len(), 1);
+    }
+
+    /// 1335: on a client the pull can bring the sent entry of the running
+    /// send before the runner names it (the home's answer and the pull race
+    /// on two links): the running bubble takes the id, no second bubble
+    /// appears, and the late name does not take it back to queued.
+    #[test]
+    fn a_sent_entry_pulled_before_the_runner_names_it_is_the_running_bubble() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        sent(&mut model, "und die Antwort");
+        let home_sent = |body: &[u8]| OutboxEvent::HomeSent {
+            message_id: ID,
+            destination: PEER,
+            sent_at: 0,
+            body: body.to_vec(),
+            fields: Vec::new(),
+        };
+        // Another device's message to the same peer: not the running one.
+        engine(&mut model, home_sent(b"from the laptop"));
+        assert_eq!(model.conversations[0].messages.len(), 2);
+        assert_eq!(model.conversations[0].messages[0].id, None);
+        let id = [0x49; 32];
+        engine(
+            &mut model,
+            OutboxEvent::HomeSent {
+                message_id: id,
+                destination: PEER,
+                sent_at: 0,
+                body: b"und die Antwort".to_vec(),
+                fields: Vec::new(),
+            },
+        );
+        engine(&mut model, OutboxEvent::Queued { message_id: id });
+        let messages = &model.conversations[0].messages;
+        assert_eq!(messages.len(), 2, "one bubble for the running send");
+        assert_eq!(messages[0].id, Some(id));
+        assert_eq!(messages[0].delivery, Some(DeliveryState::Sent));
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert!(model.sending.is_empty());
     }
 
     /// A finished send on a client pulls at once; one finishing while a
