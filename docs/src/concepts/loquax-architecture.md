@@ -78,7 +78,7 @@ That is a cost-aware keymap, and a messenger sends over the same radios.
 
 **Architecture.** Elm-style with an explicit effect list. The core sits in
 `lnomad/src/app/` since the #219 cut (2026-10-25): `Model` at
-`lnomad/src/app/model.rs:465-646` (`#[derive(Clone, Debug, Default)]` at
+`lnomad/src/app/model.rs:469-654` (`#[derive(Clone, Debug, Default)]` at
 `:565`), `Effect` at `:478-532`; `AppEvent` at
 `lnomad/src/app/event.rs:36-105` and `update(&mut Model, AppEvent) ->
 Vec<Effect>` at `:98-208`. The terminal frontend is `lnomad/src/tui.rs`:
@@ -87,7 +87,7 @@ interpreter `run_effects` at `:1855-1960`. `update` mutates rather than
 returning a new model, and effects are plain data, not closures. That
 combination is what makes the 245 in-file unit tests possible: build a
 `Model`, feed a synthetic `AppEvent::Key`, assert on the model and on the
-returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:1493`
+returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:1495`
 onwards; helpers at `:2411-2427`). The view is tested against
 `ratatui::backend::TestBackend` (`:3240`), and the `--print` path has
 byte-identical golden files (`lnomad/tests/render_golden.rs:18-37`).
@@ -98,15 +98,15 @@ anything else for a messenger, and the answer is yes.
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
 (`set_announce_sink`, `lnomad/src/fetch.rs:243-245`, wiring comment at
-`lnomad/src/tui.rs:1293-1296`), a non-blocking unbounded send on every
+`lnomad/src/tui.rs:1295-1298`), a non-blocking unbounded send on every
 recorded announce (`note_announce`, `lnomad/src/fetch.rs:387-407`), a
 dedicated background task parked on the shared session in 250 ms lock
 slices (`spawn_discovery`, `lnomad/src/transfer.rs:166-186`), and a
 `tokio::select!` arm that folds the result into the model
-(`lnomad/src/tui.rs:1452-1454`). The main loop has five arms
-(`lnomad/src/tui.rs:1356-1459`), and the timer arm is conditionally enabled
+(`lnomad/src/tui.rs:1454-1456`). The main loop has five arms
+(`lnomad/src/tui.rs:1358-1461`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
-`lnomad/src/app/model.rs:867-870`) so an idle browser does not wake eight
+`lnomad/src/app/model.rs:875-878`) so an idle browser does not wake eight
 times a second.
 
 **Persistence.** Three small files under
@@ -152,7 +152,7 @@ character count rather than display width (`wrap`,
 `lnomad/src/render.rs:778-805`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
-relayout (`lnomad/src/app/model.rs:745-769`), including on every keystroke in a
+relayout (`lnomad/src/app/model.rs:753-777`), including on every keystroke in a
 form field (`:1657-1660`).
 
 **Scriptability, and the absence of settings.** `--print` fetches, renders
@@ -169,14 +169,15 @@ or URL error (`lnomad/src/main.rs:191`, `:188`, `:222`, `:238`).
 `lnomad` has no settings file at all. `--config` points at the *Reticulum*
 config directory; the `lnomad/` directory holds only data. The theme is
 auto-detected via OSC 11 before raw mode is entered
-(`lnomad/src/tui.rs:1242-1249`) and toggled at runtime with `t`; theme
+(`lnomad/src/tui.rs:1244-1251`) and toggled at runtime with `t`; theme
 colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1485-1493`). The messenger is the natural target of that
-handoff, and wiring the two together is an explicit goal.
+`lnomad/src/app/event.rs:1513-1516`). The messenger is the natural target of that
+handoff: hosted as Loquax's Browse tab (1337) the browser hands the address
+over instead (`lnomad/src/app/event.rs:1509-1512`), and Loquax opens that chat.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
@@ -809,12 +810,12 @@ Three specific things `lnomad` does that must change:
    scrolled up. NomadNet gets this wrong: it resets to the bottom on every
    refresh (NomadNet's `Conversations.py`, line 2287).
 2. **Windowed layout.** `lnomad` re-lays out the whole page on every
-   relayout (`lnomad/src/app/model.rs:745-769`). A ten-thousand-message
+   relayout (`lnomad/src/app/model.rs:753-777`). A ten-thousand-message
    conversation must not do that, and a compose buffer must not trigger it
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.
 3. **The timer must run.** `lnomad` disables its tick when idle
-   (`lnomad/src/tui.rs:1455`). A messenger has relative timestamps, a sync
+   (`lnomad/src/tui.rs:1457`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
    (`leviculum-lxmf/src/router.rs:2254`).
@@ -823,7 +824,7 @@ Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/transfer.rs:53-89`), the tick-counted
 toast whose expiry is a pure function and therefore unit-testable without
 real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
-`lnomad/src/tui.rs:2552`),
+`lnomad/src/tui.rs:2554`),
 the `TerminalGuard` RAII plus panic hook that restores the terminal before
 the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:96-138`), and OSC 52 for the
 clipboard so copy works over SSH with no X11 dependency (`osc52`,

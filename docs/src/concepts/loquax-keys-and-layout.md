@@ -926,9 +926,9 @@ first rung it is.
 - a terminal that does not answer in time and sets no `COLORFGBG` gives
   dark, as in `lnomad`;
 - a palette action `theme` toggles for the session, the way `t` calls
-  `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:338`); no key, the
+  `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:350`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:3661`).
+  (`loquax/src/ui.rs:3680`).
 
 #### 3. What colour carries and what it must not carry alone
 
