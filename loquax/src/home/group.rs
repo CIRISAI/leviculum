@@ -72,6 +72,7 @@ use crate::store::groups::{
     Copy, Group, GroupMember, MEMBER_ADMIN, MEMBER_GROUPS, MEMBER_JOINED, MEMBER_SLOW,
 };
 use crate::store::Store;
+use crate::ui::strings::Lang;
 
 /// The directory under the loquax home with the key of every group this
 /// home hosts, one file a group named by its address in hex.
@@ -79,6 +80,16 @@ pub const GROUPS_DIR: &str = "groups";
 
 /// What a stock member writes to leave (study 3.1); the invitation says so.
 pub const LEAVE_WORD: &str = "/leave";
+
+/// Where a stock member gets Loquax, as its invitation says (1307 pass
+/// six). The site's page tree has `site/pages/download.md`, served at
+/// `/download` once published; until then (2026-11-02 it answers 404)
+/// this is the site's root, which answers.
+pub const LOQUAX_URL: &str = "https://leviculum.network";
+
+/// The most characters an invitation's text has (1307 pass six), its
+/// `lxma://` code of 168 counted: a stock client shows it as one bubble.
+pub const INVITATION_MAX_CHARS: usize = 299;
 
 /// How long a slow member's lines are held before they go as one digest
 /// (study 5.3), seconds.
@@ -273,25 +284,73 @@ pub fn hosted(home: &Path, store: &Store) -> Result<Vec<Hosted>, String> {
     Ok(out)
 }
 
+/// Whether `member` runs a client that shows a group as one (1307 pass
+/// six): the newest message the home's owner has from it said bit 1, as
+/// every Loquax says on every message. A member never heard is taken for
+/// a stock client: the link in its invitation costs a Loquax nothing, its
+/// card shows the group and not the text.
+pub fn understands_groups(store: &Store, member: &[u8; 16]) -> Result<bool, String> {
+    let newest = store
+        .archive_newest_from(member)
+        .map_err(|e| e.to_string())?;
+    Ok(newest
+        .and_then(|packed| Message::unpack(&packed, None, None, DeliveryMethod::Direct).ok())
+        .and_then(|message| Lev::from_fields(&message.fields))
+        .is_some_and(|lev| lev.supports_groups()))
+}
+
+/// The text of an invitation (1307 pass six), in the admin's catalogue
+/// language: who invites to what, the group's `lxma://` code, how a stock
+/// member leaves, and for a `stock` member once, where Loquax shows the
+/// group as a group. Where long names would take the text past
+/// [`INVITATION_MAX_CHARS`], the link sentence is left out.
+pub fn invitation_text(
+    admin_name: &str,
+    group_name: &str,
+    code: &str,
+    lang: Lang,
+    stock: bool,
+) -> String {
+    let base = match lang {
+        Lang::En => {
+            format!("{admin_name} invited you to {group_name}: {code} Reply {LEAVE_WORD} to leave.")
+        }
+        Lang::De => format!(
+            "{admin_name} lädt dich zu {group_name} ein: {code} Antworte {LEAVE_WORD} zum Austreten."
+        ),
+    };
+    if !stock {
+        return base;
+    }
+    let link = match lang {
+        Lang::En => format!(" Loquax shows members and names: {LOQUAX_URL}"),
+        Lang::De => format!(" Loquax zeigt Mitglieder und Namen: {LOQUAX_URL}"),
+    };
+    match base.chars().count() + link.chars().count() <= INVITATION_MAX_CHARS {
+        true => base + &link,
+        false => base,
+    }
+}
+
 /// The invitation the admin sends `member`: from the admin, a text any
 /// client shows with the group's `lxma://` code in it, which Columba opens
 /// as a contact, and the `lev` key `0x04` a Loquax shows as a card with
 /// "Join" (study 4.2). Unknown `lev` keys are invisible to every stock
-/// client, so the one message serves both.
+/// client, so the one message serves both; a `stock` member's text says
+/// where Loquax is ([`invitation_text`]).
 pub fn invitation(
     admin: &Identity,
     hosted: &Hosted,
     admin_name: &str,
+    lang: Lang,
     member: [u8; 16],
+    stock: bool,
     now: f64,
 ) -> Result<Outgoing, String> {
     let group = &hosted.group;
     let public_key = hosted.identity.public_key_bytes();
     let code = crate::lxma::encode_parts(&group.address, &public_key);
-    let content = format!(
-        "{admin_name} invited you to {}: {code} Reply {LEAVE_WORD} to leave.",
-        group.name
-    );
+    let content = invitation_text(admin_name, &group.name, &code, lang, stock);
     let mut fields = Vec::new();
     Lev {
         capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
@@ -323,6 +382,7 @@ pub fn opening(
     admin: &Identity,
     hosted: &Hosted,
     admin_name: &str,
+    lang: Lang,
     store: &Store,
     now: f64,
 ) -> Result<(Vec<Outgoing>, Vec<Outgoing>), String> {
@@ -333,7 +393,10 @@ pub fn opening(
     let invitations = members
         .iter()
         .filter(|m| m.address != group.admin)
-        .map(|m| invitation(admin, hosted, admin_name, m.address, now))
+        .map(|m| {
+            let stock = !(m.understands_groups() || understands_groups(store, &m.address)?);
+            invitation(admin, hosted, admin_name, lang, m.address, stock, now)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let welcome = members
         .iter()
@@ -759,6 +822,7 @@ pub fn add(
     admin: &Identity,
     hosted: &Hosted,
     admin_name: &str,
+    lang: Lang,
     store: &mut Store,
     members: &[([u8; 16], String)],
     now: f64,
@@ -795,7 +859,13 @@ pub fn add(
     };
     let invitations = added
         .iter()
-        .map(|address| invitation(admin, &current, admin_name, *address, now))
+        .map(|address| {
+            let flagged = before
+                .iter()
+                .any(|m| m.address == *address && m.understands_groups());
+            let stock = !(flagged || understands_groups(store, address)?);
+            invitation(admin, &current, admin_name, lang, *address, stock, now)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let members = store.group_members(&group).map_err(failed)?;
     let told = members
@@ -1457,8 +1527,15 @@ mod tests {
     #[test]
     fn a_new_group_invites_and_tells_its_admin() {
         let scene = scene();
-        let (invitations, welcome) =
-            opening(&scene.lew.0, &scene.hosted, "Lew", &scene.store, 7.0).expect("opening");
+        let (invitations, welcome) = opening(
+            &scene.lew.0,
+            &scene.hosted,
+            "Lew",
+            Lang::En,
+            &scene.store,
+            7.0,
+        )
+        .expect("opening");
         let to: Vec<_> = invitations.iter().map(|i| i.destination).collect();
         assert_eq!(to, [scene.anna.1, scene.bob.1]);
         assert_eq!(welcome.len(), 1);
@@ -1495,11 +1572,148 @@ mod tests {
         assert_eq!(invited_key(&fields), None);
     }
 
+    /// 1307 pass six: a stock member's invitation says once where Loquax
+    /// shows the group as a group, in the admin's language, and stays
+    /// under 300 characters with its `lxma://` code; a Loquax member's is
+    /// as it was. Names too long for the link leave it out, never the
+    /// code.
+    #[test]
+    fn a_stock_members_invitation_says_where_loquax_is_and_stays_short() {
+        let scene = scene();
+        let code = crate::lxma::encode_parts(
+            &scene.hosted.group.address,
+            &scene.hosted.identity.public_key_bytes(),
+        );
+        assert_eq!(code.chars().count(), 168);
+        let en = invitation_text("Lew", "Familie", &code, Lang::En, true);
+        assert_eq!(
+            en,
+            format!(
+                "Lew invited you to Familie: {code} Reply /leave to leave. \
+                 Loquax shows members and names: https://leviculum.network"
+            )
+        );
+        let de = invitation_text("Lew", "Familie", &code, Lang::De, true);
+        assert_eq!(
+            de,
+            format!(
+                "Lew lädt dich zu Familie ein: {code} Antworte /leave zum Austreten. \
+                 Loquax zeigt Mitglieder und Namen: https://leviculum.network"
+            )
+        );
+        for text in [&en, &de] {
+            assert!(
+                text.chars().count() < 300,
+                "{}: {text}",
+                text.chars().count()
+            );
+            assert_eq!(text.matches(LOQUAX_URL).count(), 1, "once");
+        }
+        // Control: a Loquax member's text is the one it was.
+        assert_eq!(
+            invitation_text("Lew", "Familie", &code, Lang::En, false),
+            format!("Lew invited you to Familie: {code} Reply /leave to leave.")
+        );
+        assert!(!invitation_text("Lew", "Familie", &code, Lang::De, false).contains(LOQUAX_URL));
+        let long = invitation_text("Lew", "Sportverein Hinterdorf e.V.", &code, Lang::De, true);
+        assert!(long.contains(&code) && !long.contains(LOQUAX_URL), "{long}");
+        assert!(long.chars().count() < 300);
+
+        // The opening: Anna showed bit 1 to the group, Bob is stock.
+        let (invitations, _) = opening(
+            &scene.lew.0,
+            &scene.hosted,
+            "Lew",
+            Lang::De,
+            &scene.store,
+            7.0,
+        )
+        .expect("opening");
+        let text = |to: [u8; 16]| {
+            let out = invitations
+                .iter()
+                .find(|i| i.destination == to)
+                .expect("invited");
+            let message =
+                Message::unpack(&out.packed, None, None, DeliveryMethod::Direct).expect("unpack");
+            String::from_utf8(message.content).expect("text")
+        };
+        assert_eq!(text(scene.bob.1), de);
+        assert_eq!(
+            text(scene.anna.1),
+            invitation_text("Lew", "Familie", &code, Lang::De, false)
+        );
+    }
+
+    /// 1307 pass six: whether a member runs Loquax is what its newest
+    /// message to the owner said; a member never heard is stock.
+    #[test]
+    fn a_member_whose_newest_message_said_bit_one_understands_groups() {
+        let mut scene = scene();
+        let cara = person();
+        assert!(!understands_groups(&scene.store, &cara.1).expect("never heard"));
+        let said = |caps: Option<u64>, at: f64| {
+            let mut fields = Vec::new();
+            Lev {
+                capabilities: caps,
+                ..Lev::default()
+            }
+            .put_into(&mut fields);
+            Message::create(
+                scene.lew.1,
+                cara.1,
+                &cara.0,
+                at,
+                Vec::new(),
+                b"Hallo".to_vec(),
+                fields,
+                DeliveryMethod::Direct,
+            )
+            .expect("message")
+        };
+        let loquax = said(Some(CAP_GROUPS), 1.0);
+        scene
+            .store
+            .archive_append(
+                crate::home::KIND_RECEIVED,
+                &loquax.message_id,
+                &loquax.pack(),
+                1,
+                u64::MAX,
+            )
+            .expect("archive");
+        assert!(understands_groups(&scene.store, &cara.1).expect("Loquax"));
+        assert!(!understands_groups(&scene.store, &scene.bob.1).expect("someone else"));
+        let columba = said(None, 2.0);
+        scene
+            .store
+            .archive_append(
+                crate::home::KIND_RECEIVED,
+                &columba.message_id,
+                &columba.pack(),
+                2,
+                u64::MAX,
+            )
+            .expect("archive");
+        assert!(
+            !understands_groups(&scene.store, &cara.1).expect("now stock"),
+            "the newest decides"
+        );
+    }
+
     #[test]
     fn the_invitation_carries_the_code_and_the_card() {
         let scene = scene();
-        let out =
-            invitation(&scene.lew.0, &scene.hosted, "Lew", scene.bob.1, 7.0).expect("invitation");
+        let out = invitation(
+            &scene.lew.0,
+            &scene.hosted,
+            "Lew",
+            Lang::En,
+            scene.bob.1,
+            true,
+            7.0,
+        )
+        .expect("invitation");
         let message = Message::unpack(
             &out.packed,
             None,
@@ -1965,6 +2179,7 @@ mod tests {
             &scene.lew.0,
             &hosted,
             "Lew",
+            Lang::En,
             &mut scene.store,
             &[(cara.1, "Cara".into()), (scene.anna.1, "Anna".into())],
             ACCEPTED,
@@ -1993,6 +2208,7 @@ mod tests {
             &scene.lew.0,
             &hosted,
             "Lew",
+            Lang::En,
             &mut scene.store,
             &[(scene.anna.1, "Anna".into())],
             ACCEPTED,

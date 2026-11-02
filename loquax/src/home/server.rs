@@ -293,7 +293,7 @@ fn group(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now:
     )
     .and_then(|hosted| {
         let (invitations, welcome) =
-            super::group::opening(home.identity, &hosted, owner_name, store, now)?;
+            super::group::opening(home.identity, &hosted, owner_name, request.lang, store, now)?;
         Ok((hosted, invitations, welcome))
     });
     let (hosted, invitations, welcome) = match made {
@@ -390,14 +390,21 @@ fn group_add(
         .filter(|(member, _)| *member != home.address)
         .cloned()
         .collect();
-    let (invitations, told) =
-        match super::group::add(home.identity, &hosted, owner_name, store, &members, now) {
-            Ok(added) => added,
-            Err(error) => {
-                tracing::warn!("HOME group add: {error}");
-                return Answer::only(wire::status_answer(Status::Failed));
-            }
-        };
+    let (invitations, told) = match super::group::add(
+        home.identity,
+        &hosted,
+        owner_name,
+        request.lang,
+        store,
+        &members,
+        now,
+    ) {
+        Ok(added) => added,
+        Err(error) => {
+            tracing::warn!("HOME group add: {error}");
+            return Answer::only(wire::status_answer(Status::Failed));
+        }
+    };
     let at = now as i64;
     let mut accepted = Vec::new();
     for invitation in invitations {
@@ -1097,6 +1104,7 @@ mod tests {
                 client_id: [7; 16],
                 name: "Familie".into(),
                 members: alloc::vec![([0x44; 16], "Anna".into())],
+                lang: crate::ui::strings::Lang::En,
             }),
             Some(LAPTOP),
             300.0,
@@ -1108,6 +1116,7 @@ mod tests {
             client_id: [8; 16],
             group,
             members: alloc::vec![([0x66; 16], "Cara".into()), ([0x44; 16], "Anna".into())],
+            lang: crate::ui::strings::Lang::En,
         };
         let ask = |store: &mut Store, device, request: &wire::GroupAddRequest| {
             answer(
@@ -1178,6 +1187,7 @@ mod tests {
                 ([0x44; 16], "Anna".into()),
                 ([0x55; 16], "Bob".into())
             ],
+            lang: crate::ui::strings::Lang::En,
         };
         let ask = |store: &mut Store, home: &Home<'_>, device, request: &wire::GroupRequest| {
             let answer = answer(

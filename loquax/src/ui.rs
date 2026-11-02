@@ -1705,16 +1705,19 @@ pub enum UiEffect {
     PauseVoice { peer: [u8; 16], key: u64 },
     /// Ask the home to make the group `name` with `members`, each under
     /// the name the reader knows it by (1307, `/group`); answered with
-    /// [`UiEvent::GroupMade`].
+    /// [`UiEvent::GroupMade`]. `lang` is the reader's, the invitations'
+    /// (1307 pass six).
     CreateGroup {
         name: String,
         members: Vec<([u8; 16], String)>,
+        lang: strings::Lang,
     },
     /// Ask the home to add `members` to its group `group` (1307 G2,
     /// `/groupadd`); answered with [`UiEvent::MembersAdded`].
     AddMembers {
         group: [u8; 16],
         members: Vec<([u8; 16], String)>,
+        lang: strings::Lang,
     },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.

@@ -408,7 +408,10 @@ impl<B> UiModel<B> {
                         .and_then(|lev| lev.invite)
                         .is_some_and(|invite| invite.group == *group)
             })
-            .map(|m| m.delivery.unwrap_or(leviculum_ui::delivery::DeliveryState::Queued))
+            .map(|m| {
+                m.delivery
+                    .unwrap_or(leviculum_ui::delivery::DeliveryState::Queued)
+            })
     }
 
     /// Learn what a message in `peer`'s conversation says of a group:
@@ -880,7 +883,11 @@ impl<B: Default> UiModel<B> {
                 (*peer, name)
             })
             .collect();
-        alloc::vec![UiEffect::CreateGroup { name, members }]
+        alloc::vec![UiEffect::CreateGroup {
+            name,
+            members,
+            lang: self.lang,
+        }]
     }
 
     /// The picker's "Add" (1307 G2): the home is asked once to add the
@@ -907,7 +914,11 @@ impl<B: Default> UiModel<B> {
                 (*peer, name)
             })
             .collect();
-        alloc::vec![UiEffect::AddMembers { group, members }]
+        alloc::vec![UiEffect::AddMembers {
+            group,
+            members,
+            lang: self.lang,
+        }]
     }
 
     /// The home's answer to "Add" (G2): the picker closes and the member
@@ -1206,7 +1217,7 @@ mod tests {
         let effects = verb(&mut model, Verb::Create);
         taps += 1;
         assert_eq!(taps, 4 + 2, "4 + k with k = 2");
-        let [UiEffect::CreateGroup { name, members }] = effects.as_slice() else {
+        let [UiEffect::CreateGroup { name, members, .. }] = effects.as_slice() else {
             panic!("one ask: {effects:?}");
         };
         assert_eq!(name, "Familie");
@@ -1606,6 +1617,7 @@ mod tests {
         let [UiEffect::AddMembers {
             group: to,
             members: added,
+            ..
         }] = asked.as_slice()
         else {
             panic!("one ask of the home: {asked:?}");
@@ -1878,7 +1890,7 @@ mod tests {
         key(&mut model, KeyCode::Enter);
         typed(&mut model, "Familie");
         let effects = key(&mut model, KeyCode::Enter);
-        let [UiEffect::CreateGroup { name, members }] = effects.as_slice() else {
+        let [UiEffect::CreateGroup { name, members, .. }] = effects.as_slice() else {
             panic!("one ask: {effects:?}");
         };
         assert_eq!(name, "Familie");

@@ -1265,6 +1265,7 @@ mod tests {
             client_id: [7; 16],
             name: "Familie".to_string(),
             members: vec![([5; 16], "Anna".to_string())],
+            lang: crate::ui::strings::Lang::En,
         };
         let wait = Duration::from_secs(2);
         let budget = Duration::from_secs(30);

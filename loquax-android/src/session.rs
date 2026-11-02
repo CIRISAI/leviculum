@@ -1924,22 +1924,30 @@ impl Inner {
                 UiEffect::Recording { peer, effect } => self.recorder.push((peer, effect)),
                 // A group (1307): the home makes it, through the runner the
                 // terminal runs.
-                UiEffect::CreateGroup { name, members } => {
+                UiEffect::CreateGroup {
+                    name,
+                    members,
+                    lang,
+                } => {
                     let client = self.client.clone();
                     let done = self.finished_tx.clone();
                     let wake = Arc::clone(&self.wake);
                     self.runtime.spawn(async move {
-                        let event = runner::create_group(client, name, members, BUDGET).await;
+                        let event = runner::create_group(client, name, members, lang, BUDGET).await;
                         let _ = done.send(Finished::Event(event));
                         wake.notify_one();
                     });
                 }
-                UiEffect::AddMembers { group, members } => {
+                UiEffect::AddMembers {
+                    group,
+                    members,
+                    lang,
+                } => {
                     let client = self.client.clone();
                     let done = self.finished_tx.clone();
                     let wake = Arc::clone(&self.wake);
                     self.runtime.spawn(async move {
-                        let event = runner::add_members(client, group, members, BUDGET).await;
+                        let event = runner::add_members(client, group, members, lang, BUDGET).await;
                         let _ = done.send(Finished::Event(event));
                         wake.notify_one();
                     });

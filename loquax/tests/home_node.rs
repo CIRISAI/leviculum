@@ -2236,6 +2236,8 @@ async fn the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them() 
 /// with the writer in `lev 0x02`. G2: the home is killed with Anna's copy
 /// of a line unproven and, started again, makes it again from the archive
 /// and delivers it; Bob, slow, gets Lew's next two lines as one digest.
+/// Pass six: Bob's invitation says where Loquax is, Anna's (she wrote to
+/// Lew before, as Loquax) does not; Bob's answer reaches Anna too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     use loquax::home::group;
@@ -2267,6 +2269,36 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     // key from it; Anna's home announced at its start.
     peer.lxmf_announce();
 
+    // 1307 pass six: Anna's phone writes to Lew first, as a friend does
+    // before she is put in a group. Her message says bit 1, so Lew's home
+    // knows she runs Loquax; Bob never wrote and is taken for stock.
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &hex::encode(owner),
+        "until ready 20\nkey enter\nkey i\ntype Hallo Lew\nkey enter\nsleep 1000\n\
+         key esc\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    anna_node
+        .wait_for("HOME outbox delivered message=", 60)
+        .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        if group::understands_groups(&store, &anna).expect("archive") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's line never reached Lew's archive:\n{}\nAnna's home:\n{}",
+            node.log(),
+            anna_node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
     // Lew's laptop makes the group: 4 + k steps on the palette, the
     // members pasted as addresses.
     tui(
@@ -2293,6 +2325,49 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     assert_eq!(hosted.group.name, "Familie");
     assert_eq!(hosted.group.admin, owner);
     let group_hex = hex::encode(hosted.group.address);
+
+    // 1307 pass six, item 2: Bob, stock, reads his invitation as a text
+    // with the group's code, how to leave, and once where Loquax shows the
+    // group as a group, under 300 characters. Control: Anna's, a Loquax
+    // member's, is as it was.
+    let code =
+        loquax::lxma::encode_parts(&hosted.group.address, &hosted.identity.public_key_bytes());
+    let plain = format!("Lew invited you to Familie: {code} Reply /leave to leave.");
+    let linked = format!(
+        "{plain} Loquax shows members and names: {}",
+        group::LOQUAX_URL
+    );
+    assert!(linked.chars().count() < 300, "{}", linked.chars().count());
+    received_by(&peer, &linked, 60, &node).await;
+    let invitations: Vec<leviculum_lxmf::Message> = Store::open_in(&home, owner)
+        .expect("the owner's store")
+        .archive_since(0, usize::MAX)
+        .expect("archive")
+        .entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_SENT)
+        .filter_map(|e| {
+            leviculum_lxmf::Message::unpack(
+                &e.packed,
+                None,
+                None,
+                leviculum_lxmf::DeliveryMethod::Direct,
+            )
+            .ok()
+        })
+        .filter(|m| {
+            leviculum_lxmf::lev::Lev::from_fields(&m.fields).is_some_and(|l| l.invite.is_some())
+        })
+        .collect();
+    let invited = |to: [u8; 16]| {
+        invitations
+            .iter()
+            .find(|m| m.destination_hash == to)
+            .map(|m| String::from_utf8_lossy(&m.content).into_owned())
+            .unwrap_or_default()
+    };
+    assert_eq!(invited(bob_address), linked, "Bob's invitation");
+    assert_eq!(invited(anna), plain, "Anna's, a Loquax member's");
 
     // Anna's phone pulls the invitation and joins through its card.
     tui(
@@ -2650,6 +2725,15 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         .expect("Bob")
         .name;
     assert_eq!(kept.content, format!("{bobs_name}: Danke").into_bytes());
+    // 1307 pass six, item 4: Bob, who installed nothing, read "Lew: Brot
+    // ist da" above and answered it; the answer reached every other
+    // member, Anna's home holds it from the group under Bob's name.
+    assert!(
+        from_group
+            .iter()
+            .any(|m| m.content == format!("{bobs_name}: Danke").into_bytes()),
+        "Anna's copy of Bob's answer"
+    );
     let checked = leviculum_lxmf::Message::unpack(
         &page
             .entries

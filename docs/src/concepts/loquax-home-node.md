@@ -128,10 +128,10 @@ Link requests on `loquax.home`, msgpack on the wire:
                                        known: bin, name: str, first: uint, more: bool,
                                        [[seq, kind, id: bin32, at, packed], ...]]
 /moved [token: bin16, cursor: uint] -> [status]
-/group [client_id: bin16, name: str, [[address: bin16, name: str], ...]]
-                                   -> [status, group: bin16]
-/groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...]]
-                                   -> [status, group: bin16]
+/group [client_id: bin16, name: str, [[address: bin16, name: str], ...],
+        lang: str?]                -> [status, group: bin16]
+/groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...],
+        lang: str?]                -> [status, group: bin16]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -154,6 +154,21 @@ every device learns the group from its archive. The same client id asked
 again answers the group it made then. A home that archives an invitation
 learns the group's key from it, so a Join from any of its devices goes
 out before the group's announce is heard.
+
+The invitation is a text every client shows, in the admin's language
+(the optional `lang`, `de`; English is said by leaving it out, so the
+request is the three elements a home from before reads): "Lew invited
+you to Familie: lxma://… Reply /leave to leave." A member whose newest
+message to the owner did not say it understands groups, or that never
+wrote, is taken for a stock client (Columba, Sideband), and its text
+adds once "Loquax shows members and names:" and the site's address
+(`LOQUAX_URL`, the site's root until its download page is published).
+The whole text stays under 300 characters with its 168-character code;
+names too long for that leave the link out. A Loquax shows the card,
+not the text. The admin's member sheet reads where each invitation
+stands from its delivery in the member's chat: delivering, waiting at
+the propagation node for the member to come online, not delivered, or
+plainly invited once delivered.
 
 `/groupadd` (1307 G2) adds members to a group the home hosts and its
 owner is admin of: each new one gets an invitation from the owner, the

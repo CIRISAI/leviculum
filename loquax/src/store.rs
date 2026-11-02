@@ -1813,6 +1813,25 @@ impl Store {
             .map_err(|e| self.failed(e))
     }
 
+    /// The newest message the archive received from `peer`, packed as it
+    /// came (1307 pass six): what that peer's client last said of itself.
+    /// An LXMF message packs its destination, then its source.
+    pub fn archive_newest_from(&self, peer: &[u8; 16]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 17, 16) = ?3 ORDER BY seq DESC LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_RECEIVED),
+                    &peer[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))
+    }
+
     /// The peers the archive and the outbox hold a conversation with: the
     /// source of each received message, the destination of each sent one
     /// and of each message a client handed in. The home node archives the

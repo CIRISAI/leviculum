@@ -237,12 +237,14 @@ pub async fn create_group(
     client: HomeClient,
     name: String,
     members: Vec<([u8; 16], String)>,
+    lang: crate::ui::strings::Lang,
     budget: Duration,
 ) -> UiEvent {
     let request = super::wire::GroupRequest {
         client_id: super::client::client_id(),
         name,
         members,
+        lang,
     };
     let made = super::client::group(
         &client.node,
@@ -269,12 +271,14 @@ pub async fn add_members(
     client: HomeClient,
     group: [u8; 16],
     members: Vec<([u8; 16], String)>,
+    lang: crate::ui::strings::Lang,
     budget: Duration,
 ) -> UiEvent {
     let request = super::wire::GroupAddRequest {
         client_id: super::client::client_id(),
         group,
         members,
+        lang,
     };
     let added = super::client::group_add(
         &client.node,
