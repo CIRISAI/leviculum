@@ -2236,10 +2236,23 @@ fn a_late_recipient_stamp_invalidates_a_propagated_build() {
 
 /// U8 — a propagation-node switch re-targets every prepared envelope (S3), so
 /// a build made against the old node's link must come back `StaleBuild`.
+///
+/// The switch is the router's own, so the first node is its own choice here:
+/// a node the caller named is never swapped (1332, the test below).
 #[test]
 fn a_propagation_node_switch_invalidates_a_build_for_the_old_node() {
     let mut harness = deferred_upload_harness(66, 67, 68);
     let message_id = harness.message_id;
+    let chosen = harness
+        .client
+        .router
+        .select_outbound_propagation_node(&mut harness.client.node, None)
+        .expect("the router chooses the only node it knows");
+    let _ = harness.client.absorb_router(chosen);
+    assert_eq!(
+        harness.client.router.outbound_propagation_node(),
+        Some(harness.server_hash)
+    );
 
     // A second enabled propagation node becomes known through a real
     // announce.
@@ -2304,6 +2317,58 @@ fn a_propagation_node_switch_invalidates_a_build_for_the_old_node() {
     assert!(
         harness.client.router.outbound().contains_key(&message_id),
         "the refusal leaves the entry queued for a fresh build"
+    );
+}
+
+/// 1332: a node the caller named stays the node while it has no route, even
+/// with another node announced and reachable. On miauhaus a group's fresh
+/// engine was told the home's node, had no path to it yet, and its first
+/// tick moved the copies to another announced node without an event: the
+/// home logged them handed on to its own node, whose log had no link, no
+/// upload and no accept. The named node waits for its path instead, and
+/// nothing reaches the other one.
+#[test]
+fn a_named_node_without_a_route_is_not_swapped_for_an_announced_one() {
+    let mut harness = deferred_upload_harness(75, 76, 77);
+    let message_id = harness.message_id;
+    let (mut second_sink, second_hash) = upload_sink(78);
+    let announced = second_sink
+        .node
+        .announce_destination(&second_hash, Some(&propagation_announce()))
+        .expect("announce the second propagation node");
+    let _ = harness.client.receive(take_packets(announced.actions));
+    assert!(harness
+        .client
+        .router
+        .known_propagation_node(&second_hash)
+        .is_some());
+    assert!(harness.client.node.has_path(&second_hash));
+
+    assert!(harness
+        .client
+        .node
+        .remove_path(harness.server_hash.as_bytes()));
+    for _ in 0..3 {
+        let ticked = harness
+            .client
+            .router
+            .tick(&mut harness.client.node)
+            .expect("tick without a route to the named node");
+        let sent = harness.client.absorb_router(ticked);
+        pump_upload(&mut harness.client, &mut second_sink, sent, Vec::new());
+        assert_eq!(
+            harness.client.router.outbound_propagation_node(),
+            Some(harness.server_hash),
+            "the named node stays the node"
+        );
+    }
+    assert!(
+        second_sink.uploads.is_empty(),
+        "nothing may reach a node nobody named"
+    );
+    assert!(
+        harness.client.router.outbound().contains_key(&message_id),
+        "the message waits for the named node"
     );
 }
 

@@ -1571,6 +1571,14 @@ async fn a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_no
 /// agree here: the hand-on names the node (`pn=`), and the node's own
 /// accept line names the member as the copy's destination, from an upload,
 /// not a peer's sync.
+///
+/// 1332: on miauhaus the node still had no link, no upload and no accept for
+/// three copies handed on to it. The group's engine, fresh, had no path yet
+/// to the node it was told, heard other nodes announce, and its router moved
+/// the copies to one of those without a word (the journal mined at cost 16,
+/// the reference's default, where the home's node asks 13). So a second node
+/// announces here once the group's engine is up, at that cost, and the copy
+/// must still reach the home's node and not the other.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
     let events = leviculum_std::test_support::event_log::init_event_log();
@@ -1644,6 +1652,10 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    // Another node in the neighbourhood, heard by the group's engine, which
+    // has no path to the home's node yet: the miauhaus shape.
+    let other = lnpnd_node::PropagationNode::start(&mesh.instance, 16).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let sent = mesh
         .run(
             "send",
@@ -1707,6 +1719,17 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
         seen.iter().any(|event| event.starts_with("Accepted")),
         "the engine's own word agrees: {seen:?}"
     );
+    let elsewhere: Vec<String> = other
+        .events
+        .try_iter()
+        .map(|event| format!("{event:?}"))
+        .filter(|event| event.starts_with("Accepted"))
+        .collect();
+    assert!(
+        elsewhere.is_empty(),
+        "the copy went to a node nobody named: {elsewhere:?}\nhome node:\n{}",
+        node.log()
+    );
 
     let ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
         &once.path().join("storage"),
@@ -1751,6 +1774,7 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
 
     drop(node);
     drop(pn);
+    drop(other);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 

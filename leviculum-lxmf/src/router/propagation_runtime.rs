@@ -180,6 +180,14 @@ pub(super) struct PropagationRuntime {
     transport: PropagationTransport,
     config: PropagationClientConfig,
     outbound_node: Option<DestinationHash>,
+    /// Whether the caller named [`Self::outbound_node`] itself. Only a node
+    /// this router chose may be swapped by it for a reachable one: a named
+    /// node is waited for, as the reference waits for the one its caller set
+    /// (`reference/LXMF/LXMF/LXMRouter.py:412`). 1332: a group's fresh engine
+    /// had no path yet to the home's node it was told to use, its first tick
+    /// moved the copies to another announced node, and the home logged them
+    /// handed on to its own node, which never saw a byte.
+    outbound_pinned: bool,
     client: MailboxSync,
 }
 
@@ -189,6 +197,7 @@ impl PropagationRuntime {
             transport,
             config,
             outbound_node: None,
+            outbound_pinned: false,
             client: MailboxSync::default(),
         }
     }
@@ -912,10 +921,17 @@ impl PropagationRuntime {
             return Ok(output);
         };
 
-        // A selected preferred node can disappear after the message was
-        // queued. Once Core no longer has a route, move pending work to the
-        // best reachable announced alternative instead of exhausting every
-        // attempt against the stale preference.
+        // A node this router chose itself can disappear after the message
+        // was queued. Once Core no longer has a route, move pending work to
+        // the best reachable announced alternative instead of exhausting
+        // every attempt against the stale choice.
+        //
+        // Never a node the caller named (1332): no route to it yet is the
+        // normal state of a node just told to use it, and the move went
+        // without an event, so the caller booked an upload to a node it
+        // never chose as one to its own. A named node is asked for its path
+        // and its link, and the attempts run out against it, which ends the
+        // message `Failed` with the reason of its last attempt.
         //
         // Not while a mailbox round is still running on that node: the switch
         // replaces the client state, so the round would end without a word.
@@ -929,7 +945,10 @@ impl PropagationRuntime {
         // (`:1461-1470`). The reference never switches nodes by itself at
         // all (`outbound_propagation_node` is set only by its caller,
         // `:412`), so the next tick moving on is still the deviation it was.
-        if node.hops_to(&propagation_node).is_none() && !sync_is_active(self.client.state) {
+        if !self.outbound_pinned
+            && node.hops_to(&propagation_node).is_none()
+            && !sync_is_active(self.client.state)
+        {
             if let Some(alternative) = self
                 .transport
                 .known_nodes()
@@ -1269,7 +1288,9 @@ fn schedule_upload_retry(router: &mut LxmfRouter, message_id: [u8; 32], next_att
 impl LxmfRouter {
     /// Select the configured propagation node even before a path is known, or
     /// otherwise choose the best enabled node announced to this router. Known
-    /// routes rank ahead of nodes that require a path request.
+    /// routes rank ahead of nodes that require a path request. A configured
+    /// node is kept while it has no route; a chosen one may be swapped for a
+    /// reachable one (1332).
     pub fn select_outbound_propagation_node<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
@@ -1292,7 +1313,8 @@ impl LxmfRouter {
                     .known_node(destination)
                     .is_none_or(|known| known.announce.enabled)
             });
-            preferred.or_else(|| {
+            let pinned = preferred.is_some();
+            let selected = preferred.or_else(|| {
                 propagation
                     .transport
                     .known_nodes()
@@ -1308,16 +1330,36 @@ impl LxmfRouter {
                     })
                     .min()
                     .map(|(_, _, _, _, destination)| destination)
-            })
+            });
+            selected.map(|selected| (selected, pinned))
         }
         .ok_or(RouterError::NotFound)?;
-        self.set_outbound_propagation_node(node, Some(selected))
+        self.select_outbound(node, Some(selected.0), selected.1)
     }
 
+    /// Make `destination` the outbound propagation node, named by the
+    /// caller: it is kept while it has no route (1332), as the reference
+    /// keeps the node its caller set.
     pub fn set_outbound_propagation_node<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
         destination: Option<DestinationHash>,
+    ) -> Result<RouterOutput, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        self.select_outbound(node, destination, destination.is_some())
+    }
+
+    /// [`Self::set_outbound_propagation_node`], with `pinned` saying
+    /// whether the caller named the node or this router chose it.
+    fn select_outbound<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        destination: Option<DestinationHash>,
+        pinned: bool,
     ) -> Result<RouterOutput, RouterError>
     where
         R: CryptoRngCore,
@@ -1332,6 +1374,7 @@ impl LxmfRouter {
         }
         let changed = {
             let propagation = self.propagation.as_mut().ok_or(RouterError::NotFound)?;
+            propagation.outbound_pinned = pinned;
             let changed = propagation.outbound_node != destination;
             if changed {
                 propagation.cancel_outbound_link(node, &mut output);
