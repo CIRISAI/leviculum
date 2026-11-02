@@ -15,6 +15,11 @@
 //! beside it, which the window hands the effects that leave the process
 //! and which answers with outcomes the window folds into the model. The
 //! window draws no inline pictures yet; a picture link stays a link.
+//!
+//! A form field is a box in the terminal's chrome colours, reversed while
+//! focused, with a block caret on its editor's cell; a click on it is
+//! `Activate(Field(n))` and a key the window's widgets leave types into it
+//! through the rows table, as in the terminal.
 
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -55,11 +60,24 @@ use tui_input::Input;
 /// every host (`lnomad/fonts/OFL.txt`).
 pub const MONO_BYTES: &[u8] = include_bytes!("../fonts/FiraMono-Medium.ttf");
 
+/// Its bold, the same advance on the same grid, for a run the page sets
+/// bold. Fira Mono has no italic, so an italic run stays upright: a face
+/// asked for that the family lacks falls back to the proportional sans,
+/// off the grid.
+pub const MONO_BOLD_BYTES: &[u8] = include_bytes!("../fonts/FiraMono-Bold.ttf");
+
 /// The page's face as iced names it: the family, at the one weight the
 /// file holds.
 pub const MONO: Font = Font {
     family: iced::font::Family::Name("Fira Mono"),
     weight: iced::font::Weight::Medium,
+    ..Font::DEFAULT
+};
+
+/// The bold face as iced names it.
+pub const MONO_BOLD: Font = Font {
+    family: iced::font::Family::Name("Fira Mono"),
+    weight: iced::font::Weight::Bold,
     ..Font::DEFAULT
 };
 
@@ -405,7 +423,7 @@ impl Window {
         let lang = self.model.lang;
         let bar = top_bar(&scene, lang, p);
         let address = address_row(&scene.address, &scene, lang, p);
-        let page = page_view(&scene.page, p);
+        let page = page_view(&scene.page, &self.model, p);
         let page: Element<'_, Message> = mouse_area(page)
             .on_scroll(|delta| {
                 Message::Wheel(match delta {
@@ -524,45 +542,164 @@ fn pill<'a>(words: String, p: Palette) -> Element<'a, Message> {
         .into()
 }
 
-/// One run as a span: its colours, underline, the link it is part of; the
-/// focused link on the selection's ground, a search match on the accent's.
-fn span<'a>(run: &Run, focused: Option<usize>, p: Palette) -> Span<'a, usize, Font> {
+/// What a press on a page run activates: its link, or its form field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Link(usize),
+    Field(usize),
+}
+
+impl Hit {
+    fn intent(self) -> Intent {
+        Intent::Activate(match self {
+            Hit::Link(n) => NodeId::Link(n),
+            Hit::Field(n) => NodeId::Field(n),
+        })
+    }
+}
+
+/// What the page view needs beside the runs: the palette, the focused link
+/// or field, the field boxes' colours and the caret's cell in the focused
+/// text field.
+#[derive(Clone, Copy)]
+struct Ground {
+    p: Palette,
+    focus: Option<crate::app::Focus>,
+    /// A field box's words and ground, the terminal's chrome pair.
+    field: (Color, Color),
+    /// The focused text field and its caret's cell, counted from the box's
+    /// first cell.
+    caret: Option<(usize, usize)>,
+}
+
+/// The caret of the focused text field: the field and the cell, from the
+/// box's first, its editor's column less the box's scroll, held inside the
+/// box, as the terminal places its cursor.
+fn caret(model: &Model, focus: Option<crate::app::Focus>) -> Option<(usize, usize)> {
+    let Some(crate::app::Focus::Field(n)) = focus else {
+        return None;
+    };
+    let field = crate::app::model::visible_fields(model)
+        .into_iter()
+        .find(|f| f.index == n && f.kind == leviculum_micron::FieldKind::Text)?;
+    let edit = model.field_state.get(n.checked_sub(1)?)?;
+    let w = usize::from(field.col_end.saturating_sub(field.col_start));
+    let scroll = crate::app::input::visual_scroll(&edit.input, w.saturating_sub(1));
+    let at = crate::app::input::visual_cursor(&edit.input).saturating_sub(scroll);
+    Some((n, at.min(w.saturating_sub(1))))
+}
+
+/// One run as a span: its colours, weight, underline, the link or field it
+/// is part of; the focused link on the selection's ground, a field in its
+/// box (reversed while focused), a search match on the accent's.
+fn span<'a>(text: String, run: &Run, g: &Ground, caret: bool) -> Span<'a, Hit, Font> {
     let style = run.style;
+    let p = g.p;
     let (mut fg, mut bg) = (style.fg.map(ink), style.bg.map(ink));
     if style.reverse {
         (fg, bg) = (Some(bg.unwrap_or(p.background)), Some(fg.unwrap_or(p.text)));
     }
-    if run.link.is_some() && run.link == focused {
-        bg = Some(p.selected_row);
+    if let Some(n) = run.link {
+        if g.focus == Some(crate::app::Focus::Link(n)) {
+            bg = Some(p.selected_row);
+        }
+    }
+    if let Some(n) = run.field {
+        let (words, ground) = g.field;
+        // The focused field reversed, its caret's cell back in the box's
+        // colours: a block caret.
+        let reversed = g.focus == Some(crate::app::Focus::Field(n)) && !caret;
+        (fg, bg) = match reversed {
+            true => (Some(ground), Some(words)),
+            false => (Some(words), Some(ground)),
+        };
     }
     match run.matched {
         Some(true) => bg = Some(p.accent),
         Some(false) => bg = Some(p.panel),
         None => {}
     }
-    // One face for every run: the file holds one weight and no italic, and
-    // a face asked for that it lacks falls back to the proportional sans,
-    // which takes the run off the grid. Bold and italic are not drawn yet.
-    let mut span = Span::new(run.text.clone())
-        .font(MONO)
+    let font = match style.bold {
+        true => MONO_BOLD,
+        false => MONO,
+    };
+    let mut span = Span::new(text)
+        .font(font)
         .color(fg.unwrap_or(p.text))
         .underline(style.underline);
     if let Some(bg) = bg {
         span = span.background(Background::Color(bg));
     }
-    span.link_maybe(run.link)
+    let hit = match (run.link, run.field) {
+        (Some(n), _) => Some(Hit::Link(n)),
+        (None, Some(n)) => Some(Hit::Field(n)),
+        (None, None) => None,
+    };
+    span.link_maybe(hit)
+}
+
+/// `text` cut at cell `at`: the characters before it, the one on it and
+/// those after.
+fn cut_at(text: &str, at: usize) -> (String, String, String) {
+    let (mut before, mut on, mut after) = (String::new(), String::new(), String::new());
+    let mut col = 0;
+    for c in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if !on.is_empty() {
+            after.push(c);
+        } else if col + w <= at {
+            before.push(c);
+        } else {
+            on.push(c);
+        }
+        col += w;
+    }
+    (before, on, after)
+}
+
+/// A line's runs as spans, the caret's run split around its cell.
+fn line_spans<'a>(line: &crate::app::scene::PageLine, g: &Ground) -> Vec<Span<'a, Hit, Font>> {
+    let mut spans = Vec::new();
+    // Where in its box each field's next run starts.
+    let mut into = 0usize;
+    let mut field = None;
+    for run in &line.runs {
+        if run.field != field {
+            (field, into) = (run.field, 0);
+        }
+        let width = unicode_width::UnicodeWidthStr::width(run.text.as_str());
+        match g.caret {
+            Some((n, at)) if run.field == Some(n) && (into..into + width).contains(&at) => {
+                let (before, on, after) = cut_at(&run.text, at - into);
+                for (part, caret) in [(before, false), (on, true), (after, false)] {
+                    if !part.is_empty() {
+                        spans.push(span(part, run, g, caret));
+                    }
+                }
+            }
+            _ => spans.push(span(run.text.clone(), run, g, false)),
+        }
+        into += width;
+    }
+    spans
 }
 
 /// The page: its window of lines on the cell grid, one rich text per
-/// line, a click on a link run its activation.
-fn page_view<'a>(page: &Page, p: Palette) -> Element<'a, Message> {
-    let focused = match page.focus {
-        Some(crate::app::Focus::Link(n)) => Some(n),
-        _ => None,
+/// line, a click on a link run its activation, on a field run the field's.
+fn page_view<'a>(page: &Page, model: &Model, p: Palette) -> Element<'a, Message> {
+    let words = model.theme.chrome_fg();
+    let ground = model.theme.chrome_bg();
+    let g = Ground {
+        p,
+        focus: page.focus,
+        field: (
+            Color::from_rgb8(words.0, words.1, words.2),
+            Color::from_rgb8(ground.0, ground.1, ground.2),
+        ),
+        caret: caret(model, page.focus),
     };
     let lines = page.lines.iter().fold(column![], |lines, line| {
-        let spans: Vec<Span<'a, usize, Font>> =
-            line.runs.iter().map(|run| span(run, focused, p)).collect();
+        let spans = line_spans(line, &g);
         let line: Element<'a, Message> = match spans.is_empty() {
             true => Space::new().height(CELL_H).into(),
             false => rich_text(spans)
@@ -570,7 +707,7 @@ fn page_view<'a>(page: &Page, p: Palette) -> Element<'a, Message> {
                 .line_height(iced::Pixels(CELL_H))
                 .font(MONO)
                 .wrapping(text::Wrapping::None)
-                .on_link_click(|n| Message::Intent(Intent::Activate(NodeId::Link(n))))
+                .on_link_click(|hit: Hit| Message::Intent(hit.intent()))
                 .into(),
         };
         lines.push(container(line).height(CELL_H))
@@ -673,6 +810,7 @@ pub fn load_mono() {
     let system = iced::advanced::graphics::text::font_system();
     let mut system = system.write().unwrap_or_else(PoisonError::into_inner);
     system.load_font(Cow::Borrowed(MONO_BYTES));
+    system.load_font(Cow::Borrowed(MONO_BOLD_BYTES));
 }
 
 /// The transfers: the effects that leave the process, run over the
@@ -829,6 +967,7 @@ pub async fn run_gui(
         .subscription(Window::subscription)
         .theme(Window::theme)
         .font(MONO_BYTES)
+        .font(MONO_BOLD_BYTES)
         .window_size(Size::new(WINDOW.0, WINDOW.1))
         .run()
     });
@@ -1092,6 +1231,151 @@ mod tests {
             y += 4.0;
         }
         assert_eq!(opened.len(), 3, "{opened:?}");
+    }
+
+    /// A page with a text field and a checkbox, as a load leaves it, in
+    /// the window.
+    fn form() -> Window {
+        load_mono();
+        let src = "`!Sign in`!\nName: `<12|name`bo>\nAgree: `<?|agree`Agree>";
+        let (cols, rows) = cells(WINDOW.0, WINDOW.1);
+        let mut model = Model::from_document(
+            &parse(src),
+            crate::app::model::content_width(cols),
+            "Form",
+            (cols, rows),
+        );
+        let target = crate::url::parse_url(&format!("{NODE}:/page/form.mu"), None).expect("url");
+        model.current_dest = Some(target.dest_hash);
+        model.history.visit(target);
+        model.theme = Theme::Light;
+        Window::new(model, None)
+    }
+
+    /// The window's place of cell `col` of the page's line `row`.
+    fn cell(col: usize, row: usize) -> iced::Point {
+        iced::Point::new(
+            PAGE_PAD + (col as f32 + 0.5) * CELL_W,
+            BAR + ADDRESS_ROW + PAGE_PAD + (row as f32 + 0.5) * CELL_H,
+        )
+    }
+
+    fn press(c: char) -> Message {
+        let key = keyboard::Key::Character(c.to_string().into());
+        Message::Key(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: Some(c.to_string().into()),
+            repeat: false,
+        })
+    }
+
+    /// A click on a field's box raises `Activate(Field(n))`; folded, the
+    /// field has the focus and a typed key lands in it, as in the terminal.
+    #[test]
+    fn a_click_on_a_field_focuses_it_and_keys_type_into_it() {
+        let mut window = form();
+        let field = crate::app::model::visible_fields(&window.model)[0].clone();
+        let row = usize::from(field.row - crate::app::model::TOPBAR_ROWS);
+        let at = cell(usize::from(field.col_start) + 1, row);
+        let clicked =
+            leviculum_ui_iced::headless::click(window.view(), at, WINDOW.0 as u32, WINDOW.1 as u32)
+                .expect("the software renderer");
+        assert!(
+            matches!(
+                clicked.as_slice(),
+                [Message::Intent(Intent::Activate(NodeId::Field(1)))]
+            ),
+            "{clicked:?}"
+        );
+        let _ = window.update(clicked.into_iter().next().expect("one message"));
+        assert_eq!(window.model.field_focus, Some(1));
+        let _ = window.update(press('b'));
+        assert_eq!(
+            crate::app::input::InputBuffer::value(&window.model.field_state[0].input),
+            "bob"
+        );
+    }
+
+    /// The focused text field is reversed and its caret's cell, after the
+    /// typed "bo", is back in the box's colours: three spans, the middle
+    /// one the caret.
+    #[test]
+    fn the_focused_field_is_reversed_around_a_block_caret() {
+        let mut window = form();
+        let _ = window.update(Message::Intent(Intent::Activate(NodeId::Field(1))));
+        let scene = window.model.scene();
+        let p = window.palette();
+        let g = Ground {
+            p,
+            focus: scene.page.focus,
+            field: (Color::BLACK, Color::WHITE),
+            caret: caret(&window.model, scene.page.focus),
+        };
+        assert_eq!(g.caret, Some((1, 2)), "after \"bo\"");
+        let line = scene
+            .page
+            .lines
+            .iter()
+            .find(|l| l.runs.iter().any(|r| r.field == Some(1)))
+            .expect("the field's line");
+        let boxed: Vec<_> = line_spans(line, &g)
+            .into_iter()
+            .filter(|s| s.link == Some(Hit::Field(1)))
+            .collect();
+        let grounds: Vec<_> = boxed
+            .iter()
+            .map(|s| (s.text.to_string(), s.highlight.map(|h| h.background)))
+            .collect();
+        let reversed = Some(Background::Color(Color::BLACK));
+        let plain = Some(Background::Color(Color::WHITE));
+        assert_eq!(grounds.len(), 3, "{grounds:?}");
+        assert_eq!(grounds[0], ("bo".to_string(), reversed), "{grounds:?}");
+        assert_eq!(grounds[1].1, plain, "{grounds:?}");
+        assert_eq!(grounds[2].1, reversed, "{grounds:?}");
+    }
+
+    /// A bold run is set in the bold face of the same family, a plain one
+    /// in the regular: the heading of the form, and its words after it.
+    #[test]
+    fn a_bold_run_is_set_in_the_bold_face() {
+        let window = form();
+        let scene = window.model.scene();
+        let g = Ground {
+            p: window.palette(),
+            focus: None,
+            field: (Color::BLACK, Color::WHITE),
+            caret: None,
+        };
+        let spans: Vec<_> = scene
+            .page
+            .lines
+            .iter()
+            .flat_map(|l| line_spans(l, &g))
+            .collect();
+        let face = |words: &str| {
+            spans
+                .iter()
+                .find(|s| s.text.contains(words))
+                .and_then(|s| s.font)
+        };
+        assert_eq!(face("Sign in"), Some(MONO_BOLD));
+        assert_eq!(face("Name"), Some(MONO));
+    }
+
+    /// The form in the window, its field focused: the golden, pixel for
+    /// pixel (the boxes, the reversed field, the caret, the bold heading).
+    #[test]
+    fn the_form_is_the_golden() {
+        let mut window = form();
+        let _ = window.update(Message::Intent(Intent::Activate(NodeId::Field(1))));
+        let (w, h) = (WINDOW.0 as u32, WINDOW.1 as u32);
+        same_as("gui-form-light.png", &shoot(&window), w, h);
     }
 
     /// The xterm table: the cube's corners and the grey ramp's ends.
