@@ -87,7 +87,7 @@ interpreter `run_effects` at `:1855-1960`. `update` mutates rather than
 returning a new model, and effects are plain data, not closures. That
 combination is what makes the 245 in-file unit tests possible: build a
 `Model`, feed a synthetic `AppEvent::Key`, assert on the model and on the
-returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:1778`
+returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:1589`
 onwards; helpers at `:2411-2427`). The view is tested against
 `ratatui::backend::TestBackend` (`:3240`), and the `--print` path has
 byte-identical golden files (`lnomad/tests/render_golden.rs:18-37`).
@@ -98,13 +98,13 @@ anything else for a messenger, and the answer is yes.
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
 (`set_announce_sink`, `lnomad/src/fetch.rs:243-245`, wiring comment at
-`lnomad/src/tui.rs:1554-1557`), a non-blocking unbounded send on every
+`lnomad/src/tui.rs:1389-1392`), a non-blocking unbounded send on every
 recorded announce (`note_announce`, `lnomad/src/fetch.rs:387-407`), a
 dedicated background task parked on the shared session in 250 ms lock
-slices (`spawn_discovery`, `lnomad/src/tui.rs:1310-1351`), and a
+slices (`spawn_discovery`, `lnomad/src/transfer.rs:163-183`), and a
 `tokio::select!` arm that folds the result into the model
-(`lnomad/src/tui.rs:1713-1715`). The main loop has five arms
-(`lnomad/src/tui.rs:1617-1720`), and the timer arm is conditionally enabled
+(`lnomad/src/tui.rs:1548-1550`). The main loop has five arms
+(`lnomad/src/tui.rs:1452-1555`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
 `lnomad/src/app/model.rs:855-858`) so an idle browser does not wake eight
 times a second.
@@ -114,7 +114,7 @@ times a second.
 and a binary `identity`. Everything else is RAM. The write path is
 `fs::write` with no atomic rename, no fsync, and errors deliberately
 ignored (`lnomad/src/bookmarks.rs:124-130`, effect handler at
-`lnomad/src/tui.rs:1471-1477`), and load treats corrupt exactly like
+`lnomad/src/tui.rs:1306-1312`), and load treats corrupt exactly like
 missing (`lnomad/src/bookmarks.rs:116-121`). For bookmarks that is a
 defensible trade. For a message store it is data loss.
 
@@ -161,15 +161,15 @@ raw ANSI page text and nothing else: no link markers, no legend, and with
 `--no-color` links are indistinguishable from body text
 (`lnomad/src/render.rs:144-147`). There is no JSON output anywhere in the
 crate: `serde_json` is not a dependency. Non-interactive detection is
-automatic: `interactive = !args.print && stdin().is_terminal() &&
-stdout().is_terminal()` (`lnomad/src/main.rs:174-175`), so piping never
+automatic: `interactive = args.gui || (!args.print && stdin().is_terminal() &&
+stdout().is_terminal())` (`lnomad/src/main.rs:179-180`), so piping never
 blocks on the UI. Exit codes: 0 success, 1 operational failure, 2 argument
-or URL error (`lnomad/src/main.rs:181`, `:188`, `:222`, `:238`).
+or URL error (`lnomad/src/main.rs:190`, `:188`, `:222`, `:238`).
 
 `lnomad` has no settings file at all. `--config` points at the *Reticulum*
 config directory; the `lnomad/` directory holds only data. The theme is
 auto-detected via OSC 11 before raw mode is entered
-(`lnomad/src/tui.rs:1503-1510`) and toggled at runtime with `t`; theme
+(`lnomad/src/tui.rs:1338-1345`) and toggled at runtime with `t`; theme
 colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
@@ -809,16 +809,16 @@ Three specific things `lnomad` does that must change:
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.
 3. **The timer must run.** `lnomad` disables its tick when idle
-   (`lnomad/src/tui.rs:1716`). A messenger has relative timestamps, a sync
+   (`lnomad/src/tui.rs:1551`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
    (`leviculum-lxmf/src/router.rs:2216`).
 
 Things to carry over unchanged: the generation counter for stale-result
-rejection (`spawn_fetch`, `lnomad/src/tui.rs:904-945`), the tick-counted
+rejection (`spawn_fetch`, `lnomad/src/transfer.rs:50-86`), the tick-counted
 toast whose expiry is a pure function and therefore unit-testable without
 real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
-`lnomad/src/tui.rs:2836`),
+`lnomad/src/tui.rs:2648`),
 the `TerminalGuard` RAII plus panic hook that restores the terminal before
 the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:96-138`), and OSC 52 for the
 clipboard so copy works over SSH with no X11 dependency (`osc52`,
@@ -838,7 +838,7 @@ opportunity: "send me a message when the backup finishes" is a real use and
 needs no UI at all.
 
 Non-interactive subcommands from the start, following `lnomad`'s automatic
-non-tty detection (`lnomad/src/main.rs:174-175`) and its exit-code
+non-tty detection (`lnomad/src/main.rs:179-180`) and its exit-code
 convention (0, 1, 2):
 
 ```

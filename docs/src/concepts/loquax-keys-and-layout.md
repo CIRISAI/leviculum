@@ -879,7 +879,7 @@ falls from 5.9:1 to 4.3:1.
 1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
 2. `--color truecolor|256|16`: that tier. `lnomad` had the flag with two
    values (`lnomad/src/main.rs:65`); `loquax` has it now
-   (`loquax/src/main.rs:364`), and both have `16`.
+   (`loquax/src/main.rs:369`), and both have `16`.
 3. `COLORTERM` is `truecolor` or `24bit`: truecolor (the rule
    `resolve_depth` had before 1042).
 4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
@@ -928,7 +928,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:332`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:3475`).
+  (`loquax/src/ui.rs:3506`).
 
 #### 3. What colour carries and what it must not carry alone
 

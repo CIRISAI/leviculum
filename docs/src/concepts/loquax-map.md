@@ -28,12 +28,12 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:478`, `loquax/src/outbox.rs:261`). The core reads
+(`loquax/src/engine.rs:478`, `loquax/src/outbox.rs:268`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
-`loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
+`loquax/src/telemetry.rs:144`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3847`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2640`) and the positions in a table of
+`loquax/src/ui.rs:3881`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:2641`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:191`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
@@ -1277,6 +1277,61 @@ No share survives an uninstall: the store goes with the app. Android 14
 refuses a location service started from the background; a share
 restored before any screen then runs on the fixes a screen brings until
 one starts the service.
+
+### Positions the mesh announces (1302)
+
+Lew, 2026-11-01: the map shows every position the mesh announces,
+mailbox or not. A node announces a second destination, `lev.position`
+(SINGLE, of its identity), beside its delivery destination; its app data
+is the fix (the mailbox for friends study of order 1296, section 4.3,
+on master). The board side and the final codec are order 1301; until it lands
+`loquax/src/mesh_position.rs` reads one plain layout, version 1, 18
+bytes (`lat_e7`, `lon_e7` as i32, `alt_m` i16, `fix_time` u32, `speed`
+u16 in cm/s, all big endian), and any other version is no position.
+
+**The event.** The engine sees every announce its core hears
+(`engine.rs`, `on_event`), a client of a home node too, since the check
+needs no router: a `lev.position` announce whose app data decodes
+becomes `OutboxEvent::MeshPosition { identity, location }`, the identity
+hash the announce proved. The model takes it as
+`UiEvent::MeshPosition { identity, fix, name, age }` (the engine's
+event folds the same way, with no name and age 0); a shell that holds an
+announce itself hands its name and how long ago it heard it.
+
+**The merge rule.** The peer is the identity's `lxmf.delivery` address
+(`mesh_position::delivery_of`, the same hash a delivery announce of that
+identity proves), so an announced fix joins the peer's telemetry
+positions in `UiModel::positions`: the newest fix wins by
+`Fix::newer_than` whichever way it came, and `Fix::source` remembers
+which (`Telemetry` or `Mesh`). It is a state: the store keeps no
+announced fix, since the node announces again at its cadence and a
+stranger leaves no trace once gone. An announced fix newer than every
+report is the row's newest fix (`UiModel::liveness`), so the list's ⌖
+(1224), the ring and the Friends sheet show it unchanged.
+
+**The pin and the card.** A peer whose shown position came from the mesh
+and who is none of the reader's people (`UiModel::is_contact`: ourselves,
+a conversation, a petname or an address book link) is **nearby**
+(`UiModel::is_nearby`, `MapPin::nearby`, `FriendRow::nearby`). A peer
+known from a collector's stream keeps the pin it had. Nearby is drawn as
+a neutral grey pin with the announced name and no avatar: the phone's
+`AvatarView` draws a grey circle without letters or photo, the window a
+grey marker, the terminal the muted colour. Its card says "Nearby, not in
+your contacts" with **Add** in place of Chat and Share; Add opens its
+conversation and makes the announced name the reader's name for it
+(`UiModel::add_nearby`; on the phone the `addcontact` request of the
+code reader, 1263, with the bare address). In the terminal the map's
+title is the card while the pin is selected (`map · Nearby, not in your
+contacts · Enter adds`) and Enter adds it; the window's pin list carries
+the line and an Add button. No setting: nearby nodes are a fact of the
+mesh; hiding them is a later option if someone asks.
+
+**Seeding one.** `loquax announce --position LAT,LON [--from NAME]`
+attaches as `send` does and announces the position once
+(`Command::AnnouncePosition`, which registers the `lev.position`
+destination of our identity on first use). The device walk's
+`offgrid_positions` uses it with the mailbox stopped
+([device walk](loquax-device-walk.md)).
 
 ## 7. Decided
 
