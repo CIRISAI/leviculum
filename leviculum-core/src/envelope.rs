@@ -373,6 +373,22 @@ pub const PN_LIST_CONTROL_ALLOWED: u8 = 2;
 /// which `leviculum_pn_store::BOARD_LIST_MAX` is asserted equal to.
 pub const PN_LIST_MAX_HASHES: usize = 16;
 
+/// Set whom the board shares its position with in its `lev.position`
+/// announce (order 1301): `lnflash --share-position
+/// <default|off|owner|everyone>`.
+///
+/// Payload is one byte, the setting
+/// ([`crate::position_share_store`]: 0 default, 1 off, 2 owner, 3
+/// everyone); a byte above
+/// [`crate::position_share_store::POSITION_SHARE_MAX`] is refused with
+/// [`REFUSE_VALUE`]. Persisted on the telemetry flash page before the ack
+/// (#358) and applied at once: the next position announce follows it, and
+/// the `[POSITION] share=` line says what the board now runs. USB-only by
+/// where the parser sits, as [`TYPE_MGMT_ALLOW`] argues: a setting that
+/// decides whether a board says where it is must never be writable over
+/// the air.
+pub const TYPE_POSITION_SHARE: u8 = 0x17;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -774,6 +790,11 @@ pub fn decode_store_storm_payload(payload: &[u8]) -> Option<StoreStormWire> {
         records: u16::from_be_bytes([bytes[0], bytes[1]]),
         size: u16::from_be_bytes([bytes[2], bytes[3]]),
     })
+}
+
+/// Encode a complete position-share frame (order 1301).
+pub fn encode_position_share(setting: u8) -> Vec<u8> {
+    encode_frame(TYPE_POSITION_SHARE, &[setting])
 }
 
 /// What one [`TYPE_PN_CONFIG`] asks for (Codeberg #384). A field holding
@@ -2156,6 +2177,12 @@ pub enum ControlAction {
     /// `encode_ack(TYPE_PN_LIST)` only once it landed. Already inside its
     /// bounds: the classifier refused anything else.
     PnList(PnListWire),
+    /// Envelope position share (order 1301): persist the setting, apply
+    /// it, and answer `encode_ack(TYPE_POSITION_SHARE)` only once the
+    /// record is on the page (#358). Already inside
+    /// [`crate::position_share_store::POSITION_SHARE_MAX`]: the classifier
+    /// refused anything else.
+    PositionShare(u8),
     /// Envelope channel-stats query: answer via
     /// [`encode_channel_stats_report`]. Read-only, like
     /// [`MediaQuery`](Self::MediaQuery).
@@ -2400,6 +2427,16 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             }
             None => malformed,
         },
+        TYPE_POSITION_SHARE => match frame.payload {
+            [setting] if *setting <= crate::position_share_store::POSITION_SHARE_MAX => {
+                ControlAction::PositionShare(*setting)
+            }
+            [_] => ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_VALUE,
+            },
+            _ => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -2438,6 +2475,7 @@ mod tests {
         TYPE_MGMT_ALLOW_QUERY,
         TYPE_CHANNEL_STATS_QUERY,
         TYPE_PN_LIST,
+        TYPE_POSITION_SHARE,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -4471,6 +4509,45 @@ mod tests {
             }
         );
     }
+    #[test]
+    fn position_share_classifies_and_refuses_a_setting_it_does_not_know() {
+        for setting in 0..=crate::position_share_store::POSITION_SHARE_MAX {
+            assert_eq!(
+                classify_control_frame(&encode_position_share(setting), ACCEPTED),
+                ControlAction::PositionShare(setting)
+            );
+        }
+        assert_eq!(
+            classify_control_frame(&encode_position_share(4), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_VALUE,
+            }
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_POSITION_SHARE, &[]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_POSITION_SHARE, &[1, 1]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+        // A firmware that does not list it refuses it as unknown.
+        assert_eq!(
+            classify_control_frame(&encode_position_share(2), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SHARE,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
     #[test]
     fn pn_config_classifies_and_keep_keep_is_refused() {
         let both = PnConfigWire {

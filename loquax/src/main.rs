@@ -224,9 +224,15 @@ struct SetupArgs {
     reach: Option<String>,
 
     /// The fixed address, `host:port`, as a phone reaches this computer's
-    /// port for phones (4243); implies `--reach fixed`.
+    /// port for phones (--phone-port); implies `--reach fixed`.
     #[arg(long, value_name = "HOST:PORT")]
     address: Option<String>,
+
+    /// The port for phones the Reticulum daemon listens on, for a fixed
+    /// address: 4243 unless another is given. The address may name another
+    /// port when a router forwards it here.
+    #[arg(long, value_name = "PORT")]
+    phone_port: Option<u16>,
 
     /// The name the device is admitted under.
     #[arg(long)]
@@ -1771,8 +1777,12 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
     // The phones' port, in access point mode, on a new install only: a
     // config that already runs is never rewritten (1176).
     if first_start {
-        let added = loquax::home::phone_server::add(&config_dir);
-        println!("{}", loquax::home::phone_server::first_start_lines(&added));
+        let port = loquax::home::phone_server::PORT;
+        let added = loquax::home::phone_server::add(&config_dir, port);
+        println!(
+            "{}",
+            loquax::home::phone_server::first_start_lines(&added, port)
+        );
     }
     let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
     let storage_dir = match storage_dir(&home) {
@@ -2215,10 +2225,14 @@ async fn run_setup(args: SetupArgs) -> ExitCode {
             }
         }
     };
+    if args.phone_port.is_some() && reach == Reach::Rendezvous {
+        return usage("--phone-port goes with a fixed address, not the rendezvous");
+    }
     let answers = Answers {
         store,
         reach,
         name: args.name.map(|name| name.trim().to_string()),
+        phone_port: args.phone_port.unwrap_or(loquax::home::phone_server::PORT),
     };
     println!();
     match store {
@@ -2316,12 +2330,21 @@ async fn setup_account(
     };
     println!("{}", setup::service_done(None, changed));
     let port = match &answers.reach {
-        Reach::Fixed(_) => Some(loquax::home::phone_server::add(config_dir)),
+        Reach::Fixed(_) => Some(loquax::home::phone_server::add(
+            config_dir,
+            answers.phone_port,
+        )),
         Reach::Rendezvous => None,
     };
     println!(
         "{}",
-        setup::reach_done(answers.store, &answers.reach, changed, port.as_ref())
+        setup::reach_done(
+            answers.store,
+            &answers.reach,
+            changed,
+            port.as_ref(),
+            answers.phone_port
+        )
     );
     println!("{}", setup::code_head(token_hours(dir)));
     let code = run_mailbox(MailboxCommand::Admit {
@@ -2380,7 +2403,10 @@ fn setup_system(answers: &loquax::home::setup::Answers, dir: &Path) -> ExitCode 
     }
     let port = match &answers.reach {
         Reach::Fixed(_) => {
-            let added = loquax::home::phone_server::add(Path::new(setup::SYSTEM_RETICULUM));
+            let added = loquax::home::phone_server::add(
+                Path::new(setup::SYSTEM_RETICULUM),
+                answers.phone_port,
+            );
             if matches!(added, loquax::home::phone_server::Added::Written(_)) {
                 let _ = std::process::Command::new("systemctl")
                     .args(["try-restart", "lnsd.service"])
@@ -2444,7 +2470,13 @@ fn setup_system(answers: &loquax::home::setup::Answers, dir: &Path) -> ExitCode 
     println!("{}", setup::service_done(Some(service), changed));
     println!(
         "{}",
-        setup::reach_done(answers.store, &answers.reach, changed, port.as_ref())
+        setup::reach_done(
+            answers.store,
+            &answers.reach,
+            changed,
+            port.as_ref(),
+            answers.phone_port
+        )
     );
     println!("{}", setup::code_head(token_hours(dir)));
     print!("{}", String::from_utf8_lossy(&admitted));

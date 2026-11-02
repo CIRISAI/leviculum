@@ -33,7 +33,7 @@ runs an event-driven main loop that dispatches packets between them:
 `set_interface_name` (`leviculum-nrf/src/node_loop.rs:439-456`) and
 `leviculum-nrf/src/bin/rak4631.rs:297-338`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/node_loop.rs:848`.)
+`leviculum-nrf/src/node_loop.rs:849`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
@@ -548,8 +548,8 @@ The mapping from board to binary and features used by the flash recipes:
 | SenseCAP T1000-E | `t1000e` | `bsp-t1000e` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:2121`, `Justfile:2149`,
-`Justfile:2163`.)
+`just flash-rak4631-pocket` recipes: `Justfile:2142`, `Justfile:2170`,
+`Justfile:2184`.)
 
 ### What the `lnflash` bundle carries
 

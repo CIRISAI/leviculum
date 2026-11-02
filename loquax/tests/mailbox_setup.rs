@@ -100,6 +100,17 @@ fn printed_code(text: &str) -> (HomeCode, Vec<String>, String) {
     (code, list, line)
 }
 
+/// A port for phones no other test asks for: the kernel's free one, let go
+/// at once so the setup's own probe finds it free. The default port, 4243,
+/// is the host's, and two tests of this file asking for it at the same
+/// instant took it from each other (1311).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("0.0.0.0", 0))
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+        .port()
+}
+
 fn config(home: &Path) -> String {
     std::fs::read_to_string(home.join("config")).expect("config written")
 }
@@ -107,12 +118,17 @@ fn config(home: &Path) -> String {
 #[test]
 fn the_flags_set_up_a_mailbox_with_a_fixed_address_and_a_second_run_keeps_it() {
     let home = Home::new();
+    // The address keeps 4243, as a router forwarding it here would; the
+    // port the daemon listens on is the test's own.
+    let port = free_port().to_string();
     let first = stdout(&home.setup(
         &[
             "--store",
             "account",
             "--address",
             "192.0.2.7:4243",
+            "--phone-port",
+            &port,
             "--name",
             "phone",
             "--yes",
@@ -124,7 +140,10 @@ fn the_flags_set_up_a_mailbox_with_a_fixed_address_and_a_second_run_keeps_it() {
         first.contains("at the fixed address 192.0.2.7:4243\n"),
         "{first}"
     );
-    assert!(first.contains("Added port 4243 for phones"), "{first}");
+    assert!(
+        first.contains(&format!("Added port {port} for phones")),
+        "{first}"
+    );
     assert!(first.contains('█'), "no QR code:\n{first}");
     assert!(
         first.contains("\"On a computer at home\", then \"Scan the code\""),
@@ -134,7 +153,7 @@ fn the_flags_set_up_a_mailbox_with_a_fixed_address_and_a_second_run_keeps_it() {
     assert_eq!(list, ["192.0.2.7:4243"]);
     let rns = std::fs::read_to_string(home.rns().join("config")).expect("rns config");
     assert!(rns.contains("[[Loquax Mailbox TCP]]"), "{rns}");
-    assert!(rns.contains("listen_port = 4243"), "{rns}");
+    assert!(rns.contains(&format!("listen_port = {port}\n")), "{rns}");
     assert_eq!(
         config(&home.home()),
         "rendezvous_dial = off\nhome_address = 192.0.2.7:4243\n"
@@ -153,7 +172,7 @@ fn the_flags_set_up_a_mailbox_with_a_fixed_address_and_a_second_run_keeps_it() {
         "{second}"
     );
     assert!(
-        second.contains("The port for phones, 4243, is open."),
+        second.contains(&format!("The port for phones, {port}, is open.")),
         "{second}"
     );
     let (again, again_list, again_line) = printed_code(&second);
@@ -197,16 +216,32 @@ fn the_rendezvous_by_flags_puts_the_configs_list_in_the_code() {
         config(&home.home()),
         "rendezvous = rv.example:4343\nrendezvous_dial = on\n"
     );
-    // The rendezvous needs no port for phones.
+    // The rendezvous needs no port for phones, and refuses one.
     let rns = std::fs::read_to_string(home.rns().join("config")).expect("rns config");
     assert_eq!(rns, RETICULUM_CONFIG);
+    let refused = home.setup(
+        &[
+            "--store",
+            "account",
+            "--reach",
+            "rendezvous",
+            "--phone-port",
+            "5000",
+            "--yes",
+        ],
+        "",
+    );
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--phone-port goes with"));
 }
 
 #[test]
 fn the_questions_take_typed_answers() {
     let home = Home::new();
-    // Your account, a fixed address, this one.
-    let text = stdout(&home.setup(&[], "2\n2\n198.51.100.4:4243\n"));
+    // Your account, a fixed address, this one; the port for phones is the
+    // test's own.
+    let port = free_port().to_string();
+    let text = stdout(&home.setup(&["--phone-port", &port], "2\n2\n198.51.100.4:4243\n"));
     for question in [
         "1/5  Where your mailbox keeps your mail\n",
         "     2) In your own account, in ",
@@ -218,6 +253,10 @@ fn the_questions_take_typed_answers() {
         assert!(text.contains(question), "no {question:?}:\n{text}");
     }
     assert_five_steps(&text);
+    assert!(
+        text.contains(&format!("Added port {port} for phones")),
+        "{text}"
+    );
     let (_, list, _) = printed_code(&text);
     assert_eq!(list, ["198.51.100.4:4243"]);
 

@@ -187,6 +187,24 @@ struct Cli {
     )]
     peering_cost: Option<u8>,
 
+    /// Set whom every running LNode shares its position with in its
+    /// lev.position announce, then exit. No flashing; persisted, and in
+    /// force at once. owner: sealed to the owner, the identity the board's
+    /// telemetry goes to, so the owner's homes and devices read it and
+    /// nobody else. everyone: in the clear, to everyone in radio range
+    /// ("share my position with everyone nearby"). off: never. default: a
+    /// board reporting as a tracker shares with its owner, every other
+    /// board shares nothing.
+    #[arg(
+        long,
+        value_name = "WHOM",
+        value_parser = clap::builder::PossibleValuesParser::new(
+            leviculum_core::position_share_store::SETTING_NAMES
+        ),
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm", "stamp_cost", "peering_cost", "static_peer", "clear_static_peers", "auth_allowed", "clear_auth_allowed", "control_allowed", "clear_control_allowed"]
+    )]
+    share_position: Option<String>,
+
     /// Pin the board's propagation node to a peer (audit 2026-10-12 D4):
     /// that node's `lxmf.propagation` destination hash, 32 hex digits.
     /// Repeatable, at most 16; the list replaces the stored one. Always
@@ -846,6 +864,23 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
         let all_took_it = flow::set_pn_lists(&catalogue, &sysfs, ui, &pn_lists)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if let Some(setting) = cli
+        .share_position
+        .as_deref()
+        .and_then(leviculum_core::position_share_store::parse_setting)
+    {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_position_share(&catalogue, &sysfs, ui, setting)?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {

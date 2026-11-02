@@ -167,6 +167,51 @@ commits it read.
   break, but the functionality codes belong upstream, and an announce
   tells everyone on the network who has receipts on.
 
+### The announce aspect `lev.position`
+
+The namespace has one destination of its own beside the field pair
+(order 1301): `lev.position`, app name `lev`, aspect `position`, a SINGLE
+destination of a node's identity. Its announce carries where the node is,
+so a map shows the nodes of a mesh without a message. Its own aspect and
+never the `lxmf.delivery` announce's `app_data`, which every reader parses
+as LXMF's list (`reference/LXMF/LXMF/LXMF.py:151-172`); a Python node
+stores and relays an announce whose name hash it has no handler for and
+does nothing else with it.
+
+```
+app_data = map {                    plain; sealed is bin(encrypt(this map))
+    0x00: int    latitude,  degrees times 1e7
+    0x01: int    longitude, degrees times 1e7
+    0x02: int    altitude, metres                       when the fix has one
+    0x03: uint   ground speed, centimetres a second     when the fix has one
+    0x04: uint   course over ground, degrees times 100  when the fix has one
+    0x05: uint   age of the fix when the announce left, seconds
+    0x06: uint   source: 0 GNSS, 1 manual
+    0x07: str    the node's display name                when it has one
+}
+```
+
+- **Two forms, told apart by the first byte.** Sealed, the default, is a
+  `bin` (`0xc4`) holding the map encrypted to one identity the way
+  Reticulum encrypts to a SINGLE destination (`Identity::encrypt`:
+  ephemeral X25519 key, AES-256-CBC, HMAC-SHA256); whoever holds that
+  identity's key opens it, nobody else learns anything but its length.
+  Plain is the map itself, the opt-in "share my position with everyone
+  nearby".
+- **The same rules as the field pair**: a reader skips a key it does not
+  know, a key never changes meaning, a repeated key resolves to its last
+  occurrence. A map without both coordinates, or one out of range, is no
+  position; a known key of the wrong type makes the whole map none.
+- **Authentic as the identity**: the announce's signature covers the
+  `app_data`, so the position is the node's own statement.
+- **The age, not a time**: the announce carries its own emission time;
+  the fix is `0x05` seconds older than that.
+
+The codec is `leviculum-lxmf/src/lev_position.rs` (`Position`,
+`AppData::parse`, `open`), which a reader decodes with as the board
+encodes with. When a board sends it, and to whom it is sealed, is
+[Announce cadence, the position announce](announce-cadence.md#the-position-announce).
+
 ## 2. Gating and reciprocity
 
 The message that is read carries its sender's mark. When B reads a marked

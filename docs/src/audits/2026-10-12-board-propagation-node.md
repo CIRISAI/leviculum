@@ -515,7 +515,7 @@ rest; a stock node announces every 6 hours.** Board:
 `STILL_ANNOUNCE_INTERVAL_MS`
 (`leviculum-nrf/announce-policy/src/cadence.rs:60`), first
 announce 20 s after boot (`PN_ANNOUNCE_INITIAL_DELAY_MS`,
-`leviculum-nrf/announce-policy/src/cadence.rs:509`, the reference's
+`leviculum-nrf/announce-policy/src/cadence.rs:517`, the reference's
 `NODE_ANNOUNCE_DELAY`, `reference/LXMF/LXMF/LXMRouter.py:41`);
 stock: `announce_interval = 360` minutes
 (`reference/LXMF/LXMF/Utilities/lxmd.py:981`). Both withheld while

@@ -7,6 +7,11 @@
 #
 #   <path that must exist> <member dir>/<target> [<exact test name>]
 #
+# The target is always qualified by its member directory: two packages may
+# share a target name (lnomad and loquax both have `scene_golden`), and a
+# bare name is refused by every checker for not saying which (1306). The
+# runners give a target whose name an excluded one shares its own `-p` run.
+#
 # Without a test name the line covers the whole target. A target or test with
 # several prerequisites gets several lines, and is skipped when ANY of them is
 # absent. A runner that finds a path absent leaves the target or test out of
@@ -40,7 +45,10 @@ reference/Reticulum/RNS/__init__.py leviculum-std/rnsd_interop
 # reference as well. Excluding the whole mvr target would take ~90 other tests
 # with them, so these go by exact name. Measured on a clone without
 # submodules whose submodule URLs point nowhere, 2026-10-04: these seven, and
-# only these, fail in the whole selection there.
+# only these, fail in the whole selection there. The two `a_third_announce_*`
+# lines came after (1317), and spawn the same Python peer.
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::a_third_announce_on_a_fresh_interface_waits_at_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::control_two_announces_on_a_fresh_interface_both_arrive
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_restart
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_starts_and_responds

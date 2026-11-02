@@ -99,7 +99,9 @@ pub enum Reach {
     /// Both dial the rendezvous (1196); the code carries its list.
     Rendezvous,
     /// The phone dials this `host:port`, the mailbox's phone port
-    /// ([`phone_server::PORT`]) as the world reaches it.
+    /// ([`Answers::phone_port`]) as the world reaches it: a router's port
+    /// forward may put another port in front of it, so the two are given
+    /// apart.
     Fixed(String),
 }
 
@@ -191,6 +193,9 @@ pub struct Answers {
     pub reach: Reach,
     /// The name the device is admitted under; `None` is admit's default.
     pub name: Option<String>,
+    /// The port the daemon's section for phones listens on, for a fixed
+    /// address: [`phone_server::PORT`] unless `--phone-port` says another.
+    pub phone_port: u16,
 }
 
 impl Answers {
@@ -205,6 +210,9 @@ impl Answers {
         ];
         if let Reach::Fixed(address) = &self.reach {
             out.extend(["--address".to_string(), address.clone()]);
+            if self.phone_port != phone_server::PORT {
+                out.extend(["--phone-port".to_string(), self.phone_port.to_string()]);
+            }
         }
         if let Some(name) = &self.name {
             out.extend(["--name".to_string(), name.clone()]);
@@ -345,7 +353,8 @@ pub fn reach_question(offered: Option<&str>) -> String {
 }
 
 /// Step 3's line, with what it changed. `port` is what the fixed
-/// address's phone port came to, `None` for the rendezvous; the system
+/// address's phone port, asked on `phone_port`, came to, `None` for the
+/// rendezvous; the system
 /// mailbox's setup restarts the daemon for a new port, an account's
 /// leaves that to the user.
 pub fn reach_done(
@@ -353,6 +362,7 @@ pub fn reach_done(
     reach: &Reach,
     changed: bool,
     port: Option<&phone_server::Added>,
+    phone_port: u16,
 ) -> String {
     let changed = match changed {
         true => "",
@@ -366,16 +376,18 @@ pub fn reach_done(
         out.push_str("\n     ");
         out.push_str(&match added {
             phone_server::Added::Written(path) => format!(
-                "Added port {} for phones to {}; {}.",
-                phone_server::PORT,
+                "Added port {phone_port} for phones to {}; {}.",
                 path.display(),
                 match store {
                     Store::System => "lnsd restarted to open it",
                     Store::Account => "restart the Reticulum daemon (lnsd or rnsd) to open it",
                 }
             ),
-            phone_server::Added::Present(_) => {
-                format!("The port for phones, {}, is open.", phone_server::PORT)
+            phone_server::Added::Present(_, Some(listening)) => {
+                format!("The port for phones, {listening}, is open.")
+            }
+            phone_server::Added::Present(path, None) => {
+                format!("The port for phones is in {}.", path.display())
             }
             phone_server::Added::NoConfig(path) => format!(
                 "No port for phones yet: {} does not exist; the Reticulum daemon writes it \
@@ -386,12 +398,12 @@ pub fn reach_done(
                 "No port for phones yet: {} could not be written ({error}). Put this into \
                  its [interfaces] section and restart the Reticulum daemon:\n\n{}",
                 path.display(),
-                phone_server::block()
+                phone_server::block(phone_port)
             ),
             phone_server::Added::PortTaken(path) => format!(
-                "No port for phones: port {} is taken on this host or named in {}. Give the \
-                 mailbox's section another listen_port, and the address that port.",
-                phone_server::PORT,
+                "No port for phones: port {phone_port} is taken on this host or named in {}. \
+                 Run this setup again with --phone-port and a free port, and give the address \
+                 a phone reaches that port at.",
                 path.display()
             ),
         });
@@ -480,6 +492,7 @@ mod tests {
             store: Store::System,
             reach: Reach::Fixed("example.org:4243".to_string()),
             name: Some("phone".to_string()),
+            phone_port: phone_server::PORT,
         };
         assert_eq!(
             sudo_argv(exe, &answers).join(" "),
@@ -490,10 +503,21 @@ mod tests {
             store: Store::System,
             reach: Reach::Rendezvous,
             name: None,
+            phone_port: phone_server::PORT,
         };
         assert_eq!(
             rendezvous.flags().join(" "),
             "--store system --reach rendezvous --yes"
+        );
+        let forwarded = Answers {
+            reach: Reach::Fixed("example.org:443".to_string()),
+            phone_port: 5000,
+            ..answers
+        };
+        assert_eq!(
+            forwarded.flags().join(" "),
+            "--store system --reach fixed --address example.org:443 --phone-port 5000 \
+             --name phone --yes"
         );
         assert_eq!(
             admit_argv(exe, &system_dir(), Some("phone")).join(" "),

@@ -366,7 +366,19 @@ def findings(root, prerequisites=None):
     REPO_ROOT[0] = root
     whole, named = declared(prerequisites or os.path.join(root, PREREQUISITES))
     out = []
-    for target, path in sorted(targets(root).items()):
+    tree = targets(root)
+    # A line names its target as `<dir>/<target>`. A bare name covers no
+    # target here, and when two packages share it, it does not say which one
+    # it means (1306: lnomad and loquax both have `scene_golden`).
+    for bare in sorted({t for t in whole | {t for t, _ in named} if "/" not in t}):
+        same = sorted(t for t in tree if t.rsplit("/", 1)[-1] == bare)
+        if len(same) > 1:
+            out.append(
+                f"{PREREQUISITES} names the bare target {bare}, which exists in "
+                f"{len(same)} packages ({', '.join(same)}); qualify it as "
+                f"<dir>/{bare} (1306)."
+            )
+    for target, path in sorted(tree.items()):
         if target in whole:
             continue
         fns = []
@@ -390,7 +402,7 @@ def findings(root, prerequisites=None):
     return out
 
 
-FIXTURE_CARGO = 'members = [\n    "a",\n]\n'
+FIXTURE_CARGO = 'members = [\n    "a",\n    "b",\n]\n'
 FIXTURE_PEER = """\
 pub struct Peer;
 impl Peer {
@@ -443,6 +455,13 @@ mod tests {
     }
 }
 """
+# A second package with a target of the same name as one of a's (1306).
+FIXTURE_SAME_NAME = """\
+#[test]
+fn b_spawns() {
+    let _ = std::process::Command::new("python3").status();
+}
+"""
 FIXTURE_PREREQ_FULL = f"""\
 # fixture
 {RNS} a/interop direct
@@ -450,6 +469,7 @@ FIXTURE_PREREQ_FULL = f"""\
 {RNS} a/interop through_a_helper
 command:python3 a/script
 command:python3 a/mvr inner::tests::spawns
+command:python3 b/script b_spawns
 """
 
 
@@ -463,6 +483,7 @@ def selftest():
             "a/tests/script.rs": FIXTURE_SCRIPT,
             "a/tests/mvr/main.rs": FIXTURE_MVR,
             "a/tests/mvr/inner.rs": FIXTURE_MVR_INNER,
+            "b/tests/script.rs": FIXTURE_SAME_NAME,
             PREREQUISITES: FIXTURE_PREREQ_FULL,
         }
         for rel, body in files.items():
@@ -488,14 +509,28 @@ def selftest():
             ),
             ("command:python3 a/script", ["test runs_a_script", "command:python3 a/script runs_a_script"]),
             ("command:python3 a/mvr inner::tests::spawns", ["test inner::tests::spawns of a/mvr"]),
+            # a/script's line does not cover b/script, whose name it shares.
+            ("command:python3 b/script b_spawns", ["test b_spawns of b/script"]),
         ]:
             with open(os.path.join(tmp, PREREQUISITES), "w", encoding="utf-8") as handle:
                 handle.write(FIXTURE_PREREQ_FULL.replace(line + "\n", ""))
             expect(f"without `{line}`", want)
         # A whole-target line covers every test of the target.
         with open(os.path.join(tmp, PREREQUISITES), "w", encoding="utf-8") as handle:
-            handle.write(f"{RNS} a/interop\ncommand:python3 a/script\ncommand:python3 a/mvr\n")
+            handle.write(f"{RNS} a/interop\ncommand:python3 a/script\ncommand:python3 a/mvr\ncommand:python3 b/script\n")
         expect("whole targets", [], 0)
+        # A bare name both packages have is refused by name, and covers
+        # neither: b's test is reported as well.
+        with open(os.path.join(tmp, PREREQUISITES), "w", encoding="utf-8") as handle:
+            handle.write(
+                FIXTURE_PREREQ_FULL.replace("command:python3 a/script\n", "command:python3 script\n")
+            )
+        expect(
+            "a bare name two packages share",
+            ["names the bare target script, which exists in 2 packages (a/script, b/script)",
+             "test runs_a_script of a/script"],
+            2,
+        )
     for failure in failures:
         print(f"check-python-test-prerequisites selftest: {failure}", file=sys.stderr)
     return not failures

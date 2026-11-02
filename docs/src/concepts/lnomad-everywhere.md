@@ -41,7 +41,7 @@ which is what the M9 needs, is less: `fetch.rs`, `browser.rs`,
 network IO and are the platform layer; the other 5,840 lines need only
 `alloc` after the mechanical changes of slice 4a, but for the file halves
 of `bookmarks.rs` and the decoder in `image.rs`. The line is held by `just
-lnomad-core-no-tui` (`Justfile:628`) and stated in the module doc of
+lnomad-core-no-tui` (`Justfile:644`) and stated in the module doc of
 `lnomad/src/app/mod.rs:1`. Two qualifications, both measured:
 
 - **The core speaks cells.** Events arrive as raw keys and cell-addressed
@@ -605,7 +605,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   picture's fitted size, not its cell box, in which iced centred it.
 
 **Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
-`just lnomad-core-no-std` (`Justfile:2527`) holds it.
+`just lnomad-core-no-std` (`Justfile:2548`) holds it.
 
 - **`leviculum-micron` is `no_std` always** (`leviculum-micron/src/lib.rs:25`):
   a parser has no use for a file or a clock, and its `std` paths were

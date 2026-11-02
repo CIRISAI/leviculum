@@ -10374,16 +10374,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if self.interface_modes.is_empty() && self.duty_hold_ifaces.is_empty() {
             return Vec::new();
         }
-        // Through a set because the chain can name an interface twice
-        // (duty-held AND moded), and the two sources interleave arbitrarily.
-        self.interface_modes
+        // Sorted and deduplicated because the chain can name an interface
+        // twice (duty-held AND moded), and the two sources interleave
+        // arbitrarily. By sorted insertion rather than through a
+        // `BTreeSet<usize>`: the result is the same ascending list, and on a
+        // board the set's collect pulled in a generic stable sort of about
+        // 2.4 KB of flash for a list of a few interfaces (order 1300).
+        let mut blocked: Vec<usize> = Vec::new();
+        for idx in self
+            .interface_modes
             .keys()
             .chain(self.duty_hold_ifaces.iter())
             .copied()
             .filter(|&idx| !self.announce_allowed_on_interface(idx, dest_hash, is_local))
-            .collect::<BTreeSet<usize>>()
-            .into_iter()
-            .collect()
+        {
+            if let Err(at) = blocked.binary_search(&idx) {
+                blocked.insert(at, idx);
+            }
+        }
+        blocked
     }
 
     /// Path-table entry lifetime (ms) for a destination learned through

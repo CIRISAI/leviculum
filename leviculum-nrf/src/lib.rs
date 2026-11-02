@@ -89,6 +89,7 @@ pub mod name;
 /// engine, over the record-log adapters of `leviculum-pn-store`.
 #[cfg(feature = "softdevice")]
 pub mod pn;
+pub mod position;
 pub mod qspi;
 // The LoRa transceiver driver this build links, behind one set of names
 // for `lora`. Documented inside, where its links resolve.
@@ -499,6 +500,7 @@ pub fn log_stack(tag: &str) {
 pub async fn stack_watermark_task() {
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(2)).await;
+        leviculum_firmware::thread_watch::beat_now();
         log_stack("tick");
     }
 }

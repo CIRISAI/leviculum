@@ -67,7 +67,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
   which runs `meshtastic --port /dev/ttyACM0 --enter-dfu`. This
   firmware-side admin command is the only software-only DFU entry on a
   board with no accessible RESET pin. Requires the `meshtastic` CLI
-  (`pip install meshtastic`). (`Justfile:2209-2218`)
+  (`pip install meshtastic`). (`Justfile:2230-2239`)
 
 - **Manual fallback.** Where the software command is unavailable, the
   bootloader is reached by a **needle double-tap in the hidden pinhole**
@@ -75,7 +75,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
   through a small pinhole, double-tapped with a needle. *(This pinhole
   detail comes from project field notes, not from the firmware source;
   the source confirms only that the device "has no externally accessible
-  RESET pin", `Justfile:2210-2211`.)*
+  RESET pin", `Justfile:2231-2232`.)*
 
 - **The same pinhole gives a plain reset with a single tap**, which is
   what [When USB stays dark](#when-usb-stays-dark) asks for first: one
@@ -86,7 +86,7 @@ the ordinary double-tap-the-button trick does not apply. On this board:
 
 - **After our firmware lands**, subsequent flashes use the touch handler
   in `src/usb.rs` and the DFU recipe is no longer needed.
-  (`Justfile:2212-2213`)
+  (`Justfile:2233-2234`)
 
 > **Do not flash foreign nRF52 firmware onto the Pocket V2 without a
 > recovery plan.** Project field experience is that prebuilt
@@ -144,6 +144,23 @@ Codeberg #359 has paid that price once already: the recurrence of
 `prev_magic=absent reset_reason=0x00000000` on the next boot, which is
 the instrument being honest, not the instrument failing.
 
+A board that still shows up in `lsusb -v` is not necessarily alive. The
+Pocket that froze on 2026-10-31 seemed to answer USB control requests
+for 23 hours afterwards. That was `lsusb` returning descriptors, and the
+firmware cannot have served them: embassy-usb answers the control pipe
+from `usb_task`, which runs on the thread-mode executor, and the dying
+boot's persistent tail shows that thread mode had stopped (the LoRa task,
+on its own interrupt executor, went on logging, but the two-second
+`[STACK] tag=tick` line was missing). What answered was the hub or the
+kernel's cached descriptors. The evidence that counts is the debug port
+or the persistent tail. When the LoRa task finds the main loop not
+taking frames and thread mode has not beaten for 5 s, it writes
+`THREAD_STALL beat_age_ms=.. site=.. site_age_ms=.. waiting=lora` into
+that tail. `site` names the blocking call thread mode was in, or `none`
+(`leviculum-nrf/firmware/src/thread_watch.rs`). Separately,
+`LOG_DROPPED n=` counts the bytes the debug ring lost to a writer that
+lapped its reader, so a gap in a capture is not mistaken for silence.
+
 If the board enumerates nothing on USB after a flash or a bad image:
 
 1. **Do not remove power, and on a board with a battery do not pull the
@@ -180,13 +197,13 @@ If the board enumerates nothing on USB after a flash or a bad image:
    [Structured event logs](../structured-event-logs.md). The same port
    replays the previous boot's HardFault/panic post-mortem and the
    persistent log: look for `[HARDFAULT_PMRT]`, `[PANIC_PMRT]`, and
-   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:655-665`;
+   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:657-665`;
    `leviculum-nrf/README.md:59-60`).
 4. **Only now force the bootloader manually.** On a T114, double-tap
    RESET to get the UF2 drive regardless of the running image
    (`leviculum-nrf/README.md:38`). On a Pocket V2, use the hidden-pinhole
    needle double-tap (see above) — the board has no accessible RESET pin
-   (`Justfile:2210-2211`).
+   (`Justfile:2231-2232`).
 5. **Re-flash the known-good LNode firmware** once the UF2 drive appears:
    `just flash` (T114) or `just flash-rak4631` /
    `just flash-rak4631-pocket` (RAK4631). See [Flashing](flashing.md).
@@ -204,4 +221,4 @@ physical device.)**
 > always recoverable by re-running the flash recipe. The nRF52 LNodes
 > (T114, RAK4631) are different — a bad external image can leave the
 > device USB-dark, which is why a recovery plan matters here.
-> (`Justfile:2220-2224`)
+> (`Justfile:2241-2245`)
