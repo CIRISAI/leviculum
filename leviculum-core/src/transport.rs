@@ -3241,6 +3241,7 @@ pub struct Transport<C: Clock, S: Storage> {
     storage: S,
     identity: Identity,
     relay_routes: crate::relay_routes::RelayRoutes, // +ciris leviculum#91
+    forward_meters: crate::forward_meter::ForwardMeters, // +ciris leviculum#93
 
     // path_table: migrated to Storage trait
     // path_states: migrated to Storage trait
@@ -3691,6 +3692,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             storage,
             identity,
             relay_routes: crate::relay_routes::RelayRoutes::default(),
+            forward_meters: crate::forward_meter::ForwardMeters::default(),
             // path_table: migrated to Storage
             // path_states: migrated to Storage
             // announce_table: migrated to Storage
@@ -5778,6 +5780,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + self.interface_egress_control.heap_bytes()
             + self.interface_hw_mtus.heap_bytes()
             + self.relay_routes.heap_bytes()
+            + self.forward_meters.heap_bytes()
             + self.interface_link_profiles.heap_bytes()
             + hc::btree_map_bytes(&self.shared_instance_first_hop_answers)
             + self.loss_pricing.as_ref().map_or(0, |l| {
@@ -8463,6 +8466,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         })
                     });
 
+            // +ciris (leviculum#93): the host may refuse a transit request.
+            if !from_local
+                && !for_local
+                && !returned_client_delivery
+                && !self.admit_forward(
+                    &link_id,
+                    dest_hash,
+                    interface_index,
+                    target_iface,
+                    packet.hops,
+                    path_hops,
+                )
+            {
+                return Ok(());
+            }
             // Insert link table entry for bidirectional routing
             self.storage.set_link_entry(
                 *link_id.as_bytes(),
@@ -9544,6 +9562,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     return Ok(()); // Unknown direction
                 };
 
+                // +ciris (leviculum#93): meter, and drop over the host's cap.
+                if !self.forward_meters.forward(
+                    &dest_hash,
+                    target_iface == link_entry.next_hop_interface_index,
+                    packet.data.len(),
+                    self.clock.now_ms(),
+                ) {
+                    return Ok(());
+                }
                 // Populate reverse table for link-routed data packets
                 let now = self.clock.now_ms();
                 self.storage.set_reverse(
@@ -14570,6 +14597,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Expire local client dests not refreshed within expiry window.
         let now = self.clock.now_ms();
         self.relay_routes.expire(now);
+        let storage = &self.storage;
+        self.forward_meters
+            .retain(|id| storage.get_link_entry(id).is_some());
         self.storage
             .expire_local_client_known_dests(now, LOCAL_CLIENT_DEST_EXPIRY_MS);
 
@@ -38213,6 +38243,48 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// +ciris (leviculum#91): the relay table.
     pub fn relay_routes(&self) -> &crate::relay_routes::RelayRoutes {
         &self.relay_routes
+    }
+
+    /// +ciris (leviculum#93): ask the host's admission rule about a link
+    /// request this node is about to forward for others.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_forward(
+        &mut self,
+        link_id: &crate::link::LinkId,
+        destination_hash: [u8; TRUNCATED_HASHBYTES],
+        from_interface: usize,
+        to_interface: usize,
+        hops: u8,
+        remaining_hops: u8,
+    ) -> bool {
+        let request = crate::forward_meter::ForwardRequest {
+            link_id: *link_id.as_bytes(),
+            destination_hash,
+            from_interface,
+            to_interface,
+            hops,
+            remaining_hops,
+        };
+        let now = self.clock.now_ms();
+        let admitted = self.forward_meters.admit(&request, now);
+        if !admitted {
+            crate::tracing::debug!(
+                link = %HexShort(link_id.as_bytes()),
+                dst = %HexShort(&destination_hash),
+                "link request refused by the host's forward admission"
+            );
+        }
+        admitted
+    }
+
+    /// +ciris (leviculum#93): the forwarded-link meters and admission rule.
+    pub fn forward_meters(&self) -> &crate::forward_meter::ForwardMeters {
+        &self.forward_meters
+    }
+
+    /// +ciris (leviculum#93): set the admission rule.
+    pub fn forward_meters_mut(&mut self) -> &mut crate::forward_meter::ForwardMeters {
+        &mut self.forward_meters
     }
 
     /// +ciris (leviculum#91): the relay table, to pin and unpin rows.

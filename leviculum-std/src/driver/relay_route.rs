@@ -88,3 +88,29 @@ impl ReticulumNode {
         ))
     }
 }
+
+/// +ciris (leviculum#93): what this transport node forwards for others.
+impl ReticulumNode {
+    /// Set (or clear) the rule that admits or refuses each link request this
+    /// node would forward for others, with optional per-link byte and packet
+    /// rate caps. It runs inside packet processing with the core lock held:
+    /// decide from the request and your own state, never call the node.
+    /// Takes the core lock.
+    pub fn set_forward_admission(
+        &self,
+        hook: Option<leviculum_core::forward_meter::AdmissionHook>,
+    ) {
+        self.inner.lock_recover().set_forward_admission(hook);
+    }
+
+    /// Every link this node forwards: bytes and packets each way, drops over
+    /// a cap, when admitted and last used. Takes the core lock.
+    pub fn forwarded_links(&self) -> Vec<leviculum_core::forward_meter::ForwardedLink> {
+        self.inner.lock_recover().forwarded_links()
+    }
+
+    /// Link requests the admission rule refused so far. Takes the core lock.
+    pub fn forward_refusals(&self) -> u64 {
+        self.inner.lock_recover().forward_refusals()
+    }
+}
