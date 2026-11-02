@@ -78,13 +78,14 @@ use crate::image::{Backend, Probe, SlotState};
 use crate::image_cache::ImageCache;
 use crate::theme::{resolve_theme, ThemeFlag};
 use crate::transfer::{
-    close_session, spawn_discovery, spawn_download, spawn_fetch, FetchOutcome, LoadResult,
+    close_session, open_saved, save_picture, say_saved, spawn_discovery, spawn_download,
+    spawn_fetch, spawn_image_queue, FetchOutcome, ImageOutcome, ImageResult, LoadResult,
 };
 use crate::url::Target;
 use leviculum_micron::FieldKind;
 
 use crate::app::scene::{AddressField, Chip, Page, Row as SceneRow, SceneToast, Sheet};
-use crate::app::strings::{with, with_args, Arg, StrId, Text as StrText};
+use crate::app::strings::{with, StrId, Text as StrText};
 use crate::app::*;
 
 /// [`crate::app::geometry::regions`] over ratatui rectangles, for the drawing
@@ -871,28 +872,6 @@ fn render_help(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
-/// One inline image's outcome, reported by the image-queue task.
-struct ImageOutcome {
-    /// The queue generation this belongs to; a stale one is dropped.
-    generation: u64,
-    /// The link index it belongs to.
-    link: usize,
-    /// Where it was fetched from, which is the cache key.
-    target: Target,
-    /// What happened.
-    result: ImageResult,
-}
-
-/// What the image-queue task has to say about one picture.
-enum ImageResult {
-    /// Its transfer has started.
-    Started,
-    /// Its bytes arrived.
-    Bytes(Vec<u8>),
-    /// Its transfer failed.
-    Failed(String),
-}
-
 /// One picture the shell is holding: the payload, and the encoded form the
 /// terminal will actually be handed.
 struct ImageEntry {
@@ -1118,66 +1097,8 @@ impl ImageStore {
         let Some(entry) = self.entries.get_mut(&link) else {
             return Err(StrText::key(StrId::ImageNotArrived));
         };
-        if let Some(path) = &entry.saved {
-            return Ok((path.clone(), entry.bytes.len()));
-        }
-        let dir = crate::download::download_dir().ok_or(StrText::key(StrId::NoDownloadDir))?;
-        let path = crate::download::save_to_dir(&dir, &entry.name, &entry.bytes).map_err(|e| {
-            with_args(
-                StrId::CouldNotSave,
-                vec![Arg::Str(entry.name.clone()), Arg::Str(e.to_string())],
-            )
-        })?;
-        entry.saved = Some(path.clone());
-        Ok((path, entry.bytes.len()))
+        save_picture(&entry.name, &entry.bytes, &mut entry.saved)
     }
-}
-
-/// Fetch a page's inline images one after another, reporting each outcome.
-///
-/// Sequential on purpose: a link carries one transfer at a time, so issuing
-/// them in parallel would only queue them inside the stack while holding the
-/// session lock longer. Between images the lock is released, so a navigation
-/// the reader starts is served promptly — and it aborts this task anyway.
-fn spawn_image_queue(
-    store: &mut ImageStore,
-    session: &Arc<Mutex<Session>>,
-    tx: &mpsc::UnboundedSender<ImageOutcome>,
-    timeout: Duration,
-    requests: Vec<ImageRequest>,
-) {
-    let generation = store.generation;
-    let session = session.clone();
-    let tx = tx.clone();
-    store.task = Some(tokio::spawn(async move {
-        for request in requests {
-            let _ = tx.send(ImageOutcome {
-                generation,
-                link: request.link,
-                target: request.target.clone(),
-                result: ImageResult::Started,
-            });
-            let fetched = {
-                let mut guard = session.lock().await;
-                guard.download_file(&request.target, timeout).await
-            };
-            let result = match fetched {
-                Ok((bytes, _)) => ImageResult::Bytes(bytes),
-                Err(err) => ImageResult::Failed(err.to_string()),
-            };
-            if tx
-                .send(ImageOutcome {
-                    generation,
-                    link: request.link,
-                    target: request.target,
-                    result,
-                })
-                .is_err()
-            {
-                return;
-            }
-        }
-    }));
 }
 
 /// The IO handles [`run_effects`] works with, bundled.
@@ -1231,34 +1152,17 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                     update(model, event);
                 }
                 if !pending.is_empty() {
-                    spawn_image_queue(images, session, image_tx, timeout, pending);
+                    images.task = Some(spawn_image_queue(
+                        session,
+                        image_tx,
+                        timeout,
+                        pending,
+                        images.generation,
+                    ));
                 }
             }
-            Effect::SaveImage { link } => match images.save(link) {
-                Ok((path, bytes)) => model.say(
-                    ToastKind::Info,
-                    with_args(
-                        StrId::SavedImage,
-                        vec![Arg::Str(path.display().to_string()), Arg::Int(bytes as i64)],
-                    ),
-                ),
-                Err(err) => model.say(ToastKind::Error, err),
-            },
-            Effect::OpenImage { link } => match images.save(link) {
-                // Saved first, because the platform handler needs a file: the
-                // picture only ever existed in this process's memory.
-                Ok((path, _)) => match open::that(&path) {
-                    Ok(_) => model.say(
-                        ToastKind::Info,
-                        with(StrId::OpenedImage, path.display().to_string()),
-                    ),
-                    Err(_) => model.say(
-                        ToastKind::Error,
-                        with(StrId::FailedToOpenImage, path.display().to_string()),
-                    ),
-                },
-                Err(err) => model.say(ToastKind::Error, err),
-            },
+            Effect::SaveImage { link } => say_saved(model, images.save(link)),
+            Effect::OpenImage { link } => open_saved(model, images.save(link)),
             Effect::Download(target) => {
                 spawn_download(inflight, generation, session, tx, timeout, target);
             }

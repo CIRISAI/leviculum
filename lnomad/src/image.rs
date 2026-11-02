@@ -72,9 +72,17 @@ pub fn max_rows(backend: Backend, viewport: usize) -> u16 {
     let room = viewport.saturating_sub(2).max(1);
     let bounded = match backend {
         Backend::Halfblocks => room.saturating_mul(HALFBLOCK_VIEWPORT_MULTIPLE),
-        _ => return MAX_IMAGE_ROWS.min(room.min(u16::MAX as usize) as u16),
+        _ => return picture_rows(viewport),
     };
     bounded.min(u16::MAX as usize) as u16
+}
+
+/// The row ceiling for a picture drawn in pixels, a graphics protocol's or
+/// a window's: [`MAX_IMAGE_ROWS`], and never more than the viewport less
+/// two, so one photograph does not take over the page.
+pub fn picture_rows(viewport: usize) -> u16 {
+    let room = viewport.saturating_sub(2).max(1);
+    MAX_IMAGE_ROWS.min(room.min(u16::MAX as usize) as u16)
 }
 
 /// The name a `/file/` request path points at, or `None` when the path is not
