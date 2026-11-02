@@ -523,7 +523,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             engine.outgoing.add(out.id, out.destination, out.packed, now, false);
                         }
                         let acts = engine.outgoing.tick(now);
-                        sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn);
+                        sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn, engine.selected_pn);
                     }
                 }
                 if let Some(made) = made {
@@ -547,7 +547,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 engine.outgoing.add(out.id, out.destination, out.packed, now, false);
                             }
                             let acts = engine.outgoing.tick(now);
-                            sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn);
+                            sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn, engine.selected_pn);
                             groups.push(engine);
                         }
                         Err(error) => tracing::warn!("GROUP {name} not hosted: {error}"),
@@ -580,7 +580,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         false,
                     );
                     let acts = outgoing.tick(unix_now());
-                    sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+                    sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn, selected_pn);
                 }
             }
             _ = outside.tick() => {
@@ -590,11 +590,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             }
             _ = outbox_tick.tick() => {
                 let acts = outgoing.tick(unix_now());
-                sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+                sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn, selected_pn);
                 for hosted in &mut groups {
                     digests(&mut store, hosted, unix_now());
                     let acts = hosted.outgoing.tick(unix_now());
-                    sender.carry_out(&mut hosted.engine, &mut store, &mut hosted.outgoing, acts, selected_pn);
+                    sender.carry_out(&mut hosted.engine, &mut store, &mut hosted.outgoing, acts, selected_pn, hosted.selected_pn);
                 }
             }
             _ = tokio::time::sleep_until(next_group_announce) => {
@@ -652,28 +652,21 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 );
                             }
                             let acts = outgoing.announced(destination, unix_now());
-                            sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+                            sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn, selected_pn);
                         }
                         OutboxEvent::Left { message_id, last } => {
-                            let outcome = match last {
-                                Some(MessageState::Delivered) => Outcome::Delivered,
-                                Some(MessageState::Sent | MessageState::AwaitingCollection) => {
-                                    Outcome::Sent
-                                }
-                                _ => Outcome::Failed,
-                            };
-                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, selected_pn);
+                            let (outcome, reason) = left_outcome(last);
+                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, reason.as_deref(), selected_pn, selected_pn);
                         }
-                        OutboxEvent::State { message_id, .. } => {
+                        OutboxEvent::State { message_id, state } => {
                             // A sign of the leg: the stall bound counts from now.
-                            outgoing.heard(&message_id, unix_now());
+                            leg_sign(&mut outgoing, &message_id, state);
                         }
                         OutboxEvent::Unsent { message_id, detail } => {
-                            tracing::info!(
-                                "HOME outbox unsent message={} reason={detail}",
-                                crate::address::to_hex(&message_id)
-                            );
-                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, Outcome::Failed, selected_pn);
+                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, Outcome::Failed, Some(&format!("unsent: {detail}")), selected_pn, selected_pn);
+                        }
+                        OutboxEvent::Refused { detail } => {
+                            tracing::info!("HOME outbox refused: {detail}");
                         }
                         OutboxEvent::NodeAnnounced { destination }
                             if Some(destination) == selected_pn =>
@@ -759,6 +752,9 @@ struct GroupEngine<O> {
     hosted: Hosted,
     engine: O,
     outgoing: Outgoing,
+    /// The propagation node this engine has selected: its own, since the
+    /// home's engine selecting one selects nothing here (1328).
+    selected_pn: Option<[u8; 16]>,
 }
 
 /// Start the engine of one hosted group, announced with the group's name,
@@ -821,6 +817,7 @@ async fn attach_group(
         outgoing: Outgoing::new(policy),
         hosted,
         engine,
+        selected_pn: None,
     })
 }
 
@@ -895,6 +892,7 @@ fn pump_group<O: Outbox>(
                     &mut group.outgoing,
                     acts,
                     selected_pn,
+                    group.selected_pn,
                 );
             }
             OutboxEvent::Announced { destination, .. } => {
@@ -905,35 +903,42 @@ fn pump_group<O: Outbox>(
                     &mut group.outgoing,
                     acts,
                     selected_pn,
+                    group.selected_pn,
                 );
             }
             OutboxEvent::Left { message_id, last } => {
-                let outcome = match last {
-                    Some(MessageState::Delivered) => Outcome::Delivered,
-                    Some(MessageState::Sent | MessageState::AwaitingCollection) => Outcome::Sent,
-                    _ => Outcome::Failed,
-                };
+                let (outcome, reason) = left_outcome(last);
                 sender.left(
                     &mut group.engine,
                     store,
                     &mut group.outgoing,
                     &message_id,
                     outcome,
+                    reason.as_deref(),
                     selected_pn,
+                    group.selected_pn,
                 );
             }
-            OutboxEvent::State { message_id, .. } => {
-                group.outgoing.heard(&message_id, unix_now());
+            OutboxEvent::State { message_id, state } => {
+                leg_sign(&mut group.outgoing, &message_id, state);
             }
-            OutboxEvent::Unsent { message_id, .. } => {
+            OutboxEvent::Unsent { message_id, detail } => {
                 sender.left(
                     &mut group.engine,
                     store,
                     &mut group.outgoing,
                     &message_id,
                     Outcome::Failed,
+                    Some(&format!("unsent: {detail}")),
                     selected_pn,
+                    group.selected_pn,
                 );
+            }
+            OutboxEvent::PnSelected { destination, .. } => {
+                group.selected_pn = Some(destination);
+            }
+            OutboxEvent::Refused { detail } => {
+                tracing::info!("GROUP {} outbox refused: {detail}", group.hosted.group.name);
             }
             _ => {}
         }
@@ -1400,7 +1405,9 @@ struct Sender {
 
 impl Sender {
     /// The router let go of `id`: tell the outbox, and carry out what it
-    /// says.
+    /// says. `reason` is why a failed leg failed, as the engine said it
+    /// (1328: a propagated leg that failed in 100 ms said nothing).
+    #[allow(clippy::too_many_arguments)]
     fn left(
         &mut self,
         engine: &mut impl Outbox,
@@ -1408,27 +1415,32 @@ impl Sender {
         outgoing: &mut Outgoing,
         id: &[u8; 32],
         outcome: Outcome,
+        reason: Option<&str>,
         selected_pn: Option<[u8; 16]>,
+        held_pn: Option<[u8; 16]>,
     ) {
         if let Some(leg) = outgoing.in_flight(id) {
             tracing::info!(
-                "HOME outbox {} {} message={}",
+                "HOME outbox {} {} message={}{}",
                 leg_word(leg),
                 match outcome {
                     Outcome::Delivered => "delivered",
                     Outcome::Sent => "handed-on",
                     Outcome::Failed => "failed",
                 },
-                crate::address::to_hex(id)
+                crate::address::to_hex(id),
+                reason.map_or_else(String::new, |reason| format!(" reason={reason}"))
             );
         }
         let acts = outgoing.left(id, outcome, unix_now());
-        self.carry_out(engine, store, outgoing, acts, selected_pn);
+        self.carry_out(engine, store, outgoing, acts, selected_pn, held_pn);
     }
 
     /// Hand each message to the router on its leg, and record each state
     /// change. A leg that cannot start is ended as failed at once, so the
-    /// outbox moves on.
+    /// outbox moves on. `selected_pn` is the node the home's collections
+    /// selected, `held_pn` the one `engine` itself has selected: a group's
+    /// engine is not the home's.
     fn carry_out(
         &mut self,
         engine: &mut impl Outbox,
@@ -1436,11 +1448,23 @@ impl Sender {
         outgoing: &mut Outgoing,
         acts: Vec<Act>,
         selected_pn: Option<[u8; 16]>,
+        held_pn: Option<[u8; 16]>,
     ) {
         let mut acts = std::collections::VecDeque::from(acts);
         while let Some(act) = acts.pop_front() {
             match act {
                 Act::Record { id, change } => self.record(store, &id, change),
+                Act::Unanswered { id } => {
+                    tracing::info!(
+                        "HOME outbox direct unanswered message={}: no link after {} s, \
+                         offering the propagation node",
+                        crate::address::to_hex(&id),
+                        super::outgoing::ANSWER_SECS
+                    );
+                    // As a stall's call-off: the router's end comes back as
+                    // a Left the outbox ignores.
+                    let _ = engine.submit(Command::Cancel { message_id: id });
+                }
                 Act::GiveUp { id, leg } => {
                     tracing::info!(
                         "HOME outbox {} stalled message={}: no end after {} s, trying again",
@@ -1466,10 +1490,15 @@ impl Sender {
                             .is_ok(),
                         Leg::Propagated => match selected_pn.or(self.preferred_pn) {
                             Some(node) => {
-                                // The node the collections use, selected again
-                                // if none was this run: one command queue, so
-                                // the selection is in before the send.
-                                let selected = selected_pn.is_some()
+                                // The node the collections use, selected on
+                                // this engine unless it holds it already: one
+                                // command queue, so the selection is in before
+                                // the send. A group's engine never ran a
+                                // collection, and taking the home's selection
+                                // for its own failed every group copy's
+                                // propagated leg in its router, unsent
+                                // (1328).
+                                let selected = held_pn == Some(node)
                                     || engine
                                         .submit(Command::SelectPn {
                                             preferred: Some(node),
@@ -1564,6 +1593,35 @@ fn pn_pull_line(n: usize, pn: Option<[u8; 16]>, schedule: &Schedule, now_ms: u64
         |next| (next.saturating_sub(now_ms) / 1000).to_string(),
     );
     format!("PN_PULL n={n} pn={pn} next_in_s={next}")
+}
+
+/// The router reported `state` for `id`: a sign of its leg, and from
+/// `Sending` on the recipient's answer, which lifts the direct leg's answer
+/// bound (1328).
+fn leg_sign(outgoing: &mut Outgoing, id: &[u8; 32], state: MessageState) {
+    match state {
+        MessageState::Sending
+        | MessageState::Sent
+        | MessageState::Delivered
+        | MessageState::AwaitingCollection => outgoing.answered(id, unix_now()),
+        _ => outgoing.heard(id, unix_now()),
+    }
+}
+
+/// How a leg the router let go of ended, and why when it failed: the last
+/// state the router reported for it, which tells a propagation node's
+/// refusal (`rejected`) from attempts run out (`failed`) or a call-off
+/// (`cancelled`).
+fn left_outcome(last: Option<MessageState>) -> (Outcome, Option<String>) {
+    match last {
+        Some(MessageState::Delivered) => (Outcome::Delivered, None),
+        Some(MessageState::Sent | MessageState::AwaitingCollection) => (Outcome::Sent, None),
+        Some(state) => (
+            Outcome::Failed,
+            Some(format!("{state:?}").to_ascii_lowercase()),
+        ),
+        None => (Outcome::Failed, Some("no state seen".to_string())),
+    }
 }
 
 fn leg_word(leg: Leg) -> &'static str {
@@ -1926,6 +1984,7 @@ mod tests {
             hosted: hosted.clone(),
             engine: FakeOutbox::new(vec![arrived.clone()]),
             outgoing: Outgoing::new(Policy::default()),
+            selected_pn: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -1981,6 +2040,129 @@ mod tests {
             [Command::Prove {
                 message_id: original.message_id
             }]
+        );
+    }
+
+    /// 1328, Lew's group invite on miauhaus: a group copy whose direct leg
+    /// failed goes to the propagation node the home's collections selected,
+    /// and the group's engine is told that node first, since the home's
+    /// engine selecting it selected nothing in the group's. Without the
+    /// selection the group's router had no node and ended every copy's
+    /// propagated leg unsent in one tick. Control: once the group's engine
+    /// said it holds the node, the next copy is not selected again; the
+    /// home's own engine, holding it, never is.
+    #[test]
+    fn a_group_copy_selects_the_homes_node_on_the_groups_engine_before_it_propagates() {
+        use crate::outbox::fake::FakeOutbox;
+        const PN: [u8; 16] = [0x5a; 16];
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna, bob) = (person(), person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[(anna.1, "Anna".into()), (bob.1, "Bob".into())],
+            100,
+        )
+        .expect("create");
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
+        let original = leviculum_lxmf::Message::create(
+            hosted.group.address,
+            anna.1,
+            &anna.0,
+            1_800_000_000.0,
+            Vec::new(),
+            b"Bin gleich da".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(vec![OutboxEvent::Packed {
+                message_id: original.message_id,
+                packed: original.pack(),
+            }]),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: None,
+        };
+        let mut sender = Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: true,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+        };
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let _ = engine.engine.commands.take();
+        let copies = store
+            .group_copies(&hosted.group.address, &original.message_id)
+            .expect("copies");
+        let bobs = copies.iter().find(|c| c.member == bob.1).expect("bob").copy;
+        let lews = copies.iter().find(|c| c.member == lew.1).expect("lew").copy;
+
+        // Bob's direct leg fails: the group's engine selects the home's
+        // node, then takes the copy propagated.
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: bobs,
+            last: Some(MessageState::Failed),
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let commands = engine.engine.commands.take();
+        assert_eq!(
+            commands[0],
+            Command::SelectPn {
+                preferred: Some(PN),
+                mailbox: None
+            },
+            "{commands:?}"
+        );
+        assert!(
+            matches!(
+                &commands[1],
+                Command::SendPacked {
+                    via: Via::Propagated,
+                    ..
+                }
+            ),
+            "{commands:?}"
+        );
+        assert_eq!(commands.len(), 2, "{commands:?}");
+
+        // Control: the group's engine said it holds the node; Lew's copy
+        // fails direct and goes propagated without a second selection.
+        engine.engine.events.push_back(OutboxEvent::PnSelected {
+            destination: PN,
+            stamp_cost: Some(13),
+        });
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: lews,
+            last: Some(MessageState::Failed),
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let commands = engine.engine.commands.take();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [Command::SendPacked {
+                    via: Via::Propagated,
+                    ..
+                }]
+            ),
+            "{commands:?}"
         );
     }
 
@@ -2058,6 +2240,7 @@ mod tests {
                 packed: original.pack(),
             }]),
             outgoing: Outgoing::new(Policy::default()),
+            selected_pn: None,
         };
         let mut first_sender = sender();
         pump_group(&mut store, &mut first_sender, &mut engine, None);
@@ -2088,12 +2271,20 @@ mod tests {
                 hosted: hosted.clone(),
                 engine: FakeOutbox::new(Vec::new()),
                 outgoing: Outgoing::new(Policy::default()),
+                selected_pn: None,
             };
             if resume {
                 resume_group(store, &mut engine, unix_now());
             }
             let acts = engine.outgoing.tick(unix_now());
-            sender().carry_out(&mut engine.engine, store, &mut engine.outgoing, acts, None);
+            sender().carry_out(
+                &mut engine.engine,
+                store,
+                &mut engine.outgoing,
+                acts,
+                None,
+                None,
+            );
             engine
         };
         let skipped = start(&mut store, false);

@@ -292,6 +292,24 @@ then and may sleep.
   recipient is there; the cadence covers an announce the home node missed,
   at one link attempt an hour. The router holds one entry per message id,
   so a message is never on two legs at once.
+- **A direct leg nobody answers is given up within a minute** (1328).
+  The router's stock direct leg against a recipient that does not answer
+  runs five link attempts, each retried twice by the core and followed by
+  a path request: about six minutes on a 2-hop path, and on miauhaus legs
+  ran past the stall bound below. A direct leg whose message has not
+  reached `Sending` after `outgoing::ANSWER_SECS` (60 s; the reference's
+  single link establishment waits 6 s per hop plus the first hop's time)
+  is called off in the router, logged as `HOME outbox direct unanswered`,
+  and counts as a direct failure: the propagation node is offered the copy
+  on the next tick, before any announce restarts the direct leg (that
+  announce is as a rule the path response the router's own request drew
+  from the cache). The announce and hourly retries go on as before.
+- **Every engine selects its own propagation node** (1328). A hosted
+  group's copies go out on the group's engine, which runs no collection:
+  the home's engine selecting a node selects nothing there, so before a
+  copy's propagated leg the group's engine is told the node the home uses
+  unless it reported holding it. A failed leg's log line carries the
+  engine's reason (`reason=unsent: …`, `reason=rejected`, …).
 - **A leg that never ends is given up** (1293). The outbox starts no leg
   for a message already on one, so a leg whose end the router never
   reports (a link that died mid-leg, a transfer that stalled, a message the

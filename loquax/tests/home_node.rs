@@ -12,6 +12,9 @@ use std::time::Duration;
 #[path = "support/python.rs"]
 mod python;
 
+#[path = "support/lnpnd.rs"]
+mod lnpnd_node;
+
 use python::{Mesh, PythonPeer, Sent, LNMSG};
 
 /// One `loquax` run with no daemon flag appended: `home admit`, `home
@@ -531,12 +534,12 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
         "{sent}"
     );
 
-    // The client is gone. The home node's direct leg runs out of the
-    // router's attempts against a recipient that is not there, and with no
-    // propagation node configured the message stays in its outbox.
+    // The client is gone. Nobody answers the home node's direct leg within
+    // its answer bound (1328), and with no propagation node configured the
+    // message stays in its outbox.
     node.wait_for(
-        &format!("HOME outbox direct failed message={message_id}"),
-        120,
+        &format!("HOME outbox direct unanswered message={message_id}"),
+        90,
     )
     .await;
     node.wait_for(
@@ -1276,10 +1279,11 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
     let message_id = sent.enqueued_id();
 
-    // Direct fails against nobody, and the propagated leg starts.
+    // Nobody answers the direct leg within its bound (1328), and the
+    // propagated leg starts.
     node.wait_for(
-        &format!("HOME outbox direct failed message={message_id}"),
-        120,
+        &format!("HOME outbox direct unanswered message={message_id}"),
+        90,
     )
     .await;
     node.wait_for(&format!("HOME outbox propagated message={message_id}"), 5)
@@ -1386,6 +1390,309 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     );
 
     drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// 1328, Lew's group invite on miauhaus: the home's own lnpnd asks stamp
+/// cost 13, as a deployed one does, and the recipient announced once and
+/// left, so the home holds its key and the direct leg finds nobody. The
+/// propagated leg must reach the node, which accepts the upload, and the
+/// recipient, back as a stock Python client, collects the message from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_node() {
+    let recipient_peer = PythonPeer::start();
+    let mut mesh = Mesh::start(recipient_peer.rns_port).await;
+    let pn = lnpnd_node::PropagationNode::start(&mesh.instance, 13).await;
+    let pn_hash = pn.hex();
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "laptop");
+    let node = HomeNode::start_with(&home, &mesh.instance, &["--pn", &pn_hash]).await;
+    let client = joined(&mesh, &node, &code).await;
+
+    // The recipient is heard once and leaves: a loquax run on its identity
+    // announces on attach and fails on a node that does not exist.
+    let recipient = leviculum_std::generate_identity();
+    let recipient_address =
+        hex::encode(loquax::engine::delivery_address(&recipient).expect("address"));
+    let once = tempfile::tempdir().expect("the recipient's earlier home");
+    std::fs::write(
+        once.path().join("identity"),
+        leviculum_core::identity_store::encode_identity(&recipient).expect("storable"),
+    )
+    .expect("the recipient's identity");
+    let heard = mesh
+        .run(
+            "fetch",
+            once.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+                "--timeout".to_string(),
+                "10".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(heard.code, Some(1), "{heard}");
+
+    let body = "an den Briefkasten mit Preis";
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![
+                recipient_address.clone(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            body.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let message_id = sent.enqueued_id();
+
+    // The direct leg finds nobody and is given up within its answer bound
+    // (1328: a stock leg ran six minutes and more).
+    node.wait_for(
+        &format!("HOME outbox direct unanswered message={message_id}"),
+        90,
+    )
+    .await;
+    node.wait_for(&format!("HOME outbox propagated message={message_id}"), 10)
+        .await;
+    // Positive: the node takes it. Negative: the home never reports the
+    // propagated leg failed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let mut seen = Vec::new();
+    loop {
+        while let Ok(event) = pn.events.try_recv() {
+            seen.push(format!("{event:?}"));
+        }
+        assert!(
+            !node.log().contains(&format!(
+                "HOME outbox propagated failed message={message_id}"
+            )),
+            "the propagated leg failed; node events {seen:?}\nhome node:\n{}",
+            node.log()
+        );
+        if node
+            .log()
+            .contains(&format!("HOME outbox propagated message={message_id} seq="))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the node never took the message; node events {seen:?}\nhome node:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    while let Ok(event) = pn.events.try_recv() {
+        seen.push(format!("{event:?}"));
+    }
+    assert!(
+        seen.iter().any(|event| event.starts_with("Accepted")),
+        "{seen:?}"
+    );
+
+    // The recipient comes back as a stock Python client, with the ratchets
+    // its loquax run announced (1185), and collects from the node.
+    let ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
+        &once.path().join("storage"),
+        &loquax::engine::delivery_address(&recipient).expect("address"),
+    ))
+    .expect("the loquax run kept its ratchets");
+    let started = recipient_peer.rpc(
+        "lxmf_init",
+        serde_json::json!({
+            "identity_prv": hex::encode(recipient.private_key_bytes().expect("private key")),
+            "ratchets": hex::encode(ratchets),
+        }),
+    );
+    assert_eq!(
+        started.get("delivery_hash").and_then(|v| v.as_str()),
+        Some(recipient_address.as_str())
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Err(error) = recipient_peer.try_rpc(
+        "lxmf_set_propagation_node",
+        serde_json::json!({ "dest_hash": pn_hash }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never heard the propagation node: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    recipient_peer.rpc("lxmf_request_from_propagation_node", serde_json::json!({}));
+    received_by(&recipient_peer, body, 60, &node).await;
+    let collected: Vec<_> = recipient_peer
+        .received()
+        .into_iter()
+        .filter(|m| m["message_hash"] == message_id.as_str())
+        .collect();
+    assert_eq!(collected.len(), 1, "{collected:?}");
+    assert_eq!(collected[0]["method"], "propagated", "{collected:?}");
+
+    drop(node);
+    drop(pn);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// 1328 itself: Lew makes a group on the home with a Columba user who
+/// announced once and went offline, and writes to it. His line's copy for
+/// that member is the group's, on the group's own engine; its direct leg
+/// finds nobody, and its propagated leg must reach the home's lnpnd (cost
+/// 13) through the group's engine, which selects the node the home uses.
+/// Before the fix the group's engine was never told the node once the
+/// home's engine held one (the invitation's leg selects it here, the
+/// collections did on miauhaus), its router had none, and the copy's leg
+/// failed in one tick, unsent, with nothing at the node. The member comes back as a stock Python
+/// client and collects the line, from the group's address.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
+    let recipient_peer = PythonPeer::start();
+    let mut mesh = Mesh::start(recipient_peer.rns_port).await;
+    let pn = lnpnd_node::PropagationNode::start(&mesh.instance, 13).await;
+    let pn_hash = pn.hex();
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "laptop");
+    let node = HomeNode::start_as(&home, &mesh.instance, &["--pn", &pn_hash], Some("Lew")).await;
+    let client = joined(&mesh, &node, &code).await;
+
+    let recipient = leviculum_std::generate_identity();
+    let recipient_address =
+        hex::encode(loquax::engine::delivery_address(&recipient).expect("address"));
+    let once = tempfile::tempdir().expect("the recipient's earlier home");
+    std::fs::write(
+        once.path().join("identity"),
+        leviculum_core::identity_store::encode_identity(&recipient).expect("storable"),
+    )
+    .expect("the recipient's identity");
+    let heard = mesh
+        .run(
+            "fetch",
+            once.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+                "--timeout".to_string(),
+                "10".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(heard.code, Some(1), "{heard}");
+
+    tui(
+        &mesh,
+        client.path(),
+        &recipient_address,
+        &format!(
+            "until ready 20\nkey :\ntype new group\nkey enter\ntype {recipient_address}\n\
+             key enter\nkey enter\ntype Familie\nkey enter\nuntil groups 1 40\nkey q\n"
+        ),
+        &node,
+    )
+    .await;
+    node.wait_for("GROUP hosted name=Familie address=", 20)
+        .await;
+    let group_hex = {
+        let log = node.log();
+        let at = log
+            .find("GROUP hosted name=Familie address=")
+            .expect("hosted line");
+        log[at + "GROUP hosted name=Familie address=".len()..][..32].to_string()
+    };
+    // The invitation is the home's own message: its propagated leg selects
+    // the node on the home's engine, as the collections had on miauhaus.
+    // From here the home holds a selection the group's engine does not.
+    node.wait_for("HOME outbox propagated message=", 90).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !node
+        .log()
+        .lines()
+        .any(|line| line.contains("HOME outbox propagated message=") && line.contains(" seq="))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the invitation never reached the node:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![group_hex.clone(), "--timeout".to_string(), "40".to_string()],
+            "Brot ist da".as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    let mut seen = Vec::new();
+    while !node.log().contains("GROUP copy propagated message=") {
+        while let Ok(event) = pn.events.try_recv() {
+            seen.push(format!("{event:?}"));
+        }
+        assert!(
+            !node.log().contains("propagated failed"),
+            "a propagated leg failed; node events {seen:?}\nhome node:\n{}",
+            node.log()
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the node never took the group's copy; node events {seen:?}\nhome node:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
+        &once.path().join("storage"),
+        &loquax::engine::delivery_address(&recipient).expect("address"),
+    ))
+    .expect("the loquax run kept its ratchets");
+    recipient_peer.rpc(
+        "lxmf_init",
+        serde_json::json!({
+            "identity_prv": hex::encode(recipient.private_key_bytes().expect("private key")),
+            "ratchets": hex::encode(ratchets),
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Err(error) = recipient_peer.try_rpc(
+        "lxmf_set_propagation_node",
+        serde_json::json!({ "dest_hash": pn_hash }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never heard the propagation node: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    recipient_peer.rpc("lxmf_request_from_propagation_node", serde_json::json!({}));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let received = recipient_peer.received();
+        if received
+            .iter()
+            .any(|m| m["source_hash"] == group_hex.as_str() && m["method"] == "propagated")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never collected the line: {received:?}\nhome node:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    drop(node);
+    drop(pn);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 

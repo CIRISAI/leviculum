@@ -297,6 +297,7 @@ pub fn policy(config: &crate::config::Config) -> outgoing::Policy {
                 .saturating_mul(24 * 3600),
         ),
         stall_secs: secs(outgoing::STALL_SECS),
+        answer_secs: secs(outgoing::ANSWER_SECS),
     }
 }
 
