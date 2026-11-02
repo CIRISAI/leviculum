@@ -218,7 +218,7 @@ pub fn book(
 /// (1307 pass four, study 2.3): due once no copy sent alone waits for its
 /// proof, which is the two ticks when no member is slow, and again for
 /// every late copy a digest proves after that. `None` when not due, or
-/// when the writer gets none ([`status`]).
+/// when the writer gets none (a stock writer, a reaction).
 pub fn status_after_proof(
     store: &Store,
     hosted: &Hosted,
