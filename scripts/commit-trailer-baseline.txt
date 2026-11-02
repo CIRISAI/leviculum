@@ -77,7 +77,7 @@
 
 baseline 8d309ab69a2d451b54f61dc003fb0d509bb12524
 legacy 16
-foreign 90
+foreign 92
 
 # Every `ours` line is an identity this guard stops exempting -- i.e. one
 # whose commit messages it checks. `lp@lew-palm.de` is what Lew, the

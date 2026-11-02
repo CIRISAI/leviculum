@@ -230,7 +230,7 @@ pub(crate) async fn probe(
         // exactly keeps the rule simple).
         let attempt = ProbeAttempt::new(protocol, &mut rng);
         let request = attempt.request();
-        socket.send_to(&request, server).await?;
+        socket.send_to(&request, on_socket(socket, server)).await?;
         let deadline = tokio::time::Instant::now() + PROBE_WAIT;
         loop {
             match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
@@ -240,7 +240,7 @@ pub(crate) async fn probe(
                     break;
                 }
                 Ok(Ok((len, src))) => {
-                    if src != server {
+                    if canonical(src) != canonical(server) {
                         continue;
                     }
                     if let Some(public) = attempt.answer(&buf[..len]) {
@@ -294,12 +294,25 @@ const EARLY_MAX_BYTES: usize = 64 * 1024;
 /// is not one of them.
 const EARLY_DATAGRAM_MAX: usize = 2_048;
 
-/// Punch toward every address in `targets` at once until both directions
-/// are proven: a valid punch from the peer has arrived (so its NAT lets it
-/// out to us) and a valid ack for one of ours has arrived (so ours reach it).
-/// `targets` is the peer's public address, then (+ciris) its host candidates
-/// when both ends share a NAT; the path is the address the peer's punch
-/// arrived from.
+/// Peer-reflexive addresses one punch adds to its targets, at most: where
+/// the peer's punches were seen coming from, when that is none of the
+/// addresses it advertised.
+const PEER_REFLEXIVE_MAX: usize = 4;
+
+/// Punch toward every address in `targets` at once until one of them is
+/// proven both ways: an ack arrives FROM an address this end punched, so
+/// its punch reached the peer there and the peer's answer came back over
+/// the same pair (+ciris; ICE's symmetric check, RFC 8445 7.2.5.2.1). That
+/// address is the path. An ack from anywhere else proves nothing about the
+/// pair this end would send on, and accepting it let the two ends settle on
+/// different paths.
+///
+/// Every punch heard is acked to where it came from, and that address is
+/// punched too from then on (a peer-reflexive candidate): behind a NAT that
+/// did not keep the advertised port, it is the address the peer is really
+/// reachable at. `targets` is the peer's public address, then (+ciris) its
+/// host candidates; the socket may be dual-stack, so addresses are compared
+/// in canonical form.
 pub(crate) async fn punch(
     socket: &UdpSocket,
     targets: &[SocketAddr],
@@ -307,8 +320,16 @@ pub(crate) async fn punch(
     token: &[u8; 32],
 ) -> Option<Punched> {
     let deadline = tokio::time::Instant::now() + PUNCH_WINDOW;
-    let mut heard_punch_from: Option<SocketAddr> = None;
-    let mut acked_by: Option<SocketAddr> = None;
+    let mut targets: Vec<SocketAddr> = alloc_targets(
+        canonical(*targets.first()?),
+        &targets[1..]
+            .iter()
+            .map(|a| canonical(*a))
+            .collect::<Vec<_>>(),
+    );
+    let advertised = targets.len();
+    // Addresses a punch actually left for; only an ack from one counts.
+    let mut punched: Vec<SocketAddr> = Vec::new();
     let mut early: Vec<Vec<u8>> = Vec::new();
     let mut early_bytes = 0usize;
     let mut seq: u32 = 0;
@@ -320,23 +341,34 @@ pub(crate) async fn punch(
             _ = tick.tick() => {
                 let frame = wire::punch_frame(PunchKind::Punch, session, token, seq);
                 seq = seq.wrapping_add(1) % wire::KEEPALIVE_SEQ;
-                for target in targets {
-                    let _ = socket.send_to(&frame, target).await;
+                for target in &targets {
+                    if socket.send_to(&frame, on_socket(socket, *target)).await.is_ok()
+                        && !punched.contains(target)
+                    {
+                        punched.push(*target);
+                    }
                 }
             }
             result = socket.recv_from(&mut buf) => {
                 let Ok((len, src)) = result else { continue };
+                let src = canonical(src);
                 let frame = &buf[..len];
                 match wire::parse_punch_frame(frame, session, token) {
                     Some((PunchKind::Punch, their_seq)) => {
                         let ack = wire::punch_frame(PunchKind::Ack, session, token, their_seq);
-                        let _ = socket.send_to(&ack, src).await;
-                        heard_punch_from = Some(src);
+                        let _ = socket.send_to(&ack, on_socket(socket, src)).await;
+                        if !targets.contains(&src) && targets.len() < advertised + PEER_REFLEXIVE_MAX {
+                            tracing::debug!("direct link: peer-reflexive candidate {src}");
+                            targets.push(src);
+                        }
                     }
-                    Some((PunchKind::Ack, _)) => acked_by = Some(src),
+                    Some((PunchKind::Ack, _)) => {
+                        if punched.contains(&src) {
+                            return Some(Punched { peer: src, early });
+                        }
+                    }
                     None => {
-                        let from_peer = targets.contains(&src) || Some(src) == heard_punch_from;
-                        if from_peer
+                        if targets.contains(&src)
                             && wire::punch_frame_kind(frame).is_none()
                             && !frame.is_empty()
                             && frame.len() <= EARLY_DATAGRAM_MAX
@@ -346,16 +378,61 @@ pub(crate) async fn punch(
                             early_bytes += frame.len();
                             early.push(frame.to_vec());
                         }
-                        continue;
                     }
-                }
-                if let (Some(from), Some(_)) = (heard_punch_from, acked_by) {
-                    // Only what came from the address the path settled on.
-                    return Some(Punched { peer: from, early });
                 }
             }
         }
     }
+}
+
+/// +ciris: `addr` with an IPv4-mapped IPv6 address turned back into IPv4,
+/// which is how a dual-stack socket reports an IPv4 peer.
+pub(crate) fn canonical(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(v4.into(), v6.port()),
+            None => addr,
+        },
+        SocketAddr::V4(_) => addr,
+    }
+}
+
+/// +ciris: `addr` in the form `socket` can send to: an IPv4 address goes
+/// IPv4-mapped on an IPv6 (dual-stack) socket.
+pub(crate) fn on_socket(socket: &UdpSocket, addr: SocketAddr) -> SocketAddr {
+    let socket_v6 = socket.local_addr().is_ok_and(|a| a.is_ipv6());
+    match addr {
+        SocketAddr::V4(v4) if socket_v6 => {
+            SocketAddr::new(v4.ip().to_ipv6_mapped().into(), v4.port())
+        }
+        _ => addr,
+    }
+}
+
+/// +ciris: the session socket. Dual-stack where the host allows it, so one
+/// socket (one NAT mapping, one interface) can punch the peer's IPv4 public
+/// address and its global IPv6 address at once; plain IPv4 otherwise.
+fn bind_session_socket(server: SocketAddr) -> io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let dual = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).and_then(|s| {
+        s.set_only_v6(false)?;
+        s.bind(&SocketAddr::from(([0u16; 8], 0)).into())?;
+        Ok(s)
+    });
+    let socket: std::net::UdpSocket = match dual {
+        Ok(s) => s.into(),
+        Err(e) => {
+            tracing::debug!("direct link: no dual-stack socket ({e}), IPv4 only");
+            let bind = if server.is_ipv4() {
+                SocketAddr::from(([0, 0, 0, 0], 0))
+            } else {
+                SocketAddr::from(([0u16; 8], 0))
+            };
+            std::net::UdpSocket::bind(bind)?
+        }
+    };
+    socket.set_nonblocking(true)?;
+    Ok(socket)
 }
 
 /// The punch targets: `peer` first, then each alternate not already there.
@@ -369,24 +446,39 @@ fn alloc_targets(peer: SocketAddr, alternates: &[SocketAddr]) -> Vec<SocketAddr>
     targets
 }
 
-/// +ciris — this socket's host candidate: the local address the OS would
-/// send from toward `server` (learned by connecting a throwaway UDP socket,
-/// which sends nothing), on `socket`'s port. `None` when that is unspecified
-/// or loopback, which no peer on another host can reach.
-fn host_candidate(socket: &UdpSocket, server: SocketAddr) -> Option<SocketAddr> {
-    let port = socket.local_addr().ok()?.port();
-    let bind = if server.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0u16; 8], 0))
+/// +ciris — this socket's host candidates, on its port: the local IPv4
+/// address the OS would send from toward `server`, and, on a dual-stack
+/// socket, the global IPv6 address it would send from toward the IPv6
+/// internet. Each is learned by connecting a throwaway UDP socket, which
+/// sends nothing. Unspecified, loopback and non-global IPv6 addresses are
+/// left out: no peer on another host can reach them.
+fn host_candidates(socket: &UdpSocket, server: SocketAddr) -> Vec<SocketAddr> {
+    let Ok(local) = socket.local_addr() else {
+        return Vec::new();
     };
-    let route = std::net::UdpSocket::bind(bind).ok()?;
-    route.connect(server).ok()?;
-    let ip = route.local_addr().ok()?.ip();
-    if ip.is_unspecified() || ip.is_loopback() {
-        return None;
+    let route = |bind: SocketAddr, toward: SocketAddr| -> Option<std::net::IpAddr> {
+        let probe = std::net::UdpSocket::bind(bind).ok()?;
+        probe.connect(toward).ok()?;
+        Some(probe.local_addr().ok()?.ip())
+    };
+    let mut out = Vec::new();
+    let v4_bind = SocketAddr::from(([0, 0, 0, 0], 0));
+    if let Some(ip) = route(v4_bind, canonical(server)).filter(|ip| ip.is_ipv4()) {
+        if !ip.is_unspecified() && !ip.is_loopback() {
+            out.push(SocketAddr::new(ip, local.port()));
+        }
     }
-    Some(SocketAddr::new(ip, port))
+    if local.is_ipv6() {
+        // A public resolver's address; only the route to it is looked up.
+        let v6_internet: SocketAddr = "[2001:4860:4860::8888]:53".parse().expect("literal");
+        let v6_bind = SocketAddr::from(([0u16; 8], 0));
+        if let Some(std::net::IpAddr::V6(ip)) = route(v6_bind, v6_internet) {
+            if leviculum_core::direct_link::session::is_global_v6(&ip) {
+                out.push(SocketAddr::new(ip.into(), local.port()));
+            }
+        }
+    }
+    out
 }
 
 // Facilitator
@@ -471,6 +563,9 @@ pub(crate) struct DirectLinkRuntime {
     /// that is not a punch frame (Codex review on #74).
     reannounce: Vec<(std::time::Instant, usize)>,
     timing: DirectUdpTiming,
+    /// +ciris: sessions whose peer acks sequenced keepalives (both ends run
+    /// the two-sided commit), so their interface uses the fast liveness.
+    fast_liveness: HashMap<SessionId, bool>,
 }
 
 impl DirectLinkRuntime {
@@ -484,6 +579,7 @@ impl DirectLinkRuntime {
             interfaces: HashMap::new(),
             reannounce: Vec::new(),
             timing: DirectUdpTiming::default(),
+            fast_liveness: HashMap::new(),
         }
     }
 
@@ -500,7 +596,18 @@ impl DirectLinkRuntime {
                 peer,
                 alternates,
                 token,
-            } => self.start_punch(session, peer, alternates, token),
+                start_delay_ms,
+                fast_liveness,
+            } => {
+                self.fast_liveness.insert(session, fast_liveness);
+                self.start_punch(
+                    session,
+                    peer,
+                    alternates,
+                    token,
+                    Duration::from_millis(start_delay_ms),
+                )
+            }
             DirectLinkJob::Release { session } => self.release(&session),
             DirectLinkJob::CloseInterface { interface_index } => {
                 if let Some(task) = self.interfaces.remove(&interface_index) {
@@ -513,15 +620,7 @@ impl DirectLinkRuntime {
 
     fn start_probe(&mut self, session: SessionId, server: SocketAddr, protocol: ProbeProtocol) {
         let outcomes = self.outcomes.clone();
-        let bind = if server.is_ipv4() {
-            SocketAddr::from(([0, 0, 0, 0], 0))
-        } else {
-            SocketAddr::from(([0u16; 8], 0))
-        };
-        let socket = match std::net::UdpSocket::bind(bind)
-            .and_then(|s| s.set_nonblocking(true).map(|_| s))
-            .and_then(UdpSocket::from_std)
-        {
+        let socket = match bind_session_socket(server).and_then(UdpSocket::from_std) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 tracing::warn!("direct link: cannot bind a probe socket: {e}");
@@ -545,7 +644,7 @@ impl DirectLinkRuntime {
                     None
                 }
             };
-            let local = host_candidate(&socket, server).into_iter().collect();
+            let local = host_candidates(&socket, server);
             let _ = outcomes
                 .send(Outcome::Probed {
                     session,
@@ -563,6 +662,7 @@ impl DirectLinkRuntime {
         peer: SocketAddr,
         alternates: Vec<SocketAddr>,
         token: [u8; 32],
+        start_delay: Duration,
     ) {
         let outcomes = self.outcomes.clone();
         let Some(socket) = self.sockets.get(&session).cloned() else {
@@ -577,11 +677,16 @@ impl DirectLinkRuntime {
         };
         self.tokens.insert(session, token);
         let task = tokio::spawn(async move {
+            // The responder waits out the READY's trip to the initiator, so
+            // both ends start together.
+            if !start_delay.is_zero() {
+                tokio::time::sleep(start_delay).await;
+            }
             let targets = alloc_targets(peer, &alternates);
             if targets.len() > 1 {
                 tracing::info!(
                     "direct link: punching toward {peer} and host candidate(s) {alternates:?} \
-                     (both ends share a public address)"
+                     (a shared NAT, or IPv6)"
                 );
             } else {
                 tracing::info!("direct link: punching toward {peer}");
@@ -618,6 +723,7 @@ impl DirectLinkRuntime {
         }
         self.sockets.remove(session);
         self.tokens.remove(session);
+        self.fast_liveness.remove(session);
     }
 
     /// The punch for `session` succeeded toward `peer`: build its interface
@@ -634,8 +740,13 @@ impl DirectLinkRuntime {
         self.tasks.remove(&session);
         let socket = self.sockets.remove(&session)?;
         let token = self.tokens.remove(&session)?;
+        let timing = if self.fast_liveness.remove(&session).unwrap_or(false) {
+            DirectUdpTiming::fast()
+        } else {
+            self.timing
+        };
         let (handle, task) =
-            spawn_direct_udp_interface(id, socket, peer, session, token, early, self.timing);
+            spawn_direct_udp_interface(id, socket, peer, session, token, early, timing);
         self.registering.insert(id, session);
         self.interfaces.insert(id.0, task);
         Some(handle)
@@ -812,6 +923,97 @@ mod tests {
             punch(&b, std::slice::from_ref(&a_addr), &session, &[5u8; 32])
         );
         assert!(ra.is_none() && rb.is_none());
+    }
+
+    /// +ciris: an ack only counts from an address this end punched. A
+    /// valid ack from anywhere else (here a third socket that knows the
+    /// token, standing in for an ack that came back over another route)
+    /// never completes the punch: it proves nothing about the pair this end
+    /// would send on.
+    #[tokio::test]
+    async fn an_ack_from_an_address_never_punched_does_not_complete() {
+        let a = loopback().await;
+        let elsewhere = loopback().await;
+        let dead = loopback().await.local_addr().unwrap();
+        let a_addr = a.local_addr().unwrap();
+        let (session, token) = ([3u8; 16], [4u8; 32]);
+        let spam = async {
+            for seq in 0..40 {
+                let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                let _ = elsewhere.send_to(&ack, a_addr).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(
+                Duration::from_millis(1_000),
+                punch(&a, std::slice::from_ref(&dead), &session, &token)
+            ),
+            spam
+        );
+        assert!(result.is_err(), "still punching: {result:?}");
+    }
+
+    /// +ciris: a peer seen at an address it never advertised (a NAT that
+    /// did not keep the port) is punched there too, and the path comes up
+    /// on that address for both ends.
+    #[tokio::test]
+    async fn a_peer_heard_from_an_unadvertised_address_is_punched_there() {
+        let a = loopback().await;
+        let b = loopback().await;
+        let (a_addr, b_addr) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+        // A was told a wrong address for B; B knows A's.
+        let wrong = loopback().await.local_addr().unwrap();
+        let (session, token) = ([3u8; 16], [4u8; 32]);
+        // B finishes first (A acks its punches at once) and then acks late
+        // punches, as its direct interface does.
+        let b_side = async {
+            let result = punch(&b, std::slice::from_ref(&a_addr), &session, &token).await;
+            let mut buf = [0u8; 256];
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Ok((len, src))) =
+                tokio::time::timeout_at(until, b.recv_from(&mut buf)).await
+            {
+                if let Some((PunchKind::Punch, seq)) =
+                    wire::parse_punch_frame(&buf[..len], &session, &token)
+                {
+                    let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                    let _ = b.send_to(&ack, src).await;
+                }
+            }
+            result
+        };
+        let (ra, rb) = tokio::join!(
+            punch(&a, std::slice::from_ref(&wrong), &session, &token),
+            b_side
+        );
+        assert_eq!(
+            (ra.map(|p| p.peer), rb.map(|p| p.peer)),
+            (Some(b_addr), Some(a_addr))
+        );
+    }
+
+    /// +ciris: a dual-stack session socket punches an IPv4-only peer, and
+    /// reports the path as plain IPv4.
+    #[tokio::test]
+    async fn a_dual_stack_socket_punches_an_ipv4_peer() {
+        let Ok(std_socket) = bind_session_socket("127.0.0.1:1".parse().unwrap()) else {
+            return;
+        };
+        let a = UdpSocket::from_std(std_socket).unwrap();
+        let a_port = a.local_addr().unwrap().port();
+        let a_v4: SocketAddr = format!("127.0.0.1:{a_port}").parse().unwrap();
+        let b = loopback().await;
+        let b_addr = b.local_addr().unwrap();
+        let (session, token) = ([3u8; 16], [4u8; 32]);
+        let (ra, rb) = tokio::join!(
+            punch(&a, std::slice::from_ref(&b_addr), &session, &token),
+            punch(&b, std::slice::from_ref(&a_v4), &session, &token)
+        );
+        assert_eq!(
+            (ra.map(|p| p.peer), rb.map(|p| p.peer)),
+            (Some(b_addr), Some(a_v4))
+        );
     }
 
     #[tokio::test]

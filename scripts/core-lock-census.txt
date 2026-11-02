@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 71
+TOTAL 72
 
 driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
@@ -78,6 +78,7 @@ driver::ReticulumNode::remember_identity
 driver::ReticulumNode::remove_path
 driver::ReticulumNode::request_path
 driver::ReticulumNode::retire_direct_link
+driver::ReticulumNode::set_direct_link_retry
 driver::ReticulumNode::send_file_response
 driver::ReticulumNode::send_proof
 driver::ReticulumNode::send_request

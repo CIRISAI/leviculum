@@ -11,6 +11,12 @@
 //!   [`KEEPALIVE_INTERVAL`], and goes down after [`INACTIVITY_TIMEOUT`] with
 //!   nothing heard (the peer sends keepalives too, so silence means the path
 //!   or the peer is gone);
+//! - (+ciris) with a peer that runs the two-sided commit, probes every
+//!   [`FAST_KEEPALIVE_INTERVAL`] with a sequenced punch frame the peer
+//!   acks, and goes down after [`FAST_INACTIVITY_TIMEOUT`] of silence: a
+//!   dead path is left in seconds, as ICE consent checks (RFC 7675) do,
+//!   instead of minutes. With any other peer (rns-rs) the plain keepalive
+//!   and timeout above stay, since its interface does not ack keepalives;
 //! - answers a late punch frame with its ack. The peer finishes punching
 //!   only once it has seen an ack; if this side finished first and the one
 //!   ack it sent was lost, the peer would otherwise punch into silence and
@@ -38,6 +44,11 @@ pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// Silence after which the direct path is declared dead (four missed
 /// keepalives).
 pub(crate) const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
+/// +ciris: the acked probe interval, and the silence after which the path
+/// is dead (three missed probes, each answered by an ack and matched by the
+/// peer's own), with a peer that acks them.
+pub(crate) const FAST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const FAST_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Largest datagram accepted: anything UDP can carry. The link is lowered to
 /// `DIRECT_LINK_MTU` when it moves here, but a part sized for the link's
@@ -51,6 +62,19 @@ const CHANNEL_DEPTH: usize = 256;
 pub(crate) struct DirectUdpTiming {
     pub keepalive: Duration,
     pub inactivity: Duration,
+    /// +ciris: keepalives carry a sequence number, so the peer acks them.
+    pub sequenced: bool,
+}
+
+impl DirectUdpTiming {
+    /// +ciris: acked probes, for a peer that runs the two-sided commit.
+    pub(crate) fn fast() -> Self {
+        DirectUdpTiming {
+            keepalive: FAST_KEEPALIVE_INTERVAL,
+            inactivity: FAST_INACTIVITY_TIMEOUT,
+            sequenced: true,
+        }
+    }
 }
 
 impl Default for DirectUdpTiming {
@@ -58,6 +82,7 @@ impl Default for DirectUdpTiming {
         DirectUdpTiming {
             keepalive: KEEPALIVE_INTERVAL,
             inactivity: INACTIVITY_TIMEOUT,
+            sequenced: false,
         }
     }
 }
@@ -161,7 +186,9 @@ async fn direct_io_task(
             return;
         }
     }
-    let keepalive = wire::punch_frame(PunchKind::Punch, &session, &token, wire::KEEPALIVE_SEQ);
+    let peer = crate::direct_link::canonical(peer);
+    let send_to = crate::direct_link::on_socket(&socket, peer);
+    let mut probe_seq: u32 = 0;
     let mut buf = vec![0u8; DATAGRAM_MAX];
     let mut last_heard = Instant::now();
     let mut keepalive_tick = tokio::time::interval(timing.keepalive);
@@ -179,7 +206,7 @@ async fn direct_io_task(
                         continue;
                     }
                 };
-                if src != peer {
+                if crate::direct_link::canonical(src) != peer {
                     continue;
                 }
                 let frame = &buf[..len];
@@ -191,7 +218,7 @@ async fn direct_io_task(
                         last_heard = Instant::now();
                         if kind == PunchKind::Punch && seq != wire::KEEPALIVE_SEQ {
                             let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
-                            let _ = socket.send_to(&ack, peer).await;
+                            let _ = socket.send_to(&ack, send_to).await;
                         }
                     }
                     continue;
@@ -218,7 +245,7 @@ async fn direct_io_task(
                     // The loop dropped the handle: the interface was removed.
                     return;
                 };
-                match socket.send_to(&packet.data, peer).await {
+                match socket.send_to(&packet.data, send_to).await {
                     Ok(n) => {
                         counters.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
                     }
@@ -233,7 +260,16 @@ async fn direct_io_task(
                     );
                     return;
                 }
-                let _ = socket.send_to(&keepalive, peer).await;
+                // Sequenced, the peer acks it, so silence means the path is
+                // gone even while the link has nothing to say.
+                let seq = if timing.sequenced {
+                    probe_seq = probe_seq.wrapping_add(1) % wire::KEEPALIVE_SEQ;
+                    probe_seq
+                } else {
+                    wire::KEEPALIVE_SEQ
+                };
+                let keepalive = wire::punch_frame(PunchKind::Punch, &session, &token, seq);
+                let _ = socket.send_to(&keepalive, send_to).await;
             }
         }
     }

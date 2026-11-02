@@ -78,25 +78,38 @@ pub enum Failure {
     PunchFailed,
 }
 
-/// +ciris — the peer's host candidates worth punching: all of them when both
-/// ends report the SAME public IP (one NAT; a punch to that IP needs the
-/// router to hairpin, which many home routers do not), none otherwise (a host
-/// address behind another NAT is unreachable, and punching it only leaks
-/// datagrams onto this node's own network).
+/// +ciris — the peer's host candidates worth punching:
+/// - its global IPv6 addresses, always: most mobile and many home networks
+///   give hosts one, with no NAT in the way, only a stateful firewall that a
+///   simultaneous send opens like any punch;
+/// - its IPv4 host addresses only when both ends report the SAME public IP
+///   (one NAT; a punch to that IP needs the router to hairpin, which many
+///   home routers do not). A private address behind another NAT is
+///   unreachable, and punching it only leaks datagrams onto this node's own
+///   network.
 #[must_use]
 pub fn same_nat_alternates(
     own_public: SocketAddr,
     peer_public: SocketAddr,
     peer_local: &[SocketAddr],
 ) -> Vec<SocketAddr> {
-    if own_public.ip() != peer_public.ip() {
-        return Vec::new();
-    }
+    let same_nat = own_public.ip() == peer_public.ip();
     peer_local
         .iter()
         .copied()
         .filter(|a| *a != peer_public && a.port() != 0)
+        .filter(|a| match a.ip() {
+            core::net::IpAddr::V6(ip) => is_global_v6(&ip),
+            core::net::IpAddr::V4(_) => same_nat,
+        })
         .collect()
+}
+
+/// +ciris — a global unicast IPv6 address (2000::/3), the only kind a peer
+/// elsewhere can reach.
+#[must_use]
+pub fn is_global_v6(ip: &core::net::Ipv6Addr) -> bool {
+    ip.segments()[0] & 0xe000 == 0x2000
 }
 
 /// Something the caller must do for the session.
@@ -653,6 +666,22 @@ mod tests {
         // Different public IPs: a host candidate is never punched.
         let other: SocketAddr = "192.0.2.9:6000".parse().unwrap();
         assert!(same_nat_alternates(a_pub, other, &[b_lan]).is_empty());
+    }
+
+    /// +ciris: a peer's global IPv6 address is punched across NATs too; its
+    /// link-local or unique-local ones never are.
+    #[test]
+    fn a_global_ipv6_candidate_is_punched_whatever_the_public_ipv4() {
+        let a_pub: SocketAddr = "198.51.100.1:5000".parse().unwrap();
+        let b_pub: SocketAddr = "203.0.113.7:6000".parse().unwrap();
+        let global: SocketAddr = "[2001:db8:1::5]:6000".parse().unwrap();
+        let link_local: SocketAddr = "[fe80::1]:6000".parse().unwrap();
+        let ula: SocketAddr = "[fd00::5]:6000".parse().unwrap();
+        let lan: SocketAddr = "192.168.1.5:6000".parse().unwrap();
+        assert_eq!(
+            same_nat_alternates(a_pub, b_pub, &[lan, global, link_local, ula]),
+            alloc::vec![global]
+        );
     }
 
     #[test]

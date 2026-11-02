@@ -13566,7 +13566,7 @@ pub use telemetry::{
 mod direct_link;
 pub use direct_link::{
     DirectLinkConfig, DirectLinkError, DirectLinkJob, DirectLinkPolicy, ASK_HOST_TIMEOUT_MS,
-    FALLBACK_GRACE_MS, PROPOSAL_COOLDOWN_MS,
+    FALLBACK_GRACE_MS, PROPOSAL_COOLDOWN_MS, RESPONDER_START_DELAY_MAX_MS, RETRY_BACKOFF_MS,
 };
 #[cfg(test)]
 mod mvr_direct_link;

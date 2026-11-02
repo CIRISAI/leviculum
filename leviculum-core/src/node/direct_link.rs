@@ -41,6 +41,18 @@ use super::NodeCore;
 /// retrying in a loop cannot keep a peer probing its facilitator.
 pub const PROPOSAL_COOLDOWN_MS: u64 = 60_000;
 
+/// +ciris: when a node's own proposal fails for a reason worth trying
+/// again (the punch, a timeout, the probe), or its direct path is lost, it
+/// proposes again after these waits, one per attempt, then stops. A
+/// rejection, a host's retire or the host proposing itself ends or resets
+/// the schedule. The first wait is the proposal cooldown.
+pub const RETRY_BACKOFF_MS: [u64; 6] = [60_000, 120_000, 300_000, 600_000, 900_000, 900_000];
+
+/// +ciris: the responder starts punching this long after it sends READY, at
+/// most: half the link's round trip, so both ends start together instead of
+/// the initiator a one-way relay delay behind (the READY's trip).
+pub const RESPONDER_START_DELAY_MAX_MS: u64 = 1_500;
+
 /// After a link moves onto its direct interface, link packets still in
 /// flight on the relayed path keep arriving for a while. Only past this grace
 /// does such an arrival mean the peer has gone back to the relay.
@@ -144,11 +156,19 @@ pub enum DirectLinkJob {
     /// Punch from the session's socket toward `peer`, and toward each of
     /// `alternates` at once (+ciris: the peer's host candidates when both
     /// ends share a NAT).
+    ///
+    /// +ciris: wait `start_delay_ms` first (the responder, so both ends start
+    /// together). `fast_liveness` is set when both ends run the two-sided
+    /// commit, so the peer is a CIRIS node that acks the interface's
+    /// sequenced keepalives: the interface may then probe often and give the
+    /// path up within seconds instead of minutes.
     Punch {
         session: SessionId,
         peer: SocketAddr,
         alternates: Vec<SocketAddr>,
         token: [u8; 32],
+        start_delay_ms: u64,
+        fast_liveness: bool,
     },
     /// The session is over: drop its socket and any task still running.
     Release { session: SessionId },
@@ -176,6 +196,17 @@ struct PendingRequest {
     asked_at_ms: u64,
     /// +ciris (leviculum#89): the REQUEST offered the two-sided commit.
     commit: bool,
+}
+
+/// +ciris: a link this node proposed on, for proposing again.
+#[derive(Debug, Clone)]
+struct Retry {
+    /// Attempts scheduled so far, an index into [`RETRY_BACKOFF_MS`].
+    attempt: usize,
+    /// When to propose again; `None` while nothing is due.
+    due_ms: Option<u64>,
+    /// The host payload of the proposal, sent again with each retry.
+    payload: Option<Vec<u8>>,
 }
 
 /// A link moved onto a direct interface, and where it was before.
@@ -214,6 +245,10 @@ pub(crate) struct DirectLinks {
     /// waiting for the peer's COMPLETE before they move: (session, direct
     /// interface, proposed). Nothing is sent on the interface meanwhile.
     committing: BTreeMap<LinkId, (SessionId, usize, bool)>,
+    /// +ciris: links this node proposed on, and their retry schedule.
+    retries: BTreeMap<LinkId, Retry>,
+    /// +ciris: proposals are not retried ([`NodeCore::set_direct_link_retry`]).
+    retry_off: bool,
     jobs: VecDeque<DirectLinkJob>,
 }
 
@@ -278,6 +313,44 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> Result<crate::transport::TickOutput, DirectLinkError> {
         let link_id = self.resolve_link_id(link_id);
         let now_ms = self.transport.clock().now_ms();
+        // The host proposing starts a fresh retry schedule; one refused up
+        // front leaves the schedule it found.
+        let before = self.direct_links.retries.insert(
+            link_id,
+            Retry {
+                attempt: 0,
+                due_ms: None,
+                payload: host_payload.clone(),
+            },
+        );
+        if let Err(e) = self.start_direct_link_proposal(link_id, host_payload, now_ms) {
+            match before {
+                Some(before) => self.direct_links.retries.insert(link_id, before),
+                None => self.direct_links.retries.remove(&link_id),
+            };
+            return Err(e);
+        }
+        Ok(self.process_events_and_actions())
+    }
+
+    /// +ciris: stop or resume retrying failed proposals (on by default).
+    /// Off, a failed upgrade stays failed until the host proposes again.
+    pub fn set_direct_link_retry(&mut self, enabled: bool) {
+        self.direct_links.retry_off = !enabled;
+        if !enabled {
+            for retry in self.direct_links.retries.values_mut() {
+                retry.due_ms = None;
+            }
+        }
+    }
+
+    /// The body of a proposal, for the host's call and for a retry.
+    fn start_direct_link_proposal(
+        &mut self,
+        link_id: LinkId,
+        host_payload: Option<Vec<u8>>,
+        now_ms: u64,
+    ) -> Result<(), DirectLinkError> {
         let facilitator = self
             .direct_links
             .config
@@ -329,7 +402,60 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.direct_links.last_proposal_ms.insert(link_id, now_ms);
         self.direct_links.sessions.insert(link_id, session);
         self.apply_direct_link_steps(link_id, steps, now_ms);
-        Ok(self.process_events_and_actions())
+        Ok(())
+    }
+
+    /// +ciris: schedule this node's next proposal on `link_id`, if it
+    /// proposed there and has attempts left.
+    fn schedule_direct_link_retry(&mut self, link_id: LinkId, now_ms: u64) {
+        if self.direct_links.retry_off {
+            return;
+        }
+        let Some(retry) = self.direct_links.retries.get_mut(&link_id) else {
+            return;
+        };
+        let Some(wait) = RETRY_BACKOFF_MS.get(retry.attempt) else {
+            self.direct_links.retries.remove(&link_id);
+            return;
+        };
+        retry.attempt += 1;
+        retry.due_ms = Some(now_ms.saturating_add(*wait));
+        crate::tracing::info!(
+            link = %HexShort(link_id.as_bytes()),
+            attempt = retry.attempt,
+            wait_ms = *wait,
+            "direct link: proposing again later"
+        );
+    }
+
+    /// +ciris: propose again where a retry is due.
+    fn run_due_direct_link_retries(&mut self, now_ms: u64) {
+        let due: Vec<(LinkId, Option<Vec<u8>>)> = self
+            .direct_links
+            .retries
+            .iter_mut()
+            .filter(|(_, r)| r.due_ms.is_some_and(|d| d <= now_ms))
+            .map(|(link_id, r)| {
+                r.due_ms = None;
+                (*link_id, r.payload.clone())
+            })
+            .collect();
+        for (link_id, payload) in due {
+            match self.start_direct_link_proposal(link_id, payload, now_ms) {
+                Ok(()) => {}
+                // The peer proposed meanwhile, or the link is already direct:
+                // nothing to retry.
+                Err(DirectLinkError::AlreadyUpgrading) => {}
+                Err(DirectLinkError::CoolingDown | DirectLinkError::ChannelBusy) => {
+                    if let Some(retry) = self.direct_links.retries.get_mut(&link_id) {
+                        retry.due_ms = Some(now_ms.saturating_add(PROPOSAL_COOLDOWN_MS));
+                    }
+                }
+                Err(_) => {
+                    self.direct_links.retries.remove(&link_id);
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -511,6 +637,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 attached_at_ms: now_ms,
             },
         );
+        // A path that came up starts the retry schedule over, for when it
+        // is lost.
+        if let Some(retry) = self.direct_links.retries.get_mut(&link_id) {
+            retry.attempt = 0;
+            retry.due_ms = None;
+        }
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             interface = index,
@@ -809,6 +941,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
         self.release_direct_attachment(index, attachment, "retired by the host", true);
         self.direct_links.last_proposal_ms.insert(link_id, now_ms);
+        // The host chose the relay: no retry brings the direct path back.
+        self.direct_links.retries.remove(&link_id);
         Ok(self.process_events_and_actions())
     }
 
@@ -835,11 +969,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
                 Step::Punch { peer, alternates } => {
                     let token = *session.token();
+                    let fast_liveness = session.commit();
+                    // READY reaches the initiator one relay trip after the
+                    // responder sent it; the responder waits that long.
+                    let start_delay_ms = if session.role() == Role::Responder {
+                        self.links
+                            .get(&link_id)
+                            .and_then(|l| l.rtt_us())
+                            .map_or(0, |us| (us / 2_000).min(RESPONDER_START_DELAY_MAX_MS))
+                    } else {
+                        0
+                    };
                     self.direct_links.jobs.push_back(DirectLinkJob::Punch {
                         session: session_id,
                         peer,
                         alternates,
                         token,
+                        start_delay_ms,
+                        fast_liveness,
                     });
                 }
                 // The attach already happened in `direct_link_punched`,
@@ -917,6 +1064,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 failure,
                 proposed: session.role() == Role::Initiator,
             });
+            if session.role() == Role::Initiator {
+                if matches!(failure, Failure::Rejected(_)) {
+                    // The peer said no; asking again changes nothing.
+                    self.direct_links.retries.remove(&link_id);
+                } else {
+                    let now_ms = self.transport.clock().now_ms();
+                    self.schedule_direct_link_retry(link_id, now_ms);
+                }
+            }
         }
     }
 
@@ -1051,6 +1207,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Time out sessions whose peer or facilitator went quiet.
     pub(super) fn check_direct_link_timeouts(&mut self, now_ms: u64) {
         self.flush_direct_link_outbox(now_ms);
+        self.run_due_direct_link_retries(now_ms);
         // A host that never answered refuses (leviculum#82).
         let expired: Vec<LinkId> = self
             .direct_links
@@ -1095,11 +1252,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .pending
             .values()
             .map(|p| p.asked_at_ms.saturating_add(ASK_HOST_TIMEOUT_MS));
+        let retries = self.direct_links.retries.values().filter_map(|r| r.due_ms);
         self.direct_links
             .sessions
             .values()
             .filter_map(Session::deadline_ms)
             .chain(held)
+            .chain(retries)
             .min()
     }
 
@@ -1136,6 +1295,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             + hc::btree_map_bytes(&d.attached)
             + hc::btree_map_bytes(&d.deferred)
             + hc::btree_map_bytes(&d.committing)
+            + hc::btree_map_bytes(&d.retries)
+            + d.retries
+                .values()
+                .filter_map(|r| r.payload.as_ref())
+                .map(alloc::vec::Vec::capacity)
+                .sum::<usize>()
             + hc::btree_map_bytes(&d.pending)
             + hc::btree_map_bytes(&d.outbox)
             + outbox
@@ -1159,6 +1324,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             });
         }
         self.direct_links.last_proposal_ms.remove(link_id);
+        self.direct_links.retries.remove(link_id);
         self.direct_links.outbox.remove(link_id);
         self.direct_links.pending.remove(link_id);
         if let Some(index) = self.direct_links.interface_of_link(link_id) {
@@ -1287,6 +1453,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     },
                     now_ms,
                 );
+                // +ciris: the side that proposed tries for a path again.
+                self.schedule_direct_link_retry(attachment.link_id, now_ms);
             }
             None => {
                 // The link goes, so its direct interface must too: the

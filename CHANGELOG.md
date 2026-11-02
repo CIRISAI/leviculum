@@ -13,7 +13,8 @@ git tag, not the version string. -->
 
 The fork carried onto current upstream master (+572 since the Oct 13 base),
 with v0.31.0+ciris.1 (#82, #83) and v0.31.1+ciris.1 (#86) on it, plus the
-mobile and direct-link work CIRISEdge asked for (#90, #89, #88, #84, #85).
+mobile and direct-link work CIRISEdge asked for (#90, #89, #88, #84, #85),
+and the direct-link traversal fixes from the 10-31 one-sided punch study.
 
 ### Added
 
@@ -42,6 +43,21 @@ mobile and direct-link work CIRISEdge asked for (#90, #89, #88, #84, #85).
   asking host as `NodeEvent::DirectLinkRequested { host_payload, .. }`.
   A payload that cannot fit is refused up front with
   `DirectLinkError::PayloadTooLarge`.
+- Direct links: failed proposals are retried in the background (+ciris).
+  When this node's proposal fails on the punch, a timeout or the probe, or
+  its direct path is later lost, it proposes again after 1, 2, 5, 10, 15
+  and 15 min, then stops. Each retry carries the same host payload. A
+  refusal ends the retries, and so does `retire_direct_link`; a new
+  proposal from the host starts the schedule over. To turn it off, call
+  `ReticulumNode::set_direct_link_retry(false)` (or
+  `NodeCore::set_direct_link_retry`).
+- Direct links: IPv6 candidates (+ciris). The session socket is
+  dual-stack where the host allows it. The global IPv6 address the host
+  would use is sent with its other host candidates (the `"l"` key) and is
+  always punched, NAT or not: most mobile and many home networks give a
+  device one with only a stateful firewall in front. IPv4 host candidates
+  are still punched only when both ends share a public address. Link-local
+  and unique-local IPv6 addresses are never sent.
 - TCP: `reconnect_interface(id)` and `reconnect_all_clients()` on
   `ReticulumNode` and `api::Node` (leviculum#84). A host that knows the
   network changed can redial at once instead of waiting for TCP to notice. It
@@ -55,6 +71,24 @@ mobile and direct-link work CIRISEdge asked for (#90, #89, #88, #84, #85).
 
 ### Changed
 
+- Direct links: a punch succeeds only when an ack comes back FROM an
+  address this end punched, and that address becomes the path (+ciris).
+  Before, any punch heard plus any ack from anywhere counted, so the two
+  ends could settle on different paths. This is the check ICE requires
+  (RFC 8445 §7.2.5.2.1). An address the peer's punches arrive from without
+  being advertised is punched as well (up to 4), which recovers a NAT that
+  did not keep the advertised port. Measured in a namespace NAT lab
+  (`scripts/natlab`, branch `natlab/symmetric`).
+- Direct links: faster detection of a dead path when both ends run the
+  commit (+ciris). The direct interface sends a keepalive every 5 s with a
+  sequence number, which the peer acks, and gives the path up after 15 s
+  of silence instead of 120 s. The link then falls back to the relay and
+  the retry above takes over. This is what ICE consent freshness (RFC 7675)
+  does. With rns-rs, whose interface does not ack keepalives, the 30 s /
+  120 s timing stays.
+- Direct links: the responder starts punching half a link round trip after
+  it sends READY (at most 1.5 s), so both ends start together instead of
+  the initiator lagging by the READY's relay trip (+ciris).
 - Apple TCP liveness matches Linux (leviculum#85): keepalive idle 5 s,
   interval 2 s, 12 probes, and `TCP_RXT_CONNDROPTIME` 24 s. A dead socket
   after a Wi-Fi/cellular switch is now detected in about 24 s instead of
@@ -76,7 +110,8 @@ mobile and direct-link work CIRISEdge asked for (#90, #89, #88, #84, #85).
 
 - Lockfile lifts past RUSTSEC-2026-0414 (pulldown-cmark 0.13.6),
   RUSTSEC-2026-0346..0349 (rustls 0.23.46), RUSTSEC-2026-0382
-  (rustls-webpki 0.103.16), RUSTSEC-2026-0386 (tokio 1.54.1) and
+  (rustls-webpki 0.103.16), RUSTSEC-2026-0386 (tokio 1.51.6, the fixed 1.51 line; leviculum-proxy's
+  PTY moves off the now-deprecated `AsyncFd::new` to `AsyncFd::register`) and
   RUSTSEC-2026-0381 (webpki-roots 1.0.11). RUSTSEC-2026-0192 (`ttf-parser`
   unmaintained, reached only through upstream's iced GUI, no fix) is
   ignored in `deny.toml` with that reason.
@@ -85,6 +120,9 @@ mobile and direct-link work CIRISEdge asked for (#90, #89, #88, #84, #85).
 
 - `NodeEvent::DirectLinkRequested` gained a field (`host_payload`). A match
   that names fields without `..` must add it.
+- `DirectLinkJob::Punch` gained `start_delay_ms` and `fast_liveness`. Only
+  a host driving `NodeCore` itself sees the job; a match on it must add the
+  fields or `..`. `ReticulumNode` users are not affected.
 - A `CoreProcessor` set on the builder runs only for the first run; a
   restarted node has none (the daemons that set one, lntd and lnpnd, never
   restart).
