@@ -13331,3 +13331,6 @@ mod tests {
 
 #[cfg(test)]
 mod mvr_path_response_survives_reannounce;
+
+#[cfg(test)]
+mod mvr_announce_committed_before_interface_up;

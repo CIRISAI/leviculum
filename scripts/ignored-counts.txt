@@ -27,7 +27,10 @@
 # 4 -> 5 -> 4 (2026-10-19): the #848 departure loop in
 # node/mvr_ble_departure_loop.rs was red by design until #852 closed it;
 # the test runs in the suite again.
-4    -p leviculum-core --lib
+# 4 -> 5 (2026-11-02, order 1317): the mvr in
+# node/mvr_announce_committed_before_interface_up.rs is red by design until
+# the fix for the twice-announced destination lands; its control runs.
+5    -p leviculum-core --lib
 3    -p leviculum-core --doc
 
 # measure_send_lock_costs is a timing harness for the lock-budget doc page,
@@ -57,7 +60,10 @@
 # changes. Nothing in the release path re-measures it.
 5    -p leviculum-std --lib
 1    -p leviculum-std --doc
-9    -p leviculum-std --test mvr
+# 9 -> 10 (2026-11-02, order 1317): the mvr
+# a_third_announce_on_a_fresh_interface_waits_at_python is red by design
+# until the fix lands; its control runs.
+10   -p leviculum-std --test mvr
 
 # 20 in rnsd_interop, of which the status_parity_tests::* are NOT
 # unobserved: `just standard` runs them by name through
