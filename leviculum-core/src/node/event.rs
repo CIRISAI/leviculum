@@ -185,6 +185,17 @@ pub enum NodeEvent {
         tries: u8,
     },
 
+    /// +ciris (leviculum#94): a frame sent with a deadline was dropped
+    /// instead of being delivered late; see [`FrameExpiry`].
+    ChannelMessageExpired {
+        /// The link ID
+        link_id: LinkId,
+        /// The frame's sequence number
+        sequence: u16,
+        /// Where and why it was dropped.
+        expiry: FrameExpiry,
+    },
+
     /// +ciris (leviculum#70): a direct-link upgrade succeeded and the link
     /// now travels over a punched point-to-point UDP interface.
     ///
@@ -719,6 +730,7 @@ impl NodeEvent {
             | NodeEvent::LinkStale { link_id, .. }
             | NodeEvent::LinkRecovered { link_id, .. }
             | NodeEvent::ChannelRetransmit { link_id, .. }
+            | NodeEvent::ChannelMessageExpired { link_id, .. }
             | NodeEvent::LinkIdentified { link_id, .. }
             | NodeEvent::DirectLinkEstablished { link_id, .. }
             | NodeEvent::DirectLinkRequested { link_id, .. }
@@ -805,6 +817,7 @@ impl NodeEvent {
             | NodeEvent::LinkDeliveryConfirmed { .. }
             | NodeEvent::LinkDeliveryFailed { .. }
             | NodeEvent::ChannelRetransmit { .. }
+            | NodeEvent::ChannelMessageExpired { .. }
             | NodeEvent::ResourceProgress { .. }
             // Pure instrumentation: a line on a capture, never an input to
             // anything. Losing one under backpressure costs a reader one
@@ -944,6 +957,7 @@ impl NodeEvent {
             NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",
             NodeEvent::LinkEstablished { .. } => "LinkEstablished",
             NodeEvent::MessageReceived { .. } => "MessageReceived",
+            NodeEvent::ChannelMessageExpired { .. } => "ChannelMessageExpired",
             NodeEvent::LinkDataReceived { .. } => "LinkDataReceived",
             NodeEvent::LinkStale { .. } => "LinkStale",
             NodeEvent::LinkRecovered { .. } => "LinkRecovered",
@@ -1074,4 +1088,21 @@ mod tests {
         assert!(!name.contains('='));
         assert!(name.chars().all(|c| !c.is_control()));
     }
+}
+
+/// +ciris (leviculum#94): why a frame sent with a deadline was not
+/// delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameExpiry {
+    /// This node's own frame passed its deadline unconfirmed: it is never
+    /// sent again (an expired marker goes in its place).
+    Sender,
+    /// The peer expired the frame before it got here: only the marker came.
+    MarkedByPeer,
+    /// The frame came, but `age_ms` past the fastest delivery seen, beyond
+    /// its time to live (it waited behind a gap): dropped, not delivered.
+    ArrivedLate {
+        /// How old it was on delivery, beyond the path's fastest.
+        age_ms: u64,
+    },
 }

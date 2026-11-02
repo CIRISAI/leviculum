@@ -291,3 +291,7 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+// +ciris (leviculum#94): frames with a deadline, in a child module so no
+// cited line here moves.
+mod timed;

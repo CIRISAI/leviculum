@@ -13586,5 +13586,10 @@ mod mvr_direct_link;
 // last for the same reason.
 mod relay_route;
 pub use relay_route::ConnectViaError;
+// Channel frames with a deadline (+ciris, leviculum#94).
+mod timed;
+pub use event::FrameExpiry;
 #[cfg(test)]
 mod mvr_relay_route;
+#[cfg(test)]
+mod mvr_timed_frames;

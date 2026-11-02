@@ -961,6 +961,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: &LinkId,
         data: &[u8],
     ) -> Result<crate::transport::TickOutput, send::SendError> {
+        self.send_on_link_ttl(link_id, data, None)
+    }
+
+    /// [`Self::send_on_link`], as a timed frame when `ttl_ms` is set (+ciris,
+    /// leviculum#94; see [`crate::link::channel::timed`]).
+    pub(super) fn send_on_link_ttl(
+        &mut self,
+        link_id: &LinkId,
+        data: &[u8],
+        ttl_ms: Option<u32>,
+    ) -> Result<crate::transport::TickOutput, send::SendError> {
         let link_id = &self.resolve_link_id(link_id);
         let link = self.links.get(link_id).ok_or(send::SendError::NoLink)?;
 
@@ -998,15 +1009,29 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let rtt_ms = link.rtt_ms();
         let envelope_data = {
             let channel = link.ensure_channel(rtt_ms);
-            channel
-                .send(&RawBytesMessage(data), link_mdu, now_ms, rtt_ms)
-                .map_err(|e| match e {
-                    ChannelError::Busy => send::SendError::Busy,
-                    ChannelError::PacingDelay { ready_at_ms } => {
-                        send::SendError::PacingDelay { ready_at_ms }
-                    }
-                    _ => send::SendError::LinkFailed,
-                })?
+            let sent = match ttl_ms {
+                None => channel.send(&RawBytesMessage(data), link_mdu, now_ms, rtt_ms),
+                Some(ttl) => {
+                    use crate::link::channel::timed;
+                    let frame = timed::wrap(RawBytesMessage::MSGTYPE, data, now_ms, ttl);
+                    let deadline = now_ms.saturating_add(u64::from(ttl));
+                    channel.send_raw_with_deadline(
+                        timed::MSG_TIMED,
+                        &frame,
+                        link_mdu,
+                        now_ms,
+                        rtt_ms,
+                        deadline,
+                    )
+                }
+            };
+            sent.map_err(|e| match e {
+                ChannelError::Busy => send::SendError::Busy,
+                ChannelError::PacingDelay { ready_at_ms } => {
+                    send::SendError::PacingDelay { ready_at_ms }
+                }
+                _ => send::SendError::LinkFailed,
+            })?
         };
         let packet_bytes = link
             .build_data_packet_with_context(&envelope_data, PacketContext::Channel, &mut self.rng)
@@ -2034,6 +2059,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Direct-link signals (leviculum#70) are delivered and proofed like
         // any message, then handled by the node instead of the application.
         let mut direct_link_signals: Vec<(u16, Vec<u8>)> = Vec::new();
+        let mut timed_frames = Vec::new();
         let proof_packets: Vec<Vec<u8>> = {
             let rtt_ms = link.rtt_ms();
             let channel = link.ensure_channel(rtt_ms);
@@ -2060,6 +2086,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
                         // Handled by the node: costs the host sink nothing.
                         direct_link_signals.push((envelope.msgtype, envelope.data));
+                    } else if crate::link::channel::timed::is_timed_msgtype(envelope.msgtype) {
+                        // +ciris (leviculum#94): aged below, then delivered or dropped.
+                        timed_frames.push(envelope);
                     } else {
                         self.events.push(NodeEvent::MessageReceived {
                             link_id,
@@ -2122,6 +2151,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if hold {
             self.update_channel_backpressure(now_ms);
         }
+        // +ciris (leviculum#94): in order, ahead of what the drain adds.
+        for envelope in timed_frames {
+            self.deliver_timed_frame(link_id, envelope);
+        }
         self.drain_ready_channel_messages(link_id);
         if rx_ring_full {
             self.update_rx_ring_full(now_ms);
@@ -2168,6 +2201,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // host's.
             if crate::direct_link::wire::is_signal_msgtype(envelope.msgtype) {
                 direct_link_signals.push((envelope.msgtype, envelope.data));
+                continue;
+            }
+            if crate::link::channel::timed::is_timed_msgtype(envelope.msgtype) {
+                self.deliver_timed_frame(link_id, envelope);
                 continue;
             }
             self.events.push(NodeEvent::MessageReceived {
@@ -4615,6 +4652,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             // Route directly via transport
                             self.route_link_packet(&link_id, &packet);
                         }
+                    }
+                    ChannelAction::Expired { sequence } => {
+                        self.events.push(NodeEvent::ChannelMessageExpired {
+                            link_id,
+                            sequence,
+                            expiry: super::FrameExpiry::Sender,
+                        });
                     }
                     ChannelAction::TearDownLink => {
                         crate::tracing::debug!("link_mgr: channel teardown — closing link");

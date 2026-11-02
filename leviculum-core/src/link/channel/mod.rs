@@ -145,6 +145,9 @@ struct OutboundEnvelope {
     /// Used for timeout calculation to avoid death-spiral where growing
     /// queue inflates timeouts during drain.
     queue_len_at_send: usize,
+    /// +ciris (leviculum#94): past this, retransmit a [`timed::MSG_EXPIRED`]
+    /// in the frame's place.
+    deadline_ms: Option<u64>,
 }
 
 impl OutboundEnvelope {
@@ -155,6 +158,7 @@ impl OutboundEnvelope {
             tries: 0,
             sent_at_ms: 0,
             queue_len_at_send: 0,
+            deadline_ms: None,
         }
     }
 }
@@ -173,6 +177,12 @@ pub enum ChannelAction {
     },
     /// Link should be torn down (max retries exceeded)
     TearDownLink,
+    /// +ciris (leviculum#94): a frame's deadline passed before it was
+    /// confirmed; its retransmissions now carry [`timed::MSG_EXPIRED`].
+    Expired {
+        /// Sequence number of the frame.
+        sequence: u16,
+    },
 }
 
 /// Outcome of receiving a channel message, determines proof behavior.
@@ -945,7 +955,7 @@ impl Channel {
     /// * `now_ms` - Current time in milliseconds
     /// * `rtt_ms` - Round-trip time in milliseconds
     pub fn poll(&mut self, now_ms: u64, rtt_ms: u64) -> Vec<ChannelAction> {
-        let mut actions = Vec::new();
+        let mut actions = self.expire_due(now_ms);
         let mut window_decrements = 0usize;
         let mut pacing_doublings = 0usize;
         let eff_rtt = self.effective_rtt_ms(rtt_ms);
@@ -2658,3 +2668,51 @@ mod tests {
 
 // leviculum#70, declared last so the fork moves no cited line.
 mod free_drain;
+
+// +ciris (leviculum#94): frames with a deadline, declared last so the fork
+// moves no line an upstream citation points at.
+pub mod timed;
+
+impl Channel {
+    /// [`Self::send_system_raw`] for a frame worth sending only until
+    /// `deadline_ms` (+ciris, leviculum#94): past it, an unconfirmed frame is
+    /// retransmitted as [`timed::MSG_EXPIRED`], never as itself.
+    pub(crate) fn send_raw_with_deadline(
+        &mut self,
+        msgtype: u16,
+        data: &[u8],
+        link_mdu: usize,
+        now_ms: u64,
+        rtt_ms: u64,
+        deadline_ms: u64,
+    ) -> Result<Vec<u8>, ChannelError> {
+        let packed = self.send_raw(msgtype, data, link_mdu, now_ms, rtt_ms)?;
+        if let Some(out) = self.tx_ring.back_mut() {
+            out.deadline_ms = Some(deadline_ms);
+        }
+        Ok(packed)
+    }
+
+    /// Swap every unconfirmed frame past its deadline for an expired marker
+    /// under the same sequence number, so the stream stays whole and the
+    /// stale frame is never sent again.
+    fn expire_due(&mut self, now_ms: u64) -> Vec<ChannelAction> {
+        let mut actions = Vec::new();
+        for out in &mut self.tx_ring {
+            if out.deadline_ms.is_some_and(|d| now_ms >= d) {
+                out.deadline_ms = None;
+                let sequence = out.envelope.sequence;
+                if let Some(marker) = Envelope::try_new(timed::MSG_EXPIRED, sequence, Vec::new()) {
+                    out.envelope = marker;
+                    actions.push(ChannelAction::Expired { sequence });
+                }
+            }
+        }
+        actions
+    }
+
+    /// When the next frame's deadline falls, if any frame has one.
+    pub fn next_deadline_ms(&self) -> Option<u64> {
+        self.tx_ring.iter().filter_map(|o| o.deadline_ms).min()
+    }
+}

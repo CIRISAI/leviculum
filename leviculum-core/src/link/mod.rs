@@ -512,6 +512,8 @@ pub struct Link {
     /// +ciris (leviculum#91): the relay this link was opened through, when
     /// the host chose one (`NodeCore::connect_via`).
     via: Option<crate::relay_routes::LinkVia>,
+    /// +ciris (leviculum#94): how old the peer's timed frames are on arrival.
+    timed_age: channel::timed::AgeEstimator,
     /// What one frame costs the frame behind it on the interface this link
     /// runs over, in milliseconds (`Interface::frame_turnaround_ms`). Zero
     /// for a medium with no post-TX wait, which is every interface but LoRa.
@@ -645,6 +647,7 @@ impl Link {
             channel: None,
             first_hop_timeout_extra_ms: 0,
             via: None,
+            timed_age: channel::timed::AgeEstimator::default(),
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
             outgoing_resource: None,
@@ -781,6 +784,7 @@ impl Link {
             channel: None,
             first_hop_timeout_extra_ms: 0,
             via: None,
+            timed_age: channel::timed::AgeEstimator::default(),
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
             outgoing_resource: None,
@@ -1228,6 +1232,11 @@ impl Link {
 
     pub(crate) fn set_via(&mut self, via: Option<crate::relay_routes::LinkVia>) {
         self.via = via;
+    }
+
+    /// +ciris (leviculum#94): the age estimator for the peer's timed frames.
+    pub(crate) fn timed_age_mut(&mut self) -> &mut channel::timed::AgeEstimator {
+        &mut self.timed_age
     }
 
     pub(crate) fn set_first_hop_timeout_ms(&mut self, first_hop_timeout_ms: u64) {
