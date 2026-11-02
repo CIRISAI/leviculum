@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::widget::text::Span;
-use iced::widget::{column, container, mouse_area, rich_text, row, scrollable, text, Space};
+use iced::widget::{
+    column, container, mouse_area, opaque, rich_text, row, scrollable, stack, text, Space,
+};
 use iced::{
     border, keyboard, mouse, Alignment, Background, Color, Element, Font, Length, Size,
     Subscription, Task, Theme as IcedTheme,
@@ -424,14 +426,7 @@ impl Window {
         let bar = top_bar(&scene, lang, p);
         let address = address_row(&scene.address, &scene, lang, p);
         let page = page_view(&scene.page, &self.model, p);
-        let page: Element<'_, Message> = mouse_area(page)
-            .on_scroll(|delta| {
-                Message::Wheel(match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => -y * WHEEL_LINES as f32,
-                    mouse::ScrollDelta::Pixels { y, .. } => -y / CELL_H,
-                })
-            })
-            .into();
+        let page: Element<'_, Message> = mouse_area(page).on_scroll(wheel).into();
         let sheet = scene
             .names
             .as_ref()
@@ -442,15 +437,56 @@ impl Window {
             None => page,
         };
         let status = status_row(&scene, lang, p);
-        container(column![bar, address, middle, status])
+        let window: Element<'_, Message> = container(column![bar, address, middle, status])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_: &IcedTheme| container::Style {
                 background: Some(Background::Color(p.background)),
                 ..container::Style::default()
             })
-            .into()
+            .into();
+        match scene.help {
+            true => stack![window, help_layer(&self.model, p)].into(),
+            false => window,
+        }
     }
+}
+
+/// The help over the window: the shared overlay on the page's cell grid,
+/// laid out over the model's cells as the terminal lays it over its
+/// screen, so the key handler's scroll bounds are what it shows. The wheel
+/// scrolls it and a click closes it, as in the terminal; nothing beneath
+/// takes either.
+fn help_layer<'a>(model: &Model, p: Palette) -> Element<'a, Message> {
+    let (cols, rows) = model.size;
+    let grid = leviculum_ui_iced::help::Grid {
+        regular: MONO,
+        bold: MONO_BOLD,
+        size: PAGE_TEXT,
+        cell_w: CELL_W,
+        cell_h: CELL_H,
+    };
+    let overlay = leviculum_ui_iced::help::overlay(
+        &crate::app::help_groups_in(model.lang),
+        StrId::HelpTitle.text(model.lang).trim(),
+        model.help_scroll,
+        leviculum_ui::Rect::new(0, 0, cols, rows),
+        grid,
+        p,
+    );
+    opaque(
+        mouse_area(container(overlay).center(Length::Fill))
+            .on_press(Message::Intent(Intent::Dismiss))
+            .on_scroll(wheel),
+    )
+}
+
+/// The wheel's delta as lines down.
+fn wheel(delta: mouse::ScrollDelta) -> Message {
+    Message::Wheel(match delta {
+        mouse::ScrollDelta::Lines { y, .. } => -y * WHEEL_LINES as f32,
+        mouse::ScrollDelta::Pixels { y, .. } => -y / CELL_H,
+    })
 }
 
 /// How often the spinner and the toast's clock tick, as in the terminal.
@@ -1376,6 +1412,30 @@ mod tests {
         let _ = window.update(Message::Intent(Intent::Activate(NodeId::Field(1))));
         let (w, h) = (WINDOW.0 as u32, WINDOW.1 as u32);
         same_as("gui-form-light.png", &shoot(&window), w, h);
+    }
+
+    /// `?` over the README opens the help in the window: the golden in
+    /// the dark theme; a click on it closes it, as in the terminal.
+    #[test]
+    fn the_help_is_the_golden_and_a_click_closes_it() {
+        let mut window = readme(Theme::Dark);
+        let _ = window.update(press('?'));
+        assert!(window.model.scene().help, "? opens the help");
+        let (w, h) = (WINDOW.0 as u32, WINDOW.1 as u32);
+        same_as("gui-help-dark.png", &shoot(&window), w, h);
+        let clicked = leviculum_ui_iced::headless::click(
+            window.view(),
+            iced::Point::new(WINDOW.0 / 2.0, WINDOW.1 / 2.0),
+            w,
+            h,
+        )
+        .expect("the software renderer");
+        assert!(
+            matches!(clicked.as_slice(), [Message::Intent(Intent::Dismiss)]),
+            "{clicked:?}"
+        );
+        let _ = window.update(clicked.into_iter().next().expect("one message"));
+        assert!(!window.model.scene().help);
     }
 
     /// The xterm table: the cube's corners and the grey ramp's ends.
