@@ -3778,6 +3778,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         OutboxEvent::Left {
             message_id,
             last: Some(state),
+            ..
         } => apply_state(model, message_id, state),
         OutboxEvent::MeshPosition {
             identity,
@@ -3786,7 +3787,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         } => model.mesh_position(identity, location, name.as_deref(), 0),
         // Our own announce, echoed back, names nobody.
         OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
-        OutboxEvent::Announced { destination, name } => {
+        OutboxEvent::Announced {
+            destination, name, ..
+        } => {
             // Said once, in the conversation, where the reader has one with
             // the peer: a peer nobody wrote to has nothing to compare with.
             if let Heard::Changed { was, now } = model.names.heard(destination, name.as_deref()) {
@@ -6574,6 +6577,7 @@ pub(crate) mod tests {
             OutboxEvent::Left {
                 message_id: ID,
                 last: Some(MessageState::Failed),
+                failure: None,
             },
         );
         assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
@@ -9089,6 +9093,7 @@ pub(crate) mod tests {
             OutboxEvent::Announced {
                 destination: peer,
                 name: Some(name.to_string()),
+                path_response: false,
             },
         );
     }

@@ -399,6 +399,7 @@ async fn run_send_steps<O: Outbox>(
                 OutboxEvent::Left {
                     message_id: id,
                     last,
+                    ..
                 } if Some(id) == message_id => {
                     // The router removes an entry only in a terminal state, so
                     // a removal we did not already act on means the terminal
@@ -632,6 +633,7 @@ pub async fn run_send_propagated<O: Outbox, E: Effects>(
                 OutboxEvent::Left {
                     message_id: id,
                     last,
+                    ..
                 } if Some(id) == message_id => {
                     let state = last.or(last_state).unwrap_or(MessageState::Failed);
                     return if given_up(state) {
@@ -1305,6 +1307,7 @@ mod tests {
             OutboxEvent::Left {
                 message_id: DIRECT_ID,
                 last: Some(MessageState::Cancelled),
+                failure: None,
             },
             OutboxEvent::PnSelected {
                 destination: PN,

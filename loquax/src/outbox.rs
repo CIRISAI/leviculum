@@ -24,7 +24,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use leviculum_lxmf::router::{MessageState, PropagationPathAttempts};
+use leviculum_lxmf::router::{AttemptFailure, MessageState, PropagationPathAttempts};
 use leviculum_lxmf::Field;
 
 use crate::mailbox_state::{Decision, Route, Stored};
@@ -247,10 +247,13 @@ pub enum OutboxEvent {
     },
     /// The message left the router's outbound queue, which the router does
     /// only in a terminal state (`leviculum-lxmf/src/router.rs:872-874`).
-    /// `last` is the last state seen for it, when there was one.
+    /// `last` is the last state seen for it, when there was one, and
+    /// `failure` why its last attempt failed, when one did: `Failed` alone
+    /// does not say whether a link never came or died mid-transfer (1330).
     Left {
         message_id: [u8; 32],
         last: Option<MessageState>,
+        failure: Option<AttemptFailure>,
     },
     /// A [`Command::SelectPn`] found its node. `stamp_cost` is what the node
     /// announced, i.e. what a client will have to mine per upload.
@@ -301,9 +304,13 @@ pub enum OutboxEvent {
     /// name as the reference reads it from the app data
     /// (`LXMF.display_name_from_app_data`; [`crate::names::from_app_data`]),
     /// not yet sanitised: the screen does that ([`crate::names`]).
+    /// `path_response` says the announce answered a path request, as a rule
+    /// from a cache: it names the peer as well as a live one does, and says
+    /// nothing of whether the peer is there (1330).
     Announced {
         destination: [u8; 16],
         name: Option<String>,
+        path_response: bool,
     },
     /// A propagation node announced its `lxmf.propagation` destination: the
     /// screen's mailbox schedule syncs on its own node's

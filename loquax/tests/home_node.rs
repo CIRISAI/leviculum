@@ -1565,8 +1565,15 @@ async fn a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_no
 /// collections did on miauhaus), its router had none, and the copy's leg
 /// failed in one tick, unsent, with nothing at the node. The member comes back as a stock Python
 /// client and collects the line, from the group's address.
+///
+/// 1330: on miauhaus the home said `handed-on` for three copies and the
+/// node's event log had no `PN_ACCEPT` for them, so the two logs must
+/// agree here: the hand-on names the node (`pn=`), and the node's own
+/// accept line names the member as the copy's destination, from an upload,
+/// not a peer's sync.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
+    let events = leviculum_std::test_support::event_log::init_event_log();
     let recipient_peer = PythonPeer::start();
     let mut mesh = Mesh::start(recipient_peer.rns_port).await;
     let pn = lnpnd_node::PropagationNode::start(&mesh.instance, 13).await;
@@ -1664,6 +1671,42 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    let handed_on = node
+        .log()
+        .lines()
+        .find(|line| line.contains("HOME outbox propagated handed-on message="))
+        .map(str::to_string)
+        .expect("the copy's hand-on line");
+    assert!(
+        handed_on.contains(&format!(" pn={}", &pn_hash[..8])),
+        "the hand-on names the home's node: {handed_on}"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let accept = loop {
+        while let Ok(event) = pn.events.try_recv() {
+            seen.push(format!("{event:?}"));
+        }
+        let accept = events.dump().into_iter().find(|line| {
+            line.starts_with("PN_ACCEPT ") && line.contains(&format!(" dst={recipient_address} "))
+        });
+        if let Some(accept) = accept {
+            break accept;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the home handed the copy on ({handed_on}) and the node logged no accept for \
+             {recipient_address}; node events {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        !accept.contains(" via=sync "),
+        "an upload, not a peer's sync: {accept}"
+    );
+    assert!(
+        seen.iter().any(|event| event.starts_with("Accepted")),
+        "the engine's own word agrees: {seen:?}"
+    );
 
     let ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
         &once.path().join("storage"),

@@ -467,6 +467,10 @@ impl PropagationRuntime {
                     output.core.merge(self.transport.close(node, link_id));
                 }
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
+                    output.events.push(RouterEvent::AttemptFailed {
+                        message_id,
+                        reason: super::AttemptFailure::Upload(reason),
+                    });
                     entry.set_state(super::MessageState::Outbound, &mut router.build_epochs);
                     entry.next_attempt_ms =
                         node.now_ms().saturating_add(super::DELIVERY_RETRY_WAIT_MS);

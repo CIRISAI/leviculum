@@ -28,11 +28,11 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:478`, `loquax/src/outbox.rs:269`). The core reads
+(`loquax/src/engine.rs:482`, `loquax/src/outbox.rs:272`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:144`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:4003`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:4006`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:2818`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:193`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type

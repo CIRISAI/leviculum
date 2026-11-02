@@ -316,15 +316,28 @@ then and may sleep.
   single link establishment waits 6 s per hop plus the first hop's time)
   is called off in the router, logged as `HOME outbox direct unanswered`,
   and counts as a direct failure: the propagation node is offered the copy
-  on the next tick, before any announce restarts the direct leg (that
-  announce is as a rule the path response the router's own request drew
-  from the cache). The announce and hourly retries go on as before.
+  on the next tick, before any announce restarts the direct leg. The
+  announce and hourly retries go on as before.
+- **A path response is no announce** (1330). Every direct leg called off
+  or failed ends in a path request of the router's own, which a transport
+  node answers from its cache within a minute. The router reports that
+  answer as it reports an announce, flagged as a path response (Python's
+  `is_path_response`), and the outbox starts nothing on it: taken for the
+  recipient, it tried an offline member direct every 100 s on miauhaus
+  after the copy was on the node. Only the recipient's own announce and
+  the hour try direct again.
 - **Every engine selects its own propagation node** (1328). A hosted
   group's copies go out on the group's engine, which runs no collection:
   the home's engine selecting a node selects nothing there, so before a
   copy's propagated leg the group's engine is told the node the home uses
-  unless it reported holding it. A failed leg's log line carries the
-  engine's reason (`reason=unsent: …`, `reason=rejected`, …).
+  unless it reported holding it. A propagated leg's lines name the node
+  (`pn=`, its first four bytes, as `PN_PULL` does), so a `handed-on` reads
+  beside the node's own `PN_ACCEPT` (1330). A failed leg's log line carries the
+  engine's reason (`reason=unsent: …`, `reason=rejected`, …), and after the
+  router's state the transport's word on the last failed attempt
+  (`reason=failed: delivery link closed (Stale)`, `reason=failed: upload
+  transfer: …`), or `reason=failed: no attempt got a link` when none
+  failed on one (1330).
 - **A leg that never ends is given up** (1293). The outbox starts no leg
   for a message already on one, so a leg whose end the router never
   reports (a link that died mid-leg, a transfer that stalled, a message the

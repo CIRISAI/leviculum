@@ -58,7 +58,7 @@ use leviculum_core::transport::TickOutput;
 use leviculum_core::{Clock as CoreClock, DestinationHash, NodeCore, Storage};
 use leviculum_lxmf::propagation_client::PropagationTransport;
 use leviculum_lxmf::router::{
-    LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
+    AttemptFailure, LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
     PropagationStampRequest, RouterConfig, RouterError, RouterEvent, RouterOutput,
     PATH_REQUEST_WAIT_MS,
 };
@@ -300,6 +300,9 @@ pub struct Engine {
     /// forgets a message the moment it reaches a terminal state, so without
     /// this the removal could not be attributed.
     tracked: BTreeMap<[u8; 32], Option<MessageState>>,
+    /// Why the last failed attempt of a tracked message failed, for its
+    /// [`OutboxEvent::Left`] (1330).
+    failures: BTreeMap<[u8; 32], AttemptFailure>,
     /// Stamps being mined, so a re-offer does not queue a second mine for the
     /// same work behind the first. Keyed by kind as well as id: a propagated
     /// message can need a recipient stamp and a node stamp in one run.
@@ -342,6 +345,7 @@ impl Engine {
             state,
             resolves: Vec::new(),
             tracked: BTreeMap::new(),
+            failures: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
             pending_selection: None,
@@ -512,6 +516,11 @@ impl Engine {
                     self.emit(OutboxEvent::State { message_id, state });
                 }
             }
+            RouterEvent::AttemptFailed { message_id, reason } => {
+                if self.tracked.contains_key(&message_id) {
+                    self.failures.insert(message_id, reason);
+                }
+            }
             RouterEvent::StampPending(request) => {
                 self.dispatch_stamp(StampJob::Delivery(request, Arc::default()));
             }
@@ -552,10 +561,12 @@ impl Engine {
             RouterEvent::PeerAnnounced {
                 destination,
                 announce,
+                path_response,
             } => {
                 self.emit(OutboxEvent::Announced {
                     destination: destination.into_bytes(),
                     name: announce.display_name(),
+                    path_response,
                 });
             }
             RouterEvent::PropagationSyncComplete(result) => {
@@ -624,9 +635,11 @@ impl Engine {
             .collect();
         for id in gone {
             let last = self.tracked.remove(&id).flatten();
+            let failure = self.failures.remove(&id);
             self.emit(OutboxEvent::Left {
                 message_id: id,
                 last,
+                failure,
             });
         }
     }
@@ -899,6 +912,7 @@ impl Engine {
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),
+                    path_response: false,
                 }),
                 Command::HomePetname {
                     destination,
@@ -3050,6 +3064,71 @@ mod tests {
                 .any(|event| matches!(event, OutboxEvent::Left { .. })),
             "a message still in the outbound queue has not left it: {seen:?}"
         );
+    }
+
+    /// 1330: the home's "direct failed" line said `reason=failed`, the
+    /// router's state, which does not tell a link that died mid-transfer
+    /// from one that never came. A failed attempt's reason is kept until the
+    /// message leaves, and goes with it; control: a message whose attempts
+    /// never failed leaves with none.
+    #[test]
+    fn a_message_leaves_with_why_its_last_attempt_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let queue = |engine: &mut Engine, core: &mut _, destination| {
+            engine.submit(Command::Send(Box::new(SendRequest {
+                destination,
+                title: Vec::new(),
+                body: vec![b'x'; 2_000],
+                fields: Vec::new(),
+                via: Via::Direct,
+            })));
+            let now_ms = leviculum_core::node::NodeCore::now_ms(core);
+            let _ = engine.on_tick(core, now_ms);
+            drain(engine)
+                .into_iter()
+                .find_map(|event| match event {
+                    OutboxEvent::Queued { message_id } => Some(message_id),
+                    _ => None,
+                })
+                .expect("queued")
+        };
+        let died = queue(&mut engine, &mut core, [0x33; 16]);
+        let quiet = queue(&mut engine, &mut core, [0x34; 16]);
+        let reason = AttemptFailure::Delivery(leviculum_lxmf::DeliveryFailure::LinkClosed(
+            leviculum_core::LinkCloseReason::Stale,
+        ));
+        let ready = engine.take_ready(&mut core).expect("ready");
+        engine.report(
+            &ready,
+            &core,
+            RouterEvent::AttemptFailed {
+                message_id: died,
+                reason,
+            },
+        );
+        engine.state = State::Ready(ready);
+
+        engine.submit(Command::Cancel { message_id: died });
+        engine.submit(Command::Cancel { message_id: quiet });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let left: Vec<_> = drain(&mut engine)
+            .into_iter()
+            .filter_map(|event| match event {
+                OutboxEvent::Left {
+                    message_id,
+                    failure,
+                    ..
+                } => Some((message_id, failure)),
+                _ => None,
+            })
+            .collect();
+        assert!(left.contains(&(died, Some(reason))), "{left:?}");
+        assert!(left.contains(&(quiet, None)), "{left:?}");
     }
 
     /// A short status line must not pay for a link handshake; a body that

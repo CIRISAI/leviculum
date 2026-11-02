@@ -1658,6 +1658,7 @@ impl Inner {
                         OutboxEvent::Announced {
                             destination,
                             name: Some(_),
+                            ..
                         } => Some(*destination),
                         _ => None,
                     };

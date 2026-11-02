@@ -1210,6 +1210,15 @@ fn assert_upload_failure_closes_link(reason: PropagationUploadFailure) {
             .saturating_add(super::super::DELIVERY_RETRY_WAIT_MS)
     );
     assert_eq!(entry.progress, 0.01);
+    // 1330: the retry says why, as a direct attempt's does.
+    assert!(
+        output.events.contains(&RouterEvent::AttemptFailed {
+            message_id,
+            reason: super::super::AttemptFailure::Upload(reason),
+        }),
+        "{:?}",
+        output.events
+    );
     assert!(
         !output.core.actions.is_empty(),
         "failed upload emits a Link close packet before retry"
