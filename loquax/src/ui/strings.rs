@@ -178,6 +178,7 @@ leviculum_ui::catalogue! {
     GroupStateJoined = "group_state_joined", "joined", "beigetreten";
     GroupStateInvited = "group_state_invited", "invited", "eingeladen";
     GroupStateLeft = "group_state_left", "left", "ausgetreten";
+    GroupHomeTooOld = "group_home_too_old", "Your home cannot host groups yet. Update it.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.";
     GroupYouLeft = "group_you_left", "You left %1$s", "Du hast %1$s verlassen";
     MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";

@@ -394,7 +394,9 @@ impl Shell {
                         }));
                     }
                     None => answers.push(UiEvent::GroupMade(Err(
-                        "groups live at a mailbox, and this Loquax has none".to_string(),
+                        loquax::ui::groups::NotMade::Failed(
+                            "groups live at a mailbox, and this Loquax has none".to_string(),
+                        ),
                     ))),
                 },
                 UiEffect::AddMembers { group, members } => match self.context.client.clone() {

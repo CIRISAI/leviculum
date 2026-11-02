@@ -854,6 +854,10 @@ pub struct UiModel<B> {
     /// The groups whose state changed since the store last learned it
     /// (1307 G2): written by [`UiModel::take_writes`].
     groups_changed: BTreeSet<[u8; 16]>,
+    /// The language the model's own sentences from the catalogue are said
+    /// in ([`strings::StrId`]): English unless the shell knows better, as
+    /// the phone does.
+    pub lang: strings::Lang,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -955,6 +959,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             group_draft: None,
             group_sheet: None,
             groups_changed: BTreeSet::new(),
+            lang: strings::Lang::En,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1595,7 +1600,7 @@ pub enum UiEvent {
     Group(groups::Verb),
     /// The home's answer to [`UiEffect::CreateGroup`]: the group's
     /// address, or why it was not made.
-    GroupMade(Result<[u8; 16], String>),
+    GroupMade(Result<[u8; 16], groups::NotMade>),
     /// The home's answer to [`UiEffect::AddMembers`] (1307 G2): the
     /// group's address, or why nobody was added.
     MembersAdded(Result<[u8; 16], String>),

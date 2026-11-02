@@ -1566,6 +1566,7 @@ impl Inner {
         let store = Store::open_in(home, address).map_err(|error| error.to_string())?;
         let config = loquax::config::load(home).map_err(|error| error.to_string())?;
         let mut model = known(home, &store)?;
+        model.lang = lang;
         model.home_client = true;
         model.list_apart = true;
         model.reading.on = config.read_receipts.unwrap_or(true);
@@ -1871,17 +1872,7 @@ impl Inner {
             event,
             UiEvent::FetchDone(_) | UiEvent::Run(PaletteCommand::Fetch)
         );
-        let shown = matches!(
-            event,
-            UiEvent::Engine(_)
-                | UiEvent::SendDone(_)
-                | UiEvent::SendUnproven(_)
-                | UiEvent::FetchDone(_)
-                | UiEvent::Open { .. }
-                | UiEvent::Close
-                | UiEvent::Write { .. }
-                | UiEvent::React { .. }
-        );
+        let shown = redraws(&event);
         let toasts = self.model.toasts.len();
         let effects = update(&mut self.model, event);
         for toast in self
@@ -3398,6 +3389,28 @@ pub fn read_code(
     })
 }
 
+/// Whether folding `event` changes what the screens show though it asks
+/// for nothing: the session says `changed` and Java draws again.
+fn redraws(event: &UiEvent) -> bool {
+    matches!(
+        event,
+        UiEvent::Engine(_)
+            | UiEvent::SendDone(_)
+            | UiEvent::SendUnproven(_)
+            | UiEvent::FetchDone(_)
+            | UiEvent::Open { .. }
+            | UiEvent::Close
+            | UiEvent::Write { .. }
+            | UiEvent::React { .. }
+            // The home's answer lists a new group, or adds members,
+            // with no effect to run (1307 pass five): the list is
+            // drawn again, or the group stays invisible until a copy
+            // arrives.
+            | UiEvent::GroupMade(_)
+            | UiEvent::MembersAdded(_)
+    )
+}
+
 /// A join that failed, in one plain sentence for the join screen (1263,
 /// finding 8): no daemon, no server, no TCP on the main path.
 fn join_words(error: &loquax::home::client::HomeError) -> StrId {
@@ -3546,6 +3559,19 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1307 pass five: the home's answer to Create or Add asks for no
+    /// effect, and without a `changed` the list Java shows never takes the
+    /// new group's row until a copy arrives. Control: a tick changes no
+    /// screen by itself.
+    #[test]
+    fn the_homes_answer_on_a_group_draws_the_list_again() {
+        use loquax::ui::groups::NotMade;
+        assert!(redraws(&UiEvent::GroupMade(Ok([1; 16]))));
+        assert!(redraws(&UiEvent::GroupMade(Err(NotMade::HomeTooOld))));
+        assert!(redraws(&UiEvent::MembersAdded(Ok([1; 16]))));
+        assert!(!redraws(&UiEvent::Tick));
+    }
 
     /// Every join failure is one plain sentence of the catalogue in both
     /// languages (1263, finding 8), and the machinery's words, the server

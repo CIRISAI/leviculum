@@ -256,7 +256,10 @@ pub async fn create_group(
         Ok(group) => tracing::info!("HOME group made group={}", crate::address::to_hex(group)),
         Err(error) => tracing::warn!("HOME group not made: {error}"),
     }
-    UiEvent::GroupMade(made.map_err(|error| error.to_string()))
+    UiEvent::GroupMade(made.map_err(|error| match error {
+        super::client::HomeError::Unsupported(_) => crate::ui::groups::NotMade::HomeTooOld,
+        error => crate::ui::groups::NotMade::Failed(error.to_string()),
+    }))
 }
 
 /// Ask the home node to add members to its group (1307 G2, `/groupadd`):

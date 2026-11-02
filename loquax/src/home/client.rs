@@ -22,6 +22,10 @@ const PATH_RETRY: Duration = Duration::from_millis(leviculum_lxmf::router::PATH_
 const PATH_RETRY_MAX: Duration = Duration::from_secs(60);
 /// How often a waiting path is looked for.
 const PATH_POLL: Duration = Duration::from_millis(100);
+/// How long a request a home built before it may not know waits for its
+/// answer before the same link asks a request every home knows (1307 pass
+/// five): a home answers `/group` from its own store, at once.
+const KNOWN_WAIT: Duration = Duration::from_secs(15);
 
 /// Why talking to the home node failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,10 @@ pub enum HomeError {
     Malformed,
     /// The budget ran out.
     Timeout,
+    /// The home node answers on the link but stays silent on this path:
+    /// it was built before the path (a home before 1307 drops `/group`,
+    /// no handler).
+    Unsupported(&'static str),
 }
 
 impl core::fmt::Display for HomeError {
@@ -49,6 +57,7 @@ impl core::fmt::Display for HomeError {
             Self::Transfer(detail) => write!(f, "the request to the mailbox failed: {detail}"),
             Self::Malformed => write!(f, "the mailbox's answer did not decode"),
             Self::Timeout => write!(f, "the mailbox did not answer in time"),
+            Self::Unsupported(path) => write!(f, "the mailbox does not know {path}"),
         }
     }
 }
@@ -239,8 +248,21 @@ pub async fn group(
     request: &wire::GroupRequest,
     budget: Duration,
 ) -> Result<[u8; 16], HomeError> {
+    group_waiting(node, public_key, device, request, budget, KNOWN_WAIT).await
+}
+
+/// [`group`] whose every ask waits `wait` before the home is looked at.
+async fn group_waiting(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    request: &wire::GroupRequest,
+    budget: Duration,
+    wait: Duration,
+) -> Result<[u8; 16], HomeError> {
     let data = wire::group_request(request);
-    let bytes = answer_retrying(node, public_key, device, super::GROUP_PATH, &data, budget).await?;
+    let path = super::GROUP_PATH;
+    let bytes = answer_if_known(node, public_key, device, path, &data, budget, wait).await?;
     wire::read_group_answer(&bytes)
         .map_err(|_| HomeError::Malformed)?
         .map_err(HomeError::Refused)
@@ -297,6 +319,65 @@ async fn answer_retrying(
             Err(HomeError::Transfer(_) | HomeError::Timeout)
                 if attempt < 3 && tokio::time::Instant::now() < deadline => {}
             Err(error) => return Err(error),
+        }
+    }
+}
+
+/// A request a home built before `path` drops without a word (its core
+/// has no handler for it): asked as [`answer_retrying`] does, but each ask
+/// waits `wait` ([`KNOWN_WAIT`]), and a silence is followed on the same link by
+/// `/sync` past the newest entry, which every home answers with an empty
+/// page. Two silences, each beside an answered `/sync`, are a home that
+/// does not know `path` ([`HomeError::Unsupported`]); one is a lost
+/// packet, and the same request goes again. `path` must be one the home
+/// answers once however often it comes.
+async fn answer_if_known(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    path: &'static str,
+    data: &[u8],
+    budget: Duration,
+    wait: Duration,
+) -> Result<Vec<u8>, HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut attempt = 0;
+    let mut silences = 0;
+    loop {
+        attempt += 1;
+        let answer = match open(node, public_key, device, deadline).await {
+            Ok(link) => {
+                let asked = deadline.min(tokio::time::Instant::now() + wait);
+                let answer = match request(node, &link, path, data, asked).await {
+                    Err(HomeError::Timeout) if tokio::time::Instant::now() < deadline => {
+                        let probe = wire::sync_request(u64::MAX);
+                        match request(node, &link, super::SYNC_PATH, &probe, deadline).await {
+                            Ok(_) => {
+                                silences += 1;
+                                tracing::info!(
+                                    "HOME {path} unanswered, /sync answered ({silences})"
+                                );
+                                Err(HomeError::Unsupported(path))
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    answer => answer,
+                };
+                let _ = node.close_link(&link).await;
+                answer
+            }
+            Err(error) => Err(error),
+        };
+        match answer {
+            Ok(bytes) => return Ok(bytes),
+            Err(HomeError::Unsupported(_)) if silences < 2 => {}
+            Err(HomeError::Transfer(_) | HomeError::Timeout)
+                if attempt < 3 && tokio::time::Instant::now() < deadline => {}
+            Err(error) => return Err(error),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(HomeError::Timeout);
         }
     }
 }
@@ -548,7 +629,10 @@ pub(crate) async fn request(
         .await
         .map_err(|e| HomeError::Transfer(e.to_string()))?;
     match tokio::time::timeout_at(deadline, response).await {
-        Err(_) => Err(HomeError::Timeout),
+        // The protocol's own timeout is the same silence as ours.
+        Err(_) | Ok(Err(leviculum_std::driver::CompletionError::RequestTimedOut)) => {
+            Err(HomeError::Timeout)
+        }
         Ok(Err(error)) => Err(HomeError::Transfer(error.to_string())),
         Ok(Ok(info)) => Ok(info.response_data),
     }
@@ -1090,6 +1174,114 @@ mod tests {
                 Command::Fence { token: 3 },
             ]
         );
+    }
+
+    /// A home over TCP in this process that answers `/sync` with an empty
+    /// page and, when `groups`, `/group` with `GROUP`; built before groups
+    /// it has no handler for `/group`, and its core drops the request, as
+    /// the miauhaus home of 2026-10-31 did (1307 pass five).
+    async fn fake_home(
+        groups: bool,
+    ) -> (
+        std::sync::Arc<ReticulumNode>,
+        ReticulumNode,
+        [u8; 64],
+        Vec<tempfile::TempDir>,
+    ) {
+        use leviculum_core::RequestPolicy;
+        use leviculum_std::driver::ReticulumNodeBuilder;
+        const GROUP: [u8; 16] = [0x6c; 16];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("the port");
+        let (home_dir, phone_dir) = (
+            tempfile::tempdir().expect("dir"),
+            tempfile::tempdir().expect("dir"),
+        );
+        let mut home = ReticulumNodeBuilder::new()
+            .add_tcp_server_listener(listener)
+            .storage_path(home_dir.path().to_path_buf())
+            .build()
+            .await
+            .expect("the home's node");
+        let mut events = home.take_event_receiver().expect("events");
+        home.start().await.expect("start the home");
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let public_key = identity.public_key_bytes();
+        let destination = super::super::destination(identity).expect("home destination");
+        let hash = *destination.hash();
+        home.register_destination(destination);
+        home.register_request_handler(hash, super::super::SYNC_PATH, RequestPolicy::AllowAll);
+        if groups {
+            home.register_request_handler(hash, super::super::GROUP_PATH, RequestPolicy::AllowAll);
+        }
+        let mut phone = ReticulumNodeBuilder::new()
+            .add_tcp_client(port)
+            .storage_path(phone_dir.path().to_path_buf())
+            .build()
+            .await
+            .expect("the phone's node");
+        phone.start().await.expect("start the phone");
+        let home = std::sync::Arc::new(home);
+        let answering = std::sync::Arc::clone(&home);
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                let leviculum_core::NodeEvent::RequestReceived {
+                    link_id,
+                    request_id,
+                    path,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                let answer = match path.as_str() {
+                    super::super::SYNC_PATH => wire::sync_answer(&wire::Page::default()),
+                    _ => wire::group_answer(&GROUP),
+                };
+                let _ = answering
+                    .send_response(&link_id, &request_id, &answer)
+                    .await;
+            }
+        });
+        for _ in 0..20 {
+            let _ = home.announce_destination(&hash, None).await;
+            if phone.has_path(&hash) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        (home, phone, public_key, vec![home_dir, phone_dir])
+    }
+
+    /// 1307 pass five, Lew's phone on the old miauhaus home: `/group` is
+    /// met by silence while `/sync` on the same link is answered, twice,
+    /// so the client says the home does not know groups instead of a
+    /// timeout after the whole budget. Control: a home with the handler
+    /// answers the group's address on the first ask.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_home_silent_on_group_but_answering_sync_cannot_host_groups() {
+        let device = Identity::generate(&mut rand_core::OsRng);
+        let request = wire::GroupRequest {
+            client_id: [7; 16],
+            name: "Familie".to_string(),
+            members: vec![([5; 16], "Anna".to_string())],
+        };
+        let wait = Duration::from_secs(2);
+        let budget = Duration::from_secs(30);
+
+        let (_home, phone, key, _dirs) = fake_home(false).await;
+        let started = tokio::time::Instant::now();
+        let made = group_waiting(&phone, &key, &device, &request, budget, wait).await;
+        assert_eq!(made, Err(HomeError::Unsupported(super::super::GROUP_PATH)));
+        assert!(
+            started.elapsed() < budget,
+            "said before the budget ran out: {:?}",
+            started.elapsed()
+        );
+
+        let (_home, phone, key, _dirs) = fake_home(true).await;
+        let made = group_waiting(&phone, &key, &device, &request, budget, wait).await;
+        assert_eq!(made, Ok([0x6c; 16]));
     }
 
     /// Positive control for the above: without the fence there is no cursor

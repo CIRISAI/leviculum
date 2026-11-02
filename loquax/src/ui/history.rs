@@ -230,8 +230,13 @@ impl<B> UiModel<B> {
             return;
         }
         // The group as the store kept it (1307 G2); what the loaded
-        // messages say is learned over it, the newest epoch winning.
+        // messages say is learned over it, the newest epoch winning. Its
+        // name too: a group whose invitation is beyond the loaded page, or
+        // made here with no message yet, has only the store's (pass five).
         if let Some(group) = stored.group.clone() {
+            if !group.name.is_empty() {
+                self.names.remember(group.address, &group.name);
+            }
             self.groups.insert(group.address, group);
         }
         let now = self.now;

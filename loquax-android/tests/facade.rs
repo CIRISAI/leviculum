@@ -6120,3 +6120,137 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
     let unknown = java_map(&[("t", Java::Str("group")), ("verb", Java::Str("invite"))]);
     assert!(decoded(unknown).is_err());
 }
+
+/// 1307 pass five, Lew's phone 2026-11-02: "I can create a group, but I do
+/// not see it". On a home that hosts groups, the home's answer to Create
+/// says `changed`, and the list Java reads then has the group's row, on
+/// top of every unpinned chat, under its name and with its members, before
+/// anyone wrote in it. A restart lists it again from the store. Control:
+/// the list read right after Create, before the home answered, has no
+/// such row, so the row comes from the answer and nothing pretends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_made_on_the_phone_is_in_the_list_at_once_and_after_a_restart() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    ugly(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let anna = ugly_store::peer_hex(1);
+    let group = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        ugly_in(&session);
+        let verb = |verb: &str, peer: &str, text: &str| {
+            session
+                .request(Request::Group {
+                    verb: verb.to_string(),
+                    peer: peer.to_string(),
+                    member: String::new(),
+                    text: text.to_string(),
+                    confirmed: false,
+                })
+                .unwrap_or_else(|error| panic!("{verb}: {error}"));
+        };
+        verb("new", "", "");
+        verb("pick", &anna, "");
+        verb("next", "", "");
+        verb("name", "", "Familie");
+        // Drain what came before, so the next `changed` is the answer's.
+        while session.next_event(Duration::from_millis(300)).is_some() {}
+        verb("create", "", "");
+        let list = |session: &Session| -> schema::Conversations {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Conversations { search: None })
+                    .expect("the list"),
+            )
+            .expect("decode")
+        };
+        let before = list(&session);
+        assert!(
+            before
+                .conversations
+                .iter()
+                .all(|row| !row.name.starts_with("Familie")),
+            "control: no row before the home answered"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let shown = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no changed with the group"
+            );
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Notice { text, .. }) => panic!("the home refused: {text}"),
+                Some(Event::Changed { .. }) => {
+                    let shown = list(&session);
+                    if shown
+                        .conversations
+                        .iter()
+                        .any(|row| row.name.starts_with("Familie"))
+                    {
+                        break shown;
+                    }
+                }
+                _ => {}
+            }
+        };
+        let at = shown
+            .conversations
+            .iter()
+            .position(|row| row.name.starts_with("Familie"))
+            .expect("the row");
+        let row = &shown.conversations[at];
+        assert!(row.group_members >= 2, "{row:?}");
+        assert!(
+            shown.conversations[..at].iter().all(|row| row.pinned),
+            "on top of the unpinned chats: {:?}",
+            shown.conversations[..at]
+                .iter()
+                .map(|r| &r.name)
+                .collect::<Vec<_>>()
+        );
+        let group = row.peer.clone();
+        session.stop();
+        group
+    })
+    .await
+    .expect("the first session");
+
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        let listed: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("the list"),
+        )
+        .expect("decode");
+        let row = listed
+            .conversations
+            .iter()
+            .find(|row| row.peer == group)
+            .unwrap_or_else(|| panic!("the group after a restart: {listed:?}"));
+        assert!(row.name.starts_with("Familie"), "{row:?}");
+        assert!(row.group_members >= 2, "{row:?}");
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
+}

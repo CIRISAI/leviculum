@@ -58,6 +58,17 @@ pub fn client_caps(receipts: bool) -> u64 {
     CAP_GROUPS | if receipts { CAP_READ_RECEIPTS } else { 0 }
 }
 
+/// Why the home did not make a group (1307 pass five): the answer to
+/// [`UiEffect::CreateGroup`] that is no address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotMade {
+    /// The home answers, but not `/group`: it was built before groups,
+    /// and no second ask changes that.
+    HomeTooOld,
+    /// Anything else, in the machinery's words; another ask may work.
+    Failed(String),
+}
+
 /// Where the reader stands in a group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
@@ -887,14 +898,27 @@ impl<B: Default> UiModel<B> {
     }
 
     /// The home's answer to Create: the group's conversation is listed
-    /// under its name and opened, or the reader is told why not.
-    pub(super) fn group_made(&mut self, made: Result<[u8; 16], String>) -> Vec<UiEffect> {
+    /// under its name, on top, and opened, and the group is written so a
+    /// restart lists it before any message came (1307 pass five); or the
+    /// reader is told why not, and nothing is listed.
+    pub(super) fn group_made(&mut self, made: Result<[u8; 16], NotMade>) -> Vec<UiEffect> {
         let Some(draft) = self.group_draft.take() else {
             return Vec::new();
         };
         let address = match made {
             Ok(address) => address,
-            Err(why) => {
+            // Asking again cannot help: the draft goes, and the one
+            // sentence says what can.
+            Err(NotMade::HomeTooOld) => {
+                self.toast(
+                    leviculum_ui::toast::ToastKind::Error,
+                    super::strings::StrId::GroupHomeTooOld
+                        .text(self.lang)
+                        .to_string(),
+                );
+                return Vec::new();
+            }
+            Err(NotMade::Failed(why)) => {
                 self.toast(
                     leviculum_ui::toast::ToastKind::Error,
                     alloc::format!("The group was not made: {why}"),
@@ -935,7 +959,10 @@ impl<B: Default> UiModel<B> {
                 .collect();
         }
         self.names.remember(address, &name);
+        self.groups_changed.insert(address);
         let index = self.conversation(address);
+        let activity = self.bump();
+        self.conversations[index].activity = activity;
         self.select(index);
         Vec::new()
     }
@@ -1017,6 +1044,7 @@ mod tests {
 
     use leviculum_lxmf::lev::{GroupCopy, Invite};
 
+    use super::super::strings::Lang;
     use super::super::tests::Field as Line;
     use super::super::{update, UiEvent, NONE_OPEN};
     use super::*;
@@ -1145,7 +1173,10 @@ mod tests {
         );
         assert!(verb(&mut model, Verb::Create).is_empty(), "asked once");
 
-        update(&mut model, UiEvent::GroupMade(Err("no mailbox".into())));
+        update(
+            &mut model,
+            UiEvent::GroupMade(Err(NotMade::Failed("no mailbox".into()))),
+        );
         assert!(model.group_draft.is_some(), "kept for another try");
         assert!(model.current_toast().is_some());
         assert_eq!(verb(&mut model, Verb::Create).len(), 1, "asked again");
@@ -1162,6 +1193,69 @@ mod tests {
             !model.group_candidates().contains(&GROUP),
             "no group in a group"
         );
+    }
+
+    /// 1307 pass five, Lew's phone on a home built before groups: the
+    /// home's silence on `/group` comes back as [`NotMade::HomeTooOld`],
+    /// which says the one sentence in the reader's language and lists
+    /// nothing, keeps no draft to ask again with and writes no group.
+    /// Control: a confirming home lists the group at once, on top of the
+    /// older chats, with no message in it, and writes it for a restart.
+    #[test]
+    fn a_home_too_old_for_groups_says_so_and_lists_nothing() {
+        let asked = |lang| {
+            let mut model = reader(&[ANNA, BOB]);
+            model.lang = lang;
+            model.names.remember(ANNA, "Anna");
+            for verb_ in [
+                Verb::New,
+                Verb::Pick(ANNA),
+                Verb::Next,
+                Verb::Name("Familie".into()),
+            ] {
+                verb(&mut model, verb_);
+            }
+            assert_eq!(verb(&mut model, Verb::Create).len(), 1, "asked");
+            let _ = model.take_writes();
+            model
+        };
+
+        let mut old = asked(Lang::De);
+        update(&mut old, UiEvent::GroupMade(Err(NotMade::HomeTooOld)));
+        assert_eq!(
+            old.current_toast().map(|t| t.text.as_str()),
+            Some("Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.")
+        );
+        assert!(old.group_draft.is_none(), "nothing to ask again");
+        assert_eq!(old.group(&GROUP), None);
+        assert!(old.groups.is_empty());
+        assert_eq!(old.conversations.len(), 2, "no row: {:?}", old.order());
+        assert!(old
+            .take_writes()
+            .iter()
+            .all(|w| !matches!(w, super::super::history::StoreWrite::Group(_))));
+        let mut english = asked(Lang::En);
+        update(&mut english, UiEvent::GroupMade(Err(NotMade::HomeTooOld)));
+        assert_eq!(
+            english.current_toast().map(|t| t.text.as_str()),
+            Some("Your home cannot host groups yet. Update it.")
+        );
+
+        let mut new = asked(Lang::En);
+        update(&mut new, UiEvent::GroupMade(Ok(GROUP)));
+        let order = new.order();
+        assert_eq!(new.conversations[order[0]].peer, GROUP, "on top");
+        assert!(new.conversations[order[0]].messages.is_empty());
+        let kept: Vec<GroupInfo> = new
+            .take_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                super::super::history::StoreWrite::Group(group) => Some(group),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept.len(), 1, "written for a restart");
+        assert_eq!((kept[0].name.as_str(), kept[0].ours), ("Familie", true));
     }
 
     /// The study's join (4.2): the invitation lists the group as an
@@ -1652,6 +1746,11 @@ mod tests {
         assert_eq!((group.epoch, group.count()), (3, 3));
         assert_eq!(group.name, "Familie");
         assert!(again.conversations.iter().any(|c| c.peer == GROUP));
+        assert_eq!(
+            again.names.label(&GROUP).split(' ').next(),
+            Some("Familie"),
+            "listed under its name, not its address"
+        );
         let mut without = reader(&[]);
         without.restore(vec![row(None)]);
         assert_eq!(without.group(&GROUP), None, "control: no row, no group");
