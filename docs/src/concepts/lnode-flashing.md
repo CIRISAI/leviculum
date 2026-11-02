@@ -1289,6 +1289,24 @@ board's message store (`TYPE_PN_LIST`,
 `docs/src/firmware/usb-control-envelope.md`), 16 B a hash, rewritten
 by the store task before round-robin reclaim can reach them.
 
+### The position share
+
+Whom a board tells where it is, in its `lev.position` announce
+([Announce cadence, the position announce](announce-cadence.md#the-position-announce)),
+in the same no-flash session shape: one call, every running LNode,
+persisted on the config page (`TYPE_POSITION_SHARE`) and in force at once.
+
+| `--share-position` | the board's position announce |
+| --- | --- |
+| `default` | a board that reports as a tracker shares with its owner, sealed; every other board shares nothing |
+| `off` | never |
+| `owner` | sealed to the owner, the identity its telemetry goes to (`--set-telemetry`); the owner's homes and devices read it, nobody else |
+| `everyone` | in the clear, to everyone in radio range |
+
+The board's `[POSITION] share=<whom> setting=<what>` line on the debug
+port (if00) says what it runs, which for `default` depends on its
+telemetry target.
+
 ### The real bottleneck is not the tool
 
 A manifest invites the belief that the whole palette is a matter of

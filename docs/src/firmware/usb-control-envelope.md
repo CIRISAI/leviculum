@@ -55,6 +55,7 @@ Commands (host → board):
 | 0x14 | MGMT_ALLOW_QUERY | empty (a query) — answered with MGMT_ALLOW_REPORT |
 | 0x15 | CHANNEL_STATS_QUERY | empty (a query) — answered with CHANNEL_STATS_REPORT (#636) |
 | 0x16 | PN_LIST          | `[list][count][count × 16]`: replace one propagation-node operator list, `list` 0 static peers, 1 auth allowed, 2 control allowed, at most 16 hashes, `count 0` clears; acked once the store holds it, effective at the next reset (audit 2026-10-12 D4, D18) |
+| 0x17 | POSITION_SHARE   | `[setting]`: whom the `lev.position` announce is readable by, 0 default (sealed to the owner on a tracker, else off), 1 off, 2 owner, 3 everyone; above 3 refused `REFUSE_VALUE`; persisted before the ack, in force at once (order 1301) |
 
 Responses (board → host):
 
