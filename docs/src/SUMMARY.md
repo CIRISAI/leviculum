@@ -47,6 +47,7 @@
   - [Loquax on a phone: what it costs, tier P proxies](concepts/loquax-phone-power.md)
   - [Loquax on a phone as a full node](concepts/loquax-phone-node.md)
   - [Loquax: import and export](concepts/loquax-import.md)
+  - [Loquax: one messenger on every target](concepts/loquax-targets.md)
 - [Public channels over LXMF](concepts/public-channels.md)
 - [Telemetry](concepts/telemetry.md)
 - [The ThinkNode M9](concepts/thinknode-m9.md)

@@ -42,7 +42,7 @@ map as decided on 2026-10-25, and what is open.
   model that lives in the `no_std` core. Its frontend already
   talks to the backend only through `Outbox` (`loquax/src/outbox.rs:386`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`loquax/Cargo.toml:188`, `loquax/Cargo.toml:192`), since 2026-10-25 behind its `std` feature,
+  (`loquax/Cargo.toml:197`, `loquax/Cargo.toml:201`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
   993; the pass order is in [Loquax: architecture](loquax-architecture.md),
   "Plan: the Loquax core without std").
