@@ -35,13 +35,22 @@
 //! takes first is the scheduler's, which is why the field test went red only
 //! beside other load.
 //!
-//! ## What this pins
+//! ## Why the pin is not here (order 1320)
 //!
-//! The same order on one core, deterministic, no driver: commit, register,
-//! interface up, dispatch the interface-up output, then the committed one.
-//! The new interface receives the destination's announce twice. Red on master
-//! until the fix of order 1317 lands, hence `#[ignore]`; the control shows the
-//! other order is one announce.
+//! Order 1317 pinned the order on one core: commit, register, interface up,
+//! dispatch the interface-up output, then the committed one. The control
+//! below makes the same three core calls and dispatches in the other order.
+//! The core cannot tell the two apart, it sees identical calls, so no core
+//! change can make the pin send once without making the control send
+//! nothing. The duplicate is the driver's: it dispatched an output after a
+//! later interface registered. The fix drains the action channel before a
+//! new interface registers (Branch 5 of `run_event_loop`), and the pin moved
+//! beside it, `leviculum-std/src/driver/mod.rs`
+//! `an_announce_committed_before_a_new_interface_reaches_it_once`.
+//!
+//! What stays here is the core's half of the contract: an output dispatched
+//! before the interface registers reaches nobody new, and the interface-up
+//! sends the destination once.
 
 extern crate std;
 
@@ -101,25 +110,6 @@ fn announces_on_new(outputs: Vec<TickOutput>, hash: &DestinationHash) -> usize {
             p.flags.packet_type == PacketType::Announce && &p.destination_hash == hash.as_bytes()
         })
         .count()
-}
-
-/// THE pin: committed before the interface registered, dispatched after its
-/// interface-up. One announce of the destination is what a fresh peer needs;
-/// master sends two.
-#[test]
-#[ignore = "order 1317: red on master until the fix for the twice-announced destination lands"]
-fn an_announce_committed_before_an_interface_registers_reaches_it_twice() {
-    let (mut node, hash) = mailbox();
-    let committed = node.announce_destination(&hash, None).unwrap();
-
-    node.set_interface_name(NEW, String::from("tcp_client_1"));
-    let up = node.handle_interface_up(NEW);
-
-    let count = announces_on_new(vec![up, committed], &hash);
-    assert_eq!(
-        count, 1,
-        "the new interface carried the destination's announce {count} times"
-    );
 }
 
 /// Control: the committed announce dispatched before the interface

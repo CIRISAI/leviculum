@@ -27,10 +27,7 @@
 # 4 -> 5 -> 4 (2026-10-19): the #848 departure loop in
 # node/mvr_ble_departure_loop.rs was red by design until #852 closed it;
 # the test runs in the suite again.
-# 4 -> 5 (2026-11-02, order 1317): the mvr in
-# node/mvr_announce_committed_before_interface_up.rs is red by design until
-# the fix for the twice-announced destination lands; its control runs.
-5    -p leviculum-core --lib
+4    -p leviculum-core --lib
 3    -p leviculum-core --doc
 
 # measure_send_lock_costs is a timing harness for the lock-budget doc page,
