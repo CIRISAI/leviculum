@@ -296,7 +296,7 @@ Discriminants are the Python `LXMessage` constants. Four traps:
 4. **`Rejected` is ambiguous.** It means either "the receiver cancelled the
    Resource transfer" (`leviculum-lxmf/src/router.rs:1402-1468`) or "the
    propagation node refused the upload for an insufficient stamp"
-   (`leviculum-lxmf/src/router/propagation_runtime.rs:470-482`), and the
+   (`leviculum-lxmf/src/router/propagation_runtime.rs:495-507`), and the
    event alone cannot distinguish them.
 
 And one omission that shapes the whole UI: **there is no "propagated but
@@ -307,7 +307,7 @@ that vanished.
 Terminal states remove the entry from the outbound map
 (`remove_outbound`, `leviculum-lxmf/src/router.rs:983-986`; call sites at
 `:888`, `:1334`, `:1369` and five in the propagation runtime, among them
-`leviculum-lxmf/src/router/propagation_runtime.rs:987`). If the client does
+`leviculum-lxmf/src/router/propagation_runtime.rs:1012`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
 message afterwards, and it cannot offer a retry button.
 `MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:48`).
@@ -345,29 +345,29 @@ wire-compatible with Python's `PR_*` constants: `Idle`, `PathRequested`,
 practice. There is automatic failover to another reachable node when the
 selected one loses its route, but not while a sync round is still running on
 it: that round ends first, as `LinkFailed` or `NoPath`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:911-964`).
+(`leviculum-lxmf/src/router/propagation_runtime.rs:936-989`).
 
 What the router will not do:
 
 - **It never schedules a sync.** `request_messages_from_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1498`) must be called
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1523`) must be called
   by the application every time. `PropagationClientConfig` has three fields
   and none of them is an interval
   (`leviculum-lxmf/src/router/propagation_runtime.rs:56-68`), and
   `next_deadline()` returns `None` in every state except `PathRequested`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1238-1249`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1263-1274`).
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
   router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2285-2302`).
   The client must persist and replay them via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1450`). The selected
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1475`). The selected
   node is not snapshotted either.
 - **It does not clamp the transfer limit against the node's advertised
   one.** The download request carries the local
   `delivery_transfer_limit_kb` (default 1000) regardless of what the node
-  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:585-590`).
+  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:610-615`).
 
 Default `retain_synced_on_node` is `false`
 (`leviculum-lxmf/src/router/propagation_runtime.rs:77`), meaning the client
@@ -375,7 +375,7 @@ tells the node to purge what it has collected. That is a user-visible
 policy decision disguised as a config default, and
 [the mailbox page](loquax-mailbox.md) argues it should be surfaced. Set to
 `true`, our client also withholds the acknowledgement after a download
-(`leviculum-lxmf/src/router/propagation_runtime.rs:664`), which the
+(`leviculum-lxmf/src/router/propagation_runtime.rs:689`), which the
 reference client sends regardless of the flag
 (`reference/LXMF/LXMF/LXMRouter.py:1623-1638`); only then does a second
 client on the same identity still find the message.
@@ -876,7 +876,7 @@ why the exit code is what the tests assert. The ID does not become
 unobtainable, because `loquax status <id>` needs it: `LNMSG_ENQUEUED … id=…`
 carries it into the structured event log, which `LEVICULUM_EVENT_LOG=<path>`
 turns on and which is written by an unfiltered layer, so the line arrives even
-at the `warn` default (`leviculum-std/src/event_log.rs:827-834`). No
+at the `warn` default (`leviculum-std/src/event_log.rs:830-837`). No
 `--print-id` flag was added: nothing consumes the ID today, and an option
 added against a hypothetical user is an option nobody tests.
 

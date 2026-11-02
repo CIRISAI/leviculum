@@ -20,9 +20,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1498`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1523`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1238-1249`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1263-1274`).
 
 ### When to sync
 
@@ -171,7 +171,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1269-1311`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1294-1336`) with no trust
 input at all, because it has no notion of trust.
 
 Your propagation node sees the *envelope* of every message sent to you: who sent it
@@ -300,7 +300,7 @@ acknowledges every download unconditionally (`LXMRouter.py:1623-1638`,
 acknowledgement (`LXMRouter.py:1508-1519`). So with the reference client
 the flag does not keep a fresh download on the node, and a second client
 would never see it. Ours withholds the acknowledgement as well
-(`leviculum-lxmf/src/router/propagation_runtime.rs:664`). Wire-neutral:
+(`leviculum-lxmf/src/router/propagation_runtime.rs:689`). Wire-neutral:
 the node holds an unacknowledged message until expiry, exactly as for a
 client that drops before acknowledging. The same client does not fetch it
 again, since the message is in its router's store and the next list's
@@ -317,7 +317,7 @@ list until older ones expire.
   neither is in the router snapshot (`snapshot`,
   `leviculum-lxmf/src/router.rs:2285-2302`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1450`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1475`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.
@@ -403,7 +403,7 @@ disappears.**
    `Conversations.py`, lines 2186-2204). The library will tell you: our own
    helper checks `core.storage().get_identity(&peer)` before composing and
    reports which call was skipped rather than timing out later
-   (`leviculum-lxmf-node/src/processor.rs:1290-1299`).
+   (`leviculum-lxmf-node/src/processor.rs:1294-1303`).
 6. **Contact status as persisted state**, columba's `ACTIVE` /
    `PENDING_IDENTITY` / `UNRESOLVED`, rather than a live lookup, so the
    list can be rendered without touching the network.
