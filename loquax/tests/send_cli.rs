@@ -575,7 +575,10 @@ fn config_is_taken_before_and_after_the_subcommand() {
         &["home", "join", code, "--config", dir],
     ];
     for args in runs {
-        let run = run(args, b"");
+        // The instance is the verbose text's (1265), and it is what proves
+        // the value of --config arrived.
+        let verbose: Vec<&str> = args.iter().copied().chain(["--verbose"]).collect();
+        let run = run(&verbose, b"");
         assert!(
             !run.stderr.contains("cannot be used with"),
             "{args:?}: {}",
