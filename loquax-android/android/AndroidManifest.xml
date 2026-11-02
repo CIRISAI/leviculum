@@ -58,8 +58,12 @@
     </intent>
   </queries>
 
+  <!-- The jackdaw (1289, 1336): an adaptive icon in mipmap-anydpi-v26 and
+       a PNG per density, written by scripts/render-icon.py. It is round
+       already, so the round icon is the same one. -->
   <application a:label='@string/app_name'
-               a:icon='@android:drawable/sym_def_app_icon'
+               a:icon='@mipmap/ic_launcher'
+               a:roundIcon='@mipmap/ic_launcher'
                a:theme='@style/Loquax'>
     <!-- Light or dark by the phone's setting (res/values-night). A change
          while a screen is open recreates it, as a rotation does; the

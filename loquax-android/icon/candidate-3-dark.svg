@@ -1,3 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="108" height="108">
-<clipPath id="launcher"><circle cx="54" cy="54" r="36"/></clipPath><g clip-path="url(#launcher)"><rect x="0" y="0" width="108" height="108" fill="#222326"/><path d="M34,38 L75,38 L75,64 L49,64 L37,74 Z" stroke="#81c784" stroke-width="4.5" stroke-linejoin="round" fill="none"/><g fill="#81c784"><circle cx="34" cy="38" r="6"/><circle cx="75" cy="38" r="6"/><circle cx="75" cy="64" r="6"/><circle cx="37" cy="74" r="6"/></g></g>
-</svg>

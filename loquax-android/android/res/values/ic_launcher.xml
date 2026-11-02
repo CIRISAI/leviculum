@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Written by loquax-android/scripts/render-icon.py: the adaptive
+     icon's ground, leviculum_ui::pixel::LIGHT.accent. -->
+<resources>
+    <color name="ic_launcher_background">#3a7d44</color>
+</resources>
