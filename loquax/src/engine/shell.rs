@@ -21,7 +21,8 @@ use leviculum_core::transport::TickOutput;
 use leviculum_core::{DestinationHash, LinkId, RequestPolicy};
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
 use leviculum_std::ReticulumNode;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 
 use super::{Engine, StampAnswer, StampJob};
 use crate::clock;
@@ -39,6 +40,52 @@ struct Processor {
     stamp_answers: Receiver<StampAnswer>,
     /// On a home node: its home destination, and where requests to it go.
     home: Option<(DestinationHash, UnboundedSender<HomeRequest>)>,
+    /// Where the events of a lent node go, while one is lent ([`Lent`]).
+    lend: Tap,
+}
+
+/// How long a stop waits for a lent node's fetch to let go of it: one
+/// call's await on a link or a request, which the fetch abandons once its
+/// lend ended.
+const LEND_LET_GO: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The tap of a lent node: the lent end's events, and its end's signal.
+/// Empty while nothing is lent; emptied when the lend ends.
+type Tap = Arc<std::sync::Mutex<Option<(UnboundedSender<NodeEvent>, oneshot::Sender<()>)>>>;
+
+/// The engine's node lent to a page fetch beside the engine (1337 pass
+/// two, `docs/src/concepts/lnomad-everywhere.md` slice 3): the Browse tab
+/// fetches through the node the phone already runs, not a second one.
+/// The engine keeps the node, so the lend holds it weakly; the events are
+/// the ones a fetch reads, forwarded by the processor tap as the home
+/// requests are (`lends`).
+pub struct Lent {
+    pub node: std::sync::Weak<ReticulumNode>,
+    pub events: UnboundedReceiver<NodeEvent>,
+    /// Resolves once the lend ends: the node lent again, or stopping.
+    pub ended: oneshot::Receiver<()>,
+}
+
+/// Whether a lent node's fetch reads `event`: its links coming up and
+/// closing, the answers to its requests, and the NomadNet nodes'
+/// announces, which the Browse tab lists. Nothing else leaves the tap.
+fn lends(event: &NodeEvent) -> bool {
+    match event {
+        NodeEvent::LinkEstablished { is_initiator, .. }
+        | NodeEvent::LinkClosed { is_initiator, .. } => *is_initiator,
+        NodeEvent::ResponseReceived { .. } | NodeEvent::RequestTimedOut { .. } => true,
+        NodeEvent::AnnounceReceived { announce, .. } => lnomad::is_nomad_node_announce(announce),
+        _ => false,
+    }
+}
+
+/// The tap's slot, poisoned or not: what it holds is a channel's end, and
+/// no panic leaves one half-written.
+fn slot(
+    tap: &Tap,
+) -> std::sync::MutexGuard<'_, Option<(UnboundedSender<NodeEvent>, oneshot::Sender<()>)>> {
+    tap.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// One request a client sent the home destination, with the identity the
@@ -110,6 +157,19 @@ impl Processor {
 }
 
 impl Processor {
+    /// An event a lent node's fetch reads goes to it. A lend whose end
+    /// went away is over.
+    fn forward_lent(&self, event: &NodeEvent) {
+        if !lends(event) {
+            return;
+        }
+        let mut slot = slot(&self.lend);
+        let gone = matches!(&*slot, Some((events, _)) if events.send(event.clone()).is_err());
+        if gone {
+            *slot = None;
+        }
+    }
+
     /// Move what the frontend and the miner sent into the engine's queues.
     /// Neither blocks; a gone sender has simply nothing more to send.
     fn take_inputs(&mut self) {
@@ -142,6 +202,7 @@ impl Processor {
 impl CoreProcessor for Processor {
     fn on_event(&mut self, core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
         self.forward_home_request(core, event);
+        self.forward_lent(event);
         let out = self.engine.on_event(core, event);
         self.flush();
         out
@@ -432,6 +493,8 @@ pub struct Attached {
     rendezvous: Option<crate::home::rendezvous::Rendezvous>,
     /// The network word the rotation listens to (1298).
     network: crate::home::rendezvous::Network,
+    /// The processor's tap for a lent node ([`Attached::lend`]).
+    lend: Tap,
 }
 
 /// A group's engine is driven as the home's is, through its outbox.
@@ -450,6 +513,19 @@ impl Attached {
     /// node's answers and a client's pulls (`crate::home`).
     pub fn node(&self) -> Arc<ReticulumNode> {
         Arc::clone(&self.node)
+    }
+
+    /// Lend the node to a page fetch beside the engine ([`Lent`]). A lend
+    /// before ends: one fetch reads the events at a time.
+    pub fn lend(&self) -> Lent {
+        let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (end, ended) = oneshot::channel();
+        *slot(&self.lend) = Some((events, end));
+        Lent {
+            node: Arc::downgrade(&self.node),
+            events: events_rx,
+            ended,
+        }
     }
 
     /// Where the rendezvous rotation stands, when this node dials one.
@@ -513,7 +589,16 @@ impl Attached {
         if let Some(rendezvous) = self.rendezvous.take() {
             rendezvous.stop().await;
         }
-        if let Ok(mut node) = Arc::try_unwrap(self.node) {
+        // A lent node's fetch lets go of it once told; one in the middle
+        // of a call holds it for that call.
+        let node = self.node;
+        if slot(&self.lend).take().is_some() {
+            let deadline = tokio::time::Instant::now() + LEND_LET_GO;
+            while Arc::strong_count(&node) > 1 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        if let Ok(mut node) = Arc::try_unwrap(node) {
             let _ = node.stop().await;
         }
     }
@@ -725,7 +810,9 @@ async fn attach_through<N: Effects + Send + 'static>(
             Engine::new(config.identity, config.display_name).handing_out_packed()
         }
     };
+    let lend = Tap::default();
     let processor = Processor {
+        lend: Arc::clone(&lend),
         engine,
         commands: commands_rx,
         events: events_tx,
@@ -814,6 +901,7 @@ async fn attach_through<N: Effects + Send + 'static>(
         },
         rendezvous: None,
         network: crate::home::rendezvous::Network::default(),
+        lend,
     })
 }
 
@@ -843,6 +931,39 @@ fn run_stamp_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1337 pass two: a lent node's fetch hears its own links come up and
+    /// close, and every answer and timeout; the controls, a link a peer
+    /// opened to us and what is no fetch's, stay at the tap. The announces
+    /// it hears are `lnomad::is_nomad_node_announce`'s, tested there and
+    /// end to end in the phone's facade (no announce is made here: the
+    /// core parses them only off the wire).
+    #[test]
+    fn a_lent_fetch_hears_its_own_links_and_its_answers_alone() {
+        let link_id = LinkId::new([0x11; 16]);
+        let destination_hash = DestinationHash::new([0x22; 16]);
+        let link = |is_initiator| NodeEvent::LinkEstablished {
+            link_id,
+            is_initiator,
+            destination_hash,
+        };
+        let closed = |is_initiator| NodeEvent::LinkClosed {
+            link_id,
+            reason: leviculum_core::LinkCloseReason::Normal,
+            is_initiator,
+            destination_hash,
+        };
+        assert!(lends(&link(true)));
+        assert!(lends(&closed(true)));
+        assert!(lends(&NodeEvent::RequestTimedOut {
+            link_id,
+            request_id: [0x33; 16],
+        }));
+        // The controls.
+        assert!(!lends(&link(false)), "a link a peer opened");
+        assert!(!lends(&closed(false)), "a link a peer opened");
+        assert!(!lends(&NodeEvent::InterfaceDown(0)));
+    }
 
     #[test]
     fn a_server_is_host_and_port() {

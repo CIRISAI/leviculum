@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use leviculum_ui::input::InputBuffer;
 use leviculum_ui::strings::Lang;
 use lnomad::app::show_start_screen;
+use lnomad::app::strings::Text;
 use lnomad::{AppEvent, DiscoveredNode, Effect, Intent as BrowseIntent, Model};
 
 use super::scene::TabId;
@@ -103,6 +104,22 @@ pub enum BrowseEvent {
     Loaded { micron: String, title: String },
     /// The fetch failed, in the platform's words.
     Failed(String),
+    /// The fetch failed, in the browser's catalogue (the fetch's own
+    /// errors, `lnomad::FetchError::text`), said in the reader's language.
+    FailedText(Text),
+    /// The fetch's word on identifying to `dest`, read with the page it
+    /// brought: it corrects the bar's optimistic toggle, and covers a node
+    /// an earlier run identified to.
+    Identifying { dest: [u8; 16], on: bool },
+    /// The file of [`Effect::Download`] arrived and was kept as `name`, of
+    /// `bytes`, where the platform keeps downloads (`dir`, for the toast).
+    Downloaded {
+        name: String,
+        bytes: usize,
+        dir: String,
+    },
+    /// The file of [`Effect::Download`] did not arrive or was not kept.
+    DownloadFailed(Text),
     /// An announce named a NomadNet node (`nomadnetwork.node`).
     Node(DiscoveredNode),
     /// The page's area in cells, columns by rows.
@@ -112,8 +129,16 @@ pub enum BrowseEvent {
 }
 
 impl BrowseEvent {
-    fn into_app(self) -> AppEvent {
-        match self {
+    /// The browser's event for this, but the identify word, which is no
+    /// event of the browser's but a note in its model.
+    fn into_app(self) -> Result<AppEvent, ([u8; 16], bool)> {
+        Ok(match self {
+            BrowseEvent::Identifying { dest, on } => return Err((dest, on)),
+            BrowseEvent::FailedText(text) => AppEvent::LoadFailedText(text),
+            BrowseEvent::Downloaded { name, bytes, dir } => {
+                AppEvent::DownloadDone { name, bytes, dir }
+            }
+            BrowseEvent::DownloadFailed(text) => AppEvent::DownloadFailed(text),
             BrowseEvent::Intent(intent) => AppEvent::Intent(intent),
             BrowseEvent::Loaded { micron, title } => AppEvent::PageLoaded {
                 doc: leviculum_micron::parse(&micron),
@@ -123,7 +148,7 @@ impl BrowseEvent {
             BrowseEvent::Node(node) => AppEvent::NodeDiscovered(node),
             BrowseEvent::Resize { cols, rows } => AppEvent::Resize(cols, rows),
             BrowseEvent::Tick => AppEvent::Tick,
-        }
+        })
     }
 }
 
@@ -148,7 +173,13 @@ pub(super) fn fold<B: InputBuffer + Default>(
         return Vec::new();
     }
     model.browse.model.lang = model.lang;
-    let effects = model.browse.fold(event.into_app());
+    let effects = match event.into_app() {
+        Ok(event) => model.browse.fold(event),
+        Err((dest, on)) => {
+            model.browse.model.note_identify(dest, on);
+            Vec::new()
+        }
+    };
     effects_of(model, effects)
 }
 
@@ -440,6 +471,102 @@ mod tests {
             "Seiten",
             "Loquax's bar names the tab"
         );
+    }
+
+    /// 1337 pass two: what the phone's fetch says back. The identify
+    /// word follows the page and sets the bar's flag for its node, and for
+    /// another node only what is known (the control); a failure in the
+    /// catalogue's words is said in the reader's language and ends the
+    /// loading; a download's end is a toast.
+    #[test]
+    fn the_fetchs_words_reach_the_browser() {
+        let mut model = phone();
+        model.lang = Lang::De;
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        let effects = update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Intent(BrowseIntent::Go {
+                url: Some(format!("{}:/page/index.mu", hex(&NODE))),
+            })),
+        );
+        assert_eq!(effects, vec![navigate(NODE, "/page/index.mu")]);
+        assert!(model.browse.model.pending.is_some(), "loading");
+        page(&mut model, ">Hallo");
+        assert!(!model.browse.model.identifying);
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Identifying {
+                dest: OPERATOR,
+                on: true,
+            }),
+        );
+        assert!(!model.browse.model.identifying, "another node's word");
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Identifying {
+                dest: NODE,
+                on: true,
+            }),
+        );
+        assert!(model.browse.model.identifying, "this node's word");
+
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Intent(BrowseIntent::Go {
+                url: Some(format!("{}:/page/next.mu", hex(&NODE))),
+            })),
+        );
+        let no_path = lnomad::app::strings::Text::key(lnomad::app::strings::StrId::FetchNoPath);
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::FailedText(no_path.clone())),
+        );
+        assert!(model.browse.model.pending.is_none(), "no longer loading");
+        let said = model.browse.model.toast_text.clone().expect("a toast");
+        assert_eq!(said, no_path);
+        let toast = model.browse.model.toast.clone().expect("a toast").text;
+        assert_eq!(toast, no_path.resolve(Lang::De), "said in German");
+
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Downloaded {
+                name: "karte.pdf".to_string(),
+                bytes: 1234,
+                dir: "Loquax".to_string(),
+            }),
+        );
+        let said = model.browse.model.toast.clone().expect("a toast").text;
+        assert!(
+            said.contains("karte.pdf") && said.contains("Loquax"),
+            "{said}"
+        );
+    }
+
+    /// The tab's start page is the phone's, one sentence over the places
+    /// list, and names no key; the terminal's names them (the control).
+    #[test]
+    fn the_tab_opens_on_the_phones_start_page() {
+        let words = |model: &UiModel<Buffer>| -> String {
+            model
+                .scene(LayoutClass::Compact)
+                .browse
+                .expect("browser")
+                .page
+                .lines
+                .iter()
+                .flat_map(|line| line.runs.iter().map(|run| run.text.clone()))
+                .collect()
+        };
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        let text = words(&model);
+        assert!(text.contains("Tap a node"), "{text:?}");
+        assert!(!text.contains("Terminal"), "{text:?}");
+        let mut terminal = phone();
+        terminal.browse.model.hosted = false;
+        update(&mut terminal, UiEvent::Tab(TabId::Browse));
+        let lines = words(&terminal);
+        assert!(lines.contains("Terminal"), "the control: {lines:?}");
     }
 
     fn hex(bytes: &[u8; 16]) -> String {

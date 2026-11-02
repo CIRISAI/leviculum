@@ -28,6 +28,7 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
     let Some(scene) = model.scene(LayoutClass::Compact).browse else {
         return BrowseScreen {
             v,
+            enabled: model.browse.enabled,
             ..BrowseScreen::default()
         };
     };
@@ -55,6 +56,7 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
     let sheet = scene.names.as_ref().or(scene.places.as_ref());
     BrowseScreen {
         v,
+        enabled: model.browse.enabled,
         open: true,
         title: bar.title.resolve(lang),
         back: matches!(bar.lead, Lead::Back { .. }),
@@ -89,6 +91,8 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
             .as_ref()
             .map(|t| t.text.resolve(lang))
             .unwrap_or_default(),
+        // The session's to fill, once.
+        ..BrowseScreen::default()
     }
 }
 

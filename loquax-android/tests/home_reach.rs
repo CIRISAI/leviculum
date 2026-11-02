@@ -139,6 +139,7 @@ impl Mailbox {
                 wake: true,
                 stop: Some(stopped),
                 network: Default::default(),
+                lend: None,
             },
         ));
         Self {

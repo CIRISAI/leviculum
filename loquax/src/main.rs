@@ -1837,6 +1837,7 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         // A desktop or server mailbox has no platform that says a network
         // change; its connection's keepalive (1176) finds a dead one.
         network: Default::default(),
+        lend: None,
     })
     .await;
     match outcome {

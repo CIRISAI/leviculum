@@ -242,6 +242,10 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             }
         });
         tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
+        // The tab shows where the library has it (1337 pass two): off in the
+        // APK until its fetch through the phone's own node was seen on a device.
+        findViewById(R.id.tab_browse).setVisibility(
+                Core.bool(Core.browseScreen(), "enabled") ? View.VISIBLE : View.GONE);
         select(map);
     }
 

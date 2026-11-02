@@ -1991,6 +1991,10 @@ pub struct GroupScreen {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowseScreen {
     pub v: u32,
+    /// The phone has the tab at all (the config's `browse_tab`, 1337 pass
+    /// two): Java shows its button only then.
+    #[serde(default)]
+    pub enabled: bool,
     /// The tab is in front.
     pub open: bool,
     /// The browser's bar: the page's title, whether back is offered, and
@@ -2025,6 +2029,16 @@ pub struct BrowseScreen {
     pub rows: Vec<BrowseRow>,
     #[serde(default)]
     pub toast: String,
+    /// Handed out once (1337 pass two): a text the browser copied, for the
+    /// clipboard, and a file it downloaded, kept under the app's files
+    /// (its path and name), for Java to open or share as a bubble's file.
+    /// Empty when there is none.
+    #[serde(default)]
+    pub copy: String,
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub file_name: String,
 }
 
 /// An action of [`BrowseScreen`]'s bar.

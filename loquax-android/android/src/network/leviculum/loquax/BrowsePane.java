@@ -2,6 +2,9 @@ package network.leviculum.loquax;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
@@ -156,6 +159,7 @@ final class BrowsePane {
     /** Back: the browser's back while it has one; false when it has none. */
     boolean back() {
         Map<String, Object> shown = Core.browseScreen();
+        handOver(shown);
         if (!Core.bool(shown, "back")) {
             return false;
         }
@@ -190,6 +194,7 @@ final class BrowsePane {
     /** Draw what the library says the tab shows. */
     void draw() {
         Map<String, Object> shown = Core.browseScreen();
+        handOver(shown);
         if (!Core.bool(shown, "open")) {
             host.left();
             return;
@@ -226,6 +231,52 @@ final class BrowsePane {
             text.append('\n');
         }
         page.setText(text);
+    }
+
+    /**
+     * What the library hands out once with the screen (1337 pass two): a
+     * text the browser copied goes to the clipboard, and a file it
+     * downloaded, kept under the app's files as a bubble's is, opens in the
+     * app the system has for its kind, or the share sheet takes it.
+     */
+    private void handOver(Map<String, Object> shown) {
+        String copy = Core.str(shown, "copy");
+        if (!copy.isEmpty()) {
+            ClipboardManager clip = screen.getSystemService(ClipboardManager.class);
+            if (clip != null) {
+                clip.setPrimaryClip(ClipData.newPlainText("NomadNet", copy));
+            }
+        }
+        String path = Core.str(shown, "file");
+        if (path.isEmpty()) {
+            return;
+        }
+        android.net.Uri uri = FilesProvider.uri(screen, path);
+        if (uri == null) {
+            Toast.makeText(screen, R.string.file_unreadable, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String name = Core.str(shown, "file_name");
+        String type = FilesProvider.type(name);
+        Intent send = new Intent(Intent.ACTION_SEND)
+                .setType(type)
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        send.setClipData(ClipData.newRawUri(name, uri));
+        Intent chooser = Intent.createChooser(send, name)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        Intent view = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, type)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            screen.startActivity(view);
+        } catch (android.content.ActivityNotFoundException e) {
+            try {
+                screen.startActivity(chooser);
+            } catch (android.content.ActivityNotFoundException again) {
+                Toast.makeText(screen, R.string.file_no_app, Toast.LENGTH_SHORT).show();
+            }
+        }
     }
 
     private View row(Map<String, Object> row) {

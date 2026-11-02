@@ -222,6 +222,11 @@ pub struct DaemonOptions {
     /// re-evaluates on (1298): the phone's mailbox hears the app's;
     /// [`Network::default`](super::rendezvous::Network) elsewhere.
     pub network: super::rendezvous::Network,
+    /// Where the home node's own node is lent once it runs (1337 pass
+    /// two): the phone's Browse tab fetches pages through the mailbox's
+    /// node, which is the phone's way onto the network. `None` lends it to
+    /// nobody, as on a computer, where lnomad has a shared instance.
+    pub lend: Option<tokio::sync::mpsc::UnboundedSender<crate::engine::Lent>>,
 }
 
 /// A source of [`MailboxRun`]s, read once per collection.
@@ -287,6 +292,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         wake,
         stop,
         network,
+        lend,
     } = options;
     if let Some(at) = super::handover::gone_at(&home) {
         return Err(format!(
@@ -411,6 +417,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         mailbox,
     };
     let node = attached.node();
+    if let Some(to) = &lend {
+        // A screen that went away borrows nothing.
+        let _ = to.send(attached.lend());
+    }
     tracing::warn!(
         "HOME up address={} home={} archive_cap={}B outbox={}",
         crate::address::to_hex(&address),

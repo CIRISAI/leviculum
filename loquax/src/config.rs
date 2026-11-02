@@ -25,7 +25,9 @@
 //! palette's `read receipts` write it (1233). `photo_size`, `small`,
 //! `phone` (the default) or `original` (1220): how far a photo is scaled
 //! before it goes (`crate::photo`), which the settings' Chats page
-//! writes. And one key a terminal context for the map's
+//! writes. `browse_tab`, `off` (the default) or `on` (1337): whether
+//! the phone shows its Browse tab, held back until the tab's fetch has
+//! been seen on a device. And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`
@@ -161,6 +163,10 @@ pub struct Config {
     pub map_fling: Option<bool>,
     /// `read_receipts`, when the file sets it; unset is on.
     pub read_receipts: Option<bool>,
+    /// `browse_tab`, when the file sets it; unset is off (1337 pass two):
+    /// the phone's Browse tab, held back until its fetch has landed on a
+    /// device, and switched on by this key alone meanwhile.
+    pub browse_tab: Option<bool>,
     /// `photo_size`, when the file sets it; unset is `phone`.
     pub photo_size: Option<crate::ui::photos::PhotoSize>,
     /// `map_drawing.<context>` lines: each context and the drawing
@@ -272,6 +278,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             ("home_wake", &mut config.home_wake),
             ("map_fling", &mut config.map_fling),
             ("read_receipts", &mut config.read_receipts),
+            ("browse_tab", &mut config.browse_tab),
             ("rendezvous_dial", &mut config.rendezvous_dial),
         ] {
             if key.trim() == name {
@@ -654,6 +661,16 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn browse_tab_is_off_unless_the_file_says_on() {
+        assert_eq!(parse_str("").expect("empty").browse_tab, None);
+        assert_eq!(
+            parse_str("browse_tab = on\n").expect("on").browse_tab,
+            Some(true)
+        );
+        assert!(parse_str("browse_tab = maybe\n").is_err(), "the control");
     }
 
     #[test]
