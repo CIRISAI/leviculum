@@ -15,8 +15,9 @@
 //! Capability bit 1 says "I understand groups": a group's home sends such a
 //! member its copies with key `0x02` and the bare text, and every other
 //! member the text with the sender's name in front
-//! (`docs/drafts/group-chats-study-2026-11.md`, 2.2 and 3.1). Keys `0x03`
-//! and `0x06` are the study's group status and digest, kept free for them.
+//! (`docs/drafts/group-chats-study-2026-11.md`, "The fan-out field" and
+//! "Interop for stock clients"). Keys `0x03` and `0x06` are the study's
+//! group status and digest, kept free for them.
 //!
 //! Versions move by keys, never by the type: a reader skips a key it does
 //! not know, and a later key never changes what an earlier one means. The
