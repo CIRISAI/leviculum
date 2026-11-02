@@ -2036,8 +2036,10 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     // Lew's copy of the reply reaches the home's own delivery destination
-    // and is proven: booked, as is Bob's copy of Lew's line.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    // and is proven: booked, as is Bob's copy of Lew's line. The copy
+    // travels the backchannel of the link the owner opened to the group,
+    // and its first packet is proven (1312), not a retry 20 s on.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while node.log().matches("GROUP copy delivered").count() < 2 {
         assert!(
             tokio::time::Instant::now() < deadline,
