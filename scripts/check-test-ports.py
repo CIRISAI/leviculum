@@ -53,6 +53,7 @@ Usage:
 from __future__ import annotations
 
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -346,12 +347,21 @@ def fixture(files: dict[Path, str]) -> Path:
 
 def selftest() -> int:
     failures = []
-    clean = check(fixture({}))
+    # Each fixture is removed once it behaved and kept, named, when it did not:
+    # one directory per fixture per guards run had piled up in /tmp by the
+    # hundred (1314).
+    root = fixture({})
+    clean = check(root)
     if clean:
-        failures.append(f"the clean fixture fails: {clean}")
+        failures.append(f"the clean fixture fails: {clean} (kept at {root})")
+    else:
+        shutil.rmtree(root)
     for name, (rel, text) in FAULTS.items():
-        if not check(fixture({rel: text})):
-            failures.append(f"injected fault did not fire: {name}")
+        root = fixture({rel: text})
+        if not check(root):
+            failures.append(f"injected fault did not fire: {name} (kept at {root})")
+        else:
+            shutil.rmtree(root)
     for failure in failures:
         print(f"check-test-ports selftest: {failure}", file=sys.stderr)
     if not failures:

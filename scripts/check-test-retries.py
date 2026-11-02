@@ -47,6 +47,7 @@ Usage:
 from __future__ import annotations
 
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -533,10 +534,17 @@ def selftest() -> int:
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text)
         findings, allows = check(root)
+        before = len(failures)
         if len(findings) != want:
             failures.append(f"{name}: {len(findings)} finding(s), expected {want}: {findings}")
         if name == "the same loop with an allow" and len(allows) != 1:
             failures.append(f"{name}: the allow was not printed: {allows}")
+        # Kept only when it explains a failure: one directory per fixture per
+        # guards run had piled up in /tmp by the hundred (1314).
+        if len(failures) == before:
+            shutil.rmtree(root)
+        else:
+            failures.append(f"{name}: fixture kept at {root}")
     for failure in failures:
         print(f"check-test-retries selftest: {failure}", file=sys.stderr)
     if not failures:
