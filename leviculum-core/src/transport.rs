@@ -3473,10 +3473,10 @@ pub struct Transport<C: Clock, S: Storage> {
     interface_ingress_burst: BTreeMap<usize, IngressBurstState>,
     /// Own-announce pacing while an interface is fresh (order 1320,
     /// `fresh_announce_pacing`), created in `set_interface_name`. Boxed like
-    /// `torn_down_interfaces`: the board's node box has 8 B of slack, a map
-    /// is 12 B. Removed in handle_interface_down via remove_announce_freq_tracking().
+    /// `torn_down_interfaces`: the board's node box has 8 B of slack, a vec
+    /// is 12 B. Sorted by id. Removed in handle_interface_down via remove_announce_freq_tracking().
     #[allow(clippy::box_collection)]
-    fresh_announce_pacers: Option<Box<BTreeMap<usize, fresh_announce_pacing::FreshAnnouncePacer>>>,
+    fresh_announce_pacers: Option<Box<fresh_announce_pacing::Pacers>>,
 
     /// Per-interface held-announce queue (Codeberg #87; Python
     /// `Interface.held_announces`, Interface.py:131). Keyed by destination hash
@@ -5532,11 +5532,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
         if let Some(pacers) = self.fresh_announce_pacers.as_deref() {
-            bytes +=
-                core::mem::size_of::<BTreeMap<usize, fresh_announce_pacing::FreshAnnouncePacer>>()
-                    + hc::btree_map_bytes(pacers);
+            bytes += core::mem::size_of::<fresh_announce_pacing::Pacers>();
+            bytes += hc::vec_bytes(pacers);
         }
-        for pacer in self.fresh_announce_pacers.iter().flat_map(|p| p.values()) {
+        // What waits in each pacer's queue.
+        for (_, pacer) in self.fresh_announce_pacers.iter().flat_map(|p| p.iter()) {
             bytes += hc::vec_deque_bytes(&pacer.queue);
             for queued in &pacer.queue {
                 bytes += queued.raw.capacity();

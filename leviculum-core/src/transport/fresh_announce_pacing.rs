@@ -68,6 +68,20 @@ use crate::traits::{Clock, Storage};
 /// 1.2 s and measure 2.5 Hz, and every longer run measures less.
 pub(crate) const FRESH_ANNOUNCE_SPACING_MS: u64 = 600;
 
+/// The pacers of all interfaces, sorted by interface id.
+///
+/// A vec and not a `BTreeMap`: a board has at most three interfaces, and a
+/// map with this value type was a set of B-tree monomorphs of its own, about
+/// 1 KiB of the Pocket's flash (order 1326). Kept sorted, so every walk visits
+/// the interfaces in the order the map did, and a lookup is a binary search
+/// for the hosts with many spawned interfaces.
+pub(crate) type Pacers = Vec<(usize, FreshAnnouncePacer)>;
+
+/// The index of `id` in `pacers`, or where it would be inserted.
+fn slot(pacers: &Pacers, id: usize) -> Result<usize, usize> {
+    pacers.binary_search_by_key(&id, |(i, _)| *i)
+}
+
 /// One own announce waiting for its turn on a fresh interface.
 #[derive(Debug, Clone)]
 pub(crate) struct PacedAnnounce {
@@ -150,10 +164,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Start pacing `id` if it has no pacer yet (its registration).
     pub(super) fn register_fresh_pacer(&mut self, id: usize) {
         let now = self.clock.now_ms();
-        self.fresh_announce_pacers
-            .get_or_insert_with(Box::default)
-            .entry(id)
-            .or_insert_with(|| FreshAnnouncePacer::new(now));
+        let pacers = self.fresh_announce_pacers.get_or_insert_with(Box::default);
+        if let Err(at) = slot(pacers, id) {
+            pacers.insert(at, (id, FreshAnnouncePacer::new(now)));
+        }
     }
 
     /// Restart `id`'s fresh window: the interface came up again, and the
@@ -161,17 +175,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// What is still queued keeps its order and its spacing.
     pub fn mark_interface_fresh(&mut self, id: usize) {
         let now = self.clock.now_ms();
-        self.fresh_announce_pacers
-            .get_or_insert_with(Box::default)
-            .entry(id)
-            .and_modify(|p| p.up_ms = now)
-            .or_insert_with(|| FreshAnnouncePacer::new(now));
+        let pacers = self.fresh_announce_pacers.get_or_insert_with(Box::default);
+        match slot(pacers, id) {
+            Ok(at) => pacers[at].1.up_ms = now,
+            Err(at) => pacers.insert(at, (id, FreshAnnouncePacer::new(now))),
+        }
     }
 
     /// Forget `id`'s pacer and what waits in it (the interface is gone).
     pub(super) fn remove_fresh_pacer(&mut self, id: usize) {
         if let Some(pacers) = self.fresh_announce_pacers.as_mut() {
-            pacers.remove(&id);
+            if let Ok(at) = slot(pacers, id) {
+                pacers.remove(at);
+            }
             if pacers.is_empty() {
                 self.fresh_announce_pacers = None;
             }
@@ -192,11 +208,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             return true;
         }
         let now = self.clock.now_ms();
-        let Some(pacer) = self
-            .fresh_announce_pacers
-            .as_mut()
-            .and_then(|p| p.get_mut(&iface))
-        else {
+        let Some(pacer) = self.fresh_announce_pacers.as_mut().and_then(|p| {
+            let at = slot(p, iface).ok()?;
+            Some(&mut p[at].1)
+        }) else {
             return true;
         };
         if pacer.admit(now) {
@@ -247,8 +262,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let paced: Vec<usize> = self
             .fresh_announce_pacers
             .iter()
-            .flat_map(|p| p.keys())
-            .copied()
+            .flat_map(|p| p.iter())
+            .map(|(id, _)| *id)
             .filter(|id| !skip.contains(id))
             .collect();
         paced
@@ -260,13 +275,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Release every queued own announce that is due (the poll's step).
     pub(super) fn drain_fresh_announce_queues(&mut self, now: u64) {
         let mut sends = Vec::new();
-        for (&iface, pacer) in self
+        for (iface, pacer) in self
             .fresh_announce_pacers
             .iter_mut()
             .flat_map(|p| p.iter_mut())
         {
             if let Some(next) = pacer.release(now) {
-                sends.push((iface, next));
+                sends.push((*iface, next));
             }
         }
         for (iface, next) in sends {
@@ -286,8 +301,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     pub(crate) fn fresh_announces_waiting(&self) -> usize {
         self.fresh_announce_pacers
             .iter()
-            .flat_map(|p| p.values())
-            .map(|p| p.queue.len())
+            .flat_map(|p| p.iter())
+            .map(|(_, p)| p.queue.len())
             .sum()
     }
 
@@ -295,9 +310,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     pub(super) fn fresh_announce_deadline(&self) -> Option<u64> {
         self.fresh_announce_pacers
             .iter()
-            .flat_map(|p| p.values())
-            .filter(|p| !p.queue.is_empty())
-            .map(|p| p.next_ms)
+            .flat_map(|p| p.iter())
+            .filter(|(_, p)| !p.queue.is_empty())
+            .map(|(_, p)| p.next_ms)
             .min()
     }
 }
@@ -353,6 +368,32 @@ mod tests {
             assert!(t.admit_own_announce(3, &[dst], [dst; TRUNCATED_HASHBYTES], None));
         }
         assert_eq!(t.fresh_announces_waiting(), 0);
+    }
+
+    /// The table stays sorted by id whatever order interfaces come and go
+    /// in, so the poll walks them in the order the map it replaced did.
+    #[test]
+    fn the_pacer_table_stays_sorted_by_interface() {
+        let mut t = transport_with(5);
+        t.register_fresh_pacer(2);
+        t.register_fresh_pacer(7);
+        t.register_fresh_pacer(5);
+        t.mark_interface_fresh(1);
+        let ids = |t: &Transport<MockClock, MemoryStorage>| -> Vec<usize> {
+            t.fresh_announce_pacers
+                .iter()
+                .flat_map(|p| p.iter())
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        assert_eq!(ids(&t), alloc::vec![1, 2, 5, 7]);
+        t.remove_fresh_pacer(5);
+        t.remove_fresh_pacer(4);
+        assert_eq!(ids(&t), alloc::vec![1, 2, 7]);
+        for id in [1, 2, 7] {
+            t.remove_fresh_pacer(id);
+        }
+        assert!(t.fresh_announce_pacers.is_none());
     }
 
     fn announce(dst: u8) -> PacedAnnounce {
