@@ -942,6 +942,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PN_REJECT",
         required_keys: &["reason", "via"],
     },
+    // lnpnd: an inbound sync batch had messages the store could not hold
+    // even after eviction; `offered` is the batch, `dropped` what was lost.
+    // The node declines offers until its next maintenance sweep (1294).
+    EventSchema {
+        name: "PN_STORE_FULL",
+        required_keys: &["peer", "offered", "dropped"],
+    },
     EventSchema {
         name: "PN_MAILBOX",
         required_keys: &["src", "bytes"],

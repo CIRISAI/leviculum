@@ -171,6 +171,8 @@ pub(crate) struct InboundSync {
     duplicates: usize,
     bytes: u64,
     invalid: usize,
+    /// Messages the store could not hold even after eviction.
+    store_failed: usize,
 }
 
 impl InboundSync {
@@ -240,6 +242,12 @@ pub(crate) struct PeeringRuntime {
     /// certainly alive then, and may not be by the time the resource's
     /// [`SyncSender`] is taken (643).
     inbound_link_facts: HashMap<LinkId, (Option<Identity>, Option<u8>)>,
+    /// The store failed a message of an inbound sync, so every `/offer`
+    /// and every sync resource is declined until the engine has run its
+    /// maintenance sweep ([`Self::store_full`], [`Self::store_swept`]).
+    /// Declined, the sending peer keeps the messages for its next round;
+    /// accepted and dropped, it would have moved its cursor past them.
+    store_full: bool,
     outbound: Option<OutboundSync>,
     mining: Option<MiningJob>,
     last_synced: Option<[u8; 16]>,
@@ -317,6 +325,7 @@ impl PeeringRuntime {
             validated_links: HashMap::new(),
             inbound_transfers: HashSet::new(),
             inbound_link_facts: HashMap::new(),
+            store_full: false,
             outbound: None,
             mining: None,
             last_synced: None,
@@ -801,6 +810,17 @@ impl PeeringRuntime {
         ) {
             return OfferResponse::Error(error).encode();
         }
+        // A store that just failed a sync message declines with the
+        // reference's postponement, `ERROR_THROTTLED`: the peer keeps its
+        // messages and comes back after `PN_STAMP_THROTTLE`
+        // (`offer_response`, `reference/LXMF/LXMF/LXMPeer.py:421-425`), the
+        // same answer the reference gives a node over its inbound-sync
+        // limit (`reference/LXMF/LXMF/LXMRouter.py:2280-2283`). An empty
+        // "want none" would tell it we hold them all.
+        if self.store_full {
+            crate::engine::log_reject("store_full", "offer");
+            return OfferResponse::Error(PeerError::Throttled).encode();
+        }
 
         let Ok(offer) = PeerOffer::decode(data) else {
             return OfferResponse::Error(PeerError::InvalidData).encode();
@@ -870,6 +890,19 @@ impl PeeringRuntime {
                 .static_peers
                 .contains(&Self::propagation_hash_of(identity))
         })
+    }
+
+    /// Whether the store failed a sync message since the last maintenance
+    /// sweep: the engine runs the sweep at its next tick, before any
+    /// further sync is taken, and `/offer`s and sync resources are
+    /// declined until it has.
+    pub(crate) fn store_full(&self) -> bool {
+        self.store_full
+    }
+
+    /// The engine's maintenance sweep ran; offers are answered again.
+    pub(crate) fn store_swept(&mut self) {
+        self.store_full = false;
     }
 
     /// Throttle an identified client whose upload resource carried an
@@ -1063,6 +1096,7 @@ impl PeeringRuntime {
             duplicates: 0,
             bytes: 0,
             invalid: 0,
+            store_failed: 0,
         })
     }
 
@@ -1146,13 +1180,17 @@ impl PeeringRuntime {
                     job.invalid += 1;
                 }
                 UploadOutcome::StoreFailed(error) => {
-                    // Eviction already ran inside accept; a message that
-                    // still does not fit is dropped — the protocol's
-                    // normal, unsignalled forgetting (§1 of the concept
-                    // paper). Complete messages only: the store append is
-                    // atomic at the verb boundary.
+                    // Eviction already ran inside accept, and the resource
+                    // is already concluded, so the peer has moved its
+                    // cursor past this message: it is lost here. What can
+                    // be saved is the next batch, so the node declines
+                    // until its maintenance sweep has run
+                    // (`Self::store_full`), and the round says what it
+                    // dropped (`PN_STORE_FULL` below).
                     tracing::debug!("lnpnd: sync message dropped, store: {error}");
                     crate::engine::log_reject("store_failed", "sync");
+                    job.store_failed += 1;
+                    self.store_full = true;
                 }
             }
         }
@@ -1164,6 +1202,14 @@ impl PeeringRuntime {
         // The round's accounting is per envelope, so it waits for the last
         // message of it — the counters above accumulate across the slices.
         let (accepted, bytes, invalid) = (job.accepted, job.bytes, job.invalid);
+        if job.store_failed > 0 {
+            tracing::warn!(
+                event = "PN_STORE_FULL",
+                peer = full_hex(&remote_hash),
+                offered = job.messages.len(),
+                dropped = job.store_failed,
+            );
+        }
         if self.table.get(&remote_hash).is_some() {
             let traffic = self.traffic_mut(&remote_hash);
             traffic.incoming += accepted as u64;

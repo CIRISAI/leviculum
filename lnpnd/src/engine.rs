@@ -1558,6 +1558,12 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             self.profile.add_appends(spent);
             budget -= spent.min(budget);
         }
+        // A sync message the store could not hold: sweep at the next tick,
+        // before the next sync is taken (the peering runtime declines
+        // until then, `PeeringRuntime::store_full`).
+        if ready.peering.store_full() {
+            self.next_maintenance_at = 0;
+        }
         self.ask_back_if_queued(core, out);
     }
 
@@ -1846,6 +1852,10 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
                     Some(("over_sync_limit", ready.node.resource_limit_bytes()))
                 } else if client && *data_size > ready.node.transfer_limit_bytes() {
                     Some(("too_large", ready.node.transfer_limit_bytes()))
+                } else if !client && ready.peering.store_full() {
+                    // An offer accepted before the store failed: refusing
+                    // the resource keeps the peer's cursor where it was.
+                    Some(("store_full", 0))
                 } else {
                     None
                 };
@@ -2019,6 +2029,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
                 limit = store.capacity(),
                 count = store.count().unwrap_or(0),
             );
+            ready.peering.store_swept();
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
         }
         self.profile.lap(Section::Tick);
@@ -3924,6 +3935,128 @@ mod tests {
         ] {
             assert!(rejects[0].contains(field), "{field}: {}", rejects[0]);
         }
+    }
+
+    /// A sync message the store cannot hold is an event, not silence: the
+    /// round logs `PN_STORE_FULL` with what was offered and dropped, the
+    /// next `/offer` is declined with `ERROR_THROTTLED` (the peer keeps
+    /// its messages, `LXMPeer.py:421-425`), and once the maintenance
+    /// sweep has run at the next tick offers pass the gate again
+    /// (order 1294).
+    #[test]
+    fn a_store_failure_during_a_sync_is_logged_and_declines_until_the_sweep() {
+        use leviculum_lxmf::{OfferResponse, PeerSyncEnvelope};
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            // Smaller than the message below: no eviction can make room.
+            store: MemoryPropagationStore::new(500),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 500,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+        let sender = leviculum_std::generate_identity();
+        let link_id = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            &sender,
+        );
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        ready.peering.validate_link_for_tests(link_id, [0x24; 16]);
+        let mut message = vec![0x11u8; 900];
+        message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![message],
+        }
+        .encode();
+
+        enable_log_dispatch();
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            engine.on_inbound_resource_completed(&mut ready, &server, &link_id, &envelope);
+            engine.state = State::Ready(ready);
+            await_validation(&mut engine);
+            let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+                State::Ready(ready) => ready,
+                _ => panic!("engine must be ready"),
+            };
+            // The hook's own drain, which books the sweep.
+            let mut out = TickOutput::empty();
+            engine.drain_pending(&mut ready, &mut server, &mut out);
+            engine.state = State::Ready(ready);
+        });
+        let log = capture.unquoted();
+        let full: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=PN_STORE_FULL"))
+            .collect();
+        assert_eq!(full.len(), 1, "{log}");
+        assert!(
+            full[0].contains("offered=1") && full[0].contains("dropped=1"),
+            "{}",
+            full[0]
+        );
+
+        let mut offer = |engine: &mut Engine<MemoryPropagationStore>,
+                         server: &mut leviculum_std::driver::StdNodeCore| {
+            let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+                State::Ready(ready) => ready,
+                _ => panic!("engine must be ready"),
+            };
+            let response = ready
+                .peering
+                .answer_offer_request(server, &ready.node, &link_id, &[]);
+            engine.state = State::Ready(ready);
+            OfferResponse::decode(&response).ok()
+        };
+        assert_eq!(
+            offer(&mut engine, &mut server),
+            Some(OfferResponse::Error(PeerError::Throttled)),
+            "an /offer after the failure must be declined, not answered"
+        );
+        assert_eq!(
+            engine.next_maintenance_at, 0,
+            "the sweep is booked for the next tick"
+        );
+        let now = server.now_ms();
+        let _ = engine.on_tick(&mut server, now);
+        assert_ne!(
+            offer(&mut engine, &mut server),
+            Some(OfferResponse::Error(PeerError::Throttled)),
+            "after the sweep an /offer passes the gate again"
+        );
     }
 
     /// A path request answered before the node's first announce must carry

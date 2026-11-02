@@ -1243,11 +1243,16 @@ impl<S: PropagationStore> PropagationNode<S> {
             // this body, not its raw length: a block-backed store charges
             // whole blocks plus its framing, and its free_space frees
             // blocks, so a raw-byte target would never be reached.
+            //
+            // A body the empty store could not hold either evicts nothing:
+            // culling would empty the store and the append would still fail.
             let needed = self.store.space_required(body.len());
-            evicted = self.make_room(needed, now_secs);
-            result = self
-                .store
-                .append(&transient_id, now_secs, stamp_value, &body);
+            if needed <= self.store.capacity() {
+                evicted = self.make_room(needed, now_secs);
+                result = self
+                    .store
+                    .append(&transient_id, now_secs, stamp_value, &body);
+            }
         }
         if let Err(error) = result {
             return UploadOutcome::StoreFailed(error);

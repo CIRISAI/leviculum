@@ -326,6 +326,21 @@ fn a_full_store_displaces_by_age_times_size() {
     assert!(node.store().contains(&accepted_id(&outcome)).unwrap());
 }
 
+/// A message bigger than the whole store fails without culling: every
+/// eviction would be for nothing, and the store would be empty after
+/// (the review's suspected fault, order 1294).
+#[test]
+fn a_body_larger_than_the_store_evicts_nothing() {
+    let mut node = node(340);
+    let held = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    let outcome = node.handle_upload(&envelope_sized(7, 2, 400), DAY, stamp_of_value_zero);
+    assert!(
+        matches!(outcome, UploadOutcome::StoreFailed(StorageError::Full)),
+        "{outcome:?}"
+    );
+    assert!(node.store().contains(&held).unwrap(), "nothing culled");
+}
+
 #[test]
 fn the_resource_gate_follows_the_announced_sync_limit() {
     let node = node(64 * 1024);

@@ -44,6 +44,7 @@ KNOWN = {
     "PN_SYNC",
     "PN_MAILBOX",
     "PN_STORE",
+    "PN_STORE_FULL",
 }
 
 # A heartbeat gap worth naming. PN_STORE fires every STORE_MAINTENANCE_SECS
@@ -91,6 +92,8 @@ class Stats:
         self.store_used_max = 0
         self.evicted = defaultdict(int)
         self.evicted_bytes = 0
+        self.store_full_rounds = 0
+        self.store_full_dropped = 0
 
         # Phase 4: capped at MAX_TRACKED_PEERS, never by traffic.
         self.peer_offers = defaultdict(lambda: defaultdict(int))
@@ -189,6 +192,10 @@ def consume(stats, line):
     elif name == "PN_REJECT":
         stats.rejected_by_reason[values.get("reason", "?")] += 1
         stats.rejected_via[values.get("via", "?")] += 1
+
+    elif name == "PN_STORE_FULL":
+        stats.store_full_rounds += 1
+        stats.store_full_dropped += as_int(values, "dropped")
 
     elif name == "PN_EVICT":
         stats.evicted[values.get("reason", "?")] += 1
@@ -310,6 +317,11 @@ def report(stats):
     out(f"evicted          {evicted} ({human_bytes(stats.evicted_bytes)})\n")
     for reason, count in sorted(stats.evicted.items(), key=lambda kv: -kv[1]):
         out(f"  {reason:<14} {count}\n")
+    if stats.store_full_rounds:
+        out(
+            f"store full       {stats.store_full_rounds} sync round(s) lost "
+            f"{stats.store_full_dropped} message(s) the store could not hold\n"
+        )
     if stats.evicted.get("displaced"):
         out("  note: 'displaced' means the store was full and made room -- if this\n")
         out("        is not near zero the limit is too small for the offered load\n")
