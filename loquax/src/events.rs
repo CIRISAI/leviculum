@@ -175,6 +175,69 @@ pub fn store_failed(detail: &str) {
     tracing::warn!(event = "LNMSG_STORE_FAILED", detail = %scalar(detail));
 }
 
+// The home's own record (1305, study `docs/drafts/mailbox-for-friends-study-
+// 2026-11.md` section 6, "structured events on the home"): what a home
+// accepted, proved, synced and announced, so the N-home cells count per home
+// what today's free-text `HOME ...` lines only describe. Identities and
+// message ids are their first eight hex characters, as `jl` shortens them.
+
+/// A home kept a received message in its archive, new or held already:
+/// `msg` its id, `from` the sender, `via` how it came (`direct` over a link,
+/// `opportunistic` as one packet, `propagated` from a propagation node),
+/// `home` the identity the home answers for.
+pub fn home_accept(msg: &[u8; 32], from: &[u8; 16], via: &str, home: &[u8; 16]) {
+    tracing::info!(
+        event = "HOME_ACCEPT",
+        msg = %id8(msg),
+        from = %short_hex(from),
+        via = %via,
+        home = %short_hex(home),
+    );
+}
+
+/// A home released the delivery proof of an archived message (1239: only
+/// once it is archived). Not said for a propagated one, which has no proof.
+pub fn home_prove(msg: &[u8; 32], home: &[u8; 16]) {
+    tracing::info!(
+        event = "HOME_PROVE",
+        msg = %id8(msg),
+        home = %short_hex(home),
+    );
+}
+
+/// One exchange of archive entries with another home of the identity:
+/// `pulled` the entries taken in, `pushed` the ones handed over, `ratchets`
+/// whether both hold the same ring after it (`same`) or not (`differ`).
+/// Today's only such exchange is the move (1281); the N-home sync of study
+/// section 2.5 says the same line.
+pub fn home_sync(peer_home: &[u8; 16], pulled: usize, pushed: usize, ratchets: &str) {
+    tracing::info!(
+        event = "HOME_SYNC",
+        peer_home = %short_hex(peer_home),
+        pulled = pulled,
+        pushed = pushed,
+        ratchets = %ratchets,
+    );
+}
+
+/// A home announced the identity: `kind` the destination (`delivery`, the
+/// LXMF address; `position`, `lev.position`), `iface` where it went
+/// (`all` for a broadcast on every interface, the only form today).
+pub fn home_announce(home: &[u8; 16], iface: &str, kind: &str) {
+    tracing::info!(
+        event = "HOME_ANNOUNCE",
+        home = %short_hex(home),
+        iface = %iface,
+        kind = %kind,
+    );
+}
+
+fn id8(id: &[u8; 32]) -> String {
+    let mut hex = to_hex(&id[..4]);
+    hex.truncate(8);
+    hex
+}
+
 // The debug log (leviculum 1002). Not structured events: plain `info` lines
 // for `${LNMSG_HOME}/tui.log`, which the TUI writes at `info` for loquax's own
 // targets, so a send that waits can be read back as what each leg did. No

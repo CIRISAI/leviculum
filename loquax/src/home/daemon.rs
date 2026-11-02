@@ -616,17 +616,28 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 schedule.on(SyncEvent::Start, now_ms());
                             }
                         }
-                        OutboxEvent::Packed { message_id, packed } => {
+                        OutboxEvent::Packed { message_id, packed, arrived } => {
                             let Ok(new) = archive(&mut store, &message_id, &packed, archive_cap_bytes)
                             else {
                                 // Not archived, so not proven: the sender
                                 // tries again, or propagates.
                                 continue;
                             };
+                            crate::events::home_accept(
+                                &message_id,
+                                &source_of(&packed).unwrap_or([0; 16]),
+                                arrived.as_str(),
+                                &address,
+                            );
                             // Archived, now or before: the sender may be
                             // told so (1239).
                             // An engine that went away is said by the next pump.
-                            let _ = attached.outbox.submit(Command::Prove { message_id });
+                            let proving = attached.outbox.submit(Command::Prove { message_id }).is_ok();
+                            // A propagated message has no proof to release:
+                            // the propagation node took it, not its sender.
+                            if proving && arrived != crate::outbox::Arrived::Propagated {
+                                crate::events::home_prove(&message_id, &address);
+                            }
                             if let Some(seq) = new {
                                 wakes.appended(seq);
                                 if let Some(source) = source_of(&packed) {
@@ -667,6 +678,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::Refused { detail } => {
                             tracing::info!("HOME outbox refused: {detail}");
+                        }
+                        OutboxEvent::KeyWanted { message_id, destination } => {
+                            tracing::info!("{}", key_wanted_line(&message_id, &destination));
                         }
                         OutboxEvent::NodeAnnounced { destination }
                             if Some(destination) == selected_pn =>
@@ -841,7 +855,9 @@ fn pump_group<O: Outbox>(
             }
         };
         match event {
-            OutboxEvent::Packed { message_id, packed } => {
+            OutboxEvent::Packed {
+                message_id, packed, ..
+            } => {
                 let now = unix_now();
                 let new = match store.archive_append(
                     crate::home::KIND_GROUP,
@@ -1576,6 +1592,18 @@ impl Sender {
     }
 }
 
+/// The line a propagated leg that waits for its recipient's key leaves,
+/// once and again every [`crate::engine::KEY_WAIT_SAY_MS`] (1305): without
+/// the key it can be neither encrypted nor stamped, and the router asks the
+/// recipient's path until an announce brings it.
+fn key_wanted_line(id: &[u8; 32], destination: &[u8; 16]) -> String {
+    format!(
+        "HOME outbox propagated waiting message={} reason=no key for {}, path requested",
+        crate::address::to_hex(id),
+        crate::address::to_hex(&destination[..4])
+    )
+}
+
 /// The line a collection from the propagation node leaves (1293): how many
 /// messages it brought, from which node, and when the next one is due, so
 /// the cadence shows in the log when nothing comes.
@@ -1757,6 +1785,24 @@ mod tests {
                 Some("rejected")
             ),
             format!("HOME outbox propagated failed message={hex} reason=rejected")
+        );
+    }
+
+    /// 1305: a propagated leg that waits for its recipient's key says why,
+    /// in the words miauhaus lacked on 2026-11-02.
+    #[test]
+    fn a_leg_waiting_for_a_key_names_the_recipient() {
+        let id = [0xab; 32];
+        assert_eq!(
+            key_wanted_line(
+                &id,
+                &[0x63, 0x52, 0x98, 0xc8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+            ),
+            format!(
+                "HOME outbox propagated waiting message={} reason=no key for 635298c8, \
+                 path requested",
+                crate::address::to_hex(&id)
+            )
         );
     }
 
@@ -2038,6 +2084,7 @@ mod tests {
         let arrived = OutboxEvent::Packed {
             message_id: original.message_id,
             packed: packed.clone(),
+            arrived: crate::outbox::Arrived::Direct,
         };
         let mut engine = GroupEngine {
             hosted: hosted.clone(),
@@ -2154,6 +2201,7 @@ mod tests {
             engine: FakeOutbox::new(vec![OutboxEvent::Packed {
                 message_id: original.message_id,
                 packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
@@ -2297,6 +2345,7 @@ mod tests {
             engine: FakeOutbox::new(vec![OutboxEvent::Packed {
                 message_id: original.message_id,
                 packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,

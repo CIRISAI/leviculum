@@ -850,6 +850,27 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "HOME_NETWORK",
         required_keys: &["kind", "changed", "action", "entry"],
     },
+    // The home's own record (1305, H6 of the N-home study,
+    // `docs/drafts/mailbox-for-friends-study-2026-11.md` section 6): a
+    // message archived, its proof released, an archive exchange with another
+    // home of the identity, an announce of the identity. Emitters in
+    // `loquax/src/events.rs`.
+    EventSchema {
+        name: "HOME_ACCEPT",
+        required_keys: &["msg", "from", "via", "home"],
+    },
+    EventSchema {
+        name: "HOME_PROVE",
+        required_keys: &["msg", "home"],
+    },
+    EventSchema {
+        name: "HOME_SYNC",
+        required_keys: &["peer_home", "pulled", "pushed", "ratchets"],
+    },
+    EventSchema {
+        name: "HOME_ANNOUNCE",
+        required_keys: &["home", "iface", "kind"],
+    },
     EventSchema {
         name: "LNMSG_VIA",
         required_keys: &["method", "reason"],

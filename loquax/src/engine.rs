@@ -94,6 +94,11 @@ pub use shell::{
 /// the driver's 1 s idle cadence.
 const POLL_INTERVAL_MS: u64 = 200;
 
+/// How often a propagated message that waits for its recipient's key says
+/// so again ([`OutboxEvent::KeyWanted`]): five minutes, so a home that
+/// waits an hour leaves twelve lines, not one per router retry.
+pub const KEY_WAIT_SAY_MS: u64 = 5 * 60 * 1000;
+
 /// Why a client's engine sends nothing itself: a client holds no LXMF
 /// identity, and its messages go through the home node's `/send`
 /// (`docs/src/concepts/loquax-home-node.md`), which the shell asks, not the
@@ -323,6 +328,14 @@ pub struct Engine {
     /// since the start: each is an `LXMF_RX_UNDECRYPTABLE` line and carries
     /// this count. See [`Engine::undecryptable`].
     undecryptable: u64,
+    /// Whether this engine answers for a home, and says its announces as
+    /// `HOME_ANNOUNCE` (1305). A hosted group's engine hands out packed too,
+    /// but announces the group, not the home.
+    says_home: bool,
+    /// Propagated messages whose recipient's key this node does not hold,
+    /// with the recipient and when to say so next (1305). See
+    /// [`OutboxEvent::KeyWanted`].
+    key_wanted: BTreeMap<[u8; 32], ([u8; 16], u64)>,
 }
 
 impl Engine {
@@ -348,6 +361,8 @@ impl Engine {
             unheard: BTreeMap::new(),
             hands_out_packed: false,
             undecryptable: 0,
+            says_home: false,
+            key_wanted: BTreeMap::new(),
         }
     }
 
@@ -371,6 +386,13 @@ impl Engine {
     /// only on the [`Command::Prove`] that says it is archived.
     pub fn handing_out_packed(mut self) -> Self {
         self.hands_out_packed = true;
+        self
+    }
+
+    /// Say every announce of the identity as `HOME_ANNOUNCE` (1305): the
+    /// engine of a home node.
+    pub fn saying_home(mut self) -> Self {
+        self.says_home = true;
         self
     }
 
@@ -528,7 +550,7 @@ impl Engine {
                     (!verified).then(|| (message.message_id, message.source_hash, message.pack()));
                 let packed = self
                     .hands_out_packed
-                    .then(|| (message.message_id, message.pack()));
+                    .then(|| (message.message_id, message.pack(), message.method.into()));
                 self.emit(OutboxEvent::Received {
                     message_id: message.message_id,
                     source: message.source_hash,
@@ -545,8 +567,12 @@ impl Engine {
                         packed,
                     });
                 }
-                if let Some((message_id, packed)) = packed {
-                    self.emit(OutboxEvent::Packed { message_id, packed });
+                if let Some((message_id, packed, arrived)) = packed {
+                    self.emit(OutboxEvent::Packed {
+                        message_id,
+                        packed,
+                        arrived,
+                    });
                 }
             }
             RouterEvent::PeerAnnounced {
@@ -745,6 +771,18 @@ impl Engine {
                 },
                 out,
             );
+        }
+        // A propagated leg to a recipient whose key this node does not hold
+        // cannot be encrypted for the node; the router asks the path and
+        // waits, and without this it waits in silence (1305).
+        if message.method == DeliveryMethod::Propagated
+            && core
+                .storage()
+                .get_identity(destination.as_bytes())
+                .is_none()
+        {
+            self.key_wanted
+                .insert(message_id, (message.destination_hash, 0));
         }
         if message.method == DeliveryMethod::Propagated
             && ready.router.outbound_propagation_node().is_none()
@@ -1344,15 +1382,20 @@ impl Engine {
         }
         let app_data = position.encode();
         match core.announce_destination(&hash, Some(&app_data)) {
-            Ok(output) => self.absorb(
-                ready,
-                core,
-                RouterOutput {
-                    core: output,
-                    events: Vec::new(),
-                },
-                out,
-            ),
+            Ok(output) => {
+                if self.says_home {
+                    crate::events::home_announce(&ready.address, "all", "position");
+                }
+                self.absorb(
+                    ready,
+                    core,
+                    RouterOutput {
+                        core: output,
+                        events: Vec::new(),
+                    },
+                    out,
+                )
+            }
             Err(e) => tracing::warn!("loquax: could not announce our position: {e:?}"),
         }
     }
@@ -1369,15 +1412,21 @@ impl Engine {
         self.announced = true;
         let app_data = announce::delivery(Some(&self.display_name), None);
         match core.announce_destination(&DestinationHash::new(ready.address), Some(&app_data)) {
-            Ok(output) => self.absorb(
-                ready,
-                core,
-                RouterOutput {
-                    core: output,
-                    events: Vec::new(),
-                },
-                out,
-            ),
+            Ok(output) => {
+                // A broadcast on every interface (`NodeCore::announce_destination`).
+                if self.says_home {
+                    crate::events::home_announce(&ready.address, "all", "delivery");
+                }
+                self.absorb(
+                    ready,
+                    core,
+                    RouterOutput {
+                        core: output,
+                        events: Vec::new(),
+                    },
+                    out,
+                )
+            }
             // Not fatal, and deliberately not an `OutboxEvent::Refused`: the
             // message still goes out, it just arrives unverifiable at a peer
             // that has never heard of us. Failing the send over it would turn
@@ -1410,6 +1459,36 @@ impl Engine {
             ratchets = ratchets,
             count = self.undecryptable,
         );
+    }
+
+    /// Say each propagated message still waiting for its recipient's key,
+    /// at once and then every [`KEY_WAIT_SAY_MS`]; forget one whose key came
+    /// or that the router let go of.
+    fn poll_key_wanted<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &Ready,
+        core: &NodeCore<R, C, S>,
+        now_ms: u64,
+    ) {
+        let mut due = Vec::new();
+        self.key_wanted.retain(|message_id, (destination, next)| {
+            if core.storage().get_identity(destination).is_some()
+                || ready.router.outbound().get(message_id).is_none()
+            {
+                return false;
+            }
+            if now_ms >= *next {
+                *next = now_ms.saturating_add(KEY_WAIT_SAY_MS);
+                due.push((*message_id, *destination));
+            }
+            true
+        });
+        for (message_id, destination) in due {
+            self.emit(OutboxEvent::KeyWanted {
+                message_id,
+                destination,
+            });
+        }
     }
 
     /// Hold one received message until its sender's key is known.
@@ -1843,6 +1922,7 @@ impl Engine {
         self.poll_resolves(&mut ready, core, now_ms, &mut out);
         self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
         self.poll_unheard(&mut ready, core, now_ms, &mut out);
+        self.poll_key_wanted(&ready, core, now_ms);
         match ready.router.tick(core) {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emit(OutboxEvent::Broken {
@@ -3362,6 +3442,59 @@ mod tests {
                 .any(|e| matches!(e, OutboxEvent::Unsent { message_id, .. } if *message_id == id)),
             "{events:?}"
         );
+    }
+
+    /// 1305: a propagated leg to a recipient whose key this node does not
+    /// hold says so at once and then every `KEY_WAIT_SAY_MS`, not on every
+    /// tick; a direct leg to the same recipient says nothing of the kind.
+    #[test]
+    fn a_propagated_leg_without_the_recipients_key_says_it_waits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        engine.submit(Command::SelectPn {
+            preferred: Some([8; 16]),
+            mailbox: None,
+        });
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        let wanted = |events: &[OutboxEvent], id: [u8; 32]| {
+            events
+                .iter()
+                .filter(|e| {
+                    matches!(e, OutboxEvent::KeyWanted { message_id, destination }
+                        if *message_id == id && *destination == [0x42; 16])
+                })
+                .count()
+        };
+
+        let (direct, direct_id) = packed_message([0x42; 16]);
+        engine.submit(Command::SendPacked {
+            packed: direct,
+            via: Via::Link,
+        });
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert_eq!(wanted(&events, direct_id), 0, "{events:?}");
+
+        let (packed, id) = packed_message([0x42; 16]);
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Propagated,
+        });
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(
+            events.contains(&OutboxEvent::Queued { message_id: id }),
+            "the propagated leg was not queued: {events:?}"
+        );
+        assert_eq!(wanted(&events, id), 1, "said at once: {events:?}");
+        let _ = engine.on_tick(&mut core, now_ms + KEY_WAIT_SAY_MS - 1);
+        assert_eq!(wanted(&drain(&mut engine), id), 0, "not on every tick");
+        let _ = engine.on_tick(&mut core, now_ms + KEY_WAIT_SAY_MS);
+        assert_eq!(wanted(&drain(&mut engine), id), 1, "and again later");
     }
 
     /// A client's engine names a bubble after the id the home node gave it,

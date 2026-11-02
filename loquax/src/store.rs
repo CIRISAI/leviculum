@@ -648,7 +648,7 @@ impl Store {
             }
         }
         if version < SCHEMA_VERSION {
-            return self.migrate();
+            return self.migrate(version);
         }
         Ok(())
     }
@@ -656,13 +656,21 @@ impl Store {
     /// An older schema to this one: each later schema's tables, all or
     /// none. The version is read again under the write lock, so two loquax
     /// opening one old file at once migrate it once.
-    fn migrate(&self) -> Result<(), StoreError> {
-        let migrate = || -> rusqlite::Result<()> {
+    ///
+    /// Each migration says one line, `HOME store migrated from= to= steps=
+    /// took_ms=`, and one that fails says `HOME store migration refused`
+    /// before the error goes up (1305: miauhaus went from 7 to 12 with no
+    /// trace but a read of `user_version`).
+    fn migrate(&self, seen: i32) -> Result<(), StoreError> {
+        let started = std::time::Instant::now();
+        let mut from = None;
+        let mut migrate = || -> rusqlite::Result<()> {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
             let version: i32 = self
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))?;
             if version < SCHEMA_VERSION {
+                from = Some(version);
                 let mut batch = String::new();
                 if version < 2 {
                     batch.push_str(SCHEMA_V2);
@@ -703,7 +711,35 @@ impl Store {
             }
             self.conn.execute_batch("COMMIT")
         };
-        migrate().map_err(|e| failed(&self.path, e))
+        let outcome = migrate();
+        // Read under the write lock: another loquax may have migrated first,
+        // which says nothing here. A failure before the read is said with
+        // the version the open read.
+        let from = match (from, &outcome) {
+            (Some(from), _) => from,
+            (None, Ok(())) => return Ok(()),
+            (None, Err(_)) => seen,
+        };
+        let took_ms = started.elapsed().as_millis();
+        match outcome {
+            Ok(()) => {
+                tracing::info!(
+                    "HOME store migrated from={from} to={SCHEMA_VERSION} steps={} took_ms={took_ms} \
+                     path={}",
+                    SCHEMA_VERSION - from,
+                    self.path.display()
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "HOME store migration refused from={from} to={SCHEMA_VERSION} took_ms={took_ms} \
+                     path={}: {error}",
+                    self.path.display()
+                );
+                Err(failed(&self.path, error))
+            }
+        }
     }
 
     fn configure(&self) -> Result<(), StoreError> {
@@ -1896,6 +1932,29 @@ impl Store {
         }
         tx.commit().map_err(|e| failed(&path, e))?;
         Ok(added)
+    }
+
+    /// Every archive entry's id, kind and time, oldest first, without its
+    /// bytes: what `loquax mailbox archive` prints, and what the N-home cells
+    /// compare across homes (1305).
+    pub fn archive_index(&self) -> Result<Vec<([u8; 32], u8, i64)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, kind, at FROM archive WHERE identity = ?1 ORDER BY seq")
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                let id: Vec<u8> = row.get(0)?;
+                let kind: i64 = row.get(1)?;
+                Ok((
+                    <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
+                    u8::try_from(kind).unwrap_or(u8::MAX),
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| self.failed(e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| self.failed(e))
     }
 
     /// The archive after `cursor` as a move carries it (1281): each entry
@@ -3812,6 +3871,47 @@ mod tests {
         // Opened again it is a current store, not migrated twice.
         let store = Store::open_in(home.path(), US).expect("reopen");
         assert_eq!(store.positions().expect("positions").len(), 1);
+    }
+
+    /// 1305: a migration says where it came from, where it went, how many
+    /// steps and how long; a current store says nothing; a migration that
+    /// fails says it was refused.
+    #[test]
+    fn a_migration_says_one_line_and_a_failed_one_says_it_was_refused() {
+        use leviculum_std::test_support::log_capture::{capture_logs, captured};
+        let home = tempfile::tempdir().expect("home");
+        v1_store(home.path());
+        let (buf, guard) = capture_logs();
+        drop(Store::open_in(home.path(), US).expect("schema 1 opens"));
+        drop(Store::open_in(home.path(), US).expect("reopen"));
+        drop(guard);
+        let log = captured(&buf);
+        let line = format!(
+            "HOME store migrated from=1 to={SCHEMA_VERSION} steps={}",
+            SCHEMA_VERSION - 1
+        );
+        assert_eq!(log.matches(&line).count(), 1, "one line, once: {log}");
+        assert!(log.contains("took_ms="), "{log}");
+
+        // A schema 1 store that already holds schema 2's table: the step
+        // to 2 fails, and nothing moves.
+        let broken = tempfile::tempdir().expect("home");
+        v1_store(broken.path());
+        Connection::open(broken.path().join(STORE_FILE))
+            .expect("open")
+            .execute_batch("CREATE TABLE positions(x INTEGER);")
+            .expect("a table in the way");
+        let (buf, guard) = capture_logs();
+        assert!(Store::open_in(broken.path(), US).is_err());
+        drop(guard);
+        let log = captured(&buf);
+        assert!(
+            log.contains(&format!(
+                "HOME store migration refused from=1 to={SCHEMA_VERSION}"
+            )),
+            "{log}"
+        );
+        assert!(!log.contains("HOME store migrated"), "{log}");
     }
 
     /// A store this loquax wrote, opened by the loquax before it: the check

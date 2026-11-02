@@ -903,6 +903,9 @@ fn move_page(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) 
                 crate::address::to_hex(&device),
                 entries.len()
             );
+            // The page carries this home's ring, which the device keeps as
+            // its own: both hold the same ring after it, or neither has one.
+            crate::events::home_sync(&device, 0, entries.len(), "same");
             wire::move_answer(&wire::MovePage {
                 private_key: private_key.to_vec(),
                 ratchets: handover.ratchets.clone(),
