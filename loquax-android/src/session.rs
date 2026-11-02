@@ -1377,6 +1377,7 @@ impl Session {
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
             schema::Query::Bar { peer } => schema::encode(&inner.bar(parse_peer(&peer)?)),
             schema::Query::Shares => schema::encode(&inner.shares()),
+            schema::Query::Group => schema::encode(&inner.group_screen()),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
                 let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
@@ -2174,6 +2175,7 @@ impl Inner {
             .map(|draft| draft.resolve(self.lang))
             .unwrap_or_default();
         let sharing = row.sharing;
+        let group = row.group.clone();
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
@@ -2203,6 +2205,98 @@ impl Inner {
             pin_label,
             draft,
             sharing,
+            group_members: group
+                .as_ref()
+                .map_or(0, |g| u32::try_from(g.members).unwrap_or(u32::MAX)),
+            group_words: group
+                .as_ref()
+                .map(|g| g.words.resolve(self.lang))
+                .unwrap_or_default(),
+            group_invited: group
+                .is_some_and(|g| g.standing == loquax::ui::groups::Standing::Invited),
+        }
+    }
+
+    /// "New group" or the open member sheet (1307), as the scene has them,
+    /// in the phone's language.
+    fn group_screen(&self) -> schema::GroupScreen {
+        let lang = self.lang;
+        let scene = self.model.scene(scene::LayoutClass::Compact);
+        if let Some(new) = scene.new_group {
+            let naming = new.step == loquax::ui::groups::Step::Name;
+            let go = if naming { &new.create } else { &new.next };
+            return schema::GroupScreen {
+                v: VERSION,
+                screen: "new".into(),
+                title: new.title.resolve(lang),
+                step: if naming { "name" } else { "pick" }.into(),
+                line: new.picked.resolve(lang),
+                rows: new
+                    .rows
+                    .iter()
+                    .map(|r| schema::GroupRow {
+                        peer: loquax::address::to_hex(&r.peer),
+                        name: r.name.clone(),
+                        picked: r.picked,
+                        ..schema::GroupRow::default()
+                    })
+                    .collect(),
+                hint: new.hint.resolve(lang),
+                name: new.name.clone(),
+                trust: new.trust.resolve(lang),
+                go: go.label_key.text(lang).to_string(),
+                go_enabled: go.enabled,
+                ..schema::GroupScreen::default()
+            };
+        }
+        let Some(sheet) = scene.members else {
+            return schema::GroupScreen {
+                v: VERSION,
+                ..schema::GroupScreen::default()
+            };
+        };
+        schema::GroupScreen {
+            v: VERSION,
+            screen: "members".into(),
+            title: sheet.title.resolve(lang),
+            line: sheet.count.resolve(lang),
+            rows: sheet
+                .rows
+                .iter()
+                .map(|r| schema::GroupRow {
+                    peer: loquax::address::to_hex(&r.address),
+                    name: r.name.resolve(lang),
+                    state: r.state.resolve(lang),
+                    you: r.you,
+                    remove: r
+                        .remove
+                        .as_ref()
+                        .map(|a| a.label_key.text(lang).to_string())
+                        .unwrap_or_default(),
+                    ..schema::GroupRow::default()
+                })
+                .collect(),
+            leave: sheet
+                .leave
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
+            ask: sheet
+                .ask
+                .as_ref()
+                .map(|a| a.words.resolve(lang))
+                .unwrap_or_default(),
+            yes: sheet
+                .ask
+                .as_ref()
+                .map(|_| StrId::GroupYes.text(lang).to_string())
+                .unwrap_or_default(),
+            no: sheet
+                .ask
+                .as_ref()
+                .map(|_| StrId::GroupNo.text(lang).to_string())
+                .unwrap_or_default(),
+            ..schema::GroupScreen::default()
         }
     }
 
@@ -2331,6 +2425,12 @@ impl Inner {
         // The field opens with the scene's compose (1219).
         let compose = index.map(|c| scene::compose(&self.model, c));
         let bar = self.bar(peer);
+        // A group's chat (1307): the count, and the card while invited.
+        let badge = loquax::ui::group_scene::badge(&self.model, &peer);
+        let invite = badge
+            .as_ref()
+            .filter(|b| b.standing == loquax::ui::groups::Standing::Invited)
+            .and_then(|_| loquax::ui::group_scene::invite(&self.model, &peer, false));
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -2383,6 +2483,14 @@ impl Inner {
                 .unwrap_or_default(),
             share_stop: Text::key(StrId::ShareStop).resolve(self.lang),
             recording: bar.recording,
+            group_members: badge.map_or(0, |b| u32::try_from(b.members).unwrap_or(u32::MAX)),
+            invite_title: invite
+                .as_ref()
+                .map(|i| i.title.resolve(self.lang))
+                .unwrap_or_default(),
+            invite_trust: invite
+                .map(|i| i.trust.resolve(self.lang))
+                .unwrap_or_default(),
         }
     }
 
@@ -2605,7 +2713,22 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                     words: file.words.resolve(lang),
                 })
                 .collect();
+            // A group's writer above the first bubble of its group, and an
+            // invitation's card (1307).
+            let writer = match (group.named, node.place.joins_before) {
+                (true, false) => group.sender.resolve(lang),
+                _ => String::new(),
+            };
+            let invite = node.invite.clone();
             let mut row = row(node.bubble);
+            row.writer = writer;
+            if let Some(invite) = invite {
+                row.invite_group = loquax::address::to_hex(&invite.group);
+                row.invite_title = invite.title.resolve(lang);
+                row.invite_trust = invite.trust.resolve(lang);
+                row.invite_state = invite.state.map(|s| s.resolve(lang)).unwrap_or_default();
+                row.invite_join = invite.join.is_some();
+            }
             // The scene's words (1268): a body of blanks is none, and the
             // app draws no text row under a photo without words.
             row.body = node.text.unwrap_or_default();
@@ -2713,6 +2836,12 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         voice_playable: false,
         voice_playing: false,
         voice_words: String::new(),
+        writer: String::new(),
+        invite_group: String::new(),
+        invite_title: String::new(),
+        invite_trust: String::new(),
+        invite_state: String::new(),
+        invite_join: false,
     }
 }
 
@@ -2976,6 +3105,36 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
         },
         R::AddContact { lxma, name } => Intent::AddContact { lxma, name },
+        R::Group {
+            verb,
+            peer,
+            member,
+            text,
+            confirmed,
+        } => {
+            use loquax::ui::groups::Verb;
+            let group = || parse_peer(&peer).map(Target::Peer);
+            Intent::Group(match verb.as_str() {
+                "new" => Verb::New,
+                "pick" => Verb::Pick(parse_peer(&peer)?),
+                "next" => Verb::Next,
+                "name" => Verb::Name(text),
+                "create" => Verb::Create,
+                "join" => Verb::Join { group: group()? },
+                "members" => Verb::Members { group: group()? },
+                "leave" => Verb::Leave {
+                    group: group()?,
+                    confirmed,
+                },
+                "remove" => Verb::Remove {
+                    group: group()?,
+                    member: Some(parse_peer(&member)?),
+                    confirmed,
+                },
+                "close" => Verb::Close,
+                other => return Err(format!("no group verb {other:?}")),
+            })
+        }
         R::Draft { peer, body, reply } => Intent::Draft {
             to: Target::Peer(parse_peer(&peer)?),
             text: body,

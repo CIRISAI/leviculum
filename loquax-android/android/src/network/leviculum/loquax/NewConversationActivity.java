@@ -60,6 +60,12 @@ public class NewConversationActivity extends Activity {
         } else {
             scan.setVisibility(View.GONE);
         }
+        findViewById(R.id.new_group).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                GroupDialogs.newGroup(NewConversationActivity.this);
+            }
+        });
         findViewById(R.id.new_paste).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {

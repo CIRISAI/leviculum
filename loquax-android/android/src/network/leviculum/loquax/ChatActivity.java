@@ -134,6 +134,15 @@ public class ChatActivity extends Activity implements Events.Listener {
      * field mirrors the scene's compose and says every change.
      */
     private boolean draftOwed = true;
+    /** The invited group's card was shown once this visit (1307). */
+    private boolean invitationShown;
+    /** Read the chat again: after a group's verb (1307). */
+    private final Runnable again = new Runnable() {
+        @Override
+        public void run() {
+            refresh();
+        }
+    };
     /** The field is being set from the draft, which is no change to say. */
     private boolean mirroring;
     private View replyBar;
@@ -1010,6 +1019,10 @@ public class ChatActivity extends Activity implements Events.Listener {
             popup.getMenu().add(0, R.string.add_to_contacts, 2, R.string.add_to_contacts);
         }
         popup.getMenu().add(0, R.string.rename, 5, R.string.rename);
+        // A group's members (1307), its Leave and the admin's Remove.
+        if (Core.num(header, "group_members") > 0) {
+            popup.getMenu().add(0, R.string.group_members, 0, R.string.group_members);
+        }
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
@@ -1034,6 +1047,8 @@ public class ChatActivity extends Activity implements Events.Listener {
                     choose();
                 } else if (id == R.string.rename) {
                     rename();
+                } else if (id == R.string.group_members) {
+                    GroupDialogs.members(ChatActivity.this, peer, again);
                 }
                 return true;
             }
@@ -1853,6 +1868,14 @@ public class ChatActivity extends Activity implements Events.Listener {
      */
     private CharSequence text(Map<String, Object> row, boolean ours, long now) {
         String body = Core.str(row, "body");
+        // An invitation is its card (1307): who invited to what, the trust
+        // sentence, where the reader stands; Join is a button under it.
+        String invite = Core.str(row, "invite_title");
+        if (!invite.isEmpty()) {
+            String state = Core.str(row, "invite_state");
+            return invite + "\n" + Core.str(row, "invite_trust")
+                    + (state.isEmpty() ? "" : "\n" + state);
+        }
         if (row.get("place") == null) {
             return body;
         }
@@ -2211,6 +2234,12 @@ public class ChatActivity extends Activity implements Events.Listener {
         shareStop.setContentDescription(Core.str(answer, "share_stop"));
         homeClient = Core.bool(answer, "home_client");
         bar(answer);
+        // A group the reader is only invited to (1307): its card, once a visit.
+        String invited = Core.str(answer, "invite_title");
+        if (!invited.isEmpty() && !invitationShown) {
+            invitationShown = true;
+            GroupDialogs.invitation(this, peer, invited, Core.str(answer, "invite_trust"), again);
+        }
         rows.clear();
         rows.addAll(Core.list(answer, "messages"));
         if (selection != null) {
@@ -2353,6 +2382,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             body.setVisibility(words.length() == 0 ? View.GONE : View.VISIBLE);
             body.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
             quote(view, row, ours);
+            group(root, bubble, row);
 
             // Only a group's last shows its time, and one of ours whose
             // state differs from the next one's keeps its mark.
@@ -2400,6 +2430,45 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
             chips.setVisibility(chips.getChildCount() > 0 ? View.VISIBLE : View.GONE);
             return view;
+        }
+
+        /**
+         * A group's writer above the first bubble of its run, and an
+         * invitation's Join under its card (1307); made once per recycled
+         * row, shown when the row has them.
+         */
+        private void group(LinearLayout root, View bubble, Map<String, Object> row) {
+            TextView writer = (TextView) root.findViewWithTag("writer");
+            if (writer == null) {
+                writer = new TextView(ChatActivity.this);
+                writer.setTag("writer");
+                writer.setTextSize(13);
+                writer.setTextColor(getColor(R.color.accent));
+                writer.setPadding(dp(14), dp(4), 0, dp(2));
+                root.addView(writer, root.indexOfChild(bubble));
+            }
+            String name = Core.str(row, "writer");
+            writer.setText(name);
+            writer.setVisibility(name.isEmpty() ? View.GONE : View.VISIBLE);
+            Button join = (Button) root.findViewWithTag("join");
+            if (join == null) {
+                join = new Button(ChatActivity.this);
+                join.setTag("join");
+                join.setText(R.string.group_join);
+                root.addView(join, root.indexOfChild(bubble) + 1);
+            }
+            final String group = Core.str(row, "invite_group");
+            join.setVisibility(Core.bool(row, "invite_join") ? View.VISIBLE : View.GONE);
+            join.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String error = Core.group("join", group, "", "", false);
+                    if (error != null) {
+                        line(error);
+                    }
+                    refresh();
+                }
+            });
         }
 
         /**

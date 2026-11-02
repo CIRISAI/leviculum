@@ -5880,3 +5880,232 @@ async fn a_restore_of_an_address_live_elsewhere_warns_first() {
     .expect("restored with nobody live");
     transport.stop().await.expect("stop the transport node");
 }
+
+/// 1307 pass two: the phone gets the group screens through the scene's
+/// export and asks its verbs in Java's bytes. A row of a group carries its
+/// count and words, an invited one `Invitation`; a copy's first bubble of
+/// a run carries its writer and the text without the home's prefix; the
+/// invitation's bubble is a card with Join; each verb Java writes decodes
+/// to the core's. Control: a verb the core has no word for is refused.
+#[test]
+fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
+    use leviculum_lxmf::lev::{GroupCopy, Invite, Lev, Member, Members};
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::groups::Verb;
+    use loquax::ui::intent::{Intent, Target};
+    use loquax::ui::{update, UiEvent};
+    use loquax_android::session::{self, Decoded};
+
+    const ME: [u8; 16] = [0x30; 16];
+    const LEW: [u8; 16] = [0x41; 16];
+    const ANNA: [u8; 16] = [0x42; 16];
+    const GROUP: [u8; 16] = [0x51; 16];
+    let lev = |lev: Lev| {
+        let mut fields = Vec::new();
+        lev.put_into(&mut fields);
+        fields
+    };
+    let mut model = loquax::ui::UiModel::<loquax_android::session::Line>::new(&[]);
+    model.address = Some(ME);
+    model.names.remember(LEW, "Lew");
+    // One minute for all of it: the bubbles of one writer join.
+    update(
+        &mut model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs: 1_800_000_000,
+            offset_secs: 0,
+        }),
+    );
+    let arrive = |model: &mut loquax::ui::UiModel<session::Line>, from, id: u8, body: &str, l| {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: [id; 32],
+                source: from,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: lev(l),
+                verified: true,
+            }),
+        );
+    };
+    arrive(
+        &mut model,
+        LEW,
+        1,
+        "Lew invited you to Familie",
+        Lev {
+            invite: Some(Invite {
+                group: GROUP,
+                public_key: [7; 64],
+                name: "Familie".into(),
+                admin_name: "Lew".into(),
+                epoch: 1,
+            }),
+            ..Lev::default()
+        },
+    );
+    let lew = model
+        .conversations
+        .iter()
+        .position(|c| c.peer == LEW)
+        .expect("Lew");
+    let card = &session::rows(&model, lew, Lang::En)[0];
+    assert_eq!(card.invite_group, hex(&GROUP));
+    assert_eq!(card.invite_title, "Lew invited you to Familie");
+    assert!(card.invite_join);
+    assert!(card.invite_trust.contains("Lew could read"));
+
+    update(
+        &mut model,
+        UiEvent::Group(Verb::Join {
+            group: Target::Peer(GROUP),
+        }),
+    );
+    arrive(
+        &mut model,
+        GROUP,
+        2,
+        "",
+        Lev {
+            members: Some(Members {
+                epoch: 1,
+                members: vec![
+                    Member {
+                        address: LEW,
+                        name: "Lew".into(),
+                        flags: 2 | 4,
+                    },
+                    Member {
+                        address: ME,
+                        name: "Me".into(),
+                        flags: 4,
+                    },
+                    Member {
+                        address: ANNA,
+                        name: "Anna".into(),
+                        flags: 4,
+                    },
+                ],
+            }),
+            ..Lev::default()
+        },
+    );
+    for (id, writer, body) in [
+        (3, LEW, "Lew: Brot"),
+        (4, LEW, "Lew: ist da"),
+        (5, ANNA, "Anna: Danke"),
+    ] {
+        arrive(
+            &mut model,
+            GROUP,
+            id,
+            body,
+            Lev {
+                group_copy: Some(GroupCopy {
+                    sender: writer,
+                    sent_ms: 1,
+                    epoch: 1,
+                }),
+                ..Lev::default()
+            },
+        );
+    }
+    let g = model
+        .conversations
+        .iter()
+        .position(|c| c.peer == GROUP)
+        .expect("group");
+    let rows: Vec<_> = session::rows(&model, g, Lang::En)
+        .into_iter()
+        .map(|r| (r.writer, r.body))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("Lew".to_string(), "Brot".to_string()),
+            (String::new(), "ist da".to_string()),
+            ("Anna".to_string(), "Danke".to_string()),
+        ],
+        "a writer once per run, the text without the prefix"
+    );
+    let row = loquax::ui::scene::row(&model, &GROUP);
+    assert_eq!(row.avatar.initials, "3");
+
+    let decoded = |bytes: Vec<u8>| -> Result<Intent, String> {
+        let request: schema::Request = schema::decode(&bytes)?;
+        match session::decode(request)? {
+            Decoded::Intent(intent) => Ok(intent),
+            Decoded::Platform(_) => Err("platform".into()),
+        }
+    };
+    let group = hex(&GROUP);
+    let anna = hex(&ANNA);
+    let cases: Vec<(Vec<u8>, Verb)> = vec![
+        (
+            java_map(&[("t", Java::Str("group")), ("verb", Java::Str("new"))]),
+            Verb::New,
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("pick")),
+                ("peer", Java::Str(&anna)),
+            ]),
+            Verb::Pick(ANNA),
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("name")),
+                ("text", Java::Str("Familie")),
+            ]),
+            Verb::Name("Familie".into()),
+        ),
+        (
+            java_map(&[("t", Java::Str("group")), ("verb", Java::Str("create"))]),
+            Verb::Create,
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("join")),
+                ("peer", Java::Str(&group)),
+            ]),
+            Verb::Join {
+                group: Target::Peer(GROUP),
+            },
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("remove")),
+                ("peer", Java::Str(&group)),
+                ("member", Java::Str(&anna)),
+                ("confirmed", Java::Bool(true)),
+            ]),
+            Verb::Remove {
+                group: Target::Peer(GROUP),
+                member: Some(ANNA),
+                confirmed: true,
+            },
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("leave")),
+                ("peer", Java::Str(&group)),
+                ("confirmed", Java::Bool(false)),
+            ]),
+            Verb::Leave {
+                group: Target::Peer(GROUP),
+                confirmed: false,
+            },
+        ),
+    ];
+    for (bytes, verb) in cases {
+        assert_eq!(decoded(bytes).expect("decodes"), Intent::Group(verb));
+    }
+    let unknown = java_map(&[("t", Java::Str("group")), ("verb", Java::Str("invite"))]);
+    assert!(decoded(unknown).is_err());
+}

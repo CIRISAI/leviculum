@@ -472,6 +472,21 @@ pub enum Request {
     /// scanned or pasted. `name`, when given, becomes the
     /// reader's name for it; the home node is handed the key, so a message
     /// can go out before any announce was heard; the conversation opens.
+    /// A verb on groups (1307, `loquax::ui::groups::Verb`): `new`, `pick`
+    /// (a friend's `peer`), `next`, `name` (its `text`), `create`, `join`,
+    /// `members`, `leave`, `remove` (the `member` of group `peer`, after
+    /// asking unless `confirmed`), `close`.
+    Group {
+        verb: String,
+        #[serde(default)]
+        peer: String,
+        #[serde(default)]
+        member: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
     #[serde(rename = "addcontact")]
     AddContact {
         lxma: String,
@@ -773,6 +788,9 @@ pub enum Query {
     /// The running position shares (1273), Settings, Privacy's list and
     /// the share notification's; answered as [`Shares`].
     Shares,
+    /// "New group" or the open member sheet (1307); answered as
+    /// [`GroupScreen`].
+    Group,
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -1561,6 +1579,16 @@ pub struct ConversationRow {
     /// small ⌖ in the accent colour on our side.
     #[serde(default)]
     pub sharing: bool,
+    /// A group's row (1307): how many are in it, the avatar's number (0
+    /// before a membership came); its line in the phone's language,
+    /// `3 members` or `Invitation`; whether the reader is only invited.
+    /// 0, empty and false for any other row.
+    #[serde(default)]
+    pub group_members: u32,
+    #[serde(default)]
+    pub group_words: String,
+    #[serde(default)]
+    pub group_invited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1721,6 +1749,26 @@ pub struct MessageRow {
     pub voice_playing: bool,
     #[serde(default)]
     pub voice_words: String,
+    /// In a group's chat (1307): the writer's name, which the first bubble
+    /// of a group that is not the reader's carries above it; empty
+    /// otherwise.
+    #[serde(default)]
+    pub writer: String,
+    /// The invitation the bubble carries (1307), a card instead of its
+    /// text: the group's address, who invited to what, the trust sentence
+    /// and where the reader stands, in the phone's language; `invite_join`
+    /// while Join may be tapped ([`Request::Group`], verb `join`). Empty
+    /// and false for any other bubble.
+    #[serde(default)]
+    pub invite_group: String,
+    #[serde(default)]
+    pub invite_title: String,
+    #[serde(default)]
+    pub invite_trust: String,
+    #[serde(default)]
+    pub invite_state: String,
+    #[serde(default)]
+    pub invite_join: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1837,6 +1885,76 @@ pub struct Messages {
     /// draws; empty for none.
     #[serde(default)]
     pub recording: String,
+    /// A group's chat (1307): how many are in it, 0 for any other chat;
+    /// the bar's Members opens [`Query::Group`].
+    #[serde(default)]
+    pub group_members: u32,
+    /// A group the reader is only invited to: the card above the compose
+    /// bar, as [`MessageRow`]'s `invite_*`; empty for none.
+    #[serde(default)]
+    pub invite_title: String,
+    #[serde(default)]
+    pub invite_trust: String,
+}
+
+/// What [`Query::Group`] answers (1307): "New group" while it is open,
+/// else a group's member sheet while it is open, in the phone's language;
+/// both empty when neither is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupScreen {
+    pub v: u32,
+    /// `new`, `members` or empty.
+    pub screen: String,
+    pub title: String,
+    /// "New group": `pick` or `name`; the line under the title (`2
+    /// selected`, `3 members`).
+    #[serde(default)]
+    pub step: String,
+    #[serde(default)]
+    pub line: String,
+    /// The rows: a friend to tick, or a member with its state.
+    #[serde(default)]
+    pub rows: Vec<GroupRow>,
+    /// "New group": the name field's hint and text, the trust sentence,
+    /// whether Next or Create may be tapped, and their words.
+    #[serde(default)]
+    pub hint: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub trust: String,
+    #[serde(default)]
+    pub go: String,
+    #[serde(default)]
+    pub go_enabled: bool,
+    /// The member sheet: Leave's words while the reader is in it, and the
+    /// question asked before Leave or Remove with its yes, empty for none.
+    #[serde(default)]
+    pub leave: String,
+    #[serde(default)]
+    pub ask: String,
+    #[serde(default)]
+    pub yes: String,
+    #[serde(default)]
+    pub no: String,
+}
+
+/// One row of [`GroupScreen`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRow {
+    pub peer: String,
+    pub name: String,
+    /// "New group": whether it is ticked. The sheet: its state's words,
+    /// whether it is the reader, and the admin's Remove words when it may
+    /// be removed.
+    #[serde(default)]
+    pub picked: bool,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub you: bool,
+    #[serde(default)]
+    pub remove: String,
 }
 
 /// What [`Query::Shares`] answers (1273): the running shares, by peer,

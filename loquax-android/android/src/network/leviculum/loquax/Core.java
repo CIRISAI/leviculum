@@ -201,6 +201,21 @@ final class Core {
         return command(map("t", "name", "name", name));
     }
 
+    /**
+     * A verb on groups (1307): `new`, `pick`, `next`, `name`, `create`,
+     * `join`, `members`, `leave`, `remove`, `close`, with the group (or the
+     * friend picked) in `peer`; the error in words, or null.
+     */
+    static String group(String verb, String peer, String member, String text, boolean confirmed) {
+        return command(map("t", "group", "verb", verb, "peer", peer, "member", member,
+                "text", text, "confirmed", confirmed));
+    }
+
+    /** "New group" or the open member sheet (1307), as the library words it. */
+    static Map<String, Object> groupScreen() {
+        return answer(Native.query(MsgPack.pack(map("t", "group"))));
+    }
+
     /** One request; the error in words, or null. */
     static String command(Map<String, Object> request) {
         Map<String, Object> done = answer(Native.command(MsgPack.pack(request)));
