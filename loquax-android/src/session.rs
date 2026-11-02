@@ -2420,12 +2420,6 @@ impl Inner {
             index.and_then(|c| chat::latest_appearance(&self.model.conversations[c].messages));
         let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c, self.lang));
         let link = self.book.links.get(&peer);
-        let heard = index.is_some_and(|c| {
-            self.model.conversations[c]
-                .messages
-                .iter()
-                .any(|m| !m.outbound)
-        });
         let names = &self.model.names;
         let liveness = self.model.liveness(&peer);
         // The field opens with the scene's compose (1219).
@@ -2450,8 +2444,10 @@ impl Inner {
             linked: link.is_some(),
             lookup: link.map(|link| link.lookup.clone()),
             contact_id: link.map(|link| link.contact_id),
+            // A group is not a person (1307 pass six): only a person who
+            // wrote is offered for the phone's contacts.
             ask_link: link.is_none()
-                && heard
+                && self.model.heard_from_a_person(&peer)
                 && !self.book.not_now.contains(&peer)
                 && !self.just_added.contains(&peer),
             announced: names.announced(&peer).map(str::to_string),

@@ -177,6 +177,10 @@ leviculum_ui::catalogue! {
     GroupAdmin = "group_admin", "admin", "Admin";
     GroupStateJoined = "group_state_joined", "joined", "beigetreten";
     GroupStateInvited = "group_state_invited", "invited", "eingeladen";
+    // The member sheet says where an invitation of the reader's stands (1307 pass six).
+    GroupStateDelivering = "group_state_delivering", "invited, delivering", "eingeladen, wird zugestellt";
+    GroupStateWaiting = "group_state_waiting", "invited, waiting for them to come online", "eingeladen, wartet, bis das Mitglied online ist";
+    GroupStateUndelivered = "group_state_undelivered", "invited, not delivered", "eingeladen, nicht zugestellt";
     GroupStateLeft = "group_state_left", "left", "ausgetreten";
     GroupHomeTooOld = "group_home_too_old", "Your home cannot host groups yet. Update it.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.";
     GroupYouLeft = "group_you_left", "You left %1$s", "Du hast %1$s verlassen";

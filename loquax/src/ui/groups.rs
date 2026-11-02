@@ -365,6 +365,52 @@ impl<B> UiModel<B> {
             .collect()
     }
 
+    /// Whether a person wrote in `peer`'s conversation (1307 pass six):
+    /// `peer` is no group, and a message came from it that is no group's
+    /// state and no invitation. The phone's "save in your contacts?"
+    /// banner asks only then: a group is not a person, and an invitation
+    /// card is the group's, not its sender's.
+    pub fn heard_from_a_person(&self, peer: &[u8; 16]) -> bool {
+        if self.groups.contains_key(peer) {
+            return false;
+        }
+        self.conversations
+            .iter()
+            .find(|c| c.peer == *peer)
+            .is_some_and(|c| {
+                c.messages.iter().any(|m| {
+                    !m.outbound
+                        && !m.is_group_state()
+                        && Lev::from_fields(&m.fields).is_none_or(|lev| lev.invite.is_none())
+                })
+            })
+    }
+
+    /// Where the reader's invitation of `member` to `group` stands (1307
+    /// pass six): the delivery of the newest invitation to it in the
+    /// member's conversation, which the home's outbox reports through
+    /// the archive as for any message sent. `None` without one, as on a
+    /// device that invited nobody.
+    pub fn invitation_delivery(
+        &self,
+        group: &[u8; 16],
+        member: &[u8; 16],
+    ) -> Option<leviculum_ui::delivery::DeliveryState> {
+        self.conversations
+            .iter()
+            .find(|c| c.peer == *member)?
+            .messages
+            .iter()
+            .rev()
+            .find(|m| {
+                m.outbound
+                    && Lev::from_fields(&m.fields)
+                        .and_then(|lev| lev.invite)
+                        .is_some_and(|invite| invite.group == *group)
+            })
+            .map(|m| m.delivery.unwrap_or(leviculum_ui::delivery::DeliveryState::Queued))
+    }
+
     /// Learn what a message in `peer`'s conversation says of a group:
     /// `outbound` when the reader (or another of its devices) sent it. A
     /// group that changed is written to the store with the next writes
@@ -1844,5 +1890,160 @@ mod tests {
     fn every_client_says_it_understands_groups() {
         assert_eq!(client_caps(true), CAP_GROUPS | CAP_READ_RECEIPTS);
         assert_eq!(client_caps(false), CAP_GROUPS);
+    }
+
+    /// 1307 pass six, Lew's finding: opening a fresh group asked whether
+    /// to save "this person" in the phone's contacts. A group is not a
+    /// person, nor is an invitation card its sender's word. Control: a
+    /// plain peer who wrote is offered, and so is the inviter once it
+    /// writes a line of its own.
+    #[test]
+    fn a_group_and_an_invitation_are_no_person_for_the_address_book() {
+        let mut model = reader(&[LEW, ANNA]);
+        arrive(
+            &mut model,
+            LEW,
+            1,
+            "Lew invited you to Familie",
+            invite("Lew"),
+        );
+        assert!(!model.heard_from_a_person(&LEW), "an invitation alone");
+        arrive(
+            &mut model,
+            GROUP,
+            2,
+            "",
+            members(1, &[(LEW, "Lew", 2 | 4), (ME, "Me", 4)]),
+        );
+        arrive(&mut model, GROUP, 3, "Lew: Brot ist da", copy(LEW));
+        assert!(model.group(&GROUP).is_some());
+        assert!(!model.heard_from_a_person(&GROUP), "a group");
+
+        // The reader's own group, fresh: the home's membership alone.
+        let mut admin = reader(&[ANNA]);
+        update(&mut admin, UiEvent::GroupMade(Ok(BOB)));
+        arrive(
+            &mut admin,
+            BOB,
+            4,
+            "",
+            members(1, &[(ME, "Me", 2 | 4), (ANNA, "Anna", 0)]),
+        );
+        assert!(!admin.heard_from_a_person(&BOB), "the admin's own group");
+
+        // Control: a person who wrote.
+        arrive(&mut model, ANNA, 5, "Hallo", Lev::default());
+        assert!(model.heard_from_a_person(&ANNA));
+        arrive(&mut model, LEW, 6, "Kommst du?", Lev::default());
+        assert!(model.heard_from_a_person(&LEW), "the inviter, writing");
+        assert!(!model.heard_from_a_person(&BOB), "nobody wrote");
+    }
+
+    /// 1307 pass six: the admin's member sheet says where each invitation
+    /// stands, from its delivery in the member's chat: being delivered,
+    /// waiting at the propagation node for the member to come online,
+    /// delivered (invited), not delivered, joined, left. Control: in a
+    /// group of another's, an invited member is plainly invited.
+    #[test]
+    fn the_member_sheet_says_where_each_invitation_stands() {
+        use leviculum_ui::delivery::DeliveryState as D;
+        const KIM: [u8; 16] = [0x05; 16];
+        const UWE: [u8; 16] = [0x06; 16];
+        const EVA: [u8; 16] = [0x07; 16];
+        const OLA: [u8; 16] = [0x08; 16];
+        let mut model = reader(&[ANNA, BOB, KIM, UWE, EVA, OLA]);
+        let member = |address, name: &str, joined, left| GroupMember {
+            address,
+            name: name.into(),
+            admin: false,
+            joined,
+            left,
+        };
+        model.groups.insert(
+            GROUP,
+            GroupInfo {
+                ours: true,
+                standing: Standing::Joined,
+                members: vec![
+                    member(ANNA, "Anna", false, false),
+                    member(BOB, "Bob", false, false),
+                    member(KIM, "Kim", false, false),
+                    member(UWE, "Uwe", false, false),
+                    member(EVA, "Eva", true, false),
+                    member(OLA, "Ola", false, true),
+                ],
+                ..GroupInfo::new(GROUP)
+            },
+        );
+        let invitation = invite("Me");
+        for (key, (peer, delivery)) in [
+            (ANNA, Some(D::InFlight)),
+            (BOB, Some(D::InMailbox)),
+            (KIM, Some(D::Delivered)),
+            (UWE, Some(D::Failed)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let c = model.conversation(peer);
+            model.conversations[c].messages.push(Message {
+                outbound: true,
+                body: "Me invited you to Familie".into(),
+                id: Some([key as u8; 32]),
+                delivery,
+                signature: super::super::Signature::Verified,
+                leg: None,
+                unproven: false,
+                at: None,
+                size: 0,
+                ledger: Vec::new(),
+                last_leg: None,
+                activity: key as u64,
+                fields: lev_fields(invitation.clone()),
+            });
+        }
+        let words = |model: &mut UiModel<Line>| -> Vec<(String, String)> {
+            verb(
+                model,
+                Verb::Members {
+                    group: Target::Peer(GROUP),
+                },
+            );
+            super::super::group_scene::member_sheet(model)
+                .expect("the sheet")
+                .rows
+                .iter()
+                .map(|row| (row.name.resolve(Lang::En), row.state.resolve(Lang::En)))
+                .collect()
+        };
+        let said = words(&mut model);
+        let of = |name: &str| {
+            said.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| s.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(of("Anna"), "invited, delivering");
+        assert_eq!(of("Bob"), "invited, waiting for them to come online");
+        assert_eq!(of("Kim"), "invited");
+        assert_eq!(of("Uwe"), "invited, not delivered");
+        assert_eq!(of("Eva"), "joined");
+        assert_eq!(of("Ola"), "left");
+        assert_eq!(
+            super::super::group_scene::member_sheet(&model)
+                .expect("the sheet")
+                .rows[1]
+                .state
+                .resolve(Lang::De),
+            "eingeladen, wartet, bis das Mitglied online ist"
+        );
+
+        // A group the reader did not make: no invitation of its own.
+        model.groups.get_mut(&GROUP).expect("group").ours = false;
+        for c in &mut model.conversations {
+            c.messages.clear();
+        }
+        let said = words(&mut model);
+        assert_eq!(said[0].1, "invited", "{said:?}");
     }
 }

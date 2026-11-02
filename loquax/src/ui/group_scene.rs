@@ -311,7 +311,7 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
                 "left" => StrId::GroupStateLeft,
                 "admin" => StrId::GroupAdmin,
                 "joined" => StrId::GroupStateJoined,
-                _ => StrId::GroupStateInvited,
+                _ => invited_words(model, info, &m.address),
             });
             let id = NodeId::Member(m.address);
             MemberRow {
@@ -392,6 +392,24 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
         ask,
         close: verb(Verb::Close),
     })
+}
+
+/// An invited member's words in the sheet (1307 pass six): where the
+/// reader's invitation to it stands, from the home's outbox through the
+/// archive. Delivered, it is plainly invited: the member has it and has
+/// not joined. In the admin's own group an invitation not seen yet is
+/// still being delivered; in another's group, the reader knows only that
+/// the member was invited.
+fn invited_words<B>(model: &UiModel<B>, info: &GroupInfo, member: &[u8; 16]) -> StrId {
+    use leviculum_ui::delivery::DeliveryState as D;
+    match model.invitation_delivery(&info.address, member) {
+        Some(D::Delivered | D::Read { .. }) => StrId::GroupStateInvited,
+        Some(D::InMailbox) => StrId::GroupStateWaiting,
+        Some(D::Failed | D::Rejected) => StrId::GroupStateUndelivered,
+        Some(D::Queued | D::Stamping | D::InFlight | D::Sent) => StrId::GroupStateDelivering,
+        None if info.ours => StrId::GroupStateDelivering,
+        None => StrId::GroupStateInvited,
+    }
 }
 
 fn hex(bytes: &[u8]) -> Value {

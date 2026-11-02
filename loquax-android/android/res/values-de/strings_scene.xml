@@ -129,6 +129,9 @@
     <string name="group_admin">Admin</string>
     <string name="group_state_joined">beigetreten</string>
     <string name="group_state_invited">eingeladen</string>
+    <string name="group_state_delivering">eingeladen, wird zugestellt</string>
+    <string name="group_state_waiting">eingeladen, wartet, bis das Mitglied online ist</string>
+    <string name="group_state_undelivered">eingeladen, nicht zugestellt</string>
     <string name="group_state_left">ausgetreten</string>
     <string name="group_home_too_old">Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.</string>
     <string name="group_you_left">Du hast %1$s verlassen</string>
