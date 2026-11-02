@@ -6076,6 +6076,17 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
                 group: Target::Peer(GROUP),
             },
         ),
+        // The admin's Add members (1307 G2).
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("add")),
+                ("peer", Java::Str(&group)),
+            ]),
+            Verb::Add {
+                group: Target::Peer(GROUP),
+            },
+        ),
         (
             java_map(&[
                 ("t", Java::Str("group")),
