@@ -211,7 +211,18 @@ impl<'a> PeerUpSolicit<'a> {
 
     /// The destinations to ask about, longest-waiting first.
     pub fn destinations(mut self) -> Vec<[u8; 16]> {
-        self.picks.sort_by_key(|(_, sequence)| *sequence);
+        // A stable insertion sort by sequence: the order `sort_by_key` gives
+        // for every input, over at most `SOLICIT_DESTINATIONS_CAP` entries,
+        // where the standard library sorts by insertion too. Spelled out
+        // because the generic stable sort costs about 3 KB of flash on a
+        // board for this one element type (order 1300).
+        for i in 1..self.picks.len() {
+            let mut j = i;
+            while j > 0 && self.picks[j - 1].1 > self.picks[j].1 {
+                self.picks.swap(j - 1, j);
+                j -= 1;
+            }
+        }
         self.picks
             .into_iter()
             .map(|(destination, _)| destination)

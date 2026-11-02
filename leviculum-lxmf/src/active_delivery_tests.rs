@@ -159,6 +159,33 @@ fn a_full_store_asks_about_the_longest_waiting_destinations_up_to_the_cap() {
     assert_eq!(asked, expected);
 }
 
+/// The hand-written sort in `destinations` gives the order the standard
+/// stable sort gives, for every length up to the cap and with ties in the
+/// sequences (two destinations whose oldest mail arrived together keep the
+/// order the scan offered them in).
+#[test]
+fn destinations_come_out_in_the_order_a_stable_sort_by_sequence_gives() {
+    let mut seed: u32 = 0x1300;
+    for _ in 0..2000 {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let len = (seed >> 8) as usize % (SOLICIT_DESTINATIONS_CAP + 1);
+        let picks: Vec<([u8; 16], u64)> = (0..len)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ([i as u8; 16], u64::from((seed >> 16) % 4))
+            })
+            .collect();
+        let mut expected = picks.clone();
+        expected.sort_by_key(|(_, sequence)| *sequence);
+        let expected: Vec<[u8; 16]> = expected.into_iter().map(|(d, _)| d).collect();
+        let solicit = PeerUpSolicit {
+            excluded: &[],
+            picks: picks.clone(),
+        };
+        assert_eq!(solicit.destinations(), expected, "picks {picks:?}");
+    }
+}
+
 /// One pair is asked once per interval; another peer or another
 /// destination is its own pair.
 #[test]
