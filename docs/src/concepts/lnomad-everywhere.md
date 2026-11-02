@@ -114,7 +114,7 @@ means only the browser has it. Catalogue keys named `browser_*` are new.
 | Places: bookmarks and discovered nodes (`Place`, `lnomad/src/app/event.rs:733`; `places`, `lnomad/src/app/event.rs:771`) | `Sheet` (`leviculum-ui/src/scene.rs:286`) of list rows | `Activate(row)`, `Menu(row)` → `Rename`, `Forget` | `browser_places`, `browser_nodes` | sheet exists; `Rename` and `Forget` exist |
 | The name search of 1227 (not in this tree: no `1227` in `lnomad/` or `docs/src/` at `af8fa5c1`) | the address field's results: the places `Sheet`, rows from 1227's announce search | `Search` (exists), `Bookmark{on}` for its pinning | `browser_find_name` | lands with 1227 into the shapes above, no new node |
 | In-page search (`Mode::Search`, matches as `Match`, `lnomad/src/app/model.rs:173`) | the shared search field; matches as a run flag | `Search`, `Match(next)` (both exist) | `search` | exists |
-| Images (`SlotState`, `lnomad/src/image.rs:221`) | `Image` node in the page window: name, state, the decoded picture by reference (pixels never enter the scene, as for the map) | `Activate` opens, `Menu` saves | `browser_image_loading`, `_failed`, `_too_many` | browser |
+| Images (`SlotState`, `lnomad/src/image.rs:229`) | `Image` node in the page window: name, state, the decoded picture by reference (pixels never enter the scene, as for the map) | `Activate` opens, `Menu` saves | `browser_image_loading`, `_failed`, `_too_many` | browser |
 | Downloads (`Effect::Download`, `Effect`, `lnomad/src/app/model.rs:401`) | `Chip` (`leviculum-ui/src/scene.rs:296`) while one runs, a toast when done | `Download` | `browser_downloaded` (the toast of `lnomad/src/app/event.rs:138`) | chip exists |
 | Identify (`IdentifyStore`, `lnomad/src/identify.rs:28`) | the marker as a `TopBar` action whose state is on or off | `Identify{on}` | `browser_identify_on`, `_off` | browser |
 | Status line: focused link target, footer (`footer_items`, `lnomad/src/app/chrome.rs:304`) | no node of its own: the footer is the renderer's way to show `Action`s with chords (study, table 3.5); the link target is the focused link's text | none | the actions' labels | exists as a rule |
@@ -271,7 +271,7 @@ and ships on its own.
 | # | Slice | Files | Tests | Accepted by | Depends on |
 |---|---|---|---|---|---|
 | 0 | **The contract's vocabulary moves into `leviculum-ui`**: `A11y`, `Role`, `Action<I>`, `TopBar`, `Lead`, `Tabs`, `Sheet`, `Chip`, a list item; `Text<K>`, `Lang`, `Arg`, `format`, the `catalogue!` macro, `android_xml`. Loquax re-exports, its `StrId` and node types stay its own. No behaviour change | `leviculum-ui/src/scene.rs`, `leviculum-ui/src/strings.rs` (new), `loquax/src/ui/scene.rs`, `loquax/src/ui/strings.rs`, `loquax/src/ui/intent.rs` | `loquax/tests/scene_golden.rs` unchanged; `the_phone_reads_the_catalogue` (`loquax/src/ui/strings.rs:425`) | the three `loquax/tests/golden/scene-*.json` and the generated `strings_scene.xml` byte-identical; `just ui-no-terminal`, `just loquax-core-no-std` green | Loquax slice one (`bb0e9f77`..`af8fa5c1`, here) |
-| 1 | **The proof: lnomad's TUI draws through a scene** (2 passes). `lnomad/src/app/scene.rs`: `Model::scene(class)` builds `TopBar`, `Page` (window of runs), the places `Sheet`, chips, toast; `lnomad::Intent`; `lnomad/src/app/strings.rs`, English and German, for the 37 toasts, the start page and the help groups. `tui::view` (`lnomad/src/tui.rs:98`) renders the scene; the cell mouse arms stay as they are, as in the Loquax study | `lnomad/src/app/{scene,strings}.rs` (new), `app/event.rs`, `app/chrome.rs`, `tui.rs` | the 241 `#[test]`s of `tui.rs` unchanged; `render_golden.rs`; new `lnomad/tests/scene_golden.rs` with `scene-page-{53,80}.json` of the README; positive control: shift a link by one cell and the golden fails | every `TestBackend` frame unchanged; the README window at 53×22 holds at most 67 runs (asserted, from 2.2); the build time of a README scene measured and written into this page | slice 0 |
+| 1 | **The proof: lnomad's TUI draws through a scene** (2 passes). `lnomad/src/app/scene.rs`: `Model::scene(class)` builds `TopBar`, `Page` (window of runs), the places `Sheet`, chips, toast; `lnomad::Intent`; `lnomad/src/app/strings.rs`, English and German, for the 37 toasts, the start page and the help groups. `tui::view` (`lnomad/src/tui.rs:99`) renders the scene; the cell mouse arms stay as they are, as in the Loquax study | `lnomad/src/app/{scene,strings}.rs` (new), `app/event.rs`, `app/chrome.rs`, `tui.rs` | the 241 `#[test]`s of `tui.rs` unchanged; `render_golden.rs`; new `lnomad/tests/scene_golden.rs` with `scene-page-{53,80}.json` of the README; positive control: shift a link by one cell and the golden fails | every `TestBackend` frame unchanged; the README window at 53×22 holds at most 67 runs (asserted, from 2.2); the build time of a README scene measured and written into this page | slice 0 |
 | 1b | **Keys become a table and intents**: lnomad's rows over `leviculum_ui::keymap`, vi, Emacs and arrows; `update_*_key` resolve to `lnomad::Intent`; help and footer derived | `lnomad/src/app/keys.rs` (new), `app/event.rs`, `app/chrome.rs` | a table test: each chord the old `match`es honoured resolves to the same intent; no chord resolves to two intents in one mode | the help overlay lists exactly the chords the handler honours | slice 1 |
 | 2 | **The window** (2 passes): `leviculum-ui-iced` extracted from `loquax/src/gui*.rs` (top bar, sheet, toast, list item, search field); `lnomad --gui` behind a `gui` feature draws the scene, the page as monospace `rich_text` runs | `leviculum-ui-iced/` (new), `loquax/src/gui.rs`, `loquax/src/gui/chat.rs`, `lnomad/src/gui.rs` (new), `lnomad/Cargo.toml` | `loquax/tests/golden/gui-chat-{light,dark}.png` byte-identical; new `lnomad/tests/golden/gui-page-{light,dark}.png` of the README fixture | Loquax's goldens unchanged; a click on a link run raises `Activate(Link(n))` in a headless test; frame time for the README at 1280×800 measured | slice 1; Loquax study slices 2 and 3 (iced draws the scene, the top bar and tab bar in the model) |
 | 3 | **Android: the Browse tab in Loquax** (2 passes). `fetch::Session` over a node the host hands it; the mailbox lends its node; the facade gets `Query::Scene{Browse}` and the browser's requests; Java adds a `PageBinder` (monospace `SpannableString`) and the address as a real `EditText` | `lnomad/src/fetch.rs`, `loquax-android/src/{session,schema,browser}.rs`, `loquax/src/ui/scene.rs` (`TabId::Browse`), Java: tab host, `PageBinder` | `lnomad/tests/fetch_integ.rs` unchanged; a facade test: the msgpack of the README window; the device walk opens Browse, loads a page from the walk's local node, follows a link, goes back | the msgpack size of a README window measured and the time of one scroll's crossing; the device walk green | slice 1; Lew's decision 1; Loquax study slice 8 (the host Activity and binders); without it the binder sits on today's tab host |
@@ -470,7 +470,7 @@ last, and is where a second pass starts.
   discovery drain and closing the session moved unchanged from `tui.rs`
   into `lnomad/src/transfer.rs`; the terminal and the window run them.
 - **`lnomad --gui`** (`lnomad/src/gui.rs`, feature `gui`). The view
-  (`lnomad/src/gui.rs:402`) draws `Model::scene`: the shared top bar
+  (`lnomad/src/gui.rs:626`) draws `Model::scene`: the shared top bar
   with back while history has a past and the bar's actions as words, a
   disabled one grey; the address as the window's own text field, its
   Enter the field's go; the state chips; the page as the scene's window
@@ -483,28 +483,105 @@ last, and is where a second pass starts.
   holds (`cells`), so a resize lays the page out again as a terminal's
   does. The transfers run on the session's runtime and answer as
   outcomes the window folds as the terminal does (`fold`,
-  `lnomad/src/gui.rs:320`).
+  `lnomad/src/gui.rs:411`).
 - **Tests** (`just lnomad-gui`, 465 tests): the README at 1280 by 800
   pixel for pixel in both themes (`lnomad/tests/golden/gui-page-{light,dark}.png`,
-  `lnomad/src/gui.rs:949`; the link underline dropped moves 1,950
+  `lnomad/src/gui.rs:1451`; the link underline dropped moves 1,950
   bytes); a headless click on the README's first link raises
   `Activate(Link(n))` and folded starts its load, a click beside it
-  nothing (`lnomad/src/gui.rs:976`; the link index off by one fails
+  nothing (`lnomad/src/gui.rs:1488`; the link index off by one fails
   it); the three name results for "marcel" are rows a click opens
-  (`lnomad/src/gui.rs:1052`; a row raising another intent fails it);
-  the page laid out on the window's cells (`lnomad/src/gui.rs:1010`).
+  (`lnomad/src/gui.rs:1556`; a row raising another intent fails it);
+  the page laid out on the window's cells (`lnomad/src/gui.rs:1514`).
 - **Measured.** One frame of the README at 1280 by 800 (view, layout,
   paint and the readback of the software renderer) takes **15.8 ms** in
   the release profile and 358 ms in the test profile, on the Ryzen 9
-  7950X host, the mean of 10 (`lnomad/src/gui.rs:1035`).
-- **Not yet; pass two.** Inline pictures (a picture link stays a link);
-  bold and italic runs (Fira Mono ships one weight and no italic, and a
-  face asked for that it lacks falls back to the proportional sans and
-  off the grid, so every run is set in the one face); the focus and
-  field boxes the terminal draws over a field; the help overlay; the
-  window's palette as tokens shared with Loquax's (each has its own
-  today); a screenshot of the real window over a live node (the goldens
-  are the headless renders).
+  7950X host, the mean of 10 (`lnomad/src/gui.rs:1539`).
+- **Not yet; pass two.** What pass one left is listed under pass two
+  below, built.
+
+**Slice 2, pass two built 2026-11-02 (1286b).** Eight commits on this
+branch; the window now draws what the terminal draws, apart from a real
+desktop's colour scheme on Linux and a screenshot over a live node.
+
+- **Bold.** Fira Mono Bold 3.206 is embedded beside the Medium (OFL,
+  the same version and the same 600 unit advance;
+  `lnomad/src/gui.rs:81`), so a bold run is set bold and stays on the
+  grid. Italic stays upright: the family has no italic, and a face it
+  lacks falls back to the proportional sans, off the grid.
+- **Form fields.** A field run is a box in the terminal's chrome
+  colours, reversed while focused, with a block caret on the editor's
+  cell placed as the terminal places its cursor (`caret`,
+  `lnomad/src/gui.rs:823`; `line_spans`, `lnomad/src/gui.rs:906`). A
+  click on a field is `Activate(Field(n))` through the same rich-text
+  hit as a link, and an uncaptured key types into it through the rows
+  table.
+- **The help.** The overlay is a shared widget,
+  `leviculum_ui_iced::help::overlay` (`leviculum-ui-iced/src/help.rs:32`),
+  the twin of the terminal's: the same lines wrapped into the same rows
+  over the model's cells and scrolled by the same bounds. The two
+  renderers style one walk, the segments of a line and their cut to a
+  drawn row (`segments`, `leviculum-ui/src/help.rs:89`; `cut`,
+  `leviculum-ui/src/help.rs:110`). The wheel scrolls it and a click
+  closes it (`help_layer`, `lnomad/src/gui.rs:668`).
+- **One chrome for the suite.** The window's grounds, words, accent,
+  panel, selection and badge are one table in `leviculum_ui::pixel`,
+  `Chrome` (`leviculum-ui/src/pixel.rs:14`), with Loquax's values; Loquax's
+  `LIGHT` and `DARK` take those fields from it, and lnomad's palette is
+  `Palette::of` the same table (`lnomad/src/gui.rs:132`). A page's inks
+  and NomadNet's link colour stay lnomad's. Loquax's window goldens and
+  the phone's `colors.xml` test are unchanged;
+  `the_chrome_is_the_suites` (`loquax/src/ui/chat.rs:1211`) holds the
+  sharing.
+- **`--theme auto` follows the desktop.** Asked at the start and on
+  each change (`lnomad/src/gui.rs:381`), as Loquax's window does, until
+  the reader flips the theme away from what the desktop last set. On
+  Linux iced reads the freedesktop colour scheme only with its
+  `linux-theme-detection` feature (mundy, over D-Bus), which neither
+  window enables; until that is decided the answer there is winit's,
+  and may be none, which keeps the window dark.
+- **Inline pictures.** The terminal's image queue, a picture's save and
+  the two toasts of a save and an open moved into `lnomad::transfer`
+  (`spawn_image_queue`, `lnomad/src/transfer.rs:242`; `save_picture`,
+  `lnomad/src/transfer.rs:285`), and both frontends run them. The window
+  decodes with the same `image` crate, holds the picture as an iced
+  RGBA image (iced's `image-without-codecs`, as Loquax has it) and draws
+  it in the rows the layout reserves under its link, at its natural
+  size on the cell grid, never enlarged, under the picture row ceiling
+  (`picture_rows`, `lnomad/src/image.rs:83`; `accept`,
+  `lnomad/src/gui.rs:457`; `picture_layer`, `lnomad/src/gui.rs:984`).
+  Until then, or when it cannot be drawn, that row says why, as the
+  terminal's does. Payloads go into the same byte-bounded cache, so a
+  revisit draws at once; a resize fits every picture again (`refit`,
+  `lnomad/src/gui.rs:511`).
+- **Hover.** The pointer's cell goes to the model as the terminal's
+  mouse moves do (`lnomad/src/gui.rs:351`), so the status line says
+  where a hovered link goes.
+- **Tests** (`just lnomad-gui`, 472 tests). New goldens:
+  `gui-form-light.png` (the form, its text field focused;
+  `lnomad/src/gui.rs:1737`), `gui-help-dark.png`
+  (`lnomad/src/gui.rs:1747`), `gui-picture-light.png` (a 240 by 96
+  picture under its link is 30 by 6 cells; `lnomad/src/gui.rs:1861`);
+  the README goldens moved for the bold runs and the suite's chrome. A
+  click on a field focuses it and a key types into it
+  (`lnomad/src/gui.rs:1646`); the reversed field around the block caret
+  (`lnomad/src/gui.rs:1672`); a bold run in the bold face
+  (`lnomad/src/gui.rs:1709`); an undecodable payload and a failed
+  transfer as lines (`lnomad/src/gui.rs:1877`); a revisit from the cache
+  (`lnomad/src/gui.rs:1896`); a resize fitting a wide picture to a
+  narrow page (`lnomad/src/gui.rs:1914`); following the desktop until
+  the reader flips (`lnomad/src/gui.rs:1772`); the hover
+  (`lnomad/src/gui.rs:1932`). Each has its control: the bold face, the
+  field's hit, its reverse, the help's bold keys (22,042 bytes), its
+  close, the flip check, the picture (69,120 bytes, its 240 by 96 RGB)
+  and the hover's top bar row each removed fail their test.
+- **Measured.** The README frame at 1280 by 800 takes **16.2 ms** in the
+  release profile now (15.8 ms before), the mean of 10 on the same host.
+- **Not yet.** A screenshot of the real window over a live node (the
+  goldens are the headless renders; no `lnsd` was started for this
+  pass); the desktop's colour scheme on Linux (above); a picture saved
+  or opened in the window is not under a test, since both write to the
+  reader's download directory.
 
 **Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
 `just lnomad-core-no-std` (`Justfile:2527`) holds it.
@@ -542,7 +619,7 @@ last, and is where a second pass starts.
   shared line table, so Alt-< and Alt-> now go to a field's start and
   end as in Loquax's compose. `fit_cells` truncates where it called
   `f64::floor`, which core lacks; for its non-negative products the
-  values are the same (`lnomad/src/image.rs:213`). Without a system
+  values are the same (`lnomad/src/image.rs:221`). Without a system
   clock the model's wall clock is `Model::clock` or the epoch
   (`lnomad/src/app/model.rs:668`); a board sets it.
 - **The check.** A `std::fs` call injected into a temp copy of

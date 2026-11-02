@@ -440,6 +440,10 @@ The phone and the window draw with one table of colours and sizes,
 `loquax/src/ui/chat.rs` (`LIGHT`, `DARK`, `size`). The phone's
 `loquax-android/android/res/values*/colors.xml` holds the same colours
 name for name, and `the_phone_draws_the_same_colours` refuses a drift.
+The chrome's rows of the table (`background`, `text`, `text_secondary`,
+`accent`, `bar`, `panel`, `failed_mark_on_panel`, `selected_row`,
+`badge`, `badge_text`) are the suite's, `leviculum_ui::pixel`, which
+lnomad's window draws in too (#475).
 Every text keeps 4.5:1 on its ground, a mark or a control 3:1; the
 numbers per pair are the comments in `colors.xml`.
 
