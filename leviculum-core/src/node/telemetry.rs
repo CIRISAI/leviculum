@@ -52,6 +52,11 @@ pub struct LinkInfo {
     pub rtt_ms: Option<u64>,
     /// The interface the link is sent on, if attached.
     pub interface_index: Option<usize>,
+    /// +ciris (leviculum#91): the relay the link goes through, when known:
+    /// exact for a link opened with `connect_via`, otherwise the one relay
+    /// heard on its interface if exactly one was (see
+    /// [`NodeCore::link_via_relay`]).
+    pub via_relay: Option<[u8; 16]>,
 }
 
 /// Why a link ended, as a counter index. One slot per [`LinkCloseReason`].
@@ -180,6 +185,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         .map(|_| now_ms.saturating_sub(link.last_inbound_ms()) / MS_PER_SECOND),
                     rtt_ms: link.rtt_us().map(|us| us / 1000),
                     interface_index: link.attached_interface(),
+                    via_relay: self.link_via_relay(wire_id),
                 }
             })
             .collect()

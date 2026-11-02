@@ -63,6 +63,23 @@ pub enum NodeEvent {
         interface_index: usize,
     },
 
+    /// +ciris (leviculum#91): a destination was heard through a relay not on
+    /// file for it, through a known relay on another interface or at another
+    /// hop count, or a path response came back through a relay. The route
+    /// is what [`NodeCore::connect_via`](crate::node::NodeCore::connect_via)
+    /// takes; [`NodeCore::relay_routes`](crate::node::NodeCore::relay_routes)
+    /// lists them all.
+    RelayRouteLearned {
+        /// The destination.
+        destination_hash: DestinationHash,
+        /// The relay's transport id.
+        relay: [u8; 16],
+        /// The interface the relay was heard on.
+        interface_index: usize,
+        /// Hops to the destination through the relay.
+        hops: u8,
+    },
+
     /// A remote node requested the path to one of our local destinations
     ///
     /// This is informational, the transport layer already handles
@@ -766,6 +783,7 @@ impl NodeEvent {
             | NodeEvent::RequestTimedOut { link_id, .. } => Some(link_id),
             NodeEvent::AnnounceReceived { .. }
             | NodeEvent::PathFound { .. }
+            | NodeEvent::RelayRouteLearned { .. }
             | NodeEvent::PathRequestReceived { .. }
             | NodeEvent::PathLost { .. }
             | NodeEvent::PacketReceived { .. }
@@ -816,6 +834,7 @@ impl NodeEvent {
             // Path discovery — losing one stalls discovery (the #71 bug).
             NodeEvent::AnnounceReceived { .. }
             | NodeEvent::PathFound { .. }
+            | NodeEvent::RelayRouteLearned { .. }
             | NodeEvent::PathRequestReceived { .. }
             | NodeEvent::PathLost { .. } => EventClass::Control,
 
@@ -968,6 +987,7 @@ impl NodeEvent {
             NodeEvent::PathRequestReceived { .. } => "PathRequestReceived",
             NodeEvent::PathLost { .. } => "PathLost",
             NodeEvent::AnnounceLearnedNotRelayed { .. } => "AnnounceLearnedNotRelayed",
+            NodeEvent::RelayRouteLearned { .. } => "RelayRouteLearned",
             NodeEvent::RelayDecided { .. } => "RelayDecided",
             NodeEvent::PacketDropped { .. } => "PacketDropped",
             NodeEvent::AnnounceTransmitted { .. } => "AnnounceTransmitted",
