@@ -486,17 +486,17 @@ last, and is where a second pass starts.
   `lnomad/src/gui.rs:411`).
 - **Tests** (`just lnomad-gui`, 465 tests): the README at 1280 by 800
   pixel for pixel in both themes (`lnomad/tests/golden/gui-page-{light,dark}.png`,
-  `lnomad/src/gui.rs:1451`; the link underline dropped moves 1,950
+  `lnomad/src/gui.rs:1461`; the link underline dropped moves 1,950
   bytes); a headless click on the README's first link raises
   `Activate(Link(n))` and folded starts its load, a click beside it
-  nothing (`lnomad/src/gui.rs:1488`; the link index off by one fails
+  nothing (`lnomad/src/gui.rs:1498`; the link index off by one fails
   it); the three name results for "marcel" are rows a click opens
-  (`lnomad/src/gui.rs:1556`; a row raising another intent fails it);
-  the page laid out on the window's cells (`lnomad/src/gui.rs:1514`).
+  (`lnomad/src/gui.rs:1586`; a row raising another intent fails it);
+  the page laid out on the window's cells (`lnomad/src/gui.rs:1524`).
 - **Measured.** One frame of the README at 1280 by 800 (view, layout,
   paint and the readback of the software renderer) takes **15.8 ms** in
   the release profile and 358 ms in the test profile, on the Ryzen 9
-  7950X host, the mean of 10 (`lnomad/src/gui.rs:1539`).
+  7950X host, the mean of 10 (`lnomad/src/gui.rs:1556`).
 - **Not yet; pass two.** What pass one left is listed under pass two
   below, built.
 
@@ -539,7 +539,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   Linux iced reads the freedesktop colour scheme only with its
   `linux-theme-detection` feature (mundy, over D-Bus), which neither
   window enables; until that is decided the answer there is winit's,
-  and may be none, which keeps the window dark.
+  and may be none, which keeps the window dark. Decided in 1310, below.
 - **Inline pictures.** The terminal's image queue, a picture's save and
   the two toasts of a save and an open moved into `lnomad::transfer`
   (`spawn_image_queue`, `lnomad/src/transfer.rs:242`; `save_picture`,
@@ -559,19 +559,19 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   where a hovered link goes.
 - **Tests** (`just lnomad-gui`, 472 tests). New goldens:
   `gui-form-light.png` (the form, its text field focused;
-  `lnomad/src/gui.rs:1737`), `gui-help-dark.png`
-  (`lnomad/src/gui.rs:1747`), `gui-picture-light.png` (a 240 by 96
-  picture under its link is 30 by 6 cells; `lnomad/src/gui.rs:1861`);
+  `lnomad/src/gui.rs:1767`), `gui-help-dark.png`
+  (`lnomad/src/gui.rs:1777`), `gui-picture-light.png` (a 240 by 96
+  picture under its link is 30 by 6 cells; `lnomad/src/gui.rs:1891`);
   the README goldens moved for the bold runs and the suite's chrome. A
   click on a field focuses it and a key types into it
-  (`lnomad/src/gui.rs:1646`); the reversed field around the block caret
-  (`lnomad/src/gui.rs:1672`); a bold run in the bold face
-  (`lnomad/src/gui.rs:1709`); an undecodable payload and a failed
-  transfer as lines (`lnomad/src/gui.rs:1877`); a revisit from the cache
-  (`lnomad/src/gui.rs:1896`); a resize fitting a wide picture to a
-  narrow page (`lnomad/src/gui.rs:1914`); following the desktop until
-  the reader flips (`lnomad/src/gui.rs:1772`); the hover
-  (`lnomad/src/gui.rs:1932`). Each has its control: the bold face, the
+  (`lnomad/src/gui.rs:1676`); the reversed field around the block caret
+  (`lnomad/src/gui.rs:1702`); a bold run in the bold face
+  (`lnomad/src/gui.rs:1739`); an undecodable payload and a failed
+  transfer as lines (`lnomad/src/gui.rs:1907`); a revisit from the cache
+  (`lnomad/src/gui.rs:1926`); a resize fitting a wide picture to a
+  narrow page (`lnomad/src/gui.rs:1944`); following the desktop until
+  the reader flips (`lnomad/src/gui.rs:1802`); the hover
+  (`lnomad/src/gui.rs:1962`). Each has its control: the bold face, the
   field's hit, its reverse, the help's bold keys (22,042 bytes), its
   close, the flip check, the picture (69,120 bytes, its 240 by 96 RGB)
   and the hover's top bar row each removed fail their test.
@@ -582,6 +582,27 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   pass); the desktop's colour scheme on Linux (above); a picture saved
   or opened in the window is not under a test, since both write to the
   reader's download directory.
+
+**Pass three, built 2026-11-02 (1310).** What pass two left open.
+
+- **The desktop's tone on Linux.** Both windows follow it through
+  `leviculum_ui_iced::desktop` (`theme`, `leviculum-ui-iced/src/desktop.rs:20`;
+  `theme_changes`, `leviculum-ui-iced/src/desktop.rs:34`): mundy's
+  colour-scheme stream as a subscription, not iced's
+  `linux-theme-detection`, which blocks the event loop up to 200 ms
+  before the first window. On the coder host, whose portal never
+  answers, iced's feature took the first visible window from 39.3 ms
+  to 241.8 ms (mean of 10); the subscription leaves it at 41 to 43 ms,
+  the same as before. Without a session bus the stream yields none and
+  ends (`leviculum-ui-iced/tests/desktop_theme.rs`). mundy is a Linux,
+  non-musl dependency only; Android and the static builds do not have it.
+- **The frame test bounds CPU time.** Under a 25 % CPU quota the README
+  frame took 1.279 s of wall clock and 319 ms of the drawing thread's
+  CPU; the bound is on the latter (`lnomad/src/gui.rs:1556`), which is
+  the work a slow frame would add.
+- **A picture sits flush left** in its cells, as the terminal draws it
+  (`picture_layer`, `lnomad/src/gui.rs:984`): the widget takes the
+  picture's fitted size, not its cell box, in which iced centred it.
 
 **Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
 `just lnomad-core-no-std` (`Justfile:2527`) holds it.
