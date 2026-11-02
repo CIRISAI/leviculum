@@ -505,6 +505,22 @@ pub(crate) fn type_field(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     Vec::new()
 }
 
+/// Set text field `fi` (1-based) to `text`, as a platform's own editor
+/// hands it in, and lay the page out again around the new width, keeping
+/// the scroll. A checkbox, a radio or an index off the page is left alone.
+pub(crate) fn fill_field(model: &mut Model, fi: usize, text: &str) {
+    let Some(fe) = fi.checked_sub(1).and_then(|i| model.field_state.get_mut(i)) else {
+        return;
+    };
+    if fe.kind != FieldKind::Text {
+        return;
+    }
+    fe.input.set_value(text);
+    let (w, vp) = (model.width, model.viewport());
+    model.relayout(w);
+    model.clamp_scroll(vp);
+}
+
 /// Activate field `fi` (1-based): a checkbox toggles its checked state, a radio
 /// selects itself within its group, a text field does nothing. Re-lays the page
 /// out so the rendered widget shows the new state, keeping the scroll. The one
