@@ -319,9 +319,9 @@ got="$(cat "$TREE/dist/leviculum-docs-nightly.tar.gz" 2>/dev/null)"
 # The source tarball is tracked files at HEAD, under one prefix, with no
 # build output in it.
 names="$(tar tzf "$TREE/dist/leviculum-nightly-source.tar.gz" 2>/dev/null)"
-echo "$names" | grep -q '^leviculum-nightly-source/README.md$' \
+grep -q '^leviculum-nightly-source/README.md$' <<<"$names" \
     || fail "source tarball does not hold leviculum-nightly-source/README.md"
-echo "$names" | grep -q 'target/' \
+grep -q 'target/' <<<"$names" \
     && fail "source tarball carries build output from target/"
 
 [ "$failures" -eq "$before" ] || dumpout

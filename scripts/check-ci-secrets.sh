@@ -92,7 +92,7 @@ offenders() { # <pipeline-file> <allowlist-file>
         name="${ref#*:}"
         if [ "$name" = '!legacy-secrets-key' ]; then
             printf '%s:%s:%s\n' "$1" "$line" "$name"
-        elif ! printf '%s\n' "$allowed" | grep -qxF -- "$name"; then
+        elif ! grep -qxF -- "$name" <<<"$allowed"; then
             printf '%s:%s:%s\n' "$1" "$line" "$name"
         fi
     done < <(refs "$1")

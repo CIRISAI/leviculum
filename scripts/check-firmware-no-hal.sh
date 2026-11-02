@@ -73,7 +73,7 @@ selftest() {
         "'cfg(all())'" >> "$tmp/leviculum-nrf/firmware/Cargo.toml"
     local rc2=0
     out="$(check "$tmp" --offline)" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "carries embassy-nrf"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "carries embassy-nrf" <<<"$out"; then
         echo "[firmware-no-hal] SELFTEST FAIL: an injected embassy-nrf dev-dependency was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
