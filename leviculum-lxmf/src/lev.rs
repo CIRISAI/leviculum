@@ -11,13 +11,14 @@
 //! | `0x02` | `[bin16 sender, uint64 sent_ms, uint epoch]` | a group copy: who wrote it, when by their clock, the membership it was sent under |
 //! | `0x04` | `[bin16 group, bin64 public key, str name, str admin's name, uint epoch]` | an invitation to a group |
 //! | `0x05` | `[uint epoch, [[bin16 address, str name, uint flags], ...]]` | a group's membership; a member leaving sends itself alone, flagged [`MEMBER_LEFT`] |
+//! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them |
 //!
 //! Capability bit 1 says "I understand groups": a group's home sends such a
 //! member its copies with key `0x02` and the bare text, and every other
 //! member the text with the sender's name in front
 //! (`docs/drafts/group-chats-study-2026-11.md`, "The fan-out field" and
-//! "Interop for stock clients"). Keys `0x03` and `0x06` are the study's
-//! group status and digest, kept free for them.
+//! "Interop for stock clients"). Key `0x03` is the study's group status,
+//! kept free for it.
 //!
 //! Versions move by keys, never by the type: a reader skips a key it does
 //! not know, and a later key never changes what an earlier one means. The
@@ -54,6 +55,9 @@ pub const KEY_GROUP_INVITE: i64 = 0x04;
 
 /// The map key of a group's membership.
 pub const KEY_GROUP_MEMBERS: i64 = 0x05;
+
+/// The map key of a group's digest for a slow member (study 5.3).
+pub const KEY_GROUP_DIGEST: i64 = 0x06;
 
 /// Capability bit 0: the sender sends read receipts and wants them.
 pub const CAP_READ_RECEIPTS: u64 = 1;
@@ -146,6 +150,15 @@ pub struct Members {
     pub members: Vec<Member>,
 }
 
+/// One line of a digest: who wrote it, when by their clock, and its text
+/// without the home's `"Name: "` prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestLine {
+    pub sender: [u8; 16],
+    pub sent_ms: u64,
+    pub text: alloc::string::String,
+}
+
 /// What the `lev` namespace of one message says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lev {
@@ -159,6 +172,8 @@ pub struct Lev {
     pub invite: Option<Invite>,
     /// Key `0x05`.
     pub members: Option<Members>,
+    /// Key `0x06`.
+    pub digest: Option<Vec<DigestLine>>,
 }
 
 impl Lev {
@@ -200,7 +215,8 @@ impl Lev {
             + usize::from(self.receipt.is_some())
             + usize::from(self.group_copy.is_some())
             + usize::from(self.invite.is_some())
-            + usize::from(self.members.is_some());
+            + usize::from(self.members.is_some())
+            + usize::from(self.digest.is_some());
         let mut data = Vec::new();
         msgpack::map(&mut data, entries);
         if let Some(caps) = self.capabilities {
@@ -242,6 +258,16 @@ impl Lev {
                 msgpack::bin(&mut data, &member.address);
                 msgpack::string(&mut data, &member.name);
                 msgpack::uint(&mut data, member.flags);
+            }
+        }
+        if let Some(digest) = &self.digest {
+            msgpack::int(&mut data, KEY_GROUP_DIGEST);
+            msgpack::array(&mut data, digest.len());
+            for line in digest {
+                msgpack::array(&mut data, 3);
+                msgpack::bin(&mut data, &line.sender);
+                msgpack::uint(&mut data, line.sent_ms);
+                msgpack::string(&mut data, &line.text);
             }
         }
         [(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)]
@@ -295,6 +321,7 @@ impl Lev {
                 Ok(KEY_GROUP_COPY) => lev.group_copy = group_copy(value),
                 Ok(KEY_GROUP_INVITE) => lev.invite = invite(value),
                 Ok(KEY_GROUP_MEMBERS) => lev.members = members(value),
+                Ok(KEY_GROUP_DIGEST) => lev.digest = digest(value),
                 _ => {}
             }
         }
@@ -361,6 +388,25 @@ fn members(d: &[u8]) -> Option<Members> {
         members.push(member(raw)?);
     }
     Some(Members { epoch, members })
+}
+
+fn digest(d: &[u8]) -> Option<Vec<DigestLine>> {
+    let mut p = 0;
+    let count = msgpack::array_len(d, &mut p).ok()?;
+    let mut lines = Vec::new();
+    for _ in 0..count {
+        let raw = msgpack::raw(d, &mut p).ok()?;
+        let mut q = 0;
+        if msgpack::array_len(raw, &mut q).ok()? < 3 {
+            return None;
+        }
+        lines.push(DigestLine {
+            sender: fixed(raw, &mut q)?,
+            sent_ms: msgpack::read_uint(raw, &mut q).ok()?,
+            text: text(raw, &mut q)?,
+        });
+    }
+    Some(lines)
 }
 
 fn member(d: &[u8]) -> Option<Member> {
@@ -585,6 +631,61 @@ mod tests {
         assert!(h.contains(&("0592019293c410".to_owned() + &"44".repeat(16) + "a34c657702")));
         assert!(h.ends_with(&("93c410".to_owned() + &"55".repeat(16) + "a4416e6e6100")));
         assert_eq!(Lev::from_fields(&lev.fields()), Some(lev));
+    }
+
+    /// 1307 G2: a digest is the study's bytes (5.3, `0x06`): a list of
+    /// `[bin16 sender, uint64 ms, str text]`, read back as written; a line
+    /// whose sender is not 16 bytes makes the whole digest none (a control:
+    /// a digest is never shown with a line missing).
+    #[test]
+    fn a_digest_is_the_studys_bytes_and_a_bad_line_spoils_it() {
+        let lev = Lev {
+            capabilities: Some(CAP_GROUPS),
+            digest: Some(alloc::vec![
+                DigestLine {
+                    sender: [0x11; 16],
+                    sent_ms: 1_700_000_000_123,
+                    text: "Brot".into(),
+                },
+                DigestLine {
+                    sender: [0x55; 16],
+                    sent_ms: 7,
+                    text: "Danke".into(),
+                },
+            ]),
+            ..Lev::default()
+        };
+        let [_, (_, data)] = lev.fields();
+        let h = hex(&data);
+        // map 2; 0: 2; 6: [[bin16, uint64, "Brot"], [bin16, 7, "Danke"]].
+        assert!(h.starts_with("8200020692"), "{h}");
+        assert!(
+            h.contains(&("93c410".to_owned() + &"11".repeat(16) + "cf0000018bcfe5687ba442726f74")),
+            "{h}"
+        );
+        assert!(
+            h.ends_with(&("93c410".to_owned() + &"55".repeat(16) + "07a544616e6b65")),
+            "{h}"
+        );
+        assert_eq!(Lev::from_fields(&lev.fields()), Some(lev));
+
+        let mut kind = Vec::new();
+        msgpack::bin(&mut kind, LEV_TYPE);
+        let mut data = Vec::new();
+        msgpack::map(&mut data, 1);
+        msgpack::int(&mut data, KEY_GROUP_DIGEST);
+        msgpack::array(&mut data, 2);
+        msgpack::array(&mut data, 3);
+        msgpack::bin(&mut data, &[1; 16]);
+        msgpack::uint(&mut data, 1);
+        msgpack::string(&mut data, "fine");
+        msgpack::array(&mut data, 3);
+        msgpack::bin(&mut data, &[1; 8]);
+        msgpack::uint(&mut data, 2);
+        msgpack::string(&mut data, "short sender");
+        let read = Lev::from_fields(&[(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)])
+            .expect("ours");
+        assert_eq!(read.digest, None);
     }
 
     #[test]

@@ -371,6 +371,35 @@
       ]
     },
     {
+      "id": "VEC-MSG-LEV-GROUP-DIGEST",
+      "title": "Leviculum lev namespace (FIELD_CUSTOM_TYPE/DATA) and the reference reading it",
+      "kind": "frozen",
+      "citation": "LXMF.py:34-45; LXMessage.py:747-822",
+      "src_identity_prv_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp": 1700000000.0,
+      "content_hex": "4c65773a2042726f74206973742064610a416e6e613a2044616e6b65",
+      "field_fb_msgpack_hex": "c4036c6576",
+      "field_fc_msgpack_hex": "820003069293c41011111111111111111111111111111111cf0000018bcfe5687bab42726f742069737420646193c41055555555555555555555555555555555cf0000018bcfe56c63a544616e6b65",
+      "packed_hex": "cf0b2a4a8d2a0b6978b71290da7cc80efae321c442e3c9bdcd7a3e79d850e03cd1d18df6838d6e7e54d26f6d7f65e5963f2759223343c25c4636d5ee91fac8f2156e32f5a7def021a548694aae2d7c59b6e341293e293646e9e953f3b7ee490194cb41d954fc40000000c400c41c4c65773a2042726f74206973742064610a416e6e613a2044616e6b6582ccfbc4036c6576ccfc820003069293c41011111111111111111111111111111111cf0000018bcfe5687bab42726f742069737420646193c41055555555555555555555555555555555cf0000018bcfe56c63a544616e6b65",
+      "message_id_hex": "eddfc5dc4c005078ad967cad1d4162992f65ee291381d8ffedbb06f201284564",
+      "recovered_type_hex": "6c6576",
+      "recovered_fc_msgpack_hex": "820003069293c41011111111111111111111111111111111cf0000018bcfe5687bab42726f742069737420646193c41055555555555555555555555555555555cf0000018bcfe56c63a544616e6b65",
+      "recovered_capabilities": 3,
+      "signature_validated": true,
+      "recovered_digest": [
+        [
+          "11111111111111111111111111111111",
+          1700000000123,
+          "Brot ist da"
+        ],
+        [
+          "55555555555555555555555555555555",
+          1700000001123,
+          "Danke"
+        ]
+      ]
+    },
+    {
       "id": "VEC-MSG-FOREIGN-UINT32",
       "title": "Foreign writer: payload[0] as MessagePack uint32",
       "kind": "frozen",

@@ -421,6 +421,13 @@ def gen_message_vectors():
                                         [LEV_GROUP_MEMBER, "Anna", 0]]]})
     gen_lev_vector("VEC-MSG-LEV-GROUP-LEAVE", b"",
                    {0x00: 3, 0x05: [1, [[LEV_GROUP_MEMBER, "Anna", 1]]]})
+    # VEC-MSG-LEV-GROUP-DIGEST: the lines a group's home held for a slow
+    # member and sends as one message (study 5.3), each with its writer,
+    # the writer's clock and the text without the name prefix.
+    gen_lev_vector("VEC-MSG-LEV-GROUP-DIGEST",
+                   "Lew: Brot ist da\nAnna: Danke".encode("utf-8"),
+                   {0x00: 3, 0x06: [[LEV_GROUP_SENDER, LEV_GROUP_SENT_MS, "Brot ist da"],
+                                    [LEV_GROUP_MEMBER, LEV_GROUP_SENT_MS + 1000, "Danke"]]})
 
     gen_foreign_writer_vectors(src, dst)
 
@@ -477,6 +484,10 @@ def gen_lev_vector(vector_id, content, data):
         record["recovered_group_name"] = read[0x04][2]
         record["recovered_admin_name"] = read[0x04][3]
         record["recovered_epoch"] = read[0x04][4]
+    if 0x06 in read:
+        record["recovered_digest"] = [
+            [a.hex(), ms, text] for a, ms, text in read[0x06]
+        ]
     if 0x05 in read:
         record["recovered_epoch"] = read[0x05][0]
         record["recovered_members"] = [

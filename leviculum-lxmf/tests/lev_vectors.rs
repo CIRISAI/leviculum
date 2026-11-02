@@ -15,18 +15,19 @@ mod common;
 use leviculum_core::Identity;
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
 use leviculum_lxmf::lev::{
-    GroupCopy, Invite, Lev, Member, Members, Receipt, CAP_GROUPS, CAP_READ_RECEIPTS, MEMBER_ADMIN,
-    MEMBER_LEFT,
+    DigestLine, GroupCopy, Invite, Lev, Member, Members, Receipt, CAP_GROUPS, CAP_READ_RECEIPTS,
+    MEMBER_ADMIN, MEMBER_LEFT,
 };
 use leviculum_lxmf::{DeliveryMethod, Message, Verification};
 
-const IDS: [&str; 6] = [
+const IDS: [&str; 7] = [
     "VEC-MSG-LEV-MARK",
     "VEC-MSG-LEV-RECEIPT",
     "VEC-MSG-LEV-GROUP-COPY",
     "VEC-MSG-LEV-GROUP-INVITE",
     "VEC-MSG-LEV-GROUP-MEMBERS",
     "VEC-MSG-LEV-GROUP-LEAVE",
+    "VEC-MSG-LEV-GROUP-DIGEST",
 ];
 
 const SENDER: [u8; 16] = [0x11; 16];
@@ -95,6 +96,21 @@ fn expected(id: &str) -> Lev {
                     flags: MEMBER_LEFT,
                 }],
             }),
+            ..Lev::default()
+        }),
+        "VEC-MSG-LEV-GROUP-DIGEST" => groups(Lev {
+            digest: Some(vec![
+                DigestLine {
+                    sender: SENDER,
+                    sent_ms: 1_700_000_000_123,
+                    text: "Brot ist da".into(),
+                },
+                DigestLine {
+                    sender: MEMBER,
+                    sent_ms: 1_700_000_001_123,
+                    text: "Danke".into(),
+                },
+            ]),
             ..Lev::default()
         }),
         _ => Lev::mark(),
@@ -174,4 +190,17 @@ fn the_reference_reads_the_group_keys_as_we_mean_them() {
     assert_eq!(common::fixture(id, "recovered_group_name"), "Familie");
     assert_eq!(common::fixture(id, "recovered_admin_name"), "Lew");
     assert!(expected("VEC-MSG-LEV-GROUP-COPY").supports_groups());
+    // The digest (1307 G2): each line's writer, clock and text.
+    let all = include_str!("../../docs/src/appendix/lxmf/vectors/vectors.json");
+    let at = all
+        .find("\"id\": \"VEC-MSG-LEV-GROUP-DIGEST\"")
+        .expect("the digest vector");
+    let record = &all[at..];
+    let start = record.find("\"recovered_digest\"").expect("its digest");
+    let digest = &record[start..start + record[start..].find(']').expect("a line") + 300];
+    for line in expected("VEC-MSG-LEV-GROUP-DIGEST").digest.unwrap() {
+        assert!(digest.contains(&hex::encode(line.sender)), "{digest}");
+        assert!(digest.contains(&line.sent_ms.to_string()), "{digest}");
+        assert!(digest.contains(&line.text), "{digest}");
+    }
 }
