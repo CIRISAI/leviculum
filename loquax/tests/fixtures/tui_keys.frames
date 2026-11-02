@@ -104,7 +104,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: help ---
 ┌ Loquax help ─────────────────────────────────────────────────────────────────┐
 │Move                                                                          █
-│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 █
+│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 ║
 │  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                ║
 │  Ctrl-d / Ctrl-u                               half a page                   ║
 │  g / G   Home / End                            top / bottom                  ║
@@ -241,7 +241,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: help ---
 ┌ Loquax help ─────────────────────────────────────────────────────────────────┐
 │Move                                                                          █
-│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 █
+│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 ║
 │  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                ║
 │  Ctrl-d / Ctrl-u                               half a page                   ║
 │  g / G   Home / End                            top / bottom                  ║
