@@ -142,12 +142,17 @@ tui = [
     "dep:tui-input",
     "dep:open",
     "qr",
+    "scan",
     "photos",
     "voice",
 ]
 # QR codes (`loquax::home::qr`): the admission code in the terminal, and an
 # address for the phone's contact screen to show (1146).
 qr = ["dep:qrcodegen"]
+# The QR decoder (`loquax::scan`, 1152): the phone's camera frames, and on
+# the desktop a picture of a code (1341). In the terminal, the window and
+# the phone; not in the core.
+scan = ["dep:rqrr"]
 # Photos (`loquax::photo`, 1220): a picked picture scaled and stripped
 # before it goes, a received one decoded for its thumbnail and its full
 # view. In the terminal, the window and the phone; not in the core.
@@ -174,6 +179,7 @@ gui = [
     "dep:iced",
     "dep:leviculum-ui-iced",
     "dep:open",
+    "scan",
     "photos",
     "voice",
 ]
@@ -256,6 +262,10 @@ open = { version = "5", optional = true }
 # `loquax home admit` prints its code as a QR code too, for a phone to
 # take in one go: Nayuki's encoder, MIT, one file, no dependencies.
 qrcodegen = { version = "1.8.0", optional = true }
+# The scanner's decoder (`scan`, 1152): a pure-Rust port of quirc, without
+# its `image` default, reading a luminance plane. Brings g2p; lru is
+# already in the lock. MIT or Apache-2.0, and ISC for quirc's part.
+rqrr = { version = "0.11", default-features = false, optional = true }
 # Photos (`photo`, 1220): the decoders of what Columba, Sideband and a
 # phone's picker hand over (JPEG, PNG, WebP, GIF), the EXIF orientation
 # they carry, the scaling and the JPEG encoder; the version lnomad's

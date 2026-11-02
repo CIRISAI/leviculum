@@ -36,8 +36,9 @@ crate-type = ["cdylib", "rlib"]
 # window and the phone.
 # With `qr` for the contact screen's address code (1146), and `photos`
 # for the paperclip's photo and the bubbles' thumbnails (1220), `voice`
-# for the microphone's voice messages and their player (1222).
-loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr", "photos", "voice"] }
+# for the microphone's voice messages and their player (1222), `scan`
+# for the scanner's QR decoder (1152), shared with the desktop (1341).
+loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr", "scan", "photos", "voice"] }
 # The map's types the screen's call passes to loquax's.
 leviculum-map = { path = "../leviculum-map", features = ["std"] }
 leviculum-mapfill = { path = "../leviculum-mapfill" }
@@ -53,10 +54,6 @@ lnomad = { path = "../lnomad", default-features = false, features = ["std"] }
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # The admission token the phone's own mailbox issues its screens (1152).
 rand_core = { workspace = true, features = ["getrandom"] }
-# The scanner's decoder (1152): a pure-Rust port of quirc, without its
-# `image` default, reading the camera's luminance plane. Brings g2p; lru
-# is already in the lock. MIT or Apache-2.0, and ISC for quirc's part.
-rqrr = { version = "0.11", default-features = false }
 # The runtime the leaf node and the session's runners run on.
 tokio.workspace = true
 tracing.workspace = true
