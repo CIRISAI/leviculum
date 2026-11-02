@@ -529,9 +529,16 @@ pub const PN_START_ANNOUNCE_GAP_MS: u64 = 10 * 1_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualAnnounce {
     /// Send both announces now; the cadence has booked them.
-    Now,
-    /// The budget does not allow the set yet; both slots fire on their own
-    /// in `wait_ms`.
+    Now {
+        /// The position slot was booked with them: send the position
+        /// announce too, after the other two. `false` when the press did
+        /// not ask for it, or when the slot's own spacing since its last
+        /// announce has not passed, in which case the slot was brought
+        /// forward to that moment instead.
+        position: bool,
+    },
+    /// The budget does not allow the set yet; every slot the press asked
+    /// for fires on its own in `wait_ms`.
     Deferred {
         /// How long until the budget allows it.
         wait_ms: u64,
@@ -770,7 +777,19 @@ impl AnnounceCadence {
     /// [`trigger`](Self::trigger) adds: the caller has its own rate limit
     /// ([`crate::BUTTON_ANNOUNCE_MIN_INTERVAL_MS`]), and the floor exists
     /// for triggers that arrive in bursts nobody chose.
-    pub fn manual(&mut self, now_ms: u64) -> ManualAnnounce {
+    ///
+    /// `position` is the caller's answer to "would a position announce go
+    /// out now": the share resolves to owner or everyone and there is a
+    /// fix (order 1316). When it is `true` the position slot is booked in
+    /// the same press, under the same spacing, after the delivery half:
+    /// the delivery and propagation halves decide whether the press goes
+    /// out now, and the position joins them when its own last announce is
+    /// at least the spacing ago. When it is not, the slot is brought
+    /// forward to that moment, like a deferred press, so the position is
+    /// still answered by its own tick as early as the band allows. When
+    /// `position` is `false` the slot is untouched, and a press does what
+    /// it did before order 1316.
+    pub fn manual(&mut self, now_ms: u64, position: bool) -> ManualAnnounce {
         let spacing = self.budget.min_interval_ms();
         let earliest = self
             .own
@@ -779,13 +798,24 @@ impl AnnounceCadence {
         if earliest > now_ms {
             self.own.trigger(now_ms, spacing);
             self.propagation.trigger(now_ms, spacing);
+            if position {
+                self.position.trigger(now_ms, spacing);
+            }
             return ManualAnnounce::Deferred {
                 wait_ms: earliest - now_ms,
             };
         }
         self.own.book(now_ms, spacing);
         self.propagation.book(now_ms, spacing);
-        ManualAnnounce::Now
+        if !position {
+            return ManualAnnounce::Now { position: false };
+        }
+        if self.position.earliest_ms(now_ms, spacing) > now_ms {
+            self.position.trigger(now_ms, spacing);
+            return ManualAnnounce::Now { position: false };
+        }
+        self.position.book(now_ms, spacing);
+        ManualAnnounce::Now { position: true }
     }
 
     /// Poll one slot. `clock_ok` is the caller's plausibility answer; it
@@ -1434,7 +1464,10 @@ mod tests {
         cadence.set_budget(budget);
         let spacing = budget.min_interval_ms();
         let press = t0() + 1_000;
-        assert_eq!(cadence.manual(press), ManualAnnounce::Now);
+        assert_eq!(
+            cadence.manual(press, false),
+            ManualAnnounce::Now { position: false }
+        );
         for slot in [AnnounceSlot::Own, AnnounceSlot::Propagation] {
             assert_eq!(
                 cadence.wait_ms(slot, press),
@@ -1461,10 +1494,13 @@ mod tests {
         cadence.set_budget(budget);
         let spacing = budget.min_interval_ms();
         let first = t0() + 1_000;
-        assert_eq!(cadence.manual(first), ManualAnnounce::Now);
+        assert_eq!(
+            cadence.manual(first, false),
+            ManualAnnounce::Now { position: false }
+        );
         let second = first + 10_000;
         assert_eq!(
-            cadence.manual(second),
+            cadence.manual(second, false),
             ManualAnnounce::Deferred {
                 wait_ms: spacing - 10_000
             }
@@ -1491,8 +1527,113 @@ mod tests {
             Some(Decision::Announce)
         );
         let due = cadence.wait_ms(AnnounceSlot::Own, first);
-        assert_eq!(cadence.manual(first + 60_000), ManualAnnounce::Now);
+        assert_eq!(
+            cadence.manual(first + 60_000, false),
+            ManualAnnounce::Now { position: false }
+        );
         assert_eq!(cadence.wait_ms(AnnounceSlot::Own, first), due);
+    }
+
+    /// Order 1316: a double press on a board that shares its position and
+    /// has a fix books the position slot with the other two, so the
+    /// position goes out on the same press and the next position tick is
+    /// spaced from it. Positive control: the same press without the
+    /// position (sharing off, or no fix) leaves the slot on its boot
+    /// deadline, so the booking assertion is not vacuous.
+    #[test]
+    fn a_double_press_with_position_shared_books_the_position_slot() {
+        let budget = a_lora_budget();
+        let spacing = budget.min_interval_ms();
+        let press = t0() + 1_000;
+        let boot_due = crate::POSITION_ANNOUNCE_INITIAL_DELAY_MS - 1_000;
+        assert!(
+            spacing > boot_due,
+            "the booking is visible over the boot deadline"
+        );
+
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        cadence.set_budget(budget);
+        assert_eq!(
+            cadence.manual(press, true),
+            ManualAnnounce::Now { position: true }
+        );
+        for slot in [
+            AnnounceSlot::Own,
+            AnnounceSlot::Propagation,
+            AnnounceSlot::Position,
+        ] {
+            assert_eq!(
+                cadence.wait_ms(slot, press),
+                spacing,
+                "every slot the press sent is booked against the budget ({slot:?})"
+            );
+        }
+
+        let mut control = AnnounceCadence::new();
+        control.arm(t0());
+        control.set_budget(budget);
+        assert_eq!(
+            control.manual(press, false),
+            ManualAnnounce::Now { position: false }
+        );
+        assert_eq!(
+            control.wait_ms(AnnounceSlot::Position, press),
+            boot_due,
+            "control: a press without the position leaves its slot alone"
+        );
+    }
+
+    /// Order 1316: with sharing off the double press books the delivery and
+    /// propagation slots and nothing else, as it did before. Positive
+    /// control: a position announce sent inside the spacing keeps the
+    /// position out of a press that asks for it (rule 5 spaces the slot
+    /// from its own last announce), and the slot is brought forward to the
+    /// moment the band allows instead of being dropped.
+    #[test]
+    fn a_double_press_with_sharing_off_books_only_the_two_halves() {
+        let budget = a_lora_budget();
+        let spacing = budget.min_interval_ms();
+        let press = t0() + 1_000;
+
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        cadence.set_budget(budget);
+        let position_due = cadence.wait_ms(AnnounceSlot::Position, press);
+        assert_eq!(
+            cadence.manual(press, false),
+            ManualAnnounce::Now { position: false }
+        );
+        for slot in [AnnounceSlot::Own, AnnounceSlot::Propagation] {
+            assert_eq!(cadence.wait_ms(slot, press), spacing, "{slot:?} booked");
+        }
+        assert_eq!(
+            cadence.wait_ms(AnnounceSlot::Position, press),
+            position_due,
+            "sharing off: the position slot is untouched"
+        );
+
+        // Control: the position went out recently on its own tick, the two
+        // halves did not, and a press asks for all three.
+        let mut control = AnnounceCadence::new();
+        control.arm(t0());
+        control.set_budget(budget);
+        let sent = t0() + crate::POSITION_ANNOUNCE_INITIAL_DELAY_MS;
+        assert_eq!(
+            control.poll(AnnounceSlot::Position, sent, true),
+            Some(Decision::Announce)
+        );
+        let late_press = sent + 10_000;
+        assert_eq!(
+            control.manual(late_press, true),
+            ManualAnnounce::Now { position: false },
+            "control: the position is spaced from its own last announce"
+        );
+        assert_eq!(
+            control.wait_ms(AnnounceSlot::Position, late_press),
+            spacing - 10_000,
+            "control: and brought forward to the moment the band allows"
+        );
     }
 
     // -- The two slots ---------------------------------------------------

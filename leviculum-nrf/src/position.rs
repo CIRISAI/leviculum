@@ -355,38 +355,15 @@ where
         return Vec::new();
     }
     let clock_ok = node.has_plausible_wall_clock();
-    let unix_secs = clock_ok.then(|| node.emission_secs());
-    let withhold = |reason| {
-        with_cadence(|cadence| {
-            cadence.withhold(AnnounceSlot::Position, now_ms, POSITION_NO_FIX_RETRY_MS)
-        });
-        log_withheld(reason);
-        Vec::new()
-    };
-    let Some((mut position, fix)) = current(unix_secs) else {
-        return withhold(Withheld::NoFix);
-    };
-    // The sealed form's recipient, before the slot is spent on it. The
-    // telemetry reporter asks the mesh for the key of a target it does not
-    // know; this only waits for it.
-    let owner = match share {
-        PositionShare::Owner => {
-            let Some(owner) = OWNER.lock(|cell| *cell.borrow()) else {
-                return withhold(Withheld::NoOwner);
-            };
-            let Some(identity) = node
-                .storage()
-                .get_identity(&owner.destination)
-                .and_then(|known| Identity::from_public_key_bytes(&known.public_key_bytes()).ok())
-            else {
-                return withhold(Withheld::NoOwnerKey);
-            };
-            Some(identity)
+    let ready = match ready(node, share, clock_ok) {
+        Ok(ready) => ready,
+        Err(reason) => {
+            with_cadence(|cadence| {
+                cadence.withhold(AnnounceSlot::Position, now_ms, POSITION_NO_FIX_RETRY_MS)
+            });
+            log_withheld(reason);
+            return Vec::new();
         }
-        _ => None,
-    };
-    let Some(hash) = destination(node) else {
-        return withhold(Withheld::Unbuilt);
     };
     match with_cadence(|cadence| cadence.poll(AnnounceSlot::Position, now_ms, clock_ok)) {
         Some(Decision::Announce) => {}
@@ -396,6 +373,107 @@ where
         }
         None => return Vec::new(),
     }
+    send(node, ready, AnnounceSlot::Position.as_str())
+}
+
+/// A position announce with everything it needs except the cadence's
+/// say: the position, the fix the 25 m advance measures from, the sealed
+/// form's recipient (`None` in the clear) and the destination.
+pub struct Ready {
+    position: Position,
+    fix: Fix,
+    owner: Option<Identity>,
+    hash: DestinationHash,
+}
+
+/// Whether a double press would send a position announce now (order 1316):
+/// the share resolves to owner or everyone, the clock is plausible, there
+/// is a fix and, when sealed, the owner's key. The answer
+/// [`leviculum_announce_policy::AnnounceCadence::manual`] books the slot
+/// on.
+///
+/// A share that is off answers `None` and writes nothing, so a press on a
+/// board that shares nothing reads as it did before. Any other refusal is
+/// the tick's own `[POSITION] withheld reason=<r>` line, once per change.
+#[inline(never)]
+pub fn for_button<R, C, S>(node: &mut NodeCore<R, C, S>) -> Option<Ready>
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    let share = share();
+    if share == PositionShare::Off {
+        return None;
+    }
+    let clock_ok = node.has_plausible_wall_clock();
+    if !clock_ok {
+        log_withheld(Withheld::NoClock);
+        return None;
+    }
+    match ready(node, share, clock_ok) {
+        Ok(ready) => Some(ready),
+        Err(reason) => {
+            log_withheld(reason);
+            None
+        }
+    }
+}
+
+/// Everything but the cadence: the fix, the owner's key when sealed, the
+/// destination. The refusal is the withhold reason.
+#[inline(never)]
+fn ready<R, C, S>(
+    node: &mut NodeCore<R, C, S>,
+    share: PositionShare,
+    clock_ok: bool,
+) -> Result<Ready, Withheld>
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    let unix_secs = clock_ok.then(|| node.emission_secs());
+    let (position, fix) = current(unix_secs).ok_or(Withheld::NoFix)?;
+    // The sealed form's recipient, before the slot is spent on it. The
+    // telemetry reporter asks the mesh for the key of a target it does not
+    // know; this only waits for it.
+    let owner = match share {
+        PositionShare::Owner => {
+            let owner = OWNER.lock(|cell| *cell.borrow()).ok_or(Withheld::NoOwner)?;
+            let identity = node
+                .storage()
+                .get_identity(&owner.destination)
+                .and_then(|known| Identity::from_public_key_bytes(&known.public_key_bytes()).ok())
+                .ok_or(Withheld::NoOwnerKey)?;
+            Some(identity)
+        }
+        _ => None,
+    };
+    let hash = destination(node).ok_or(Withheld::Unbuilt)?;
+    Ok(Ready {
+        position,
+        fix,
+        owner,
+        hash,
+    })
+}
+
+/// Build and send a position announce the cadence has already booked,
+/// writing `[ANNOUNCE] sent ... reason=<reason>`.
+#[inline(never)]
+pub fn send<R, C, S>(node: &mut NodeCore<R, C, S>, ready: Ready, reason: &str) -> Vec<Action>
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    let Ready {
+        mut position,
+        fix,
+        owner,
+        hash,
+    } = ready;
     position.name = Some(
         crate::name::mesh_name(node.identity().hash())
             .as_str()
@@ -416,7 +494,7 @@ where
             // The `[ANNOUNCE] sent` line every announce writes; whom it is
             // readable by is the `[POSITION] share=` line's, written on
             // each change.
-            crate::announce::log_sent(&hash, AnnounceSlot::Position.as_str(), None);
+            crate::announce::log_sent(&hash, reason, None);
             out.actions
         }
         Err(_) => Vec::new(),

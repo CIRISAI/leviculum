@@ -50,7 +50,7 @@ for the life of the board.
 | gesture | does |
 |---|---|
 | short press | Status. The display wakes for one minute and goes dark by itself; there is no display switch. The LED blinks mode and battery, the buzzer joins where present. No announce. |
-| double press | Announce, both identities (what the short press did before 889, 869), plus one immediate position report when a recipient is configured (914). One short and one blip when the announces have left the radio (930); two short when the proof of the report comes back. |
+| double press | Announce, both identities (what the short press did before 889, 869), and the position announce too when the board shares its position and has a fix (1316, [Announce cadence](announce-cadence.md#the-double-press)), plus one immediate position report when a recipient is configured (914). One short and one blip when the announces have left the radio (930); two short when the proof of the report comes back. |
 | long press, 2 s | Mode switch Mesh/Tracker ([Operating modes](operating-modes.md)). The board signals at 2 s, the user releases, the board confirms the new mode. |
 | very long press, 8 s | **Sleep. A press wakes.** On every board (Lew, 2026-10-25): System OFF with the button as wake source on the nRF boards, deep sleep with a GPIO wake on the M9 in its stage one. |
 | any press in Tracker mode | Also opens the wake window: BLE on, listening. |

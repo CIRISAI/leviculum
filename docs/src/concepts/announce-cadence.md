@@ -133,6 +133,29 @@ off-grid group, so friends' phones read it too.
 The duty budget's set counts the position: two frames for the sealed form,
 one for the plain.
 
+### The double press
+
+A double press of the user button announces the position too (order
+1316, Lew's one-button rule of 2026-10-20: short press status, double
+press announce), on the same press as the delivery and propagation
+announces and after them. It does so when the share resolves to `owner`
+or `everyone` and a fix or a fixed position is there, with a plausible
+clock and, sealed, the owner's key; the readiness check is
+`for_button` (`leviculum-nrf/src/position.rs:399`). The press is booked
+in the one cadence (`AnnounceCadence::manual`,
+`leviculum-nrf/announce-policy/src/cadence.rs:792`): the delivery and
+propagation halves decide whether it goes out now under rule 5's
+spacing, and the position joins them when its own last announce is at
+least that spacing ago; otherwise its slot is brought forward and its
+own tick answers as early as the band allows. The line is `[ANNOUNCE]
+sent ... reason=position-button` (`leviculum-nrf/src/announce.rs:549`).
+Without a fix the press adds nothing new: the existing `[POSITION]
+withheld reason=no-fix` line, once per change, is the answer. With
+sharing off a press books the two slots it booked before. Host tests:
+`a_double_press_with_position_shared_books_the_position_slot` and
+`a_double_press_with_sharing_off_books_only_the_two_halves` in
+`cadence.rs`.
+
 ### What it costs
 
 At our defaults (869.463 MHz, BW 125 kHz, SF8, CR 4/5, 18-symbol preamble),
