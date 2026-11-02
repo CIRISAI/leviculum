@@ -16,6 +16,7 @@ use leviculum_lxmf::constants::FIELD_ICON_APPEARANCE;
 use leviculum_lxmf::msgpack;
 use leviculum_lxmf::Field;
 use leviculum_ui::delivery::DeliveryState;
+use leviculum_ui::pixel;
 
 use super::liveness::Liveness;
 use super::reactions;
@@ -656,7 +657,9 @@ pub fn placements(bubbles: &[Bubble]) -> Vec<Placement> {
 
 /// The colours of a pixel screen, `0xaarrggbb`, by the names of the
 /// phone's `colors.xml` (loquax-ui.md, "Pixel screens"). Every pair of
-/// text and its ground keeps 4.5:1 or more, a mark or a control 3:1.
+/// text and its ground keeps 4.5:1 or more, a mark or a control 3:1. The
+/// chrome's roles are the suite's ([`leviculum_ui::pixel`]), which
+/// lnomad's window draws in too; the bubbles and marks are Loquax's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Colours {
     pub background: u32,
@@ -737,11 +740,11 @@ impl Colours {
 
 /// The light theme.
 pub const LIGHT: Colours = Colours {
-    background: 0xffffffff,
-    text: 0xff1b1b1d,
-    text_secondary: 0xff5c5f66,
-    accent: 0xff3a7d44,
-    bar: 0xfff1f2f4,
+    background: pixel::LIGHT.background,
+    text: pixel::LIGHT.text,
+    text_secondary: pixel::LIGHT.text_secondary,
+    accent: pixel::LIGHT.accent,
+    bar: pixel::LIGHT.bar,
     bubble_ours: 0xff2e6b38,
     bubble_ours_text: 0xffffffff,
     bubble_ours_meta: 0xffd6eadb,
@@ -753,15 +756,15 @@ pub const LIGHT: Colours = Colours {
     read_mark: 0xffb2ff59,
     send: 0xff2e6b38,
     on_send: 0xffffffff,
-    badge: 0xff2e6b38,
-    badge_text: 0xffffffff,
+    badge: pixel::LIGHT.badge,
+    badge_text: pixel::LIGHT.badge_text,
     list_failed_ground: 0xff93000a,
     list_failed_mark: 0xffffffff,
     dim: 0x99000000,
-    panel: 0xffffffff,
-    failed_mark_on_panel: 0xffba1a1a,
+    panel: pixel::LIGHT.panel,
+    failed_mark_on_panel: pixel::LIGHT.failed_on_panel,
     reaction_ours: 0xff5f9a69,
-    selected_row: 0x403a7d44,
+    selected_row: pixel::LIGHT.selected_row,
     status_up: 0xff2e7d32,
     status_down: 0xff80848c,
     rec_red: 0xffc62828,
@@ -770,11 +773,11 @@ pub const LIGHT: Colours = Colours {
 
 /// The dark theme.
 pub const DARK: Colours = Colours {
-    background: 0xff17181b,
-    text: 0xffececec,
-    text_secondary: 0xffa9abb0,
-    accent: 0xff81c784,
-    bar: 0xff26272b,
+    background: pixel::DARK.background,
+    text: pixel::DARK.text,
+    text_secondary: pixel::DARK.text_secondary,
+    accent: pixel::DARK.accent,
+    bar: pixel::DARK.bar,
     bubble_ours: 0xff3b6b45,
     bubble_ours_text: 0xffffffff,
     bubble_ours_meta: 0xffdbeadd,
@@ -786,15 +789,15 @@ pub const DARK: Colours = Colours {
     read_mark: 0xffb2ff59,
     send: 0xff4f8f5b,
     on_send: 0xffffffff,
-    badge: 0xff3b6b45,
-    badge_text: 0xffffffff,
+    badge: pixel::DARK.badge,
+    badge_text: pixel::DARK.badge_text,
     list_failed_ground: 0xffffdad6,
     list_failed_mark: 0xff93000a,
     dim: 0xb3000000,
-    panel: 0xff2c2d31,
-    failed_mark_on_panel: 0xffffb4ab,
+    panel: pixel::DARK.panel,
+    failed_mark_on_panel: pixel::DARK.failed_on_panel,
     reaction_ours: 0xff4f8f5b,
-    selected_row: 0x4081c784,
+    selected_row: pixel::DARK.selected_row,
     status_up: 0xff81c784,
     status_down: 0xff7d8087,
     rec_red: 0xffee6464,
@@ -1200,6 +1203,40 @@ mod tests {
                 "state_failed"
             ]
         );
+    }
+
+    /// The chrome of both themes is the suite's, the colours lnomad's
+    /// window draws in ([`leviculum_ui::pixel`]).
+    #[test]
+    fn the_chrome_is_the_suites() {
+        for (ours, suite) in [(LIGHT, pixel::LIGHT), (DARK, pixel::DARK)] {
+            assert_eq!(
+                [
+                    ours.background,
+                    ours.text,
+                    ours.text_secondary,
+                    ours.accent,
+                    ours.bar,
+                    ours.panel,
+                    ours.failed_mark_on_panel,
+                    ours.selected_row,
+                    ours.badge,
+                    ours.badge_text,
+                ],
+                [
+                    suite.background,
+                    suite.text,
+                    suite.text_secondary,
+                    suite.accent,
+                    suite.bar,
+                    suite.panel,
+                    suite.failed_on_panel,
+                    suite.selected_row,
+                    suite.badge,
+                    suite.badge_text,
+                ]
+            );
+        }
     }
 
     /// The phone's `colors.xml` holds the same table, name for name, so

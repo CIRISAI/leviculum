@@ -114,35 +114,11 @@ pub const WINDOW: (f32, f32) = (1280.0, 800.0);
 /// The lines a wheel notch scrolls, as the terminal's wheel does.
 const WHEEL_LINES: usize = 3;
 
-/// The window's grounds and words in the theme the model is in. The
-/// page's own colours are the document's; these are the chrome's.
+/// The window's grounds and words in the theme the model is in: the
+/// suite's chrome ([`leviculum_ui::pixel`]), the one Loquax's window
+/// draws in. The page's own colours are the document's.
 pub fn palette(theme: Theme) -> Palette {
-    let link = theme.link_fg();
-    let accent = Color::from_rgb8(link.0, link.1, link.2);
-    match theme {
-        Theme::Light => Palette {
-            background: Color::from_rgb8(0xff, 0xff, 0xff),
-            bar: Color::from_rgb8(0xf0, 0xf2, 0xf5),
-            panel: Color::from_rgb8(0xe4, 0xe7, 0xec),
-            text: Color::from_rgb8(0x1b, 0x1d, 0x21),
-            text_secondary: Color::from_rgb8(0x5f, 0x65, 0x6e),
-            accent,
-            selected_row: Color::from_rgb8(0xdc, 0xe8, 0xf7),
-            badge: accent,
-            badge_text: Color::WHITE,
-        },
-        Theme::Dark => Palette {
-            background: Color::from_rgb8(0x14, 0x15, 0x18),
-            bar: Color::from_rgb8(0x22, 0x24, 0x29),
-            panel: Color::from_rgb8(0x2e, 0x31, 0x37),
-            text: Color::from_rgb8(0xe6, 0xe8, 0xeb),
-            text_secondary: Color::from_rgb8(0x9a, 0xa0, 0xa8),
-            accent,
-            selected_row: Color::from_rgb8(0x1f, 0x3a, 0x5c),
-            badge: accent,
-            badge_text: Color::BLACK,
-        },
-    }
+    Palette::of(&leviculum_ui::pixel::chrome(theme))
 }
 
 /// An ink of the page as the window's colour: RGB as it is, a palette
@@ -436,7 +412,7 @@ impl Window {
             Some(sheet) => row![page, sheet].height(Length::Fill).into(),
             None => page,
         };
-        let status = status_row(&scene, lang, p);
+        let status = status_row(&scene, lang, self.model.theme, p);
         let window: Element<'_, Message> = container(column![bar, address, middle, status])
             .width(Length::Fill)
             .height(Length::Fill)
@@ -802,6 +778,7 @@ fn sheet_view<'a>(
 fn status_row<'a>(
     scene: &Scene,
     lang: crate::app::strings::Lang,
+    theme: Theme,
     p: Palette,
 ) -> Element<'a, Message> {
     let status = scene
@@ -816,7 +793,9 @@ fn status_row<'a>(
     .align_y(Alignment::Center);
     if let Some(toast) = &scene.toast {
         let ink = match toast.kind {
-            ToastKind::Error => Color::from_rgb8(0xd0, 0x30, 0x30),
+            ToastKind::Error => {
+                leviculum_ui_iced::paint::colour(leviculum_ui::pixel::chrome(theme).failed_on_panel)
+            }
             _ => p.text,
         };
         line = line.push(

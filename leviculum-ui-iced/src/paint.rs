@@ -15,7 +15,8 @@ pub fn rgb(value: u32) -> Color {
 }
 
 /// The roles the shared widgets paint with, filled by each program from
-/// its own tokens (Loquax's `loquax::ui::chat::Colours`, lnomad's theme).
+/// its tokens (Loquax's `loquax::ui::chat::Colours`, whose chrome is the
+/// suite's; lnomad's window takes the suite's chrome itself, [`Palette::of`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     /// The screen's ground.
@@ -32,6 +33,24 @@ pub struct Palette {
     pub selected_row: Color,
     pub badge: Color,
     pub badge_text: Color,
+}
+
+impl Palette {
+    /// The roles from the suite's chrome ([`leviculum_ui::pixel`]), as a
+    /// program without tokens of its own fills them (lnomad's window).
+    pub fn of(c: &leviculum_ui::pixel::Chrome) -> Palette {
+        Palette {
+            background: colour(c.background),
+            bar: colour(c.bar),
+            panel: colour(c.panel),
+            text: colour(c.text),
+            text_secondary: colour(c.text_secondary),
+            accent: colour(c.accent),
+            selected_row: colour(c.selected_row),
+            badge: colour(c.badge),
+            badge_text: colour(c.badge_text),
+        }
+    }
 }
 
 #[cfg(test)]
