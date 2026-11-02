@@ -111,7 +111,7 @@ pub fn via(method: &str, reason: &str) {
 pub fn pn(node: &[u8; 16], source: &str, cost: Option<u64>) {
     tracing::debug!(
         event = "LNMSG_PN",
-        node = %to_hex(node),
+        pn = %to_hex(node),
         source = %scalar(source),
         cost = %cost.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
     );

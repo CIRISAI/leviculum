@@ -1010,7 +1010,7 @@ impl ReticulumNodeBuilder {
             let identity = match id_store.load() {
                 Ok(Some(id)) => {
                     tracing::info!("Loaded transport identity: {}", hex_short(id.hash()));
-                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()));
+                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()), identity = %hex_full(id.hash()));
                     id
                 }
                 Ok(None) => {
@@ -1019,7 +1019,7 @@ impl ReticulumNodeBuilder {
                         .save(&id)
                         .map_err(|e| Error::Storage(format!("failed to save identity: {e}")))?;
                     tracing::info!("Generated new transport identity: {}", hex_short(id.hash()));
-                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()));
+                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()), identity = %hex_full(id.hash()));
                     id
                 }
                 Err(e) => return Err(Error::Storage(format!("failed to load identity: {e}"))),

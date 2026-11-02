@@ -327,9 +327,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "EMB_INSERT_FAIL",
         required_keys: &["cap", "len_after_evict", "map"],
     },
+    // The transport identity. Its site also writes `node=` for periculum's
+    // fmt-log readers; the event log skips a site's `node`, so the hash
+    // rides here as `identity` (1294).
     EventSchema {
         name: "IDENTITY",
-        required_keys: &["node"],
+        required_keys: &["identity"],
     },
     EventSchema {
         name: "PATH_LOOKUP",
@@ -877,7 +880,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     },
     EventSchema {
         name: "LNMSG_PN",
-        required_keys: &["node", "source", "cost"],
+        required_keys: &["pn", "source", "cost"],
     },
     EventSchema {
         name: "LNMSG_FETCHED",
@@ -1205,16 +1208,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESOURCE_PART_DROP",
         required_keys: &["reason", "link", "state"],
     },
-    // The receive window's per-round sample. NOTE: this site emits its own
-    // `t` field, and the layer appends the relative timestamp as `t=` too,
-    // so the line carries two. A line's own stamp is its LAST `t=` (the rule
-    // `merge_event_logs` already applies), so the parsers agree -- but the
-    // round's elapsed milliseconds are shadowed and only the second `t` is
-    // readable. Declared as emitted; renaming the field is a wire change for
-    // whoever greps these lines.
+    // The receive window's per-round sample; `took_ms` is the round's
+    // elapsed milliseconds. It was `t` until 1294, beside the layer's own
+    // `t=` stamp, so a first-match parser read the round time as the
+    // line's timestamp (miauhaus, `round=1 t=161 ... t=314207`). No site
+    // may write `t` again (`no_event_site_writes_a_layer_key`).
     EventSchema {
         name: "RESOURCE_RW",
-        required_keys: &["rh", "round", "window", "wmax", "rate", "outst", "t"],
+        required_keys: &["rh", "round", "window", "wmax", "rate", "outst", "took_ms"],
     },
     // `leviculum-std` driver. ANNOUNCE_TX/ANNOUNCE_WITHHELD are the
     // peer-up announce burst (distinct from the transport's ANN_TX, which
