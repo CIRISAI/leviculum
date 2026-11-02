@@ -126,7 +126,7 @@ the codec is `leviculum-lxmf/src/lev.rs`.
 ### The group keys
 
 Group chats (`docs/drafts/group-chats-study-2026-11.md`, built from 1307)
-add capability bit 1, "I understand groups", and four keys; a reader
+add capability bit 1, "I understand groups", and five keys; a reader
 that knows only the keys above skips them. A copy a group's home sends a
 member that understands groups, writer `11…11`, its clock
 1700000000123 ms, epoch 1 (`VEC-MSG-LEV-GROUP-COPY`, 33 bytes of map):
@@ -148,8 +148,25 @@ read receipts off too (`{0x00: 2}`). `0x06` is the digest
 `[[bin16 writer, uint64 ms, str text], ...]` a group's home sends a slow
 member in place of one copy a line (`VEC-MSG-LEV-GROUP-DIGEST`); its text
 is the same lines as `"Name: text"`, one a line, which is all a stock
-member gets. Key `0x03` (group status) is the study's and not written
-yet.
+member gets.
+
+`0x03` is the group status a home sends the writer of one message
+`[bin32 original, uint delivered, uint read, uint members, uint
+readers]` (`VEC-MSG-LEV-GROUP-STATUS`): the writer's own message id, how
+many copies their members proved, how many a member said it read, how
+many were made, and how many of those members send read receipts. The
+study wrote four elements; `readers` is appended so "read by N of M"
+counts only the members whose receipts are on, and a member with them
+off is never waited for. The home sends it, empty with the pair alone,
+once the last copy is proven (the writer's two ticks), again when a late
+copy is proven after a digest, and when the last reader read it (the
+writer's read mark). A status of four elements is no status.
+
+A deleted group's last membership carries a third element, the standing
+`1` (ended): `[uint epoch, [[...], ...], 1]`, every member flagged left
+(`VEC-MSG-LEV-GROUP-ENDED`). A membership without it is a live group's,
+so every membership written before keeps its bytes; a reader that does
+not know the element skips it, as for any appended one.
 
 ### What other clients do with it
 

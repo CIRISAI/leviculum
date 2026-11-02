@@ -243,6 +243,7 @@ fn the_group_screens_are_the_golden_scenes() {
                     flags: flags[2],
                 },
             ],
+            ended: false,
         }),
         ..Lev::default()
     };

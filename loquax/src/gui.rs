@@ -2671,6 +2671,7 @@ mod tests {
                             flags: 0,
                         },
                     ],
+                    ended: false,
                 }),
                 ..Lev::default()
             },

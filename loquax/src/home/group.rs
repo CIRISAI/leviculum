@@ -1027,6 +1027,7 @@ fn members_key(epoch: u64, members: &[GroupMember]) -> Members {
                     },
             })
             .collect(),
+        ended: false,
     }
 }
 
@@ -1432,6 +1433,7 @@ mod tests {
                     name: "Anna".into(),
                     flags: MEMBER_LEFT,
                 }],
+                ended: false,
             }),
             ..Lev::default()
         }
@@ -1467,6 +1469,7 @@ mod tests {
                         name: name.into(),
                         flags: MEMBER_LEFT,
                     }],
+                    ended: false,
                 }),
                 ..Lev::default()
             }

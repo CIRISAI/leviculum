@@ -127,6 +127,7 @@ impl GroupInfo {
                             | if m.joined { MEMBER_JOINED } else { 0 },
                     })
                     .collect(),
+                ended: false,
             }),
             ..Lev::default()
         };
@@ -1058,6 +1059,7 @@ impl<B: Default> UiModel<B> {
                     .unwrap_or_default(),
                 flags,
             }],
+            ended: false,
         });
         if let (Some(own), Some(Members { members, .. })) = (self.address, &members) {
             if members[0].address == own {
@@ -1166,6 +1168,7 @@ mod tests {
                         flags: *flags,
                     })
                     .collect(),
+                ended: false,
             }),
             ..Lev::default()
         }

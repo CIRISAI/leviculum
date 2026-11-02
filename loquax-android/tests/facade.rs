@@ -5987,6 +5987,7 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
                         flags: 4,
                     },
                 ],
+                ended: false,
             }),
             ..Lev::default()
         },

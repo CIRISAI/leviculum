@@ -15,12 +15,12 @@ mod common;
 use leviculum_core::Identity;
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
 use leviculum_lxmf::lev::{
-    DigestLine, GroupCopy, Invite, Lev, Member, Members, Receipt, CAP_GROUPS, CAP_READ_RECEIPTS,
-    MEMBER_ADMIN, MEMBER_LEFT,
+    DigestLine, GroupCopy, GroupStatus, Invite, Lev, Member, Members, Receipt, CAP_GROUPS,
+    CAP_READ_RECEIPTS, MEMBER_ADMIN, MEMBER_JOINED, MEMBER_LEFT,
 };
 use leviculum_lxmf::{DeliveryMethod, Message, Verification};
 
-const IDS: [&str; 7] = [
+const IDS: [&str; 9] = [
     "VEC-MSG-LEV-MARK",
     "VEC-MSG-LEV-RECEIPT",
     "VEC-MSG-LEV-GROUP-COPY",
@@ -28,6 +28,8 @@ const IDS: [&str; 7] = [
     "VEC-MSG-LEV-GROUP-MEMBERS",
     "VEC-MSG-LEV-GROUP-LEAVE",
     "VEC-MSG-LEV-GROUP-DIGEST",
+    "VEC-MSG-LEV-GROUP-STATUS",
+    "VEC-MSG-LEV-GROUP-ENDED",
 ];
 
 const SENDER: [u8; 16] = [0x11; 16];
@@ -84,6 +86,7 @@ fn expected(id: &str) -> Lev {
                         flags: 0,
                     },
                 ],
+                ended: false,
             }),
             ..Lev::default()
         }),
@@ -95,6 +98,7 @@ fn expected(id: &str) -> Lev {
                     name: "Anna".into(),
                     flags: MEMBER_LEFT,
                 }],
+                ended: false,
             }),
             ..Lev::default()
         }),
@@ -111,6 +115,35 @@ fn expected(id: &str) -> Lev {
                     text: "Danke".into(),
                 },
             ]),
+            ..Lev::default()
+        }),
+        "VEC-MSG-LEV-GROUP-STATUS" => groups(Lev {
+            status: Some(GroupStatus {
+                original: [0x77; 32],
+                delivered: 2,
+                read: 1,
+                members: 2,
+                readers: 1,
+            }),
+            ..Lev::default()
+        }),
+        "VEC-MSG-LEV-GROUP-ENDED" => groups(Lev {
+            members: Some(Members {
+                epoch: 2,
+                members: vec![
+                    Member {
+                        address: SENDER,
+                        name: "Lew".into(),
+                        flags: MEMBER_ADMIN | MEMBER_LEFT,
+                    },
+                    Member {
+                        address: MEMBER,
+                        name: "Anna".into(),
+                        flags: MEMBER_JOINED | MEMBER_LEFT,
+                    },
+                ],
+                ended: true,
+            }),
             ..Lev::default()
         }),
         _ => Lev::mark(),

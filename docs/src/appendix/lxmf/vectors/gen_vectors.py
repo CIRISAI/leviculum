@@ -429,6 +429,19 @@ def gen_message_vectors():
                    {0x00: 3, 0x06: [[LEV_GROUP_SENDER, LEV_GROUP_SENT_MS, "Brot ist da"],
                                     [LEV_GROUP_MEMBER, LEV_GROUP_SENT_MS + 1000, "Danke"]]})
 
+    # VEC-MSG-LEV-GROUP-STATUS: what a group's home tells the writer of
+    # one message (study 2.3, 1307 pass four): the writer's own message id,
+    # copies proven, copies read, copies made, and the members that send
+    # read receipts (the element pass four appends to the study's four).
+    # VEC-MSG-LEV-GROUP-ENDED: the membership a deleted group's home sends,
+    # every member flagged left and the standing 1 (ended) as a third
+    # element.
+    gen_lev_vector("VEC-MSG-LEV-GROUP-STATUS", b"",
+                   {0x00: 3, 0x03: [LEV_GROUP_ORIGINAL, 2, 1, 2, 1]})
+    gen_lev_vector("VEC-MSG-LEV-GROUP-ENDED", b"",
+                   {0x00: 3, 0x05: [2, [[LEV_GROUP_SENDER, "Lew", 3],
+                                        [LEV_GROUP_MEMBER, "Anna", 5]], 1]})
+
     gen_foreign_writer_vectors(src, dst)
 
 
@@ -444,6 +457,7 @@ LEV_GROUP_MEMBER = bytes([0x55] * 16)
 LEV_GROUP_ADDRESS = bytes([0x22] * 16)
 LEV_GROUP_KEY = bytes(range(0x80, 0xC0))
 LEV_GROUP_SENT_MS = 1700000000123
+LEV_GROUP_ORIGINAL = bytes([0x77] * 32)
 
 
 def gen_lev_vector(vector_id, content, data):
