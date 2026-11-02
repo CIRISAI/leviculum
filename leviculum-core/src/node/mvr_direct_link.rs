@@ -1614,3 +1614,101 @@ fn a_host_payload_that_cannot_fit_is_refused_up_front() {
         Some(DirectLinkError::PayloadTooLarge)
     );
 }
+
+/// +ciris: a proposal whose punch failed is made again after the first
+/// backoff, by the node that proposed, with nothing from the host.
+#[test]
+fn a_failed_punch_is_proposed_again_after_the_backoff() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let out = pair.a.direct_link_punched(&session, None);
+    pair.pump_from_a(packets(&out));
+    pair.a.take_direct_link_jobs();
+    pair.b.take_direct_link_jobs();
+
+    let first = super::direct_link::RETRY_BACKOFF_MS[0];
+    pair.advance(first - 1_000);
+    assert!(
+        !pair
+            .a
+            .take_direct_link_jobs()
+            .iter()
+            .any(|j| matches!(j, DirectLinkJob::Probe { .. })),
+        "nothing before the backoff ends"
+    );
+    pair.advance(1_000);
+    let again = only_probe(&pair.a.take_direct_link_jobs());
+    assert_ne!(again, session, "a new session");
+    assert!(
+        pair.b.take_direct_link_jobs().is_empty(),
+        "the responder never retries"
+    );
+}
+
+/// +ciris: a refusal is final, and so is a node with retries turned off.
+#[test]
+fn a_refused_proposal_and_a_node_with_retry_off_ask_no_more() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::Reject);
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    assert!(pair.a_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkFailed {
+            failure: Failure::Rejected(_),
+            ..
+        }
+    )));
+    pair.a.take_direct_link_jobs();
+    pair.advance(super::direct_link::RETRY_BACKOFF_MS[0] + 1_000);
+    assert!(!pair
+        .a
+        .take_direct_link_jobs()
+        .iter()
+        .any(|j| matches!(j, DirectLinkJob::Probe { .. })));
+
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    pair.a.set_direct_link_retry(false);
+    let out = pair.a.direct_link_punched(&session, None);
+    pair.pump_from_a(packets(&out));
+    pair.a.take_direct_link_jobs();
+    pair.advance(super::direct_link::RETRY_BACKOFF_MS[0] + 1_000);
+    assert!(!pair
+        .a
+        .take_direct_link_jobs()
+        .iter()
+        .any(|j| matches!(j, DirectLinkJob::Probe { .. })));
+}
+
+/// +ciris: two leviculum nodes both run the commit, so their punched
+/// interfaces may use the fast, acked liveness check.
+#[test]
+fn both_punches_ask_for_fast_liveness_between_committing_peers() {
+    let mut pair = Pair::new();
+    pair.configure(DirectLinkPolicy::AcceptAll);
+    pair.propose();
+    let session = only_probe(&pair.a.take_direct_link_jobs());
+    let out = pair.a.direct_link_probed(&session, Some(a_public()));
+    pair.pump_from_a(packets(&out));
+    pair.b.take_direct_link_jobs();
+    let out = pair.b.direct_link_probed(&session, Some(b_public()));
+    let b_jobs = pair.b.take_direct_link_jobs();
+    pair.pump_from_b(packets(&out));
+    let a_jobs = pair.a.take_direct_link_jobs();
+    for jobs in [&a_jobs, &b_jobs] {
+        assert!(
+            matches!(
+                jobs.as_slice(),
+                [DirectLinkJob::Punch {
+                    fast_liveness: true,
+                    start_delay_ms,
+                    ..
+                }] if *start_delay_ms <= super::direct_link::RESPONDER_START_DELAY_MAX_MS
+            ),
+            "{jobs:?}"
+        );
+    }
+}
