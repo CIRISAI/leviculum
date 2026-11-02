@@ -35,7 +35,10 @@ each of them:
 
 Plus the prerequisite file both runners read (scripts/integ-prerequisites.txt):
 every target it names must exist, so a renamed suite cannot keep a skip
-that describes nothing. And a target with required features that the file
+that describes nothing, and must be named `<dir>/<target>`: a bare name two
+packages share is refused with that reason (1306). The selftest also holds
+scripts/integ-targets.sh's integ_run_groups to running a target whose name an
+excluded one shares from its own package (land gate on ee9541af). And a target with required features that the file
 names runs in its recipe, not in either runner, so that recipe must run it
 through scripts/with-prerequisites.sh naming it, or the forge runs the tests
 the file excludes everywhere else (forge pipeline 598, 2026-10-31, 1167).
@@ -320,6 +323,17 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_run
         if len(fields) < 2:
             out.append(f"{where}: needs `<path> <dir>/<target> [<test>]`.")
             continue
+        if "/" not in fields[1]:
+            same = sorted(t for t in enumerated if t.rsplit("/", 1)[-1] == fields[1])
+            if len(same) > 1:
+                out.append(
+                    f"{where}: names the bare target {fields[1]}, which exists "
+                    f"in {len(same)} packages ({', '.join(same)}); `cargo test "
+                    f"--test {fields[1]}` selects all of them, so excluding by "
+                    f"that name would drop the others without a word. Qualify "
+                    f"it as <dir>/{fields[1]} (1306)."
+                )
+                continue
         if fields[1] not in enumerated:
             out.append(
                 f"{where}: names {fields[1]}, which is not a test target in "
@@ -472,6 +486,79 @@ def selftest():
     got = wrapped_targets(bare, gated, claims)
     if got:
         failed.append(f"--wrapped with the recipe unwrapped: expected nothing, got {got}")
+    failed += run_groups_selftest()
+    return failed
+
+
+def run_groups(all_targets, selected):
+    """scripts/integ-targets.sh's integ_run_groups: [(dir or "-", name)]."""
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail; . scripts/integ-targets.sh && integ_run_groups \"$1\" \"$2\"",
+            "run_groups",
+            "\n".join(sorted(all_targets)),
+            "\n".join(sorted(selected)),
+        ],
+        cwd=REPO_DIR,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "integ_run_groups failed")
+    return [tuple(line.split("\t")) for line in proc.stdout.splitlines() if line]
+
+
+def run_groups_selftest():
+    """A second package with a target of the same name as an excluded one
+    (lnomad and loquax `scene_golden`, land gate on ee9541af): the survivor
+    runs from its own package, never as a workspace-wide name that would take
+    the excluded one along, and is never dropped."""
+    failed = []
+    cases = [
+        (
+            "two packages share a name and one is excluded",
+            {"a/same", "b/same", "a/plain"},
+            {"b/same", "a/plain"},
+            [("-", "plain"), ("b", "same")],
+        ),
+        (
+            "two packages share a name and both run",
+            {"a/same", "b/same", "a/plain"},
+            {"a/same", "b/same", "a/plain"},
+            [("-", "plain"), ("-", "same")],
+        ),
+        (
+            "both of a shared name are excluded",
+            {"a/same", "b/same", "a/plain"},
+            {"a/plain"},
+            [("-", "plain")],
+        ),
+    ]
+    for label, all_targets, selected, want in cases:
+        got = sorted(run_groups(all_targets, selected))
+        if got != sorted(want):
+            failed.append(f"integ_run_groups, {label}: expected {want}, got {got}")
+    # The bare name of the same fixture in the prerequisite file is refused
+    # with the reason; its qualified form is accepted.
+    enumerated = {"a/same", "b/same", "a/plain"}
+    meta = {t: [] for t in enumerated}
+    claims = [(1, ["a/plain", "standard", "standard-integ.sh"])]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "Justfile")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(FIXTURE_JUSTFILE)
+        for label, line, expect in [
+            ("a bare name two packages share", "same", "exists in 2 packages (a/same, b/same)"),
+            ("the same name qualified", "a/same", None),
+        ]:
+            pre = [(1, ["reference/x", line])]
+            got = findings(path, enumerated, meta, ("fixture", claims), ("fixture", pre), FIXTURE_FORGE_RUNNER)
+            if expect is None and got:
+                failed.append(f"{label}: expected no finding, got {got}")
+            elif expect is not None and not any(expect in g for g in got):
+                failed.append(f"{label}: expected a finding with `{expect}`, got {got}")
     return failed
 
 
