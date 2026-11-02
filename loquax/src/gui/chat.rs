@@ -35,6 +35,8 @@ pub use leviculum_ui_iced::{colour, rgb, Icon};
 
 use loquax::ui::chat::{self, size, Colours, Mark};
 use loquax::ui::compose::Button as BarButton;
+use loquax::ui::group_scene::InviteNode;
+use loquax::ui::groups::{Step as GroupStep, Verb as GroupVerb};
 use loquax::ui::intent::{Intent, Switch};
 use loquax::ui::reactions::SIGNAL_QUICK;
 use loquax::ui::recording::Verb;
@@ -114,6 +116,27 @@ fn flat<'a>(content: impl Into<Element<'a, Message>>, on: Message) -> button::Bu
 }
 
 /// A word on the bars, as a link in the accent.
+/// A filled button in the accent, ours' bubble ink on it (1307: Join,
+/// Next, Create); without `on` it is dimmed and takes no press.
+fn filled<'a>(words: &str, on: Option<Message>, t: Colours) -> Element<'a, Message> {
+    let ground = colour(t.accent);
+    let ink = colour(t.bubble_ours_text);
+    let dim = on.is_none();
+    button(text(words.to_string()).size(15).color(ink))
+        .on_press_maybe(on)
+        .padding([6, 18])
+        .style(move |_: &Theme, _| button::Style {
+            background: Some(Background::Color(match dim {
+                true => ground.scale_alpha(0.4),
+                false => ground,
+            })),
+            text_color: ink,
+            border: border::rounded(size::COMPOSE_CORNER),
+            ..button::Style::default()
+        })
+        .into()
+}
+
 fn link<'a>(words: &str, on: Message, t: Colours) -> Element<'a, Message> {
     control::link(words, on, colour(t.accent))
 }
@@ -410,6 +433,15 @@ impl App {
                 .on_input(Message::NewAddress)
                 .on_submit(Message::NewGo);
             pane = pane.push(container(new).padding([0, 12]));
+            // "New group" at the top of the new chat (1307, study 4.1).
+            pane = pane.push(
+                container(link(
+                    self.word(StrId::NewGroup),
+                    Message::Intent(Intent::Group(GroupVerb::New)),
+                    t,
+                ))
+                .padding([0, 12]),
+            );
         }
         let empty = (self.scene.list.as_ref()).is_none_or(|list| list.rows.is_empty());
         let rows = self.listed().into_iter().fold(column![], |rows, r| {
@@ -455,10 +487,196 @@ impl App {
         };
         let bar = self.chat_bar(open, t);
         let messages = self.groups(open, t);
-        column![bar, messages, self.compose_bar(open, t)]
+        let mut pane = column![bar, messages];
+        // A group the reader is only invited to: its card above the
+        // compose bar (1307).
+        if let Some(invite) = &open.invite {
+            pane = pane.push(container(self.invite_card(invite, false, t)).padding([8, 12]));
+        }
+        pane.push(self.compose_bar(open, t))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    /// Whether a group's screen is open (1307): "New group" or a member
+    /// sheet.
+    pub(super) fn group_screen(&self) -> bool {
+        self.scene.new_group.is_some() || self.scene.members.is_some()
+    }
+
+    /// "New group" or the member sheet, as the scene has them.
+    pub(super) fn group_pane(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let mut pane = column![].spacing(10).padding([16, 16]);
+        if let Some(new) = &self.scene.new_group {
+            let head = row![
+                text(new.title.resolve(self.lang))
+                    .size(size::BAR_NAME)
+                    .color(ink)
+                    .width(Length::Fill),
+                link(
+                    self.word(new.close.label_key),
+                    Message::Intent(new.close.intent.clone()),
+                    t
+                ),
+            ]
+            .align_y(Alignment::Center);
+            pane = pane.push(head);
+            if new.step == GroupStep::Name {
+                let field = chrome::search_field(
+                    &new.hint.resolve(self.lang),
+                    &new.name,
+                    size::COMPOSE_CORNER,
+                    palette(t),
+                )
+                .on_input(Message::GroupName)
+                .on_submit(Message::Intent(new.create.intent.clone()));
+                pane = pane.push(field);
+                pane = pane.push(text(new.trust.resolve(self.lang)).size(14).color(quiet));
+            } else {
+                pane = pane.push(text(new.picked.resolve(self.lang)).size(14).color(quiet));
+            }
+            let mut rows = column![].spacing(2);
+            for r in &new.rows {
+                let tick = if r.picked { "☑" } else { "☐" };
+                let line = row![
+                    text(tick).size(18).color(ink),
+                    avatar(&r.avatar, size::ROW_AVATAR, t),
+                    text(r.name.clone()).size(size::ROW_NAME).color(ink),
+                ]
+                .spacing(size::ROW_GAP)
+                .align_y(Alignment::Center);
+                rows = rows.push(match new.step {
+                    GroupStep::Pick => chrome::list_item(
+                        line,
+                        r.picked,
+                        Message::Intent(r.toggle.intent.clone()),
+                        palette(t),
+                    ),
+                    GroupStep::Name => line.into(),
+                });
+            }
+            pane = pane.push(scrollable(rows).height(Length::Fill));
+            let go = match new.step {
+                GroupStep::Pick => &new.next,
+                GroupStep::Name => &new.create,
+            };
+            pane = pane.push(filled(
+                self.word(go.label_key),
+                go.enabled.then(|| Message::Intent(go.intent.clone())),
+                t,
+            ));
+        } else if let Some(sheet) = &self.scene.members {
+            let head = row![
+                column![
+                    text(sheet.title.resolve(self.lang))
+                        .size(size::BAR_NAME)
+                        .color(ink),
+                    text(sheet.count.resolve(self.lang)).size(14).color(quiet),
+                ]
+                .width(Length::Fill),
+                link(
+                    self.word(sheet.close.label_key),
+                    Message::Intent(sheet.close.intent.clone()),
+                    t
+                ),
+            ]
+            .align_y(Alignment::Center);
+            pane = pane.push(head);
+            let mut rows = column![].spacing(6);
+            for r in &sheet.rows {
+                let mut line = row![
+                    text(r.name.resolve(self.lang))
+                        .size(size::ROW_NAME)
+                        .color(ink)
+                        .width(Length::Fill),
+                    text(r.state.resolve(self.lang)).size(14).color(quiet),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center);
+                if let Some(remove) = &r.remove {
+                    line = line.push(link(
+                        self.word(remove.label_key),
+                        Message::Intent(remove.intent.clone()),
+                        t,
+                    ));
+                }
+                rows = rows.push(line);
+            }
+            pane = pane.push(scrollable(rows).height(Length::Fill));
+            if let Some(ask) = &sheet.ask {
+                pane = pane.push(text(ask.words.resolve(self.lang)).size(15).color(ink));
+                pane = pane.push(row![
+                    flat(
+                        text(self.word(StrId::GroupYes))
+                            .size(15)
+                            .color(colour(t.failed_mark_on_panel)),
+                        Message::Intent(ask.yes.intent.clone()),
+                    )
+                    .padding([4, 8]),
+                    link(
+                        self.word(StrId::GroupNo),
+                        Message::Intent(ask.no.intent.clone()),
+                        t
+                    ),
+                ]);
+            } else if let Some(leave) = &sheet.leave {
+                pane = pane.push(flat(
+                    text(self.word(leave.label_key))
+                        .size(15)
+                        .color(colour(t.failed_mark_on_panel)),
+                    Message::Intent(leave.intent.clone()),
+                ));
+            }
+        }
+        container(pane)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// An invitation's card (1307): who invited to what, the trust
+    /// sentence, and Join or where the reader stands.
+    fn invite_card<'a>(
+        &self,
+        invite: &'a InviteNode,
+        in_bubble: bool,
+        t: Colours,
+    ) -> Element<'a, Message> {
+        let ink = colour(if in_bubble {
+            t.bubble_theirs_text
+        } else {
+            t.text
+        });
+        let quiet = colour(if in_bubble {
+            t.bubble_theirs_meta
+        } else {
+            t.text_secondary
+        });
+        let mut card = column![
+            text(invite.title.resolve(self.lang))
+                .size(size::BODY)
+                .color(ink),
+            text(invite.trust.resolve(self.lang)).size(13).color(quiet),
+        ]
+        .spacing(4);
+        if let Some(join) = &invite.join {
+            card = card.push(filled(
+                self.word(join.label_key),
+                Some(Message::Intent(join.intent.clone())),
+                t,
+            ));
+        } else if let Some(state) = &invite.state {
+            card = card.push(text(state.resolve(self.lang)).size(13).color(quiet));
+        }
+        card.into()
     }
 
     /// The chat's top bar: the peer's avatar, the name, the bar's actions.
@@ -554,6 +772,18 @@ impl App {
                 )
                 .center_x(Length::Fill)
                 .padding(iced::Padding::ZERO.top(16).bottom(8)),
+            );
+        }
+        // A group's chat names the writer above a group of bubbles that
+        // is not the reader's (1307).
+        if group.named {
+            list = list.push(
+                container(
+                    text(group.sender.resolve(self.lang))
+                        .size(13)
+                        .color(colour(t.accent)),
+                )
+                .padding(iced::Padding::ZERO.top(size::GAP).left(12)),
             );
         }
         for node in &group.bubbles {
@@ -661,9 +891,11 @@ impl App {
                 ));
             }
         }
-        // The words under the media, none where the scene has none
-        // (1268): a photo alone is the photo and its time.
-        if let Some(words) = &node.text {
+        // An invitation is a card (1307): its words, the trust sentence and
+        // Join, in place of the text a stock client reads.
+        if let Some(invite) = &node.invite {
+            inside = inside.push(self.invite_card(invite, !ours, t));
+        } else if let Some(words) = &node.text {
             inside = inside.push(text(words.clone()).size(size::BODY).color(ink));
         }
         if let Some(fix) = &bubble.fix {
@@ -1270,8 +1502,17 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
     // A report's line is the scene's words after the pin, as the phone
     // sets it; a text of ours is said as ours.
     // A message typed and not sent stands in for it, in italics (1219).
+    let invited = r
+        .group
+        .as_ref()
+        .filter(|g| content.last.is_empty() || g.standing == loquax::ui::groups::Standing::Invited);
     let last = match (&r.draft, &r.live, content.ours && content.kind == "text") {
         (Some(draft), _, _) => draft.resolve(lang),
+        // A group's row says it is an invitation, or how many are in it
+        // while nothing was written yet (1307).
+        (None, None, _) if invited.is_some() => {
+            invited.map(|g| g.words.resolve(lang)).unwrap_or_default()
+        }
         (None, Some(live), _) => format!("{} {}", chat::PIN, live.resolve(lang)),
         (None, None, true) => format!("{}: {}", StrId::QuoteYou.text(lang), content.last),
         (None, None, false) => content.last.clone(),

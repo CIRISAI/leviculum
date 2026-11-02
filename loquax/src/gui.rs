@@ -299,6 +299,8 @@ pub enum Message {
     Search(String),
     /// The new conversation's field: what is typed, `Enter`.
     NewAddress(String),
+    /// What the new group's name field holds now (1307).
+    GroupName(String),
     NewGo,
     Compose(text_editor::Action),
     /// What the user asks (1218): a press on a scene node raises the
@@ -704,6 +706,9 @@ impl App {
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
             Message::Search(query) => self.search = query,
             Message::NewAddress(typed) => self.new_address = Some(typed),
+            Message::GroupName(typed) => {
+                self.tell(UiEvent::Group(loquax::ui::groups::Verb::Name(typed)));
+            }
             Message::NewGo => {
                 let typed = self.new_address.clone().unwrap_or_default();
                 // The one reader every frontend asks (1263): a contact
@@ -841,7 +846,13 @@ impl App {
             Intent::Theme => self.flipped = !self.flipped,
             // The group verbs (1307) are the model's own; the window draws
             // the picker and the sheet from the scene.
-            Intent::Group(verb) => self.tell(UiEvent::Group(verb)),
+            Intent::Group(verb) => {
+                // "New group" is reached from the new chat's field.
+                if verb == loquax::ui::groups::Verb::New {
+                    self.new_address = None;
+                }
+                self.tell(UiEvent::Group(verb));
+            }
             Intent::ReadReceipts { on } => {
                 self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
             }
@@ -1474,6 +1485,12 @@ impl App {
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
             (Screen::Settings, _, _) => self.settings_pane(),
+            // A group's screens (1307) take the chat's place, or the
+            // whole stack's on a narrow window.
+            (Screen::Chats, LayoutClass::Wide, _) if self.group_screen() => {
+                row![self.list_pane(), self.group_pane()].into()
+            }
+            (Screen::Chats, LayoutClass::Compact, _) if self.group_screen() => self.group_pane(),
             (Screen::Chats, LayoutClass::Wide, _) => {
                 row![self.list_pane(), self.chat_pane()].into()
             }
@@ -2550,6 +2567,171 @@ mod tests {
         let (w, h) = (900, 560);
         app.window = Size::new(w as f32, h as f32);
         map::tests::same_as("gui-chat-media.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// 1307 pass two: the four group screens in the window, pixel for
+    /// pixel the goldens, light: the group's chat with the writers' names
+    /// above their bubbles and the member count as the avatar, Anna's chat
+    /// holding the invitation's card with Join, the member sheet, and "New
+    /// group" at its name step with the trust sentence. Each press on a
+    /// node is the scene's verb.
+    #[test]
+    fn the_group_screens_are_the_goldens() {
+        use leviculum_lxmf::lev::{GroupCopy, Invite, Lev, Member, Members};
+        use loquax::ui::groups::Verb;
+        use loquax::ui::intent::Target;
+        const FAMILIE: [u8; 16] = [0x51; 16];
+        const VEREIN: [u8; 16] = [0x52; 16];
+        let lev_of = |lev: Lev| {
+            let mut fields = Vec::new();
+            lev.put_into(&mut fields);
+            fields
+        };
+        let arrive = |model: &mut crate::shell::Model, from, id: u8, body: &str, lev: Lev| {
+            update(
+                model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [id; 32],
+                    source: from,
+                    title: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                    fields: lev_of(lev),
+                    verified: true,
+                }),
+            );
+        };
+        let invite = |group, name: &str| Lev {
+            capabilities: Some(3),
+            invite: Some(Invite {
+                group,
+                public_key: [7; 64],
+                name: name.into(),
+                admin_name: "Anna".into(),
+                epoch: 1,
+            }),
+            ..Lev::default()
+        };
+        let copy = |writer| Lev {
+            capabilities: Some(2),
+            group_copy: Some(GroupCopy {
+                sender: writer,
+                sent_ms: 1,
+                epoch: 2,
+            }),
+            ..Lev::default()
+        };
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        model.names.remember(OWN, "Mia Sander");
+        model.names.remember(ANNA, "Anna Schulz");
+        model.names.remember(BERT, "Bert");
+        update(&mut model, UiEvent::Clock(at(30, 9, 0)));
+        received(&mut model, BERT, 9, "The relay on the hill is up again");
+        arrive(
+            &mut model,
+            ANNA,
+            1,
+            "Anna invited you to Familie: lxma://…",
+            invite(FAMILIE, "Familie"),
+        );
+        update(
+            &mut model,
+            UiEvent::Group(Verb::Join {
+                group: Target::Peer(FAMILIE),
+            }),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 5)));
+        arrive(
+            &mut model,
+            FAMILIE,
+            2,
+            "",
+            Lev {
+                capabilities: Some(3),
+                members: Some(Members {
+                    epoch: 2,
+                    members: vec![
+                        Member {
+                            address: ANNA,
+                            name: "Anna".into(),
+                            flags: 2 | 4,
+                        },
+                        Member {
+                            address: OWN,
+                            name: "Mia".into(),
+                            flags: 4,
+                        },
+                        Member {
+                            address: BERT,
+                            name: "Bert".into(),
+                            flags: 0,
+                        },
+                    ],
+                }),
+                ..Lev::default()
+            },
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 10)));
+        arrive(
+            &mut model,
+            FAMILIE,
+            3,
+            "Anna Schulz: Bread is here",
+            copy(ANNA),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 11)));
+        arrive(&mut model, FAMILIE, 4, "Bert: Thanks!", copy(BERT));
+        update(&mut model, UiEvent::Clock(at(30, 9, 12)));
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer: FAMILIE,
+                body: "On my way".into(),
+            },
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 20)));
+        arrive(
+            &mut model,
+            ANNA,
+            5,
+            "Anna invited you to Verein: lxma://…",
+            invite(VEREIN, "Verein"),
+        );
+        let (w, h) = (900, 560);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let mut shot = |model: &mut crate::shell::Model, name: &str| {
+            app.apply(Message::Seen(Box::new(seen_of(model))));
+            map::tests::same_as(name, &shoot(&app, w, h), w, h);
+        };
+        update(&mut model, UiEvent::Open { peer: FAMILIE });
+        shot(&mut model, "gui-group-chat.png");
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        shot(&mut model, "gui-group-invitation.png");
+        update(&mut model, UiEvent::Open { peer: FAMILIE });
+        update(
+            &mut model,
+            UiEvent::Group(Verb::Members {
+                group: Target::Open,
+            }),
+        );
+        shot(&mut model, "gui-group-members.png");
+        update(&mut model, UiEvent::Group(Verb::Close));
+        update(&mut model, UiEvent::Group(Verb::New));
+        update(&mut model, UiEvent::Group(Verb::Pick(BERT)));
+        update(&mut model, UiEvent::Group(Verb::Next));
+        update(&mut model, UiEvent::Group(Verb::Name("Market".into())));
+        shot(&mut model, "gui-group-new.png");
+        // A press on the scene's Create asks the model.
+        let create = app
+            .scene
+            .new_group
+            .as_ref()
+            .map(|n| n.create.clone())
+            .expect("Create");
+        assert!(create.enabled);
+        assert_eq!(create.intent, Intent::Group(Verb::Create));
     }
 
     /// `pcm` as the microphone's levels for Anna's recording, a window
