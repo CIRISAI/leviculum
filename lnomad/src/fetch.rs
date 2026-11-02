@@ -12,11 +12,21 @@
 //! response value (the inner value only; the `[request_id, response]` wrapper is
 //! already stripped by the node).
 //!
+//!
+//! The node is a [`NodeLend`]: the standalone browser owns one
+//! ([`OwnNode`], what [`Session::connect`] builds), and a host that runs a
+//! node already lends it ([`LentNode`]): Loquax's Browse tab fetches through
+//! the phone's own node and its event stream, not a second node beside it
+//! (`docs/src/concepts/lnomad-everywhere.md`, slice 3). The fetch is the same
+//! code either way.
+//!
 //! [`Link`]: leviculum_std::LinkHandle
 //! [`NodeEvent::ResponseReceived`]: leviculum_std::NodeEvent::ResponseReceived
 
 use crate::app::strings::{with, StrId, Text};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -108,18 +118,108 @@ struct CurrentLink {
     ready: bool,
 }
 
-/// A connected fetch session over a shared instance.
+/// What a fetch session needs of a node: the node, to learn paths, open
+/// links and send requests on them, and the events it says about them (the
+/// link coming up or closing, a response or its timeout, the announces).
 ///
-/// Owns the connected node and its event stream, and reuses a single [`Link`]
+/// The session reads only those events and ignores the rest, so a lender may
+/// hand it more than it needs; it must not hand it fewer.
+pub trait NodeLend: Send {
+    /// The node the session links and requests through, `None` once a lent
+    /// one is gone with its lender.
+    fn node(&self) -> Option<NodeRef<'_>>;
+    /// The node's next event, `None` once the stream ended. Cancel-safe: the
+    /// session waits on it inside `timeout` and `select!`.
+    fn next_event(&mut self) -> impl Future<Output = Option<NodeEvent>> + Send;
+    /// The session is closing: an owned node stops, a lent one stays with
+    /// its lender.
+    fn release(&mut self) -> impl Future<Output = Result<(), FetchError>> + Send;
+}
+
+/// The node for one call: borrowed from the session's own, or a lent one
+/// held for as long as the call takes and no longer, so the lender can
+/// still stop it, which takes the node to itself.
+pub enum NodeRef<'a> {
+    Own(&'a ReticulumNode),
+    Lent(Arc<ReticulumNode>),
+}
+
+impl std::ops::Deref for NodeRef<'_> {
+    type Target = ReticulumNode;
+
+    fn deref(&self) -> &ReticulumNode {
+        match self {
+            NodeRef::Own(node) => node,
+            NodeRef::Lent(node) => node,
+        }
+    }
+}
+
+/// The standalone browser's node: its own, connected to a shared instance,
+/// with the driver's event stream.
+pub struct OwnNode {
+    node: ReticulumNode,
+    events: EventReceiver,
+}
+
+impl NodeLend for OwnNode {
+    fn node(&self) -> Option<NodeRef<'_>> {
+        Some(NodeRef::Own(&self.node))
+    }
+
+    fn next_event(&mut self) -> impl Future<Output = Option<NodeEvent>> + Send {
+        self.events.recv()
+    }
+
+    async fn release(&mut self) -> Result<(), FetchError> {
+        self.node
+            .stop()
+            .await
+            .map_err(|e| FetchError::Node(e.to_string()))
+    }
+}
+
+/// A node a host lends the session: its own running node, and the events
+/// its processor tap forwards. The host keeps the node, so the session
+/// holds it weakly; closing the session closes only the session's link.
+pub struct LentNode {
+    node: Weak<ReticulumNode>,
+    events: mpsc::UnboundedReceiver<NodeEvent>,
+}
+
+impl LentNode {
+    /// `node` with the events its host forwards on `events`.
+    pub fn new(node: Weak<ReticulumNode>, events: mpsc::UnboundedReceiver<NodeEvent>) -> Self {
+        Self { node, events }
+    }
+}
+
+impl NodeLend for LentNode {
+    fn node(&self) -> Option<NodeRef<'_>> {
+        self.node.upgrade().map(NodeRef::Lent)
+    }
+
+    fn next_event(&mut self) -> impl Future<Output = Option<NodeEvent>> + Send {
+        self.events.recv()
+    }
+
+    async fn release(&mut self) -> Result<(), FetchError> {
+        Ok(())
+    }
+}
+
+/// A connected fetch session over a node, its own ([`OwnNode`], the
+/// default) or a lent one.
+///
+/// Holds the node and its event stream, and reuses a single [`Link`]
 /// across fetches to the same destination the way the reference browser does.
 /// A session holds at most one link at a time: switching destination, giving
 /// up on a half-built link, or closing the session closes the one it held, so
 /// a browsing run leaves no keepalived leftovers on the shared medium.
 ///
 /// [`Link`]: leviculum_std::LinkHandle
-pub struct Session {
-    node: ReticulumNode,
-    events: EventReceiver,
+pub struct Session<N: NodeLend = OwnNode> {
+    lend: N,
     current: Option<CurrentLink>,
     /// lnomad's own persistent identity, revealed to a destination on fetch
     /// when the identify store opts that destination in. Distinct from the
@@ -137,7 +237,7 @@ pub struct Session {
     announce_sink: Option<mpsc::UnboundedSender<DiscoveredNode>>,
 }
 
-impl Session {
+impl Session<OwnNode> {
     /// Connect to the shared instance named in `config_dir/config`, falling back
     /// to instance `default`. Storage is read from `config_dir/storage`, matching
     /// `lncp`; a client with transport disabled writes nothing there.
@@ -192,15 +292,22 @@ impl Session {
         node.start()
             .await
             .map_err(|e| FetchError::Connect(e.to_string()))?;
-        Ok(Self {
-            node,
-            events,
+        Ok(Session::over(OwnNode { node, events }, identity, identify))
+    }
+}
+
+impl<N: NodeLend> Session<N> {
+    /// A session over `lend`, revealing `identity` to the destinations
+    /// `identify` opts in.
+    pub fn over(lend: N, identity: Identity, identify: IdentifyStore) -> Self {
+        Self {
+            lend,
             current: None,
             identity,
             identify,
             registry: NomadNodeRegistry::new(),
             announce_sink: None,
-        })
+        }
     }
 
     /// The fingerprint of lnomad's own identity: the hash the responder sees
@@ -254,7 +361,7 @@ impl Session {
     /// key press, so it can park on a quiet stream without a periodic wakeup.
     pub async fn recv_node_announce(&mut self) -> Option<[u8; 16]> {
         loop {
-            let event = self.events.recv().await?;
+            let event = self.lend.next_event().await?;
             if let NodeEvent::AnnounceReceived { announce, .. } = &event {
                 if self.note_announce(announce) {
                     return Some(*announce.destination_hash().as_bytes());
@@ -333,7 +440,7 @@ impl Session {
         let timeout_ms = timeout.as_millis() as u64;
 
         let request_id = self
-            .node
+            .node()?
             .send_request(&link_id, &target.path, data.as_deref(), Some(timeout_ms))
             .await
             .map_err(|e| match e {
@@ -355,7 +462,7 @@ impl Session {
     pub async fn next_node_announce(&mut self, timeout: Duration) -> Option<[u8; 16]> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let event = match tokio::time::timeout_at(deadline, self.events.recv()).await {
+            let event = match tokio::time::timeout_at(deadline, self.lend.next_event()).await {
                 Ok(Some(event)) => event,
                 Ok(None) | Err(_) => return None,
             };
@@ -389,8 +496,9 @@ impl Session {
             return false;
         }
         let hops = self
-            .node
-            .hops_to(announce.destination_hash())
+            .lend
+            .node()
+            .and_then(|node| node.hops_to(announce.destination_hash()))
             .map(|h| h as u32);
         let now = now_unix_secs();
         let recorded = self.registry.observe(announce, hops, now);
@@ -416,7 +524,10 @@ impl Session {
         if let Some(current) = &self.current {
             if current.ready
                 && current.dest_hash == *dest
-                && self.node.link_mdu(&current.link_id).is_some()
+                && self
+                    .lend
+                    .node()
+                    .is_some_and(|node| node.link_mdu(&current.link_id).is_some())
             {
                 return Ok(current.link_id);
             }
@@ -431,9 +542,9 @@ impl Session {
 
         // Learn a path if we do not have one. `wait_for_path` sends the first
         // `PATH_REQUEST` itself, immediately, then repeats on the cadence.
-        if !self.node.has_path(&dest_hash) {
+        if !self.node()?.has_path(&dest_hash) {
             let found = self
-                .node
+                .node()?
                 .wait_for_path(&dest_hash, PATH_BUDGET, PATH_RETRY_INTERVAL)
                 .await
                 .map_err(|e| FetchError::Node(e.to_string()))?;
@@ -445,7 +556,7 @@ impl Session {
         // The destination identity (learned from its announce) yields the
         // Ed25519 verifying key needed to verify the link proof.
         let identity = self
-            .node
+            .node()?
             .get_identity(&dest_hash)
             .ok_or(FetchError::NoPath)?;
         let pk = identity.public_key_bytes();
@@ -453,7 +564,7 @@ impl Session {
         signing_key.copy_from_slice(&pk[32..64]);
 
         let handle = self
-            .node
+            .node()?
             .connect(&dest_hash, &signing_key)
             .await
             .map_err(|_| FetchError::LinkFailed)?;
@@ -476,9 +587,16 @@ impl Session {
         // Identify on the fresh link before any request goes out, so the
         // responder has `remote_identity` when it generates the page.
         if self.identify.contains(dest) {
-            if let Err(err) = self.node.identify_link(&link_id, &self.identity).await {
+            let identified = match self.node() {
+                Ok(node) => node
+                    .identify_link(&link_id, &self.identity)
+                    .await
+                    .map_err(|err| FetchError::Node(err.to_string())),
+                Err(err) => Err(err),
+            };
+            if let Err(err) = identified {
                 self.close_current_link().await;
-                return Err(FetchError::Node(err.to_string()));
+                return Err(err);
             }
         }
 
@@ -486,6 +604,13 @@ impl Session {
             current.ready = true;
         }
         Ok(link_id)
+    }
+
+    /// The node for one call, or [`FetchError::Node`] once a lent one is gone.
+    fn node(&self) -> Result<NodeRef<'_>, FetchError> {
+        self.lend
+            .node()
+            .ok_or_else(|| FetchError::Node("the node is gone".to_string()))
     }
 
     /// Close the link the session currently owns, if any, and forget it.
@@ -500,7 +625,9 @@ impl Session {
         let Some(link_id) = self.current.as_ref().map(|current| current.link_id) else {
             return;
         };
-        let _ = self.node.close_link(&link_id).await;
+        if let Some(node) = self.lend.node() {
+            let _ = node.close_link(&link_id).await;
+        }
         self.current = None;
     }
 
@@ -513,7 +640,7 @@ impl Session {
     ) -> Result<(), FetchError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let event = match tokio::time::timeout_at(deadline, self.events.recv()).await {
+            let event = match tokio::time::timeout_at(deadline, self.lend.next_event()).await {
                 Ok(Some(event)) => event,
                 Ok(None) => return Err(FetchError::LinkFailed),
                 Err(_) => return Err(FetchError::LinkFailed),
@@ -548,7 +675,7 @@ impl Session {
     ) -> Result<(Vec<u8>, Option<Vec<u8>>), FetchError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let event = match tokio::time::timeout_at(deadline, self.events.recv()).await {
+            let event = match tokio::time::timeout_at(deadline, self.lend.next_event()).await {
                 Ok(Some(event)) => event,
                 Ok(None) => return Err(FetchError::LinkFailed),
                 Err(_) => return Err(FetchError::Timeout),
@@ -586,10 +713,7 @@ impl Session {
     /// shared and cannot be taken by value at teardown.
     pub async fn shutdown(&mut self) -> Result<(), FetchError> {
         self.close_current_link().await;
-        self.node
-            .stop()
-            .await
-            .map_err(|e| FetchError::Node(e.to_string()))
+        self.lend.release().await
     }
 }
 
