@@ -12,7 +12,7 @@ git tag, not the version string. -->
 ## [0.33.0+ciris.1] — CIRIS fork
 
 Steering, metering and live-media asks from CIRISEdge for the CIRIS mesh
-(#91, #92, #93, #94).
+(#91, #92, #93, #94); the direct-link punch fix.
 
 ### Added
 
@@ -50,6 +50,25 @@ Steering, metering and live-media asks from CIRISEdge for the CIRIS mesh
   request on one interface only, so a single relay can be asked. Not
   throttled.
 
+- Forwarded-link meters, caps and admission at a transport node
+  (leviculum#93).
+  - `ReticulumNode::set_forward_admission(hook)` installs a rule that sees
+    each link request this node would forward for others: link id,
+    destination, both interfaces and hops. It answers
+    `ForwardDecision::Refuse` (not forwarded, so the link never establishes
+    through this node) or `Admit { max_bytes_per_s, max_packets_per_s }`.
+    Caps are per link and per direction, as one-second token buckets; link
+    packets over a cap are dropped and counted.
+  - `forwarded_links()` reports, per forwarded link: payload bytes, packets
+    and drops over a cap in each direction, the interfaces, and when the link
+    was admitted and last used.
+  - `forward_refusals()` counts the refused requests.
+  - With no rule, every request is admitted uncapped, as before. Local
+    clients' own links are never subject to the rule.
+  - The rule runs with the core lock held, so it must not call into the
+    node.
+  - Witnesses: `leviculum-core/src/node/mvr_relay_route.rs` and
+    `forward_meter.rs`.
 - Channel frames with a deadline, for live media (leviculum#94).
   - `LinkHandle::try_send_timed(data, ttl)` (core
     `send_on_link_timed(link_id, data, ttl_ms)`) sends a frame that is
