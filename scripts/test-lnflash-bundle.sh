@@ -139,6 +139,10 @@ dumpout() { echo "  --- script output ---"; sed 's/^/    /' "$TREE/../out"; }
 assert_stamped() { # <stamp> [<suffix>]
     local stamp="$1" suffix="${2:-}" tarball listing unpack name image
     local bundle="$stamp$suffix"
+    # Cleared first: a case whose bundle never got this far must not have the
+    # previous case's manifest asserted in its name (and with none set at all,
+    # `set -u` ended the whole test before the script output was dumped).
+    MANIFEST="$TREE/../no-manifest"
     tarball="$TREE/target/lnflash/lnflash-$bundle.tar.gz"
     [ "$(rc)" = 0 ] || { fail "the bundle script exited $(rc)"; return; }
     # 1. The tarball, and the one directory inside it that `cd lnflash-*`

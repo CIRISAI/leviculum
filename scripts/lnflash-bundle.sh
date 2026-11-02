@@ -373,9 +373,19 @@ for record in "${BOARDS[@]}"; do
     [ -n "$stem" ] || continue
     wanted+=("lnflash-$BUNDLE_NAME/firmware/$name/${stem}_license-agreement.txt")
 done
+# A here-string and never `printf | grep -q`: bash's printf writes a line
+# buffer at a time, so under `pipefail` that pipeline is red whenever grep
+# matches and exits before printf has written the rest, printf dying of SIGPIPE
+# (141) with the name right there in the listing (#843). It reported a present
+# THIRD-PARTY-NOTICES missing once on a loaded host (1314: the pipe form 14 red
+# of 20000 checks under `stress-ng --cpu 40`). The listing goes with the
+# message, so a red names what it compared against.
 for want in "${wanted[@]}"; do
-    printf '%s\n' "$listing" | grep -qxF "$want" \
-        || { echo "bundle is missing $want" >&2; exit 1; }
+    grep -qxF -- "$want" <<<"$listing" || {
+        echo "bundle is missing $want; the tarball lists:" >&2
+        printf '%s\n' "$listing" | sed 's/^/  /' >&2
+        exit 1
+    }
 done
 # Not just present: both halves of the notice file have to be in it. A
 # truncated or half-generated file passes a name check and fails the obligation
