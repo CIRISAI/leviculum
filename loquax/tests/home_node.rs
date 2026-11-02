@@ -55,6 +55,29 @@ impl HomeNode {
         }
     }
 
+    /// Wait for the end of `message`'s direct leg to a recipient nobody
+    /// answers for: the answer bound's `unanswered` (1328), or the router's
+    /// own `failed`. For a recipient never heard the router gives up after
+    /// its pathless tries at about the same 60 s (60.05 s measured in 1307
+    /// pass six), so which line comes first is the tick's luck; either
+    /// hands the message on to its next leg.
+    async fn wait_for_direct_end(&self, message: &str, secs: u64) {
+        let unanswered = format!("HOME outbox direct unanswered message={message}");
+        let failed = format!("HOME outbox direct failed message={message}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            let log = self.log();
+            if log.contains(&unanswered) || log.contains(&failed) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the direct leg of {message} did not end within {secs} s:\n{log}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     async fn start(home: &std::path::Path, instance: &str) -> Self {
         Self::start_with(home, instance, &[]).await
     }
@@ -535,13 +558,9 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
     );
 
     // The client is gone. Nobody answers the home node's direct leg within
-    // its answer bound (1328), and with no propagation node configured the
-    // message stays in its outbox.
-    node.wait_for(
-        &format!("HOME outbox direct unanswered message={message_id}"),
-        90,
-    )
-    .await;
+    // its answer bound (1328), or the router gives up on it first, and with
+    // no propagation node configured the message stays in its outbox.
+    node.wait_for_direct_end(&message_id, 90).await;
     node.wait_for(
         &format!("HOME outbox no propagation node message={message_id}"),
         5,
@@ -1279,13 +1298,9 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
     let message_id = sent.enqueued_id();
 
-    // Nobody answers the direct leg within its bound (1328), and the
-    // propagated leg starts.
-    node.wait_for(
-        &format!("HOME outbox direct unanswered message={message_id}"),
-        90,
-    )
-    .await;
+    // Nobody answers the direct leg within its bound (1328), or the router
+    // gives up on it first, and the propagated leg starts.
+    node.wait_for_direct_end(&message_id, 90).await;
     node.wait_for(&format!("HOME outbox propagated message={message_id}"), 5)
         .await;
     // The recipient is heard once: a loquax run on its identity announces
