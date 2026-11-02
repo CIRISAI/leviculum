@@ -380,8 +380,17 @@ pub(crate) fn plan_images(model: &mut Model) -> Vec<Effect> {
 /// `lnomad` is started without a URL. A real micron document rather than
 /// hand-drawn chrome, so it goes through the same parse/layout/render path as a
 /// fetched page and re-wraps on a resize or a theme change for free.
-pub(crate) fn start_page(lang: Lang) -> String {
+pub(crate) fn start_page(lang: Lang, hosted: bool) -> String {
     let w = |id: StrId| id.text(lang);
+    if hosted {
+        // A messenger's tab on a touch screen (1337): no keys to name, one
+        // sentence over the places list the tab opens with.
+        return format!(
+            ">{}\n\n{}",
+            w(StrId::StartHostedTitle),
+            w(StrId::StartHosted)
+        );
+    }
     format!(
         ">lnomad\n\n{}\n\n{}\n\n`!d`! {}   `!:`! {}   `!?`! {}   `!q`! {}",
         w(StrId::StartTagline),
@@ -406,7 +415,7 @@ pub(crate) const START_TITLE: &str = "lnomad";
 pub fn show_start_screen(model: &mut Model) {
     apply_loaded(
         model,
-        leviculum_micron::parse(&start_page(model.lang)),
+        leviculum_micron::parse(&start_page(model.lang, model.hosted)),
         START_TITLE.to_string(),
     );
     model.show_places = true;

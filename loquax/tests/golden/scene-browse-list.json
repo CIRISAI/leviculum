@@ -59,7 +59,7 @@
               "reverse": false,
               "underline": false
             },
-            "text": "lnomad                                              "
+            "text": "NomadNet pages                                      "
           }
         ],
         [],
@@ -76,24 +76,7 @@
               "reverse": false,
               "underline": false
             },
-            "text": "Terminal browser for NomadNet pages."
-          }
-        ],
-        [],
-        [
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": false,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": "No page is open. Node discovery runs in the"
+            "text": "Tap a node to open its pages, or type an address"
           }
         ],
         [
@@ -109,142 +92,11 @@
               "reverse": false,
               "underline": false
             },
-            "text": "background, so nodes appear in the places panel as"
-          }
-        ],
-        [
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": false,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": "their announces arrive."
-          }
-        ],
-        [],
-        [
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": true,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": "d"
-          },
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": false,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": " places   "
-          },
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": true,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": ":"
-          },
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": false,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": " URL   "
-          },
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": true,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": "?"
-          },
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": false,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": " help   "
-          },
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": true,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": "q"
-          },
-          {
-            "field": null,
-            "link": null,
-            "matched": null,
-            "style": {
-              "bg": null,
-              "bold": false,
-              "fg": null,
-              "italic": false,
-              "reverse": false,
-              "underline": false
-            },
-            "text": " quit"
+            "text": "above."
           }
         ]
       ],
-      "total": 9
+      "total": 4
     },
     "places": {
       "a11y": {

@@ -152,6 +152,9 @@ leviculum_ui::catalogue! {
     StartTagline = "browser_start_tagline", "Terminal browser for NomadNet pages.", "Terminal-Browser für NomadNet-Seiten.";
     StartNoPage = "browser_start_no_page", "No page is open. Node discovery runs in the background, so nodes appear in the places panel as their announces arrive.", "Keine Seite offen. Die Knotensuche läuft im Hintergrund, Knoten erscheinen in den Orten, sobald ihre Ankündigungen eintreffen.";
     Url = "browser_url", "URL", "URL";
+    // The start page of a browser a messenger hosts (Loquax's Browse tab).
+    StartHostedTitle = "browser_start_hosted_title", "NomadNet pages", "NomadNet-Seiten";
+    StartHosted = "browser_start_hosted", "Tap a node to open its pages, or type an address above.", "Tippe auf einen Knoten, um seine Seiten zu öffnen, oder gib oben eine Adresse ein.";
     // The help overlay: its title, the groups, and the words of each row.
     HelpTitle = "browser_help_title", " help — Esc, ? or click to close ", " Hilfe — Esc, ? oder Klick schließt ";
     HelpMove = "browser_help_move", "Move", "Bewegen";
@@ -296,10 +299,26 @@ places panel as their announces arrive.
 
 `!d`! places   `!:`! URL   `!?`! help   `!q`! quit";
         let start_page = super::super::event::start_page;
-        assert_eq!(start_page(Lang::En), before);
-        let de = start_page(Lang::De);
+        assert_eq!(start_page(Lang::En, false), before);
+        let de = start_page(Lang::De, false);
         assert!(de.contains("Keine Seite offen"), "{de}");
         assert!(!de.contains("No page") && !de.contains("quit"), "{de}");
+    }
+
+    /// A hosted browser's start page (Loquax's Browse tab) is one sentence
+    /// and names no key, in both languages; the terminal's names its keys
+    /// (the control).
+    #[test]
+    fn a_hosted_start_page_names_no_key() {
+        let start_page = super::super::event::start_page;
+        for lang in [Lang::En, Lang::De] {
+            let page = start_page(lang, true);
+            assert!(!page.contains("`!"), "no key in {page:?}");
+            assert!(!page.contains("Terminal"), "{page:?}");
+            assert!(start_page(lang, false).contains("`!d`!"), "the control");
+        }
+        assert!(start_page(Lang::En, true).contains("Tap a node"));
+        assert!(start_page(Lang::De, true).contains("Tippe auf einen Knoten"));
     }
 
     /// Every shared scroll row the help lists has the catalogue's words: in
