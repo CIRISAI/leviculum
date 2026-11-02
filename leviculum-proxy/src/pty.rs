@@ -27,7 +27,9 @@ impl AsyncPty {
         nix::fcntl::fcntl(raw, nix::fcntl::FcntlArg::F_SETFL(oflags))
             .map_err(|e| io::Error::other(format!("fcntl F_SETFL: {e}")))?;
 
-        let inner = AsyncFd::new(fd)?;
+        // SAFETY: `OwnedFd` owns a valid descriptor, and `AsyncFd` holds it
+        // until it drops, so it is not closed or replaced while registered.
+        let inner = unsafe { AsyncFd::register(fd)? };
         Ok(Self { inner })
     }
 }
