@@ -22,6 +22,14 @@ speed blank, so the caller kept the time of the last valid sentence as if
 the receiver still vouched for it. A valid RMC (status `A`) still needs all
 four and is `RMC(None)` without them.
 
+A change to flash size only (leviculum order 1326): the fourteen `&s[a..b]`
+str slices go through `common::field`, a `str::get`. Every one is
+length-checked on ASCII input, so the parse results are the same; the
+indexing form linked the str panic path and the unicode tables, 5392 B of
+the Pocket firmware. A range that does not fit, which only a direct call
+of `Source::try_from` with a string shorter than two bytes can reach, is now
+an error instead of a panic.
+
 Everything else is upstream. `cargo fmt` rewrapped two lines (a missing
 space in an mtk.rs derive, an under-indented body in coords.rs) because the
 crate is a workspace member here and the fmt gate covers members; nothing
