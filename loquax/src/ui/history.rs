@@ -193,6 +193,8 @@ impl<B: InputBuffer> UiModel<B> {
         for stored in restored {
             self.restore_one(stored);
         }
+        // The groups the restored messages speak of (1307).
+        self.learn_groups();
         let open = match listed {
             true => 0,
             false => self.order().first().copied().unwrap_or(0),
@@ -729,7 +731,7 @@ impl<B> UiModel<B> {
             self.mark_out(MarkFlag::Deleted, ids);
         }
         for (sc, _) in self.sending.iter_mut() {
-            if *sc > c && *sc != super::receipts::RECEIPT_SEND {
+            if *sc > c && *sc != super::receipts::RECEIPT_SEND && *sc != super::groups::STATE_SEND {
                 *sc -= 1;
             }
         }

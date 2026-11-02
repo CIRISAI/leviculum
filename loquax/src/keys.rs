@@ -827,6 +827,26 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("read receipts")
         .note("off, none is sent and none is shown"),
+        Row::new(
+            "make a group: tick friends by name, then its name (1307)",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("new group"),
+        Row::new(
+            "join the group the open conversation's invitation names",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("join group"),
+        Row::new("the open group's members", EVERYWHERE, &[]).palette("members"),
+        Row::new("leave the open group, after asking", EVERYWHERE, &[]).palette("leave group"),
+        Row::new(
+            "remove a member from the open group, its admin's",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("remove member"),
     ]
 };
 

@@ -230,6 +230,35 @@ pub async fn hand_marks(client: HomeClient, marks: Vec<super::wire::Mark>, budge
     }
 }
 
+/// Ask the home node to make a group (1307, `/group`): the event the
+/// model folds, the group's address or why not. One client id for the
+/// whole ask, so a lost answer asked again is the same group.
+pub async fn create_group(
+    client: HomeClient,
+    name: String,
+    members: Vec<([u8; 16], String)>,
+    budget: Duration,
+) -> UiEvent {
+    let request = super::wire::GroupRequest {
+        client_id: super::client::client_id(),
+        name,
+        members,
+    };
+    let made = super::client::group(
+        &client.node,
+        &client.public_key,
+        &client.device,
+        &request,
+        budget,
+    )
+    .await;
+    match &made {
+        Ok(group) => tracing::info!("HOME group made group={}", crate::address::to_hex(group)),
+        Err(error) => tracing::warn!("HOME group not made: {error}"),
+    }
+    UiEvent::GroupMade(made.map_err(|error| error.to_string()))
+}
+
 /// The petnames a fold set, handed to the home node in order (1139): the
 /// screen and the contacts file have them already. One the home node did
 /// not take is said in the log; the other devices keep the name they had

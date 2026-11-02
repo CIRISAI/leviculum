@@ -839,6 +839,9 @@ impl App {
                 }
             },
             Intent::Theme => self.flipped = !self.flipped,
+            // The group verbs (1307) are the model's own; the window draws
+            // the picker and the sheet from the scene.
+            Intent::Group(verb) => self.tell(UiEvent::Group(verb)),
             Intent::ReadReceipts { on } => {
                 self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
             }

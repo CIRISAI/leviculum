@@ -136,6 +136,7 @@ pub mod chat;
 pub mod compose;
 pub mod contacts;
 pub mod files;
+pub mod groups;
 pub mod history;
 pub mod hit;
 pub mod intent;
@@ -473,7 +474,7 @@ impl Conversation {
     /// The message after `index` that has a row of its own: reactions are
     /// drawn under their target, so they sit in no run's way.
     fn next_shown(&self, index: usize) -> Option<usize> {
-        (index + 1..self.messages.len()).find(|&i| !self.messages[i].is_reaction())
+        (index + 1..self.messages.len()).find(|&i| !self.messages[i].is_aside())
     }
 
     /// Whether the report at `index` is folded into the next one, so the
@@ -506,7 +507,7 @@ impl Conversation {
         let mut at = index;
         while let Some(before) = (0..at)
             .rev()
-            .find(|&i| !self.messages[i].is_reaction())
+            .find(|&i| !self.messages[i].is_aside())
             .filter(|&i| self.report_folded(i))
         {
             run.push(before);
@@ -532,7 +533,7 @@ impl Conversation {
             if left == 0 {
                 break;
             }
-            if message.outbound || message.is_reaction() {
+            if message.outbound || message.is_aside() {
                 continue;
             }
             left -= 1;
@@ -842,6 +843,13 @@ pub struct UiModel<B> {
     pub voice_tracks: BTreeMap<([u8; 16], u64), recording::LevelTrack>,
     /// The running position shares (1273).
     pub shares: share::Shares,
+    /// The groups the reader is in, was invited to or left (1307), learned
+    /// from the messages ([`groups`]).
+    pub groups: groups::Groups,
+    /// The group being made, while "New group" is open.
+    pub group_draft: Option<groups::Draft>,
+    /// A group's member sheet, while it is open.
+    pub group_sheet: Option<groups::Sheet>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -939,6 +947,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             recording: recording::Recording::default(),
             voice_tracks: BTreeMap::new(),
             shares: share::Shares::default(),
+            groups: groups::Groups::new(),
+            group_draft: None,
+            group_sheet: None,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1574,6 +1585,12 @@ pub enum UiEvent {
         key: u64,
         track: recording::LevelTrack,
     },
+    /// One of the reader's verbs on groups (1307): "New group", a tick,
+    /// Next, the name, Create, Join, the member sheet, Leave, Remove.
+    Group(groups::Verb),
+    /// The home's answer to [`UiEffect::CreateGroup`]: the group's
+    /// address, or why it was not made.
+    GroupMade(Result<[u8; 16], String>),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1673,6 +1690,13 @@ pub enum UiEffect {
     PlayVoice { peer: [u8; 16], key: u64 },
     /// Stop the one that plays.
     PauseVoice { peer: [u8; 16], key: u64 },
+    /// Ask the home to make the group `name` with `members`, each under
+    /// the name the reader knows it by (1307, `/group`); answered with
+    /// [`UiEvent::GroupMade`].
+    CreateGroup {
+        name: String,
+        members: Vec<([u8; 16], String)>,
+    },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.
     Recording {
@@ -1704,10 +1728,8 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // or alone once due (1231).
     model.read_step(&mut effects);
     // Every message sent says the sender takes read receipts (1230), while
-    // the switch is on.
-    if model.reading.on {
-        receipts::mark_sends(&mut effects);
-    }
+    // the switch is on, and understands groups (1307), always.
+    receipts::mark_sends(&mut effects, groups::client_caps(model.reading.on));
     effects
 }
 
@@ -1841,6 +1863,8 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::Engine(event) => on_engine(model, event),
         UiEvent::Rename { peer, name } => model.rename(peer, &name),
+        UiEvent::Group(verb) => model.group_verb(verb),
+        UiEvent::GroupMade(made) => model.group_made(made),
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -3493,6 +3517,60 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.ask_code(true);
             Vec::new()
         }
+        // The terminal's group flows (1307): the palette asks as `rename`
+        // does; the verbs are the scene's.
+        PaletteCommand::NewGroup => {
+            model.group_verb(groups::Verb::New);
+            model.palette = Some(Palette {
+                ask: Some(contacts::Ask::GroupPick),
+                ..Palette::default()
+            });
+            Vec::new()
+        }
+        PaletteCommand::JoinGroup => model.group_verb(groups::Verb::Join {
+            group: intent::Target::Open,
+        }),
+        PaletteCommand::Members => match model
+            .conversations
+            .get(model.selected)
+            .map(|c| c.peer)
+            .filter(|p| model.groups.contains_key(p))
+        {
+            Some(group) => {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::Members(group)),
+                    ..Palette::default()
+                });
+                Vec::new()
+            }
+            None => {
+                model.toast(ToastKind::Info, "this conversation is no group".to_string());
+                Vec::new()
+            }
+        },
+        PaletteCommand::LeaveGroup => match model
+            .conversations
+            .get(model.selected)
+            .map(|c| c.peer)
+            .filter(|p| model.groups.contains_key(p))
+        {
+            Some(group) => {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::LeaveGroup(group)),
+                    ..Palette::default()
+                });
+                Vec::new()
+            }
+            None => {
+                model.toast(ToastKind::Info, "this conversation is no group".to_string());
+                Vec::new()
+            }
+        },
+        PaletteCommand::RemoveMember => model.group_verb(groups::Verb::Remove {
+            group: intent::Target::Open,
+            member: None,
+            confirmed: false,
+        }),
         PaletteCommand::MyCode => {
             match model.own_code {
                 Some(_) => {
@@ -3721,6 +3799,8 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             {
                 return Vec::new();
             }
+            model.learn_group(source, false, &fields);
+            let state = groups::is_state(&String::from_utf8_lossy(&body), &fields);
             let at = model.now;
             let activity = model.bump();
             let conversation = &mut model.conversations[index];
@@ -3765,6 +3845,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             model.changed.insert((peer, activity));
             let mut effects = take_telemetry(model, index, message_id);
             effects.extend(model.take_lev(source, lev.as_ref()));
+            // A group's state (1307) is kept and stored, and asks for no
+            // attention: no unread, no toast, no cursor.
+            if state {
+                return effects;
+            }
             // A reaction: kept and stored, drawn under its target, and the
             // reader told; it is no unread message and moves no cursor.
             if let Some((_, content)) = reaction {
@@ -4244,6 +4329,7 @@ fn home_sent<B>(
         unix_secs: sent_at,
         ..now
     });
+    model.learn_group(destination, true, &fields);
     let mut message = Message::ours(String::from_utf8_lossy(&body).into_owned(), at);
     message.id = Some(message_id);
     message.delivery = Some(DeliveryState::Sent);
@@ -4269,6 +4355,17 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
         return match result {
             Ok(()) => Vec::new(),
             Err(detail) => vec![UiEffect::Log(format!("RECEIPT not sent: {detail}"))],
+        };
+    }
+    // Nor has a group's state (1307), but the reader asked for it: a
+    // failure is said.
+    if c == groups::STATE_SEND {
+        return match result {
+            Ok(()) => pull_after_send(model),
+            Err(detail) => {
+                model.toast(ToastKind::Error, NOT_SENT.to_string());
+                vec![UiEffect::Notice(format!("group: {detail}"))]
+            }
         };
     }
     if let Some(message) = model.message_mut(c, m) {
@@ -4300,7 +4397,7 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
     let Some((c, m)) = model.sending.pop_front() else {
         return Vec::new();
     };
-    if c == receipts::RECEIPT_SEND {
+    if c == receipts::RECEIPT_SEND || c == groups::STATE_SEND {
         return Vec::new();
     }
     let now = model.now;
@@ -5245,9 +5342,18 @@ mod tests {
     use super::*;
 
     /// `fields` as the model sends them: with the read-receipt mark (1230).
+    /// The mark every send of a Loquax with receipts on carries: bit 0
+    /// and, since 1307, bit 1.
     fn marked(mut fields: Vec<leviculum_lxmf::Field>) -> Vec<leviculum_lxmf::Field> {
-        leviculum_lxmf::lev::Lev::mark().put_into(&mut fields);
+        caps(groups::client_caps(true)).put_into(&mut fields);
         fields
+    }
+
+    fn caps(capabilities: u64) -> leviculum_lxmf::lev::Lev {
+        leviculum_lxmf::lev::Lev {
+            capabilities: Some(capabilities),
+            ..leviculum_lxmf::lev::Lev::default()
+        }
     }
 
     /// A minimal field for the model's tests: insert and backspace at the
@@ -5777,9 +5883,9 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: Vec::new(),
+                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
             }],
-            "the switch off sends no mark"
+            "the switch off sends no receipt bit, the groups bit still (1307)"
         );
     }
 
@@ -5788,7 +5894,7 @@ mod tests {
     /// it is asks nothing; a message written while off carries no mark,
     /// one written after it is on again does.
     #[test]
-    fn the_switch_round_trips_and_a_message_sent_while_off_carries_no_mark() {
+    fn the_switch_round_trips_and_a_message_sent_while_off_carries_no_receipt_bit() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         assert!(model.reading.on, "on by default");
         let write = |model: &mut UiModel<Field>| {
@@ -5815,9 +5921,9 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: Vec::new(),
+                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
             }],
-            "off: no mark"
+            "off: no receipt bit, the groups bit still (1307)"
         );
         assert_eq!(
             update(&mut model, UiEvent::ReadReceipts(true)),

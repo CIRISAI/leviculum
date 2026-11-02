@@ -387,7 +387,8 @@ pub fn rows<B>(model: &UiModel<B>, order: Vec<usize>) -> Vec<ListRow> {
 pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
     let conversation = model.conversations.iter().find(|c| c.peer == *peer);
     let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
-    let last = messages.last();
+    // A group's state (1307) is no line of the list.
+    let last = messages.iter().rev().find(|m| !m.is_group_state());
     // A run of reports is one line, and it says whether the position is
     // alive (1209), not how many came.
     let updates = conversation
@@ -504,6 +505,12 @@ pub struct Bubble {
     /// The voice message it carries (1222): the bubble draws its play
     /// button, length and level bar.
     pub voice: Option<super::voice::VoiceRef>,
+    /// In a group's chat (1307), a copy's writer and the name the bubble
+    /// carries above it; its body is then the text without the home's
+    /// `"Name: "` prefix.
+    pub writer: Option<([u8; 16], String)>,
+    /// The invitation it carries (`lev 0x04`, 1307): the bubble is a card.
+    pub invite: Option<[u8; 16]>,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -516,11 +523,12 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let chips = reactions::gather(conversation);
     let newest_report = conversation.newest_fix_report();
     let liveness = newest_report.map(|_| model.liveness(&conversation.peer));
+    let group = model.group(&conversation.peer).is_some();
     conversation
         .messages
         .iter()
         .enumerate()
-        .filter(|(m, message)| !message.is_reaction() && !conversation.report_folded(*m))
+        .filter(|(m, message)| !message.is_aside() && !conversation.report_folded(*m))
         .map(|(m, message)| {
             let fix = model.message_fix(c, m);
             let run = conversation.run(m);
@@ -528,15 +536,32 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 1 => (0, None),
                 n => (n, run.first().and_then(|&f| conversation.messages[f].at)),
             };
+            let copy = super::groups::copy_of(&message.body, &message.fields)
+                .filter(|_| group && !message.outbound);
+            let writer = copy.map(|(address, name, _)| {
+                let shown = match model.names.shown(&address) {
+                    Some(_) => model.names.label(&address),
+                    None if !name.is_empty() => name.to_string(),
+                    None => model.names.label(&address),
+                };
+                (address, shown)
+            });
+            let invite = leviculum_lxmf::lev::Lev::from_fields(&message.fields)
+                .and_then(|lev| lev.invite)
+                .map(|invite| invite.group)
+                .filter(|group| model.group(group).is_some());
             Bubble {
                 key: message.activity,
                 id: message.id,
                 ours: message.outbound,
-                body: match (message.is_report(), &fix) {
-                    (true, Some(_)) => String::new(),
-                    (true, None) => "position report".to_string(),
-                    (false, _) => message.body.clone(),
+                body: match (message.is_report(), &fix, copy) {
+                    (true, Some(_), _) => String::new(),
+                    (true, None, _) => "position report".to_string(),
+                    (false, _, Some((_, _, text))) => text.to_string(),
+                    (false, _, None) => message.body.clone(),
                 },
+                writer,
+                invite,
                 mark: message
                     .outbound
                     .then(|| Mark::of(shown(message.delivery, model))),
@@ -609,6 +634,7 @@ pub fn joins(a: &Bubble, b: &Bubble) -> bool {
     match (a.at, b.at) {
         (Some(at), Some(bt)) => {
             a.ours == b.ours
+                && a.writer.as_ref().map(|w| w.0) == b.writer.as_ref().map(|w| w.0)
                 && (bt.unix_secs - at.unix_secs).abs() <= GROUP_SECS
                 && at.day() == bt.day()
         }
@@ -978,6 +1004,8 @@ mod tests {
             photo: None,
             files: Vec::new(),
             voice: None,
+            writer: None,
+            invite: None,
         }
     }
 

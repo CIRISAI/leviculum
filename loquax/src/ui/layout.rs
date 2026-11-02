@@ -262,7 +262,7 @@ pub fn folded(conversation: &Conversation, index: usize) -> bool {
     conversation
         .messages
         .get(index)
-        .is_some_and(Message::is_reaction)
+        .is_some_and(Message::is_aside)
         || conversation.report_folded(index)
 }
 
@@ -708,7 +708,11 @@ fn entry(
     open: bool,
 ) -> [RLine; 2] {
     let room = width.saturating_sub(2);
-    let last = conversation.messages.last();
+    let last = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|m| !m.is_group_state());
     let time = match (last.and_then(|m| m.at), now) {
         (Some(at), Some(now)) => list_time(&at, &now),
         _ => String::new(),

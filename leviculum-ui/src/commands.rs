@@ -95,6 +95,17 @@ pub enum Command {
     AddContact,
     /// Show our own contact code and its QR, for a friend to add us.
     MyCode,
+    /// Make a group (Loquax 1307): tick the friends, then its name.
+    NewGroup,
+    /// Join the group whose invitation the open conversation holds.
+    JoinGroup,
+    /// Show the open group's members.
+    Members,
+    /// Leave the open group, after asking.
+    LeaveGroup,
+    /// Remove a member from the open group, its admin's: the palette takes
+    /// the member's name.
+    RemoveMember,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -109,7 +120,7 @@ pub struct PaletteEntry {
 /// The table, in the order the palette lists it unfiltered. A first user's
 /// two commands stand right under `send`, where an open palette shows them
 /// (1263), and the code a friend adds us by right after them (1279).
-pub const COMMANDS: [PaletteEntry; 35] = [
+pub const COMMANDS: [PaletteEntry; 40] = [
     entry("send", Command::Send),
     entry("new conversation", Command::NewConversation),
     entry("add contact", Command::AddContact),
@@ -145,6 +156,11 @@ pub const COMMANDS: [PaletteEntry; 35] = [
     entry("archived", Command::Archived),
     entry("import", Command::Import),
     entry("read receipts", Command::ReadReceipts),
+    entry("new group", Command::NewGroup),
+    entry("join group", Command::JoinGroup),
+    entry("members", Command::Members),
+    entry("leave group", Command::LeaveGroup),
+    entry("remove member", Command::RemoveMember),
 ];
 
 /// The entry that runs `command`.

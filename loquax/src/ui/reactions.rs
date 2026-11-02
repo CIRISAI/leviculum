@@ -265,11 +265,11 @@ impl<B> UiModel<B> {
         };
         let messages = &conversation.messages;
         let at = self.message_cursor;
-        if !messages.get(at).is_some_and(Message::is_reaction) {
+        if !messages.get(at).is_some_and(Message::is_aside) {
             return;
         }
-        let before = (0..at).rev().find(|&i| !messages[i].is_reaction());
-        let after = (at + 1..messages.len()).find(|&i| !messages[i].is_reaction());
+        let before = (0..at).rev().find(|&i| !messages[i].is_aside());
+        let after = (at + 1..messages.len()).find(|&i| !messages[i].is_aside());
         if let Some(to) = before.or(after) {
             self.message_cursor = to;
         }

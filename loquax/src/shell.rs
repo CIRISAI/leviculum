@@ -152,6 +152,8 @@ enum Finished {
     Send(UiEvent),
     /// The running fetch.
     Fetch(FetchEnd),
+    /// Another runner's answer, as the event the model folds (1307).
+    Event(UiEvent),
 }
 
 /// How a fetch ended, for the screen, `tui.log` and the mailbox's streak.
@@ -380,6 +382,21 @@ impl Shell {
                     }
                 }
                 UiEffect::PauseVoice { .. } => {}
+                // A group (1307): the home makes it, so a terminal with no
+                // home says so at once.
+                UiEffect::CreateGroup { name, members } => match self.context.client.clone() {
+                    Some(client) => {
+                        let done = self.done_tx.clone();
+                        let budget = self.context.timeout;
+                        self.mark_tasks.push(tokio::spawn(async move {
+                            let event = runner::create_group(client, name, members, budget).await;
+                            let _ = done.send(Finished::Event(event));
+                        }));
+                    }
+                    None => answers.push(UiEvent::GroupMade(Err(
+                        "groups live at a mailbox, and this Loquax has none".to_string(),
+                    ))),
+                },
                 // The recording bar's effects (1276): the microphone runs
                 // them; a finished recording comes back as its voice
                 // message, a preview as a WAV file for the system's player.
@@ -664,6 +681,7 @@ impl Shell {
                     self.apply(event);
                 }
                 Finished::Fetch(end) => self.fetch_done(end),
+                Finished::Event(event) => self.apply(event),
             }
         }
         while let Ok(line) = self.notices_rx.try_recv() {

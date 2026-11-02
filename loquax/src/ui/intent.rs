@@ -87,6 +87,7 @@
 //! | (new) a tap or click on a node | `Activate` |
 //! | (new) a sheet or menu closed | `Dismiss` |
 //! | (new) a tab | `Tab` |
+//! | (new) "New group", a tick, Next, Create, Join, the member sheet, Leave, Remove (1307), `Command::{NewGroup,JoinGroup,Members,LeaveGroup,RemoveMember}` | `Group` |
 //!
 //! Not intents: the facade's `Link`, `Unlink`, `NotNow` and `Relink` (the
 //! phone's address book, platform glue), and the window's arms that are
@@ -100,6 +101,7 @@ use leviculum_lxmf::telemetry::Location;
 use leviculum_ui::commands::Command;
 use leviculum_ui::keymap::ScrollCmd;
 
+use super::groups::Verb;
 use super::scene::{NodeId, TabId};
 use super::strings::StrId;
 use crate::keys::{self, MapCmd};
@@ -407,6 +409,10 @@ pub enum Intent {
         lxma: String,
         name: Option<String>,
     },
+    /// A verb on groups (1307): "New group" and its picker, Join on an
+    /// invitation, the member sheet, Leave, Remove. A frontend hands it to
+    /// the model as [`super::UiEvent::Group`].
+    Group(Verb),
     NewConversation,
     /// Show our own contact code and its QR (1279).
     MyCode,
@@ -585,6 +591,16 @@ impl Intent {
             Intent::Rename { .. } => StrId::Rename,
             Intent::Forget { .. } => StrId::Forget,
             Intent::AddContact { .. } => StrId::AddContact,
+            Intent::Group(verb) => match verb {
+                Verb::New | Verb::Pick(_) | Verb::Name(_) => StrId::NewGroup,
+                Verb::Next => StrId::GroupNext,
+                Verb::Create => StrId::GroupCreate,
+                Verb::Join { .. } => StrId::GroupJoin,
+                Verb::Members { .. } => StrId::GroupMembers,
+                Verb::Leave { .. } => StrId::GroupLeave,
+                Verb::Remove { .. } => StrId::GroupRemove,
+                Verb::Close => StrId::Close,
+            },
             Intent::NewConversation => StrId::NewConversation,
             Intent::MyCode => StrId::MyCode,
             Intent::Name(_) => StrId::Name,
@@ -713,6 +729,22 @@ impl From<Command> for Intent {
                 lxma: String::new(),
                 name: None,
             },
+            Command::NewGroup => Intent::Group(Verb::New),
+            Command::JoinGroup => Intent::Group(Verb::Join {
+                group: Target::Open,
+            }),
+            Command::Members => Intent::Group(Verb::Members {
+                group: Target::Open,
+            }),
+            Command::LeaveGroup => Intent::Group(Verb::Leave {
+                group: Target::Open,
+                confirmed: false,
+            }),
+            Command::RemoveMember => Intent::Group(Verb::Remove {
+                group: Target::Open,
+                member: None,
+                confirmed: false,
+            }),
         }
     }
 }

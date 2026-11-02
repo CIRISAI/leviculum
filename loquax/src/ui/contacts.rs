@@ -38,6 +38,17 @@ pub enum Ask {
     /// [`crate::code::read`]: its conversation opens, and with `name`
     /// the palette asks the reader's name for it next (`add contact`).
     Code { name: bool },
+    /// The terminal's group picker (1307): a friend's name ticks it, an
+    /// empty line goes on to [`Ask::GroupName`].
+    GroupPick,
+    /// The new group's name: `Enter` makes it.
+    GroupName,
+    /// A group's members, shown; `Enter` closes.
+    Members([u8; 16]),
+    /// Leave the group: `Enter` leaves.
+    LeaveGroup([u8; 16]),
+    /// A member's name: `Enter` removes it from the group.
+    RemoveMember([u8; 16]),
 }
 
 impl<B> UiModel<B> {
@@ -91,6 +102,7 @@ impl<B> UiModel<B> {
                 "your friend's code or address".to_string(),
                 "Enter opens the conversation".to_string(),
             ],
+            group => self.group_ask_rows(group),
         }
     }
 
@@ -234,6 +246,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             Ask::Rename(peer) => self.rename(peer, &typed),
             Ask::React { peer, target } => self.react(peer, target, &typed),
             Ask::Code { name } => self.take_code(&typed, name),
+            group => self.answer_group_ask(group, typed),
         }
     }
 

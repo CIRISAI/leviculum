@@ -101,7 +101,7 @@ impl<B> UiModel<B> {
         let last_sent = messages
             .iter()
             .rev()
-            .find(|m| m.outbound && !m.is_reaction())
+            .find(|m| m.outbound && !m.is_aside())
             .and_then(|m| m.delivery.map(|state| (m.at, route_words(state))));
         ContactFacts {
             last_received,

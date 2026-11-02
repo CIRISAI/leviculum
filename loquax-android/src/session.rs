@@ -129,6 +129,8 @@ impl InputBuffer for Line {
 enum Finished {
     Send(UiEvent),
     Pull(runner::PullEnd),
+    /// Another runner's answer, the event the model folds (1307).
+    Event(UiEvent),
 }
 
 /// Everything the lock guards.
@@ -1016,6 +1018,8 @@ impl Session {
             Intent::Viewport { peer, keys } => UiEvent::Viewport { peer, keys },
             Intent::Name(name) => return self.rename(&name),
             Intent::AddContact { lxma, name } => return self.add_contact(&lxma, name.as_deref()),
+            // The group verbs (1307) are the model's own.
+            Intent::Group(verb) => UiEvent::Group(verb),
             Intent::Rename {
                 peer: Target::Peer(peer),
                 name: Some(name),
@@ -1682,6 +1686,7 @@ impl Inner {
                     self.apply(event);
                 }
                 Finished::Pull(end) => self.pulled(end),
+                Finished::Event(event) => self.apply(event),
             }
         }
         self.look_at_link();
@@ -1925,6 +1930,18 @@ impl Inner {
                 // The recorder's work (1276), for Java's next
                 // `Query::Recording`.
                 UiEffect::Recording { peer, effect } => self.recorder.push((peer, effect)),
+                // A group (1307): the home makes it, through the runner the
+                // terminal runs.
+                UiEffect::CreateGroup { name, members } => {
+                    let client = self.client.clone();
+                    let done = self.finished_tx.clone();
+                    let wake = Arc::clone(&self.wake);
+                    self.runtime.spawn(async move {
+                        let event = runner::create_group(client, name, members, BUDGET).await;
+                        let _ = done.send(Finished::Event(event));
+                        wake.notify_one();
+                    });
+                }
                 // What the terminal does with its screen and its maps has
                 // no place here yet.
                 _ => {}
