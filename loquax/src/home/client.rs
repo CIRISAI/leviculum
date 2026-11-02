@@ -703,6 +703,11 @@ async fn take_in(
             pull.imported.push(entry.packed.clone());
             continue;
         }
+        if entry.kind == super::KIND_GROUP {
+            // The home's own record of a group it hosts; the owner's copy
+            // came as a received message.
+            continue;
+        }
         let id = match entry.kind {
             super::KIND_SENT => leviculum_lxmf::Message::unpack(
                 &entry.packed,

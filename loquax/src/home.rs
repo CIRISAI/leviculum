@@ -212,6 +212,11 @@ pub const KIND_PEERSTATE: u8 = 10;
 /// message id, and a message keeps one such entry, the first. A client from
 /// before it skips it as a kind it cannot show.
 pub const KIND_STALLED: u8 = 11;
+/// A member's message to a group this home hosts (1307,
+/// [`group`]), packed as it came: the group's history and the source of
+/// its copies. The owner's devices get the owner's own copy as a received
+/// message, so a client skips this kind.
+pub const KIND_GROUP: u8 = 12;
 
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that

@@ -82,6 +82,42 @@ pub enum Arrival {
     Kept,
 }
 
+/// Book one outbox change of a group copy in `group_fanout`: a delivery is
+/// the member's proof (the two ticks of slice G2 count these), the end of
+/// the retries ends the copy. `false` when `id` is no copy of a group's,
+/// so the caller books it as any outbox message.
+pub fn book(
+    store: &mut Store,
+    id: &[u8; 32],
+    change: crate::home::outgoing::Change,
+    now: i64,
+) -> Result<bool, String> {
+    use crate::home::outgoing::Change;
+    if store.group_copy(id).map_err(|e| e.to_string())?.is_none() {
+        return Ok(false);
+    }
+    match change {
+        Change::Delivered => {
+            store
+                .group_copy_proven(id, now)
+                .map_err(|e| e.to_string())?;
+        }
+        Change::Ended { .. } => store.group_copy_ended(id).map_err(|e| e.to_string())?,
+        Change::Propagated | Change::Stalled => {}
+    }
+    Ok(true)
+}
+
+/// Every message an arrival sends.
+impl Arrival {
+    pub fn outgoing(self) -> Vec<Outgoing> {
+        match self {
+            Self::Line(out) | Self::Joined(out) | Self::Left(out) => out,
+            Self::Kept => Vec::new(),
+        }
+    }
+}
+
 /// Where a group's key is kept under `home`.
 pub fn key_path(home: &Path, address: &[u8; 16]) -> PathBuf {
     home.join(GROUPS_DIR).join(crate::address::to_hex(address))

@@ -67,6 +67,12 @@ pub enum Role {
     Home {
         requests: UnboundedSender<HomeRequest>,
     },
+    /// A group the home node hosts (1307, [`crate::home::group`]): the
+    /// group identity's delivery destination, announced with the group's
+    /// name, handing every received message out packed as the home's does,
+    /// its proof held until the archive keeps it. No home destination: the
+    /// group is reached by its members' messages alone.
+    Group,
 }
 
 impl Processor {
@@ -428,6 +434,17 @@ pub struct Attached {
     network: crate::home::rendezvous::Network,
 }
 
+/// A group's engine is driven as the home's is, through its outbox.
+impl Outbox for Attached {
+    fn submit(&self, command: Command) -> Result<(), crate::outbox::OutboxGone> {
+        self.outbox.submit(command)
+    }
+
+    fn try_next_event(&mut self) -> Result<Option<OutboxEvent>, crate::outbox::OutboxGone> {
+        self.outbox.try_next_event()
+    }
+}
+
 impl Attached {
     /// The node, for what talks to the network beside the engine: the home
     /// node's answers and a client's pulls (`crate::home`).
@@ -704,7 +721,9 @@ async fn attach_through<N: Effects + Send + 'static>(
     let engine = match role {
         Role::Messenger => Engine::new(config.identity, config.display_name),
         Role::Client { address } => Engine::client(address),
-        Role::Home { .. } => Engine::new(config.identity, config.display_name).handing_out_packed(),
+        Role::Home { .. } | Role::Group => {
+            Engine::new(config.identity, config.display_name).handing_out_packed()
+        }
     };
     let processor = Processor {
         engine,
