@@ -40,6 +40,8 @@ pub mod wire;
 pub mod client;
 #[cfg(feature = "history")]
 pub mod daemon;
+#[cfg(feature = "history")]
+pub mod group;
 #[cfg(feature = "std")]
 pub mod handover;
 #[cfg(feature = "std")]

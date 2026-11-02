@@ -187,13 +187,14 @@ impl Store {
     }
 
     /// Every member a group ever had, present or gone, in the order they
-    /// were added.
+    /// were added (the admin first, then the others as the admin picked
+    /// them).
     pub fn group_members(&self, group: &[u8; 16]) -> Result<Vec<GroupMember>, StoreError> {
         let mut statement = self
             .conn
             .prepare(
                 "SELECT address, name, flags, added_at, left_at FROM group_members \
-                 WHERE identity = ?1 AND grp = ?2 ORDER BY added_at, address",
+                 WHERE identity = ?1 AND grp = ?2 ORDER BY added_at, rowid",
             )
             .map_err(|e| self.failed(e))?;
         let rows = statement
