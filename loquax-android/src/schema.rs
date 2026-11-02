@@ -1931,6 +1931,9 @@ pub struct GroupScreen {
     /// question asked before Leave or Remove with its yes, empty for none.
     #[serde(default)]
     pub leave: String,
+    /// The admin's "Add members" words (1307 G2), empty for none.
+    #[serde(default)]
+    pub add: String,
     #[serde(default)]
     pub ask: String,
     #[serde(default)]

@@ -397,6 +397,19 @@ impl Shell {
                         "groups live at a mailbox, and this Loquax has none".to_string(),
                     ))),
                 },
+                UiEffect::AddMembers { group, members } => match self.context.client.clone() {
+                    Some(client) => {
+                        let done = self.done_tx.clone();
+                        let budget = self.context.timeout;
+                        self.mark_tasks.push(tokio::spawn(async move {
+                            let event = runner::add_members(client, group, members, budget).await;
+                            let _ = done.send(Finished::Event(event));
+                        }));
+                    }
+                    None => answers.push(UiEvent::MembersAdded(Err(
+                        "groups live at a mailbox, and this Loquax has none".to_string(),
+                    ))),
+                },
                 // The recording bar's effects (1276): the microphone runs
                 // them; a finished recording comes back as its voice
                 // message, a preview as a WAV file for the system's player.

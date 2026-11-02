@@ -120,6 +120,8 @@
     <string name="group_leave">Leave group</string>
     <string name="group_leave_ask">Leave %1$s?</string>
     <string name="group_remove">Remove</string>
+    <string name="group_add">Add members</string>
+    <string name="group_add_confirm">Add</string>
     <string name="group_remove_ask">Remove %1$s from %2$s?</string>
     <string name="group_yes">Yes</string>
     <string name="group_no">No</string>

@@ -511,6 +511,10 @@ pub struct Bubble {
     pub writer: Option<([u8; 16], String)>,
     /// The invitation it carries (`lev 0x04`, 1307): the bubble is a card.
     pub invite: Option<[u8; 16]>,
+    /// A group's line of its own (1307 G2): the body says who joined, left
+    /// or was added ([`super::groups::membership_note`]); a screen draws
+    /// it centred, as no one's bubble.
+    pub note: bool,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -528,8 +532,16 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
         .messages
         .iter()
         .enumerate()
-        .filter(|(m, message)| !message.is_aside() && !conversation.report_folded(*m))
         .map(|(m, message)| {
+            let note = group
+                .then(|| super::groups::membership_note(&conversation.messages, m, model.address))
+                .flatten();
+            (m, message, note)
+        })
+        .filter(|(m, message, note)| {
+            (!message.is_aside() || note.is_some()) && !conversation.report_folded(*m)
+        })
+        .map(|(m, message, note)| {
             let fix = model.message_fix(c, m);
             let run = conversation.run(m);
             let (updates, since) = match run.len() {
@@ -556,7 +568,9 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 key: message.activity,
                 id: message.id,
                 ours: message.outbound,
+                note: note.is_some(),
                 body: match (message.is_report(), &fix, copy) {
+                    _ if note.is_some() => note.clone().unwrap_or_default(),
                     (true, Some(_), _) => String::new(),
                     (true, None, _) => "position report".to_string(),
                     (false, _, Some((_, _, text))) => text.to_string(),
@@ -636,6 +650,8 @@ pub fn joins(a: &Bubble, b: &Bubble) -> bool {
     match (a.at, b.at) {
         (Some(at), Some(bt)) => {
             a.ours == b.ours
+                && !a.note
+                && !b.note
                 && a.writer.as_ref().map(|w| w.0) == b.writer.as_ref().map(|w| w.0)
                 && (bt.unix_secs - at.unix_secs).abs() <= GROUP_SECS
                 && at.day() == bt.day()
@@ -1008,6 +1024,7 @@ mod tests {
             voice: None,
             writer: None,
             invite: None,
+            note: false,
         }
     }
 

@@ -16,8 +16,9 @@ import java.util.Map;
  * ({@link Core#group}). "New group" ticks friends, then asks the name with
  * the trust sentence under it; the member sheet lists the members with
  * their state, the admin's Remove on a row, Leave at the bottom, each
- * asked once with the library's question; an invitation is the card's
- * words and Join.
+ * asked once with the library's question, and the admin's Add members,
+ * which opens the picker for the group (1307 G2); an invitation is the
+ * card's words and Join.
  */
 final class GroupDialogs {
     private GroupDialogs() {}
@@ -31,6 +32,20 @@ final class GroupDialogs {
     /** "New group": the picker, then {@link #name}. */
     static void newGroup(final Activity screen) {
         say(screen, Core.group("new", "", "", "", false));
+        picker(screen, false);
+    }
+
+    /**
+     * "Add members" (1307 G2): the same picker for `group`, its Next is
+     * "Add" and asks the home; the answer closes it.
+     */
+    static void addMembers(final Activity screen, final String group) {
+        say(screen, Core.group("add", group, "", "", false));
+        picker(screen, true);
+    }
+
+    /** The friends to tick, then Next (a new group's name step) or Add. */
+    private static void picker(final Activity screen, final boolean adding) {
         final Map<String, Object> shown = Core.groupScreen();
         final List<Map<String, Object>> rows = Core.list(shown, "rows");
         String[] names = new String[rows.size()];
@@ -51,6 +66,11 @@ final class GroupDialogs {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         say(screen, Core.group("next", "", "", "", false));
+                        if (adding) {
+                            // The home is asked; its answer closes the
+                            // picker and opens the member sheet.
+                            return;
+                        }
                         if ("name".equals(Core.str(Core.groupScreen(), "step"))) {
                             name(screen);
                         } else {
@@ -146,6 +166,15 @@ final class GroupDialogs {
                         Core.group("close", "", "", "", false);
                     }
                 });
+        String add = Core.str(shown, "add");
+        if (!add.isEmpty()) {
+            dialog.setNeutralButton(add, new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface d, int which) {
+                    addMembers(screen, group);
+                }
+            });
+        }
         String leave = Core.str(shown, "leave");
         if (!leave.isEmpty()) {
             dialog.setPositiveButton(leave, new DialogInterface.OnClickListener() {

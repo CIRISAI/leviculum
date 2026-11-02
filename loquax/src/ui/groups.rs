@@ -99,7 +99,43 @@ pub struct GroupInfo {
 }
 
 impl GroupInfo {
-    fn new(address: [u8; 16]) -> Self {
+    /// The members as the store keeps them (1307 G2): the `lev` key `0x05`
+    /// as the wire carries it, the epoch with them.
+    pub fn members_bytes(&self) -> Vec<u8> {
+        let lev = Lev {
+            members: Some(Members {
+                epoch: self.epoch,
+                members: self
+                    .members
+                    .iter()
+                    .map(|m| Member {
+                        address: m.address,
+                        name: m.name.clone(),
+                        flags: if m.left { MEMBER_LEFT } else { 0 }
+                            | if m.admin { MEMBER_ADMIN } else { 0 }
+                            | if m.joined { MEMBER_JOINED } else { 0 },
+                    })
+                    .collect(),
+            }),
+            ..Lev::default()
+        };
+        let [_, (_, data)] = lev.fields();
+        data
+    }
+
+    /// [`GroupInfo::members_bytes`] read back: the epoch and the members;
+    /// `None` for bytes that are no membership.
+    pub fn members_from(bytes: &[u8]) -> Option<(u64, Vec<GroupMember>)> {
+        let [kind, _] = Lev::default().fields();
+        let members = Lev::from_fields(&[kind, (FIELD_CUSTOM_DATA, bytes.to_vec())])?.members?;
+        Some((
+            members.epoch,
+            members.members.iter().map(member_of).collect(),
+        ))
+    }
+
+    /// The group at `address` with nothing known of it yet.
+    pub fn new(address: [u8; 16]) -> Self {
         Self {
             address,
             name: String::new(),
@@ -142,6 +178,9 @@ pub struct Draft {
     pub name: String,
     /// Create was pressed; the home has not answered yet.
     pub asked: bool,
+    /// Adding to this group rather than making one (1307 G2, study 4.5):
+    /// the picker's Next is "Add", and there is no name step.
+    pub to: Option<[u8; 16]>,
 }
 
 /// What the member sheet asks before it acts.
@@ -179,6 +218,9 @@ pub enum Verb {
     Members { group: Target },
     /// "Leave group": asked first unless `confirmed`.
     Leave { group: Target, confirmed: bool },
+    /// The admin's "Add members" on the member sheet (1307 G2): the
+    /// picker opens for the group; its Next adds the ticked friends.
+    Add { group: Target },
     /// The admin's "Remove" on a member: asked first unless `confirmed`;
     /// with no member the palette asks for its name.
     Remove {
@@ -188,6 +230,17 @@ pub enum Verb {
     },
     /// The picker, the sheet or its question closes.
     Close,
+}
+
+/// A member as a membership (`0x05`) lists it.
+fn member_of(m: &Member) -> GroupMember {
+    GroupMember {
+        address: m.address,
+        name: m.name.clone(),
+        admin: m.flags & MEMBER_ADMIN != 0,
+        joined: m.flags & (MEMBER_JOINED | MEMBER_ADMIN) != 0,
+        left: m.flags & MEMBER_LEFT != 0,
+    }
 }
 
 /// Whether a message of `body` and `fields` is only a group's state: no
@@ -216,6 +269,54 @@ pub fn copy_of<'a>(body: &'a str, fields: &[Field]) -> Option<([u8; 16], &'a str
     Some((copy.sender, name, text))
 }
 
+/// The line a membership from the group at `index` of `messages` makes
+/// visible (1307 G2): who joined, left or was added since the membership
+/// before it in the same conversation, `"Anna joined. Bob left."`, with
+/// the names the admin gave (`own`, the reader, is "You"). None for a
+/// message that is no membership from the group, for the first one loaded
+/// (nothing to compare it with) and for one that changes nobody's
+/// standing. Read from the messages alone, so every device and every
+/// restart draws the same lines.
+pub fn membership_note(
+    messages: &[Message],
+    index: usize,
+    own: Option<[u8; 16]>,
+) -> Option<String> {
+    let list = |m: &Message| {
+        (!m.outbound)
+            .then(|| Lev::from_fields(&m.fields)?.members)
+            .flatten()
+    };
+    let now = list(messages.get(index)?)?;
+    let before = messages[..index].iter().rev().find_map(list)?;
+    if now.epoch <= before.epoch {
+        return None;
+    }
+    let name = |m: &Member| match own == Some(m.address) {
+        true => "You".to_string(),
+        false => m.name.clone(),
+    };
+    let mut lines = Vec::new();
+    for member in &now.members {
+        let was = before.members.iter().find(|b| b.address == member.address);
+        let left = member.flags & MEMBER_LEFT != 0;
+        let joined = member.flags & (MEMBER_JOINED | MEMBER_ADMIN) != 0;
+        let line = match was {
+            Some(was) if left && was.flags & MEMBER_LEFT == 0 => "left",
+            Some(was) if !left && joined && was.flags & (MEMBER_JOINED | MEMBER_ADMIN) == 0 => {
+                "joined"
+            }
+            Some(was) if !left && was.flags & MEMBER_LEFT != 0 => "was added",
+            Some(_) => continue,
+            None if left => continue,
+            None if joined => "joined",
+            None => "was added",
+        };
+        lines.push(alloc::format!("{} {line}.", name(member)));
+    }
+    (!lines.is_empty()).then(|| lines.join(" "))
+}
+
 impl Message {
     /// Whether this message is a group's state and no bubble
     /// ([`is_state`]).
@@ -239,19 +340,48 @@ impl<B> UiModel<B> {
     /// The friends the "New group" picker lists: every conversation the
     /// list shows that is no group, in the list's order.
     pub fn group_candidates(&self) -> Vec<[u8; 16]> {
+        // Adding to a group (G2): its present members are no candidates.
+        let adding = self
+            .group_draft
+            .as_ref()
+            .and_then(|d| d.to)
+            .and_then(|group| self.groups.get(&group));
         self.order()
             .into_iter()
             .map(|c| self.conversations[c].peer)
             .filter(|peer| !self.groups.contains_key(peer) && self.address != Some(*peer))
+            .filter(|peer| adding.is_none_or(|group| group.member(peer).is_none_or(|m| m.left)))
             .collect()
     }
 
     /// Learn what a message in `peer`'s conversation says of a group:
-    /// `outbound` when the reader (or another of its devices) sent it.
+    /// `outbound` when the reader (or another of its devices) sent it. A
+    /// group that changed is written to the store with the next writes
+    /// (1307 G2), so a restart lists it as it stood.
     pub(super) fn learn_group(&mut self, peer: [u8; 16], outbound: bool, fields: &[Field]) {
         let Some(lev) = Lev::from_fields(fields) else {
             return;
         };
+        let touched: Vec<[u8; 16]> = lev
+            .invite
+            .as_ref()
+            .map(|invite| invite.group)
+            .into_iter()
+            .chain(core::iter::once(peer))
+            .collect();
+        let before: Vec<Option<GroupInfo>> = touched
+            .iter()
+            .map(|a| self.groups.get(a).cloned())
+            .collect();
+        self.learn_lev(peer, outbound, &lev);
+        for (address, was) in touched.into_iter().zip(before) {
+            if self.groups.get(&address) != was.as_ref() {
+                self.groups_changed.insert(address);
+            }
+        }
+    }
+
+    fn learn_lev(&mut self, peer: [u8; 16], outbound: bool, lev: &Lev) {
         let own = self.address;
         if let Some(invite) = &lev.invite {
             let group = self
@@ -297,17 +427,7 @@ impl<B> UiModel<B> {
             };
             if members.epoch >= group.epoch {
                 group.epoch = members.epoch;
-                group.members = members
-                    .members
-                    .iter()
-                    .map(|m| GroupMember {
-                        address: m.address,
-                        name: m.name.clone(),
-                        admin: m.flags & MEMBER_ADMIN != 0,
-                        joined: m.flags & (MEMBER_JOINED | MEMBER_ADMIN) != 0,
-                        left: m.flags & MEMBER_LEFT != 0,
-                    })
-                    .collect();
+                group.members = members.members.iter().map(member_of).collect();
                 if let Some(me) = own.and_then(|own| group.member(&own)).cloned() {
                     group.ours |= me.admin;
                     group.standing = match (me.left, me.joined) {
@@ -384,6 +504,27 @@ impl<B: Default> UiModel<B> {
                     picked: Vec::new(),
                     name: String::new(),
                     asked: false,
+                    to: None,
+                });
+                self.group_sheet = None;
+            }
+            Verb::Add { group } => {
+                let Some(group) = self.group_target(group, false) else {
+                    return Vec::new();
+                };
+                if !self.groups.get(&group).is_some_and(|g| g.ours) {
+                    self.toast(
+                        leviculum_ui::toast::ToastKind::Info,
+                        "only the group's admin adds members".to_string(),
+                    );
+                    return Vec::new();
+                }
+                self.group_draft = Some(Draft {
+                    step: Step::Pick,
+                    picked: Vec::new(),
+                    name: String::new(),
+                    asked: false,
+                    to: Some(group),
                 });
                 self.group_sheet = None;
             }
@@ -400,6 +541,9 @@ impl<B: Default> UiModel<B> {
             }
             Verb::Next => {
                 if let Some(draft) = self.group_draft.as_mut() {
+                    if draft.to.is_some() {
+                        return self.add_members();
+                    }
                     if !draft.picked.is_empty() {
                         draft.step = Step::Name;
                     }
@@ -573,6 +717,10 @@ impl<B: Default> UiModel<B> {
                         .group_draft
                         .as_ref()
                         .is_some_and(|d| !d.picked.is_empty());
+                    let adding = self.group_draft.as_ref().is_some_and(|d| d.to.is_some());
+                    if picked && adding {
+                        return self.group_verb(Verb::Next);
+                    }
                     if picked {
                         self.group_verb(Verb::Next);
                         self.palette = Some(Palette {
@@ -676,6 +824,66 @@ impl<B: Default> UiModel<B> {
             })
             .collect();
         alloc::vec![UiEffect::CreateGroup { name, members }]
+    }
+
+    /// The picker's "Add" (1307 G2): the home is asked once to add the
+    /// ticked friends under the names the reader knows them by.
+    fn add_members(&mut self) -> Vec<UiEffect> {
+        let Some(draft) = self.group_draft.as_mut() else {
+            return Vec::new();
+        };
+        let Some(group) = draft.to else {
+            return Vec::new();
+        };
+        if draft.asked || draft.picked.is_empty() {
+            return Vec::new();
+        }
+        draft.asked = true;
+        let picked = draft.picked.clone();
+        let members = picked
+            .iter()
+            .map(|peer| {
+                let name = self
+                    .names
+                    .shown(peer)
+                    .map_or_else(|| super::short(peer), ToString::to_string);
+                (*peer, name)
+            })
+            .collect();
+        alloc::vec![UiEffect::AddMembers { group, members }]
+    }
+
+    /// The home's answer to "Add" (G2): the picker closes and the member
+    /// sheet opens on the group, whose new list follows from the home; or
+    /// the reader is told why not and the picker stays.
+    pub(super) fn members_added(&mut self, added: Result<[u8; 16], String>) -> Vec<UiEffect> {
+        let Some(draft) = self.group_draft.take() else {
+            return Vec::new();
+        };
+        match added {
+            Ok(group) => {
+                let count = draft.picked.len();
+                self.group_sheet = Some(Sheet {
+                    group,
+                    confirm: None,
+                });
+                self.toast(
+                    leviculum_ui::toast::ToastKind::Info,
+                    alloc::format!("{count} invited"),
+                );
+            }
+            Err(why) => {
+                self.toast(
+                    leviculum_ui::toast::ToastKind::Error,
+                    alloc::format!("Nobody was added: {why}"),
+                );
+                self.group_draft = Some(Draft {
+                    asked: false,
+                    ..draft
+                });
+            }
+        }
+        Vec::new()
     }
 
     /// The home's answer to Create: the group's conversation is listed
@@ -1216,6 +1424,239 @@ mod tests {
         );
     }
 
+    /// 1307 G2, item 6 (study 4.5): the admin adds k friends in 3 + k
+    /// taps: Members, Add members, a tick each, Add. The picker offers
+    /// only friends not in the group; the home is asked once; its answer
+    /// opens the member sheet. Controls: a member who is not admin gets no
+    /// picker; Add with nobody ticked asks nothing; a second Add while the
+    /// home has not answered asks nothing; a refusal keeps the ticks.
+    #[test]
+    fn the_admin_adds_members_in_three_taps_and_one_per_friend() {
+        let mut model = reader(&[ANNA, BOB, LEW]);
+        arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+        arrive(
+            &mut model,
+            GROUP,
+            2,
+            "",
+            members(1, &[(ME, "Me", 2 | 4), (ANNA, "Anna", 4)]),
+        );
+        let group = Target::Peer(GROUP);
+        let mut taps = 0;
+        verb(&mut model, Verb::Members { group });
+        taps += 1;
+        assert!(verb(&mut model, Verb::Add { group }).is_empty());
+        taps += 1;
+        let candidates = model.group_candidates();
+        assert!(!candidates.contains(&ANNA), "already in: {candidates:?}");
+        assert!(candidates.contains(&BOB) && candidates.contains(&LEW));
+        let node = super::super::group_scene::new_group(&model).expect("the picker");
+        assert_eq!(
+            node.next.label_key,
+            super::super::strings::StrId::GroupAddConfirm
+        );
+        assert!(verb(&mut model, Verb::Next).is_empty(), "nobody ticked");
+        for friend in [BOB, LEW] {
+            verb(&mut model, Verb::Pick(friend));
+            taps += 1;
+        }
+        let asked = verb(&mut model, Verb::Next);
+        taps += 1;
+        assert_eq!(taps, 3 + 2);
+        let [UiEffect::AddMembers {
+            group: to,
+            members: added,
+        }] = asked.as_slice()
+        else {
+            panic!("one ask of the home: {asked:?}");
+        };
+        assert_eq!(*to, GROUP);
+        let addresses: Vec<[u8; 16]> = added.iter().map(|(p, _)| *p).collect();
+        assert_eq!(addresses, [BOB, LEW]);
+        assert!(verb(&mut model, Verb::Next).is_empty(), "asked once");
+        update(&mut model, UiEvent::MembersAdded(Err("offline".into())));
+        let draft = model.group_draft.clone().expect("kept");
+        assert_eq!((draft.picked.len(), draft.asked), (2, false));
+        assert_eq!(verb(&mut model, Verb::Next).len(), 1, "asked again");
+        update(&mut model, UiEvent::MembersAdded(Ok(GROUP)));
+        assert!(model.group_draft.is_none());
+        assert_eq!(model.group_sheet.map(|s| s.group), Some(GROUP));
+
+        let mut member = reader(&[LEW]);
+        arrive(&mut member, LEW, 1, "invite", invite("Lew"));
+        arrive(
+            &mut member,
+            GROUP,
+            2,
+            "",
+            members(1, &[(LEW, "Lew", 2 | 4), (ME, "Me", 4)]),
+        );
+        assert!(verb(&mut member, Verb::Add { group }).is_empty());
+        assert!(
+            member.group_draft.is_none(),
+            "control: no picker for a member"
+        );
+    }
+
+    /// 1307 G2, item 6: the hidden membership becomes a visible line when
+    /// it changes somebody's standing: "Anna joined.", then "Bob was
+    /// added. Anna left."; the window and the phone get it as a note
+    /// bubble with that body, the terminal as a centred note line.
+    /// Controls: the first list loaded says nothing (nothing to compare),
+    /// a list at the same epoch says nothing, a list that changes nobody
+    /// says nothing.
+    #[test]
+    fn a_membership_change_is_a_line_in_the_chat() {
+        let mut model = reader(&[LEW]);
+        arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+        arrive(
+            &mut model,
+            GROUP,
+            2,
+            "",
+            members(1, &[(LEW, "Lew", 2), (ME, "Me", 4), (ANNA, "Anna", 0)]),
+        );
+        arrive(
+            &mut model,
+            GROUP,
+            3,
+            "",
+            members(2, &[(LEW, "Lew", 2), (ME, "Me", 4), (ANNA, "Anna", 4)]),
+        );
+        arrive(
+            &mut model,
+            GROUP,
+            4,
+            "",
+            members(2, &[(LEW, "Lew", 2), (ME, "Me", 4), (ANNA, "Anna", 4)]),
+        );
+        arrive(
+            &mut model,
+            GROUP,
+            5,
+            "",
+            members(
+                3,
+                &[
+                    (LEW, "Lew", 2),
+                    (ME, "Me", 4),
+                    (ANNA, "Anna", 1),
+                    (BOB, "Bob", 0),
+                ],
+            ),
+        );
+        arrive(
+            &mut model,
+            GROUP,
+            6,
+            "",
+            members(
+                4,
+                &[
+                    (LEW, "Lew", 2),
+                    (ME, "Me", 4),
+                    (ANNA, "Anna", 1),
+                    (BOB, "Bob", 0),
+                ],
+            ),
+        );
+        let c = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == GROUP)
+            .expect("the group's chat");
+        let notes: Vec<String> = super::super::chat::bubbles(&model, c)
+            .into_iter()
+            .filter(|b| b.note)
+            .map(|b| b.body)
+            .collect();
+        assert_eq!(notes, ["Anna joined.", "Anna left. Bob was added."]);
+        let messages = &model.conversations[c].messages;
+        assert_eq!(
+            membership_note(messages, 0, Some(ME)),
+            None,
+            "the first list"
+        );
+        assert_eq!(
+            membership_note(messages, 2, Some(ME)),
+            None,
+            "the same epoch"
+        );
+        assert_eq!(
+            membership_note(messages, 4, Some(ME)),
+            None,
+            "nobody changed"
+        );
+        model.selected = c;
+        let rows: Vec<String> = model
+            .laid()
+            .rows
+            .iter()
+            .map(|line| line.cells.iter().map(|cell| cell.ch).collect())
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.contains("── Anna joined. ──")),
+            "{rows:#?}"
+        );
+        assert!(rows
+            .iter()
+            .any(|r| r.contains("── Anna left. Bob was added. ──")));
+    }
+
+    /// 1307 G2, item 2: what the messages teach of a group is written to
+    /// the store as the group's own row, and a restart lists the group
+    /// from that row though none of its messages is loaded (they sit
+    /// beyond the load window). Control: the same restart without the row
+    /// knows no group, so the row is what carries it.
+    #[test]
+    fn a_restart_lists_every_group_from_the_store_without_its_messages() {
+        let mut first = reader(&[LEW]);
+        arrive(&mut first, LEW, 1, "invite", invite("Lew"));
+        arrive(
+            &mut first,
+            GROUP,
+            2,
+            "",
+            members(3, &[(LEW, "Lew", 2), (ME, "Me", 4), (ANNA, "Anna", 4)]),
+        );
+        let kept: Vec<GroupInfo> = first
+            .take_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                super::super::history::StoreWrite::Group(group) => Some(group),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept.len(), 1, "one row, the newest state: {kept:?}");
+        assert!(
+            first
+                .take_writes()
+                .iter()
+                .all(|w| !matches!(w, super::super::history::StoreWrite::Group(_))),
+            "written once"
+        );
+        let row = |group: Option<GroupInfo>| super::super::history::Restored {
+            peer: GROUP,
+            pinned: false,
+            flags: Default::default(),
+            unread: 0,
+            messages: Vec::new(),
+            earlier: 40,
+            draft: Default::default(),
+            group,
+        };
+        let mut again = reader(&[]);
+        again.restore(vec![row(Some(kept[0].clone()))]);
+        let group = again.group(&GROUP).expect("listed from the store");
+        assert_eq!(group.standing, Standing::Joined);
+        assert_eq!((group.epoch, group.count()), (3, 3));
+        assert_eq!(group.name, "Familie");
+        assert!(again.conversations.iter().any(|c| c.peer == GROUP));
+        let mut without = reader(&[]);
+        without.restore(vec![row(None)]);
+        assert_eq!(without.group(&GROUP), None, "control: no row, no group");
+    }
+
     /// A restart learns the groups again from the stored messages: the
     /// state messages are kept, not drawn, and no list line.
     #[test]
@@ -1234,6 +1675,7 @@ mod tests {
                 messages: c.messages.clone(),
                 earlier: 0,
                 draft: Default::default(),
+                group: None,
             })
             .collect();
         let mut again = reader(&[]);

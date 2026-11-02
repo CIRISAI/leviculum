@@ -102,6 +102,9 @@ pub struct Restored {
     pub earlier: usize,
     /// What was typed and not sent.
     pub draft: Draft,
+    /// The group this conversation is, as the store kept it (1307 G2):
+    /// listed with its members before any of its messages is loaded.
+    pub group: Option<super::groups::GroupInfo>,
 }
 
 /// One change for the store to make.
@@ -136,6 +139,8 @@ pub enum StoreWrite {
         peer: [u8; 16],
         share: Option<super::share::Share>,
     },
+    /// Keep a group as the model knows it now (1307 G2).
+    Group(super::groups::GroupInfo),
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -220,8 +225,14 @@ impl<B> UiModel<B> {
             && !stored.pinned
             && stored.flags == Flags::default()
             && stored.draft.is_empty()
+            && stored.group.is_none()
         {
             return;
+        }
+        // The group as the store kept it (1307 G2); what the loaded
+        // messages say is learned over it, the newest epoch winning.
+        if let Some(group) = stored.group.clone() {
+            self.groups.insert(group.address, group);
         }
         let now = self.now;
         let index = self.conversation(stored.peer);
@@ -346,6 +357,11 @@ impl<B> UiModel<B> {
                 .into_iter()
                 .map(|(peer, share)| StoreWrite::Share { peer, share }),
         );
+        for address in core::mem::take(&mut self.groups_changed) {
+            if let Some(group) = self.groups.get(&address) {
+                writes.push(StoreWrite::Group(group.clone()));
+            }
+        }
         writes.append(&mut self.forgotten);
         writes
     }

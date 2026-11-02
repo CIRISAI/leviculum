@@ -847,6 +847,12 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("remove member"),
+        Row::new(
+            "add members to the open group, its admin's: tick friends, then Enter",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("add members"),
     ]
 };
 

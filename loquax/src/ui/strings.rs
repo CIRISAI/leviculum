@@ -168,6 +168,8 @@ leviculum_ui::catalogue! {
     GroupLeave = "group_leave", "Leave group", "Gruppe verlassen";
     GroupLeaveAsk = "group_leave_ask", "Leave %1$s?", "%1$s verlassen?";
     GroupRemove = "group_remove", "Remove", "Entfernen";
+    GroupAdd = "group_add", "Add members", "Mitglieder hinzufügen";
+    GroupAddConfirm = "group_add_confirm", "Add", "Hinzufügen";
     GroupRemoveAsk = "group_remove_ask", "Remove %1$s from %2$s?", "%1$s aus %2$s entfernen?";
     GroupYes = "group_yes", "Yes", "Ja";
     GroupNo = "group_no", "No", "Nein";

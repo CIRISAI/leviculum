@@ -623,13 +623,23 @@ impl App {
                         t
                     ),
                 ]);
-            } else if let Some(leave) = &sheet.leave {
-                pane = pane.push(flat(
-                    text(self.word(leave.label_key))
-                        .size(15)
-                        .color(colour(t.failed_mark_on_panel)),
-                    Message::Intent(leave.intent.clone()),
-                ));
+            } else {
+                // The admin's Add members (1307 G2), above Leave.
+                if let Some(add) = &sheet.add {
+                    pane = pane.push(link(
+                        self.word(add.label_key),
+                        Message::Intent(add.intent.clone()),
+                        t,
+                    ));
+                }
+                if let Some(leave) = &sheet.leave {
+                    pane = pane.push(flat(
+                        text(self.word(leave.label_key))
+                            .size(15)
+                            .color(colour(t.failed_mark_on_panel)),
+                        Message::Intent(leave.intent.clone()),
+                    ));
+                }
             }
         }
         container(pane)
@@ -787,6 +797,20 @@ impl App {
             );
         }
         for node in &group.bubbles {
+            // A group's own line, "Anna joined." (1307 G2): centred, as
+            // the day line, no one's bubble.
+            if node.bubble.note {
+                list = list.push(
+                    container(
+                        text(node.bubble.body.clone())
+                            .size(size::DAY)
+                            .color(colour(t.text_secondary)),
+                    )
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding::ZERO.top(8).bottom(4)),
+                );
+                continue;
+            }
             let place = &node.place;
             let gap = match place.joins_before {
                 true => size::GAP_GROUPED,

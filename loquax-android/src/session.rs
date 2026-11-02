@@ -1943,6 +1943,16 @@ impl Inner {
                         wake.notify_one();
                     });
                 }
+                UiEffect::AddMembers { group, members } => {
+                    let client = self.client.clone();
+                    let done = self.finished_tx.clone();
+                    let wake = Arc::clone(&self.wake);
+                    self.runtime.spawn(async move {
+                        let event = runner::add_members(client, group, members, BUDGET).await;
+                        let _ = done.send(Finished::Event(event));
+                        wake.notify_one();
+                    });
+                }
                 // What the terminal does with its screen and its maps has
                 // no place here yet.
                 _ => {}
@@ -2278,6 +2288,11 @@ impl Inner {
                 .collect(),
             leave: sheet
                 .leave
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
+            add: sheet
+                .add
                 .as_ref()
                 .map(|a| a.label_key.text(lang).to_string())
                 .unwrap_or_default(),
@@ -3131,6 +3146,7 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
                     member: Some(parse_peer(&member)?),
                     confirmed,
                 },
+                "add" => Verb::Add { group: group()? },
                 "close" => Verb::Close,
                 other => return Err(format!("no group verb {other:?}")),
             })

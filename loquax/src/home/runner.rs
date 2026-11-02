@@ -259,6 +259,35 @@ pub async fn create_group(
     UiEvent::GroupMade(made.map_err(|error| error.to_string()))
 }
 
+/// Ask the home node to add members to its group (1307 G2, `/groupadd`):
+/// the event the model folds. One client id for the whole ask, so a lost
+/// answer asked again adds nobody twice.
+pub async fn add_members(
+    client: HomeClient,
+    group: [u8; 16],
+    members: Vec<([u8; 16], String)>,
+    budget: Duration,
+) -> UiEvent {
+    let request = super::wire::GroupAddRequest {
+        client_id: super::client::client_id(),
+        group,
+        members,
+    };
+    let added = super::client::group_add(
+        &client.node,
+        &client.public_key,
+        &client.device,
+        &request,
+        budget,
+    )
+    .await;
+    match &added {
+        Ok(group) => tracing::info!("HOME group added group={}", crate::address::to_hex(group)),
+        Err(error) => tracing::warn!("HOME group members not added: {error}"),
+    }
+    UiEvent::MembersAdded(added.map_err(|error| error.to_string()))
+}
+
 /// The petnames a fold set, handed to the home node in order (1139): the
 /// screen and the contacts file have them already. One the home node did
 /// not take is said in the log; the other devices keep the name they had

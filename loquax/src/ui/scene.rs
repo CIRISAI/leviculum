@@ -2016,6 +2016,9 @@ impl BubbleNode {
                     json!({ "address": hex(writer), "name": name }),
                 );
             }
+            if b.note {
+                map.insert("note".into(), Value::Bool(true));
+            }
         }
         value
     }

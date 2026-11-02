@@ -851,6 +851,9 @@ pub struct UiModel<B> {
     pub group_draft: Option<groups::Draft>,
     /// A group's member sheet, while it is open.
     pub group_sheet: Option<groups::Sheet>,
+    /// The groups whose state changed since the store last learned it
+    /// (1307 G2): written by [`UiModel::take_writes`].
+    groups_changed: BTreeSet<[u8; 16]>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -951,6 +954,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             groups: groups::Groups::new(),
             group_draft: None,
             group_sheet: None,
+            groups_changed: BTreeSet::new(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1592,6 +1596,9 @@ pub enum UiEvent {
     /// The home's answer to [`UiEffect::CreateGroup`]: the group's
     /// address, or why it was not made.
     GroupMade(Result<[u8; 16], String>),
+    /// The home's answer to [`UiEffect::AddMembers`] (1307 G2): the
+    /// group's address, or why nobody was added.
+    MembersAdded(Result<[u8; 16], String>),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1696,6 +1703,12 @@ pub enum UiEffect {
     /// [`UiEvent::GroupMade`].
     CreateGroup {
         name: String,
+        members: Vec<([u8; 16], String)>,
+    },
+    /// Ask the home to add `members` to its group `group` (1307 G2,
+    /// `/groupadd`); answered with [`UiEvent::MembersAdded`].
+    AddMembers {
+        group: [u8; 16],
         members: Vec<([u8; 16], String)>,
     },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
@@ -1866,6 +1879,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Rename { peer, name } => model.rename(peer, &name),
         UiEvent::Group(verb) => model.group_verb(verb),
         UiEvent::GroupMade(made) => model.group_made(made),
+        UiEvent::MembersAdded(added) => model.members_added(added),
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -3567,6 +3581,18 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
                 Vec::new()
             }
         },
+        PaletteCommand::AddMembers => {
+            let effects = model.group_verb(groups::Verb::Add {
+                group: intent::Target::Open,
+            });
+            if model.group_draft.as_ref().is_some_and(|d| d.to.is_some()) {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::GroupPick),
+                    ..Palette::default()
+                });
+            }
+            effects
+        }
         PaletteCommand::RemoveMember => model.group_verb(groups::Verb::Remove {
             group: intent::Target::Open,
             member: None,
@@ -9228,6 +9254,7 @@ pub(crate) mod tests {
             messages,
             earlier,
             draft: history::Draft::default(),
+            group: None,
         }
     }
 

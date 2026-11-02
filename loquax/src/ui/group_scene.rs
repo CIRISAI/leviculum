@@ -117,6 +117,8 @@ pub struct MemberSheet {
     pub rows: Vec<MemberRow>,
     /// Leave group, while the reader is in it.
     pub leave: Option<Action>,
+    /// Add members, the admin's (1307 G2, study 4.5).
+    pub add: Option<Action>,
     pub ask: Option<AskNode>,
     pub close: Action,
     pub a11y: A11y,
@@ -254,10 +256,16 @@ pub fn new_group<B>(model: &UiModel<B>) -> Option<NewGroupNode> {
         })
         .collect();
     let named = draft.name.trim();
-    let title = match draft.step {
-        Step::Pick => Text::key(StrId::GroupPickTitle),
-        Step::Name => Text::key(StrId::NewGroup),
+    // Adding to a group (G2): "Add members", and Next is "Add".
+    let title = match (draft.step, draft.to) {
+        (Step::Pick, Some(_)) => Text::key(StrId::GroupAdd),
+        (Step::Pick, None) => Text::key(StrId::GroupPickTitle),
+        (Step::Name, _) => Text::key(StrId::NewGroup),
     };
+    let mut next = enabled(verb(Verb::Next), !draft.picked.is_empty() && !draft.asked);
+    if draft.to.is_some() {
+        next.label_key = StrId::GroupAddConfirm;
+    }
     let trust_name = match named.is_empty() {
         true => String::from("…"),
         false => String::from(named),
@@ -272,7 +280,7 @@ pub fn new_group<B>(model: &UiModel<B>) -> Option<NewGroupNode> {
             StrId::GroupPicked,
             Vec::from([Arg::Int(draft.picked.len() as i64)]),
         ),
-        next: enabled(verb(Verb::Next), !draft.picked.is_empty()),
+        next,
         hint: Text::key(StrId::GroupNameHint),
         name: draft.name.clone(),
         trust: Text::Key(StrId::GroupTrustCreate, Vec::from([Arg::Str(trust_name)])),
@@ -376,6 +384,11 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
                 confirmed: false,
             })
         }),
+        add: (info.ours && info.standing == Standing::Joined).then(|| {
+            verb(Verb::Add {
+                group: Target::Peer(group),
+            })
+        }),
         ask,
         close: verb(Verb::Close),
     })
@@ -445,6 +458,16 @@ impl NewGroupNode {
 
 impl MemberSheet {
     pub fn to_json(&self) -> Value {
+        let mut value = self.json();
+        // The admin's Add members (G2) only where it is, so the sheets of
+        // a member stay the bytes they were.
+        if let (Value::Object(map), Some(add)) = (&mut value, &self.add) {
+            map.insert("add".into(), add.to_json());
+        }
+        value
+    }
+
+    fn json(&self) -> Value {
         json!({
             "id": self.id.resource(),
             "group": hex(&self.group),

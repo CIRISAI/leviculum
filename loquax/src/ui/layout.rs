@@ -199,6 +199,21 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 last = Last::Separator;
             }
         }
+        // A group's membership that changed somebody's standing (1307 G2):
+        // a line of its own, as a note is.
+        if let Some(text) = super::groups::membership_note(&conversation.messages, index, None) {
+            if last == Last::Block {
+                laid.push(RLine::default());
+            }
+            laid.push(note_line(&text, width, draw.tokens));
+            laid.spans.push(Span {
+                start,
+                end: laid.rows.len(),
+                mark: None,
+            });
+            last = Last::Separator;
+            continue;
+        }
         let from = skipped.take().unwrap_or(index);
         let here = |at: usize| (from..=index).contains(&at);
         for note in conversation.notes.iter().filter(|n| here(n.before)) {
@@ -263,6 +278,7 @@ pub fn folded(conversation: &Conversation, index: usize) -> bool {
         .messages
         .get(index)
         .is_some_and(Message::is_aside)
+        && super::groups::membership_note(&conversation.messages, index, None).is_none()
         || conversation.report_folded(index)
 }
 

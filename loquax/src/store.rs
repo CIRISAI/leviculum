@@ -115,6 +115,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::home::outgoing::Change;
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
+use crate::ui::groups::{GroupInfo, Standing};
 use crate::ui::history::{Draft, Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
 use crate::ui::share::{Report, Share, Span};
 use crate::ui::{LedgerEntry, Message, Signature};
@@ -754,11 +755,13 @@ impl Store {
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|e| self.failed(e))?;
+        let mut groups = self.client_groups()?;
         let mut out = Vec::new();
         for (peer, pinned, unread, flags) in rows {
             let peer = self.address(&peer)?;
             let (messages, earlier) = self.page(peer, u64::MAX, None)?;
             let draft = self.draft(peer)?;
+            let group = groups.remove(&peer);
             out.push(Restored {
                 peer,
                 pinned,
@@ -767,7 +770,79 @@ impl Store {
                 messages,
                 earlier,
                 draft,
+                group,
             });
+        }
+        // A group with no conversation row yet (only its state came) is
+        // listed too, after the others.
+        for (peer, group) in groups {
+            out.push(Restored {
+                peer,
+                pinned: false,
+                flags: Flags::default(),
+                unread: 0,
+                messages: Vec::new(),
+                earlier: 0,
+                draft: Draft::default(),
+                group: Some(group),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The groups the device knows (1307 G2), by address, as the model
+    /// last wrote them. A row whose members are no membership is damage.
+    pub fn client_groups(&self) -> Result<BTreeMap<[u8; 16], GroupInfo>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT address, name, admin_name, inviter, ours, epoch, standing, members \
+                 FROM client_groups WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut out = BTreeMap::new();
+        for (address, name, admin_name, inviter, ours, epoch, standing, members) in rows {
+            let address = self.address(&address)?;
+            let corrupt = |what: &str| StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("a group's {what}"),
+            };
+            let (_, members) =
+                GroupInfo::members_from(&members).ok_or_else(|| corrupt("members"))?;
+            let standing = match standing {
+                0 => Standing::Invited,
+                1 => Standing::Joined,
+                2 => Standing::Left,
+                _ => return Err(corrupt("standing")),
+            };
+            out.insert(
+                address,
+                GroupInfo {
+                    address,
+                    name,
+                    admin_name,
+                    inviter: inviter.map(|i| self.address(&i)).transpose()?,
+                    ours,
+                    epoch: u64::try_from(epoch).map_err(|_| corrupt("epoch"))?,
+                    members,
+                    standing,
+                },
+            );
         }
         Ok(out)
     }
@@ -2798,6 +2873,35 @@ fn apply(
                 "DELETE FROM positions WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
             )?;
+            tx.execute(
+                "DELETE FROM client_groups WHERE identity = ?1 AND address = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Group(group) => {
+            tx.execute(
+                "INSERT INTO client_groups(identity, address, name, admin_name, inviter, ours, \
+                 epoch, standing, members) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(identity, address) DO UPDATE SET name = excluded.name, \
+                 admin_name = excluded.admin_name, inviter = excluded.inviter, \
+                 ours = excluded.ours, epoch = excluded.epoch, standing = excluded.standing, \
+                 members = excluded.members",
+                params![
+                    &identity[..],
+                    &group.address[..],
+                    group.name,
+                    group.admin_name,
+                    group.inviter.as_ref().map(|i| &i[..]),
+                    group.ours,
+                    i64::try_from(group.epoch).unwrap_or(i64::MAX),
+                    match group.standing {
+                        Standing::Invited => 0,
+                        Standing::Joined => 1,
+                        Standing::Left => 2,
+                    },
+                    group.members_bytes()
+                ],
+            )?;
         }
         StoreWrite::Draft { peer, draft } if draft.is_empty() => {
             tx.execute(
@@ -3951,6 +4055,72 @@ mod tests {
         drop(conn);
         let text = refused(home.path());
         assert!(text.contains("table shares is missing"), "{text}");
+    }
+
+    /// 1307 G2, item 2: a group the model wrote comes back with every
+    /// field, and with no conversation row of its own (only its state
+    /// came) it is listed still; written again it is replaced; it goes
+    /// with its conversation, and another identity sees none.
+    #[test]
+    fn a_group_the_device_knows_comes_back_without_its_messages() {
+        use crate::ui::groups::{GroupInfo, GroupMember, Standing};
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let group = GroupInfo {
+            address: [0x22; 16],
+            name: "Familie".into(),
+            admin_name: "Lew".into(),
+            inviter: Some(BOB),
+            ours: false,
+            epoch: 3,
+            members: vec![
+                GroupMember {
+                    address: BOB,
+                    name: "Lew".into(),
+                    admin: true,
+                    joined: true,
+                    left: false,
+                },
+                GroupMember {
+                    address: US,
+                    name: "Me".into(),
+                    admin: false,
+                    joined: true,
+                    left: false,
+                },
+                GroupMember {
+                    address: [0x55; 16],
+                    name: "Anna".into(),
+                    admin: false,
+                    joined: false,
+                    left: true,
+                },
+            ],
+            standing: Standing::Joined,
+        };
+        store
+            .write(&[StoreWrite::Group(GroupInfo {
+                epoch: 2,
+                ..group.clone()
+            })])
+            .expect("write");
+        store
+            .write(&[StoreWrite::Group(group.clone())])
+            .expect("again");
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].peer, group.address);
+        assert!(restored[0].messages.is_empty());
+        assert_eq!(restored[0].group.as_ref(), Some(&group));
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert!(other.restore().expect("restore").is_empty());
+        drop(other);
+        store
+            .write(&[StoreWrite::ForgetConversation {
+                peer: group.address,
+            }])
+            .expect("forget");
+        assert!(store.restore().expect("restore").is_empty());
     }
 
     /// 1219: a draft is kept beside its conversation, comes back at start

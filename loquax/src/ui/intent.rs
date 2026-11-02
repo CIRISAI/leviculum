@@ -599,6 +599,7 @@ impl Intent {
                 Verb::Members { .. } => StrId::GroupMembers,
                 Verb::Leave { .. } => StrId::GroupLeave,
                 Verb::Remove { .. } => StrId::GroupRemove,
+                Verb::Add { .. } => StrId::GroupAdd,
                 Verb::Close => StrId::Close,
             },
             Intent::NewConversation => StrId::NewConversation,
@@ -744,6 +745,9 @@ impl From<Command> for Intent {
                 group: Target::Open,
                 member: None,
                 confirmed: false,
+            }),
+            Command::AddMembers => Intent::Group(Verb::Add {
+                group: Target::Open,
             }),
         }
     }

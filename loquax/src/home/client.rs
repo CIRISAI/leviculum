@@ -246,6 +246,30 @@ pub async fn group(
         .map_err(HomeError::Refused)
 }
 
+/// `/groupadd` (1307 G2): add members to the owner's group; the group's
+/// address, or the status that refused it.
+pub async fn group_add(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    request: &wire::GroupAddRequest,
+    budget: Duration,
+) -> Result<[u8; 16], HomeError> {
+    let data = wire::group_add_request(request);
+    let bytes = answer_retrying(
+        node,
+        public_key,
+        device,
+        super::GROUP_ADD_PATH,
+        &data,
+        budget,
+    )
+    .await?;
+    wire::read_group_answer(&bytes)
+        .map_err(|_| HomeError::Malformed)?
+        .map_err(HomeError::Refused)
+}
+
 /// One request on a link of its own, asked again up to three times when
 /// the answer was lost: its answer's bytes.
 async fn answer_retrying(
