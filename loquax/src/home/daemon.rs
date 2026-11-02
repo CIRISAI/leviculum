@@ -439,6 +439,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         told: std::collections::HashSet::new(),
         newest: 0,
         nodes: std::collections::HashMap::new(),
+        proven: Vec::new(),
     };
     let mut groups = Vec::new();
     for hosted in group::hosted(&home, &store)? {
@@ -513,8 +514,21 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 let (link, remote) = (request.link_id, request.remote);
                 serving.handover =
                     handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
-                let (accepted, watching, gone, (made, added)) =
+                let (accepted, watching, gone, (made, added, deleted)) =
                     answer(&node, &mut store, &serving, request).await;
+                if let Some((address, told)) = deleted {
+                    // The owner deleted the group (1307 pass four): its
+                    // engine sends the last membership, then refuses all.
+                    if let Some(engine) = groups.iter_mut().find(|g| g.hosted.group.address == address) {
+                        engine.ended = true;
+                        let now = unix_now();
+                        for out in told {
+                            engine.outgoing.add(out.id, out.destination, out.packed, now, false);
+                        }
+                        let acts = engine.outgoing.tick(now);
+                        sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn, engine.selected_pn);
+                    }
+                }
                 if let Some((address, told)) = added {
                     // Members added (1307 G2): the new membership goes out
                     // on the group's own engine.
@@ -600,7 +614,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             }
             _ = tokio::time::sleep_until(next_group_announce) => {
                 next_group_announce = tokio::time::Instant::now() + GROUP_ANNOUNCE_EVERY;
-                for hosted in &groups {
+                for hosted in groups.iter().filter(|g| !g.ended) {
                     // A group whose engine went away is said by its pump.
                     let _ = hosted.engine.submit(Command::Announce);
                 }
@@ -756,6 +770,11 @@ struct GroupEngine<O> {
     /// The propagation node this engine has selected: its own, since the
     /// home's engine selecting one selects nothing here (1328).
     selected_pn: Option<[u8; 16]>,
+    /// Its admin deleted it (1307 pass four): the store and the key are
+    /// gone, the engine stays until the daemon stops to send the last
+    /// membership and to prove and drop every later message, as a
+    /// stranger's.
+    ended: bool,
 }
 
 /// Start the engine of one hosted group, announced with the group's name,
@@ -819,6 +838,7 @@ async fn attach_group(
         hosted,
         engine,
         selected_pn: None,
+        ended: false,
     })
 }
 
@@ -835,13 +855,29 @@ fn pump_group<O: Outbox>(
     loop {
         let event = match group.engine.try_next_event() {
             Ok(Some(event)) => event,
-            Ok(None) => return,
+            Ok(None) => {
+                if send_statuses(store, sender, group, selected_pn) {
+                    continue;
+                }
+                return;
+            }
             Err(gone) => {
                 tracing::warn!("GROUP {} engine: {gone}", group.hosted.group.name);
                 return;
             }
         };
         match event {
+            OutboxEvent::Packed { message_id, packed } if group.ended => {
+                // A deleted group keeps nothing and sends nothing on: the
+                // writer's client stops retrying (as for a stranger).
+                tracing::info!(
+                    "GROUP {} ended: refused message={}",
+                    group.hosted.group.name,
+                    crate::address::to_hex(&message_id)
+                );
+                drop(packed);
+                let _ = group.engine.submit(Command::Prove { message_id });
+            }
             OutboxEvent::Packed { message_id, packed } => {
                 let now = unix_now();
                 let new = match store.archive_append(
@@ -956,6 +992,50 @@ fn pump_group<O: Outbox>(
     }
 }
 
+/// Send the statuses the proofs booked since the last call made due for
+/// `group`'s writers (1307 pass four, [`group::status_after_proof`]).
+/// Whether anything was sent, so the pump looks for events again.
+fn send_statuses<O: Outbox>(
+    store: &mut Store,
+    sender: &mut Sender,
+    group: &mut GroupEngine<O>,
+    selected_pn: Option<[u8; 16]>,
+) -> bool {
+    let address = group.hosted.group.address;
+    let (ours, others): (Vec<_>, Vec<_>) =
+        sender.proven.drain(..).partition(|(g, _)| *g == address);
+    sender.proven = others;
+    if ours.is_empty() || group.ended {
+        return false;
+    }
+    let now = unix_now();
+    let mut sent = false;
+    for (_, original) in ours {
+        match group::status_after_proof(store, &group.hosted, &original, now as f64) {
+            Ok(Some(out)) => {
+                group
+                    .outgoing
+                    .add(out.id, out.destination, out.packed, now, false);
+                sent = true;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!("GROUP {} status: {error}", group.hosted.group.name),
+        }
+    }
+    if sent {
+        let acts = group.outgoing.tick(now);
+        sender.carry_out(
+            &mut group.engine,
+            store,
+            &mut group.outgoing,
+            acts,
+            selected_pn,
+            group.selected_pn,
+        );
+    }
+    sent
+}
+
 /// A group's copies a restart cut off (1307 G2, study 2.4): every copy
 /// sent alone with no proof yet is made again from the archived original,
 /// byte for byte, and handed to the group's outbox with its acceptance
@@ -982,12 +1062,14 @@ fn resume_group<O>(store: &mut Store, group: &mut GroupEngine<O>, now: i64) -> u
     for row in open {
         match group::rebuild(store, &group.hosted, &row) {
             Ok(Some(out)) => {
+                // A copy a node took before the restart is not uploaded
+                // again (1307 pass four, the 1330 side finding).
                 group.outgoing.add(
                     out.id,
                     out.destination,
                     out.packed,
                     row.sent_at.min(now),
-                    false,
+                    row.propagated,
                 );
                 resumed += 1;
             }
@@ -1353,6 +1435,7 @@ async fn answer(
     (
         Option<super::server::NewGroup>,
         Option<([u8; 16], Vec<group::Outgoing>)>,
+        Option<([u8; 16], Vec<group::Outgoing>)>,
     ),
 ) {
     let now = std::time::SystemTime::now()
@@ -1389,13 +1472,18 @@ async fn answer(
         // The outbox has the message whether the answer arrived or not: a
         // client that retries with the same id is answered from it.
         tracing::warn!("HOME answer to {}: {error}", request.path);
-        return (answer.accepted, None, false, (answer.group, answer.added));
+        return (
+            answer.accepted,
+            None,
+            false,
+            (answer.group, answer.added, answer.deleted),
+        );
     }
     (
         answer.accepted,
         answer.watching,
         answer.gone,
-        (answer.group, answer.added),
+        (answer.group, answer.added, answer.deleted),
     )
 }
 
@@ -1415,6 +1503,9 @@ struct Sender {
     /// The node each propagated leg in flight went to, for its lines
     /// (1330: "handed-on" did not say to whom).
     nodes: std::collections::HashMap<[u8; 32], [u8; 16]>,
+    /// The originals a copy's first proof was booked for, by group, whose
+    /// writer's status the group's pump sends when due (1307 pass four).
+    proven: Vec<([u8; 16], [u8; 32])>,
 }
 
 impl Sender {
@@ -1583,7 +1674,12 @@ impl Sender {
         // A group's copy is the group's bookkeeping, not an entry the
         // owner's devices see.
         match group::book(store, id, change, unix_now()) {
-            Ok(true) => {
+            Ok(Some((group, originals))) => {
+                for original in originals {
+                    if !self.proven.contains(&(group, original)) {
+                        self.proven.push((group, original));
+                    }
+                }
                 tracing::info!(
                     "GROUP copy {} message={}",
                     change.word(),
@@ -1591,7 +1687,7 @@ impl Sender {
                 );
                 return;
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(error) => tracing::warn!("GROUP copy record: {error}"),
         }
         match store.outbox_record(id, change, unix_now(), self.cap_bytes) {
@@ -2085,6 +2181,7 @@ mod tests {
             engine: FakeOutbox::new(vec![arrived.clone()]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
+            ended: false,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2093,6 +2190,7 @@ mod tests {
             told: std::collections::HashSet::new(),
             newest: 0,
             nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
         };
         pump_group(&mut store, &mut sender, &mut engine, None);
         let commands = engine.engine.commands.take();
@@ -2200,6 +2298,7 @@ mod tests {
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
+            ended: false,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2208,6 +2307,7 @@ mod tests {
             told: std::collections::HashSet::new(),
             newest: 0,
             nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -2323,6 +2423,7 @@ mod tests {
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: Some(PN),
+            ended: false,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2331,6 +2432,7 @@ mod tests {
             told: std::collections::HashSet::new(),
             newest: 0,
             nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -2443,6 +2545,7 @@ mod tests {
             told: std::collections::HashSet::new(),
             newest: 0,
             nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
         };
         let sends = |commands: Vec<Command>| -> Vec<Vec<u8>> {
             let mut out: Vec<Vec<u8>> = commands
@@ -2463,6 +2566,7 @@ mod tests {
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
+            ended: false,
         };
         let mut first_sender = sender();
         pump_group(&mut store, &mut first_sender, &mut engine, None);
@@ -2495,6 +2599,7 @@ mod tests {
                 engine: FakeOutbox::new(Vec::new()),
                 outgoing: Outgoing::new(Policy::default()),
                 selected_pn: None,
+                ended: false,
             };
             if resume {
                 resume_group(store, &mut engine, unix_now());
@@ -2566,5 +2671,163 @@ mod tests {
             .group_copies_open(&hosted.group.address)
             .expect("open")
             .is_empty());
+    }
+
+    /// 1307 pass four, the 1330 side finding: a group's copy a propagation
+    /// node took is kept so, and after a restart the copy is tried direct
+    /// again but never uploaded a second time; the node answered `dup=true`
+    /// to every such upload before. Control: a copy no node took is handed
+    /// on once its direct leg fails after the restart.
+    #[test]
+    fn a_restart_after_a_hand_on_uploads_nothing_again() {
+        use crate::outbox::fake::FakeOutbox;
+        const PN: [u8; 16] = [0x5a; 16];
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna, bob) = (person(), person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[(anna.1, "Anna".into()), (bob.1, "Bob".into())],
+            100,
+        )
+        .expect("create");
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
+        let original = leviculum_lxmf::Message::create(
+            hosted.group.address,
+            anna.1,
+            &anna.0,
+            1_800_000_000.0,
+            Vec::new(),
+            b"Bin gleich da".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let sender = || Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: true,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
+        };
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(vec![OutboxEvent::Packed {
+                message_id: original.message_id,
+                packed: original.pack(),
+            }]),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: Some(PN),
+            ended: false,
+        };
+        let mut first = sender();
+        pump_group(&mut store, &mut first, &mut engine, Some(PN));
+        let copies = store
+            .group_copies(&hosted.group.address, &original.message_id)
+            .expect("copies");
+        let copy_of = |member: [u8; 16]| {
+            copies
+                .iter()
+                .find(|c| c.member == member)
+                .expect("copy")
+                .copy
+        };
+        let (lews, bobs) = (copy_of(lew.1), copy_of(bob.1));
+        // Bob's copy: direct fails, the node takes it.
+        for last in [MessageState::Failed, MessageState::Sent] {
+            engine.engine.events.push_back(OutboxEvent::Left {
+                message_id: bobs,
+                last: Some(last),
+                failure: None,
+            });
+            pump_group(&mut store, &mut first, &mut engine, Some(PN));
+        }
+        assert!(
+            store
+                .group_copy(&bobs)
+                .expect("row")
+                .expect("bob")
+                .propagated,
+            "kept"
+        );
+        assert!(
+            !store
+                .group_copy(&lews)
+                .expect("row")
+                .expect("lew")
+                .propagated
+        );
+        drop(engine);
+        drop(store);
+
+        let mut store = Store::open_in(home.path(), lew.1).expect("store again");
+        let hosted = group::hosted(home.path(), &store)
+            .expect("hosted")
+            .pop()
+            .expect("the group");
+        let mut engine = GroupEngine {
+            hosted,
+            engine: FakeOutbox::new(Vec::new()),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: Some(PN),
+            ended: false,
+        };
+        assert_eq!(resume_group(&mut store, &mut engine, unix_now()), 2);
+        let mut again = sender();
+        let acts = engine.outgoing.tick(unix_now());
+        again.carry_out(
+            &mut engine.engine,
+            &mut store,
+            &mut engine.outgoing,
+            acts,
+            Some(PN),
+            Some(PN),
+        );
+        let _ = engine.engine.commands.take();
+        for id in [lews, bobs] {
+            engine.engine.events.push_back(OutboxEvent::Left {
+                message_id: id,
+                last: Some(MessageState::Failed),
+                failure: None,
+            });
+        }
+        pump_group(&mut store, &mut again, &mut engine, Some(PN));
+        let uploads: Vec<[u8; 32]> = engine
+            .engine
+            .commands
+            .take()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::SendPacked {
+                    packed,
+                    via: Via::Propagated,
+                } => leviculum_lxmf::Message::unpack(
+                    &packed,
+                    None,
+                    None,
+                    leviculum_lxmf::DeliveryMethod::Direct,
+                )
+                .ok()
+                .map(|m| m.message_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uploads, [lews], "Lew's handed on, Bob's not again");
     }
 }

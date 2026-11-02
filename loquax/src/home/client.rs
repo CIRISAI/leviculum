@@ -292,6 +292,27 @@ pub async fn group_add(
         .map_err(HomeError::Refused)
 }
 
+/// `/groupdelete` (1307 pass four): the owner's group is deleted for
+/// everyone; asked again as a petname is, since a second delete is `Ok`.
+pub async fn group_delete(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    request: &wire::GroupDeleteRequest,
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let data = wire::group_delete_request(request);
+    ask_retrying(
+        node,
+        public_key,
+        device,
+        super::GROUP_DELETE_PATH,
+        &data,
+        budget,
+    )
+    .await
+}
+
 /// One request on a link of its own, asked again up to three times when
 /// the answer was lost: its answer's bytes.
 async fn answer_retrying(

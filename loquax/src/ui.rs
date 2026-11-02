@@ -1604,6 +1604,9 @@ pub enum UiEvent {
     /// The home's answer to [`UiEffect::AddMembers`] (1307 G2): the
     /// group's address, or why nobody was added.
     MembersAdded(Result<[u8; 16], String>),
+    /// The home's answer to [`UiEffect::DeleteGroup`] (1307 pass four):
+    /// the group, or why not.
+    GroupDeleted(Result<[u8; 16], String>),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1719,6 +1722,9 @@ pub enum UiEffect {
         members: Vec<([u8; 16], String)>,
         lang: strings::Lang,
     },
+    /// Ask the home to delete its group `group` for everyone (1307 pass
+    /// four, `/groupdelete`); answered with [`UiEvent::GroupDeleted`].
+    DeleteGroup { group: [u8; 16] },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.
     Recording {
@@ -1888,6 +1894,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Group(verb) => model.group_verb(verb),
         UiEvent::GroupMade(made) => model.group_made(made),
         UiEvent::MembersAdded(added) => model.members_added(added),
+        UiEvent::GroupDeleted(deleted) => model.group_deleted(deleted),
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -3658,6 +3665,18 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
     if body.trim().is_empty() {
         return Vec::new();
     }
+    // A group its admin deleted takes nothing more (1307 pass four): its
+    // compose is closed, and a frontend that still offers one is told.
+    if let Some(ended) = model
+        .conversations
+        .get(model.selected)
+        .and_then(|c| model.groups.get(&c.peer))
+        .filter(|g| g.standing == groups::Standing::Ended)
+    {
+        let line = format!("{} ended; nothing can be written to it", ended.name);
+        model.toast(ToastKind::Info, line);
+        return Vec::new();
+    }
     let Some(conversation) = model.conversations.get_mut(model.selected) else {
         return Vec::new();
     };
@@ -3886,8 +3905,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let mut effects = take_telemetry(model, index, message_id);
             effects.extend(model.take_lev(source, lev.as_ref()));
             // A group's state (1307) is kept and stored, and asks for no
-            // attention: no unread, no toast, no cursor.
+            // attention: no unread, no toast, no cursor. A group the
+            // reader deleted leaves this device with it (pass four).
             if state {
+                model.forget_deleted_groups();
                 return effects;
             }
             // A reaction: kept and stored, drawn under its target, and the
@@ -4268,13 +4289,25 @@ impl<B> UiModel<B> {
 }
 
 fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
-    let shown = delivery_of(state);
+    let delivered = delivery_of(state);
     let now = model.now;
     let running = model.sending.clone();
     let changed = &mut model.changed;
+    let groups = &model.groups;
     for (c, conversation) in model.conversations.iter_mut().enumerate() {
+        // In a group (1307 pass four) the group's proof is one tick: the
+        // group has it. The two come with its status, once every member's
+        // copy is proven, and a late proof does not take them back.
+        let group = groups.contains_key(&conversation.peer);
+        let shown = match delivered {
+            DeliveryState::Delivered if group => DeliveryState::InMailbox,
+            other => other,
+        };
         for (m, message) in conversation.messages.iter_mut().enumerate() {
             if !message.outbound || message.id != Some(id) {
+                continue;
+            }
+            if group && message.delivery == Some(DeliveryState::Delivered) {
                 continue;
             }
             if gives_up(shown) && running.contains(&(c, m)) {
@@ -4287,11 +4320,15 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
             }
             if message.unproven
                 && !matches!(shown, DeliveryState::Delivered | DeliveryState::Rejected)
+                && !(group && delivered == DeliveryState::Delivered)
             {
                 continue;
             }
             if message.delivery != Some(shown) {
-                let words = ledger_words(shown);
+                let words = match group && delivered == DeliveryState::Delivered {
+                    true => "the group has it: proof received",
+                    false => ledger_words(shown),
+                };
                 let line = match message.last_leg {
                     Some(leg) => format!("{words} ({})", leg_words(leg)),
                     None => words.to_string(),
@@ -4843,6 +4880,9 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
     ];
     if let Some(why) = no_read_words(model, conversation, message, &who) {
         rows.push(why);
+    }
+    if let (true, Some(id)) = (message.outbound, message.id) {
+        rows.extend(model.group_detail_rows(&conversation.peer, &id));
     }
     let received = message.at.map(|at| at.unix_secs);
     let sensors = telemetry::detail_rows(&conversation.peer, &message.fields, offset, received);

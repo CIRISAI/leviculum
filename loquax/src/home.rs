@@ -174,6 +174,9 @@ pub const GROUP_PATH: &str = "/group";
 /// 1307 G2: add members to a group the home hosts (study 4.5).
 pub const GROUP_ADD_PATH: &str = "/groupadd";
 
+/// 1307 pass four: the admin deletes a group the home hosts, for everyone.
+pub const GROUP_DELETE_PATH: &str = "/groupdelete";
+
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
 /// A message a client handed in with `/send`, packed as the home node

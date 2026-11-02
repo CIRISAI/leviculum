@@ -295,6 +295,31 @@ pub async fn add_members(
     UiEvent::MembersAdded(added.map_err(|error| error.to_string()))
 }
 
+/// Ask the home node to delete the owner's group for everyone (1307 pass
+/// four, `/groupdelete`): the event the model folds.
+pub async fn delete_group(client: HomeClient, group: [u8; 16], budget: Duration) -> UiEvent {
+    let request = super::wire::GroupDeleteRequest {
+        client_id: super::client::client_id(),
+        group,
+    };
+    let deleted = super::client::group_delete(
+        &client.node,
+        &client.public_key,
+        &client.device,
+        &request,
+        budget,
+    )
+    .await;
+    match &deleted {
+        Ok(()) => tracing::info!(
+            "HOME group deleted group={}",
+            crate::address::to_hex(&group)
+        ),
+        Err(error) => tracing::warn!("HOME group not deleted: {error}"),
+    }
+    UiEvent::GroupDeleted(deleted.map(|()| group).map_err(|error| error.to_string()))
+}
+
 /// The petnames a fold set, handed to the home node in order (1139): the
 /// screen and the contacts file have them already. One the home node did
 /// not take is said in the log; the other devices keep the name they had

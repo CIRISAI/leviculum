@@ -50,8 +50,19 @@
 //!   to the Loquax members with the membership, as a Join is; the admin
 //!   adds members with [`add`].
 //!
-//! Not here yet: read receipts to the group are not booked, the group
-//! status `0x03` is not sent.
+//! G3/G4 (1307 pass four):
+//!
+//! - a read receipt a member sends the group is booked against its copy
+//!   (`group_fanout.read_at`); a member whose newest message said bit 0
+//!   counts as a reader ([`MEMBER_RECEIPTS`]);
+//! - the writer of a line that understands groups gets the `lev` key
+//!   `0x03`, the counts of its copies ([`status_after_proof`],
+//!   [`status_after_read`]): once every copy sent alone is proven, again
+//!   for each late copy a digest proves, and once every reader read it;
+//! - a copy a propagation node took is kept so (`propagated`), and a
+//!   restart does not upload it again;
+//! - the admin deletes the group ([`delete`]): every present member is
+//!   told it ended, and the home forgets it.
 
 use std::path::{Path, PathBuf};
 
@@ -61,7 +72,8 @@ use leviculum_lxmf::constants::{
     FIELD_REACTION, FIELD_REPLY_TO,
 };
 use leviculum_lxmf::lev::{
-    DigestLine, GroupCopy, Invite, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, MEMBER_LEFT,
+    DigestLine, GroupCopy, GroupStatus, Invite, Lev, Member, Members, CAP_GROUPS,
+    CAP_READ_RECEIPTS, MEMBER_LEFT,
 };
 use leviculum_lxmf::message::Field;
 use leviculum_lxmf::reaction::Reaction;
@@ -69,7 +81,8 @@ use leviculum_lxmf::reply::Reply;
 use leviculum_lxmf::{DeliveryMethod, Message};
 
 use crate::store::groups::{
-    Copy, Group, GroupMember, MEMBER_ADMIN, MEMBER_GROUPS, MEMBER_JOINED, MEMBER_SLOW,
+    Copy, Counts, Group, GroupMember, COPY_PROVEN, MEMBER_ADMIN, MEMBER_GROUPS, MEMBER_JOINED,
+    MEMBER_RECEIPTS, MEMBER_SLOW,
 };
 use crate::store::Store;
 use crate::ui::strings::Lang;
@@ -132,22 +145,32 @@ pub enum Arrival {
     Joined(Vec<Outgoing>),
     /// A member left: the others are told.
     Left(Vec<Outgoing>),
+    /// Nothing to show, but a receipt in it made a writer's status due
+    /// (1307 pass four): the `0x03` for each.
+    Status(Vec<Outgoing>),
     /// Proven and archived, nothing sent: a writer who is no member, a
     /// message with nothing to show (a receipt, a mark), a reaction nobody
     /// gets.
     Kept,
 }
 
+/// What [`book`] booked: the copy's group, and the originals whose copies
+/// its proof proved first.
+pub type Booked = ([u8; 16], Vec<[u8; 32]>);
+
 /// Book one outbox change of a group copy in `group_fanout`: a delivery is
-/// the member's proof (the two ticks of slice G2 count these), the end of
-/// the retries ends the copy. `false` when `id` is no copy of a group's,
-/// so the caller books it as any outbox message.
+/// the member's proof (the writer's two ticks count these), the end of the
+/// retries ends the copy, a propagation node taking it is kept (1307 pass
+/// four), so a restart does not upload it again. `None` when `id` is no
+/// copy of a group's, so the caller books it as any outbox message; else
+/// the group and the originals of the copies this proof proved first,
+/// whose writers' status may be due ([`status_after_proof`]).
 pub fn book(
     store: &mut Store,
     id: &[u8; 32],
     change: crate::home::outgoing::Change,
     now: i64,
-) -> Result<bool, String> {
+) -> Result<Option<Booked>, String> {
     use crate::home::outgoing::Change;
     let failed = |e: crate::store::StoreError| e.to_string();
     let Some(copy) = store
@@ -155,11 +178,21 @@ pub fn book(
         .map_err(failed)?
         .or(store.group_digest_copy(id).map_err(failed)?)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let digest = copy.copy != *id;
+    let mut fresh = Vec::new();
     match change {
         Change::Delivered => {
+            let carried = match digest {
+                true => store.group_digest_copies(id).map_err(failed)?,
+                false => vec![copy.clone()],
+            };
+            for carried in carried {
+                if carried.state != COPY_PROVEN && !fresh.contains(&carried.original) {
+                    fresh.push(carried.original);
+                }
+            }
             if digest {
                 store.group_digest_changed(id, true, now).map_err(failed)?;
             } else {
@@ -171,9 +204,238 @@ pub fn book(
             store.group_digest_changed(id, false, now).map_err(failed)?;
         }
         Change::Ended { .. } => store.group_copy_ended(id).map_err(failed)?,
+        // A digest's copies are held again at a restart and go out in the
+        // next digest; only a copy sent alone is resumed as it was.
+        Change::Propagated if !digest => {
+            store.group_copy_propagated(id).map_err(failed)?;
+        }
         Change::Propagated | Change::Stalled => {}
     }
-    Ok(true)
+    Ok(Some((copy.group, fresh)))
+}
+
+/// The status `original`'s writer gets after a copy of it was proven first
+/// (1307 pass four, study 2.3): due once no copy sent alone waits for its
+/// proof, which is the two ticks when no member is slow, and again for
+/// every late copy a digest proves after that. `None` when not due, or
+/// when the writer gets none ([`status`]).
+pub fn status_after_proof(
+    store: &Store,
+    hosted: &Hosted,
+    original: &[u8; 32],
+    now: f64,
+) -> Result<Option<Outgoing>, String> {
+    let counts = store
+        .group_counts(&hosted.group.address, original)
+        .map_err(|e| e.to_string())?;
+    match counts.waiting_alone {
+        0 => status(store, hosted, original, counts, now),
+        _ => Ok(None),
+    }
+}
+
+/// The status `original`'s writer gets after a member read its copy first
+/// (1307 pass four): due once every member that sends receipts read it.
+pub fn status_after_read(
+    store: &Store,
+    hosted: &Hosted,
+    original: &[u8; 32],
+    now: f64,
+) -> Result<Option<Outgoing>, String> {
+    let counts = store
+        .group_counts(&hosted.group.address, original)
+        .map_err(|e| e.to_string())?;
+    match counts.readers > 0 && counts.read >= counts.readers {
+        true => status(store, hosted, original, counts, now),
+        false => Ok(None),
+    }
+}
+
+/// The `0x03` for the writer of `original` with `counts`: an empty message
+/// from the group with the `lev` pair alone, which a Loquax keeps and does
+/// not draw. Only a present writer that understands groups gets one (an
+/// empty message is an empty notification in Sideband, study 1.3), and
+/// only for a line: a reaction, a Join or a membership has no ticks.
+fn status(
+    store: &Store,
+    hosted: &Hosted,
+    original: &[u8; 32],
+    counts: Counts,
+    now: f64,
+) -> Result<Option<Outgoing>, String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let Some(packed) = store
+        .archive_entry(crate::home::KIND_GROUP, original)
+        .map_err(failed)?
+    else {
+        return Ok(None);
+    };
+    let Ok(message) = Message::unpack(&packed, None, None, DeliveryMethod::Direct) else {
+        return Ok(None);
+    };
+    if reaction_of(&message).is_some() || counts.members == 0 {
+        return Ok(None);
+    }
+    let members = store.group_members(&hosted.group.address).map_err(failed)?;
+    let Some(writer) = members
+        .iter()
+        .find(|m| m.address == message.source_hash && m.present() && m.understands_groups())
+    else {
+        return Ok(None);
+    };
+    let mut fields = Vec::new();
+    Lev {
+        capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+        status: Some(GroupStatus {
+            original: *original,
+            delivered: counts.delivered,
+            read: counts.read,
+            members: counts.members,
+            readers: counts.readers,
+        }),
+        ..Lev::default()
+    }
+    .put_into(&mut fields);
+    tracing::info!(
+        "GROUP {} status message={} delivered={}/{} read={}/{}",
+        hosted.group.name,
+        crate::address::to_hex(original),
+        counts.delivered,
+        counts.members,
+        counts.read,
+        counts.readers
+    );
+    sign(
+        &hosted.identity,
+        hosted.group.address,
+        writer.address,
+        now,
+        Vec::new(),
+        fields,
+    )
+    .map(Some)
+}
+
+/// Book the read receipt `original` carries, from a present member, against
+/// that member's copies (1307 pass four: before, a receipt to the group was
+/// kept and not booked), and the `0x03` each first read made due
+/// ([`status_after_read`]). An id that is no copy of this member's in this
+/// group is passed over.
+fn read_receipts(
+    store: &mut Store,
+    hosted: &Hosted,
+    original: &Message,
+    lev: &Lev,
+    now: f64,
+) -> Result<Vec<Outgoing>, String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let Some(receipt) = &lev.receipt else {
+        return Ok(Vec::new());
+    };
+    let group = hosted.group.address;
+    let reader = original.source_hash;
+    let mut read = Vec::new();
+    for id in &receipt.ids {
+        let ours = store
+            .group_copy(id)
+            .map_err(failed)?
+            .is_some_and(|copy| copy.group == group && copy.member == reader);
+        if !ours {
+            continue;
+        }
+        if let Some(copy) = store
+            .group_copy_read(id, &reader, i64::from(receipt.read_at))
+            .map_err(failed)?
+        {
+            if !read.contains(&copy.original) {
+                read.push(copy.original);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for original in read {
+        if let Some(status) = status_after_read(store, hosted, &original, now)? {
+            out.push(status);
+        }
+    }
+    Ok(out)
+}
+
+/// The admin deletes the group (1307 pass four): every present member is
+/// told, a member that understands groups (the admin among them) with the
+/// last membership, everyone flagged left and the standing ended, a stock
+/// member with the text "Lew ended Familie."; then the group's rows, its
+/// conversation in the archive and its key under `home` are forgotten.
+/// What to send comes back, signed while the key was still here; the
+/// caller's engine of the group sends it and refuses every later message.
+pub fn delete(
+    home: &Path,
+    store: &mut Store,
+    hosted: &Hosted,
+    now: f64,
+) -> Result<Vec<Outgoing>, String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let group = &hosted.group;
+    let members = store.group_members(&group.address).map_err(failed)?;
+    let epoch = store
+        .group(&group.address)
+        .map_err(failed)?
+        .map_or(group.epoch, |g| g.epoch)
+        + 1;
+    let admin_name = members
+        .iter()
+        .find(|m| m.address == group.admin)
+        .map_or_else(String::new, |m| m.name.clone());
+    let gone: Vec<GroupMember> = members
+        .iter()
+        .map(|m| GroupMember {
+            left_at: Some(m.left_at.unwrap_or(now as i64)),
+            ..m.clone()
+        })
+        .collect();
+    let ended = Members {
+        ended: true,
+        ..members_key(epoch, &gone)
+    };
+    let text = format!("{admin_name} ended {}.", group.name);
+    let mut out = Vec::new();
+    for member in members.iter().filter(|m| m.present()) {
+        let mut fields = Vec::new();
+        let content = match member.understands_groups() || member.address == group.admin {
+            true => {
+                Lev {
+                    capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+                    members: Some(ended.clone()),
+                    ..Lev::default()
+                }
+                .put_into(&mut fields);
+                Vec::new()
+            }
+            false => text.clone().into_bytes(),
+        };
+        out.push(sign(
+            &hosted.identity,
+            group.address,
+            member.address,
+            now,
+            content,
+            fields,
+        )?);
+    }
+    store.group_delete(&group.address).map_err(failed)?;
+    let forgotten = store.archive_forget_group(&group.address).map_err(failed)?;
+    match std::fs::remove_file(key_path(home, &group.address)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("group key: {error}")),
+    }
+    tracing::warn!(
+        "GROUP {} deleted address={} told={} archive_forgotten={forgotten}",
+        group.name,
+        crate::address::to_hex(&group.address),
+        out.len()
+    );
+    Ok(out)
 }
 
 /// Measure `member` after a proof (study 5.3): slow once each of its last
@@ -217,8 +479,34 @@ pub fn measured(store: &mut Store, group: &[u8; 16], member: &[u8; 16]) -> Resul
 impl Arrival {
     pub fn outgoing(self) -> Vec<Outgoing> {
         match self {
-            Self::Line(out) | Self::Joined(out) | Self::Left(out) => out,
+            Self::Line(out) | Self::Joined(out) | Self::Left(out) | Self::Status(out) => out,
             Self::Kept => Vec::new(),
+        }
+    }
+
+    /// This arrival with the statuses `more` beside what it sends.
+    fn and(self, more: Vec<Outgoing>) -> Self {
+        if more.is_empty() {
+            return self;
+        }
+        match self {
+            Self::Line(mut out) => {
+                out.extend(more);
+                Self::Line(out)
+            }
+            Self::Joined(mut out) => {
+                out.extend(more);
+                Self::Joined(out)
+            }
+            Self::Left(mut out) => {
+                out.extend(more);
+                Self::Left(out)
+            }
+            Self::Status(mut out) => {
+                out.extend(more);
+                Self::Status(out)
+            }
+            Self::Kept => Self::Status(more),
         }
     }
 }
@@ -421,8 +709,29 @@ pub fn invited_key(fields: &[Field]) -> Option<([u8; 16], [u8; 64])> {
 /// proves, accepted at `accepted_at` (unix seconds, the copies' timestamp),
 /// and say what to send for it; the copies are booked in `group_fanout`
 /// before they are returned, so a crash between the two leaves rows a run
-/// again finds.
+/// again finds. A read receipt in it is booked too, and the statuses it
+/// made due go with the rest (1307 pass four).
 pub fn accept(
+    store: &mut Store,
+    hosted: &Hosted,
+    original: &Message,
+    accepted_at: f64,
+) -> Result<Arrival, String> {
+    let arrival = accept_message(store, hosted, original, accepted_at)?;
+    let present = store
+        .group_members(&hosted.group.address)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|m| m.address == original.source_hash && m.present());
+    if !present {
+        return Ok(arrival);
+    }
+    let lev = Lev::from_fields(&original.fields).unwrap_or_default();
+    let statuses = read_receipts(store, hosted, original, &lev, accepted_at)?;
+    Ok(arrival.and(statuses))
+}
+
+fn accept_message(
     store: &mut Store,
     hosted: &Hosted,
     original: &Message,
@@ -441,11 +750,23 @@ pub fn accept(
         // retrying, and dropped (study 4.6).
         return Ok(Arrival::Kept);
     };
-    let lev = Lev::from_fields(&original.fields).unwrap_or_default();
+    let said = Lev::from_fields(&original.fields);
+    let lev = said.clone().unwrap_or_default();
     let mut joined = false;
     let mut flags = 0;
     if lev.supports_groups() && !writer.understands_groups() {
         flags |= MEMBER_GROUPS;
+    }
+    // Whether it sends read receipts, as its newest mark says (1307 pass
+    // four); a message without the pair (a stock client's) says nothing.
+    let reads = writer.flags & MEMBER_RECEIPTS != 0;
+    if said.is_some() && lev.supports_receipts() && !reads {
+        flags |= MEMBER_RECEIPTS;
+    }
+    if said.is_some() && !lev.supports_receipts() && reads {
+        store
+            .group_unflag(&group, &sender, MEMBER_RECEIPTS)
+            .map_err(failed)?;
     }
     if writer.flags & MEMBER_JOINED == 0 {
         flags |= MEMBER_JOINED;
@@ -1899,7 +2220,8 @@ mod tests {
                 crate::home::outgoing::Change::Delivered,
                 copy.sent_at + secs,
             )
-            .expect("book"));
+            .expect("book")
+            .is_some());
         }
     }
 
@@ -2002,7 +2324,8 @@ mod tests {
             crate::home::outgoing::Change::Delivered,
             t as i64 + 61
         )
-        .expect("book"));
+        .expect("book")
+        .is_some());
         for original in [&eins, &zwei] {
             let row = scene
                 .store
@@ -2219,5 +2542,226 @@ mod tests {
         .expect("again");
         assert!(invites.is_empty() && told.is_empty());
         assert_eq!(scene.store.group(&group).expect("g").expect("g").epoch, 2);
+    }
+
+    fn receipts_mark() -> Vec<Field> {
+        let mut fields = Vec::new();
+        Lev {
+            capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+            ..Lev::default()
+        }
+        .put_into(&mut fields);
+        fields
+    }
+
+    fn status_of(scene: &Scene, out: &Outgoing) -> GroupStatus {
+        let message = opened(scene, out);
+        assert!(message.content.is_empty(), "a status is no line");
+        Lev::from_fields(&message.fields)
+            .and_then(|lev| lev.status)
+            .expect("0x03")
+    }
+
+    /// 1307 pass four, the writer's ticks (study 2.3): Anna's line has two
+    /// copies; the first proof makes no status, the last makes one to
+    /// Anna, every copy proven, nobody a reader yet. Lew's read receipt to
+    /// the group is booked against his copy (before, it was kept and not
+    /// booked), makes him a reader, and sends Anna "read by 1 of 1".
+    /// Controls: a proof booked twice proves nothing first; a receipt
+    /// naming another member's copy is not booked; a stock writer gets no
+    /// status; a receipt from a member whose mark says no receipts any more
+    /// is booked, and the member counts as no reader.
+    #[test]
+    fn the_writer_hears_when_every_copy_is_proven_and_when_every_reader_read() {
+        let mut scene = scene();
+        let group = scene.hosted.group.address;
+        let hosted = scene.hosted.clone();
+        scene
+            .store
+            .group_flag(&group, &scene.anna.1, MEMBER_JOINED)
+            .expect("joined");
+        let original = to_group(
+            &scene,
+            &scene.anna,
+            1_800_000_000.0,
+            "Brot",
+            receipts_mark(),
+        );
+        archived(&mut scene, &original);
+        let copies = line(accept(&mut scene.store, &hosted, &original, ACCEPTED).expect("line"));
+        let (lews, bobs) = (copies[0].id, copies[1].id);
+        let first = book(
+            &mut scene.store,
+            &lews,
+            crate::home::outgoing::Change::Delivered,
+            200,
+        )
+        .expect("book")
+        .expect("a copy");
+        assert_eq!(first, (group, vec![original.message_id]));
+        assert_eq!(
+            status_after_proof(&scene.store, &hosted, &original.message_id, ACCEPTED).expect("s"),
+            None,
+            "Bob's copy waits"
+        );
+        let again = book(
+            &mut scene.store,
+            &lews,
+            crate::home::outgoing::Change::Delivered,
+            201,
+        )
+        .expect("book")
+        .expect("a copy");
+        assert!(again.1.is_empty(), "control: proven before");
+        book(
+            &mut scene.store,
+            &bobs,
+            crate::home::outgoing::Change::Delivered,
+            202,
+        )
+        .expect("book");
+        let two = status_after_proof(&scene.store, &hosted, &original.message_id, ACCEPTED)
+            .expect("s")
+            .expect("due");
+        assert_eq!(two.destination, scene.anna.1, "to the writer");
+        assert_eq!(
+            status_of(&scene, &two),
+            GroupStatus {
+                original: original.message_id,
+                delivered: 2,
+                read: 0,
+                members: 2,
+                readers: 0,
+            }
+        );
+
+        // Lew reads it: his client's receipt to the group names his copy.
+        let mut fields = Vec::new();
+        Lev::mark_with(leviculum_lxmf::lev::Receipt {
+            read_at: 1_800_000_050,
+            ids: vec![lews, bobs],
+        })
+        .put_into(&mut fields);
+        let mut lev = Lev::from_fields(&fields).expect("lev");
+        lev.capabilities = Some(CAP_READ_RECEIPTS | CAP_GROUPS);
+        lev.put_into(&mut fields);
+        let receipt = to_group(&scene, &scene.lew, 1_800_000_060.0, "", fields);
+        let Arrival::Status(statuses) =
+            accept(&mut scene.store, &hosted, &receipt, ACCEPTED + 60.0).expect("receipt")
+        else {
+            panic!("a status for the receipt");
+        };
+        let [read] = statuses.as_slice() else {
+            panic!("one status: {statuses:?}");
+        };
+        assert_eq!(read.destination, scene.anna.1);
+        let said = status_of(&scene, read);
+        assert_eq!((said.read, said.readers), (1, 1), "read by 1 of 1");
+        let rows = scene
+            .store
+            .group_copies(&group, &original.message_id)
+            .expect("rows");
+        let read_at = |id: [u8; 32]| rows.iter().find(|r| r.copy == id).and_then(|r| r.read_at);
+        assert_eq!(read_at(lews), Some(1_800_000_050), "booked");
+        assert_eq!(read_at(bobs), None, "control: Bob's copy is Bob's to read");
+
+        // Control: a stock writer (Bob) gets no status.
+        let stock = to_group(&scene, &scene.bob, 1_800_000_100.0, "Danke", Vec::new());
+        archived(&mut scene, &stock);
+        let copies = line(accept(&mut scene.store, &hosted, &stock, ACCEPTED + 100.0).expect("l"));
+        for copy in &copies {
+            book(
+                &mut scene.store,
+                &copy.id,
+                crate::home::outgoing::Change::Delivered,
+                300,
+            )
+            .expect("book");
+        }
+        assert_eq!(
+            status_after_proof(&scene.store, &hosted, &stock.message_id, ACCEPTED).expect("s"),
+            None
+        );
+
+        // Control: Lew switches receipts off; he counts as no reader.
+        let mut off_mark = Vec::new();
+        Lev {
+            capabilities: Some(CAP_GROUPS),
+            ..Lev::default()
+        }
+        .put_into(&mut off_mark);
+        let off = to_group(&scene, &scene.lew, 1_800_000_200.0, "still here", off_mark);
+        accept(&mut scene.store, &hosted, &off, ACCEPTED + 200.0).expect("off");
+        let counts = scene
+            .store
+            .group_counts(&group, &original.message_id)
+            .expect("counts");
+        assert_eq!((counts.read, counts.readers), (0, 0));
+    }
+
+    /// 1307 pass four, the owner deletes "Familie": Lew and Anna (Loquax)
+    /// get the last membership, everyone flagged left and the standing
+    /// ended; Bob (stock) the text "Lew ended Familie."; then the rows, the
+    /// key file and the group's archived lines are gone and the home hosts
+    /// nothing. Control: another group of the same home is untouched.
+    #[test]
+    fn a_deleted_group_tells_its_members_and_leaves_nothing_behind() {
+        let mut scene = scene();
+        let group = scene.hosted.group.address;
+        let hosted = scene.hosted.clone();
+        let line_ = to_group(&scene, &scene.anna, 1_800_000_000.0, "Brot", Vec::new());
+        archived(&mut scene, &line_);
+        accept(&mut scene.store, &hosted, &line_, ACCEPTED).expect("line");
+        let home = scene._home.path().to_path_buf();
+        let other = create(
+            &home,
+            &mut scene.store,
+            "Verein",
+            (scene.lew.1, "Lew"),
+            &[(scene.bob.1, "Bob".into())],
+            100,
+        )
+        .expect("another group");
+        let told = delete(&home, &mut scene.store, &hosted, ACCEPTED).expect("delete");
+        let to: Vec<[u8; 16]> = told.iter().map(|o| o.destination).collect();
+        assert_eq!(to, [scene.lew.1, scene.anna.1, scene.bob.1]);
+        for out in &told[..2] {
+            let message = opened(&scene, out);
+            assert!(message.content.is_empty());
+            let members = Lev::from_fields(&message.fields)
+                .and_then(|lev| lev.members)
+                .expect("the last membership");
+            assert!(members.ended);
+            assert_eq!(members.epoch, 2);
+            assert!(members.members.iter().all(|m| m.flags & MEMBER_LEFT != 0));
+        }
+        let bob = opened(&scene, &told[2]);
+        assert_eq!(bob.content, b"Lew ended Familie.");
+        assert_eq!(Lev::from_fields(&bob.fields), None);
+        assert_eq!(scene.store.group(&group).expect("g"), None);
+        assert!(scene.store.group_members(&group).expect("m").is_empty());
+        assert!(scene
+            .store
+            .group_copies(&group, &line_.message_id)
+            .expect("c")
+            .is_empty());
+        assert_eq!(
+            scene
+                .store
+                .archive_entry(crate::home::KIND_GROUP, &line_.message_id)
+                .expect("a"),
+            None
+        );
+        assert!(!key_path(&home, &group).exists(), "the key is gone");
+        let left: Vec<[u8; 16]> = hosted_groups(&home, &scene.store);
+        assert_eq!(left, [other.group.address], "control: Verein stays");
+    }
+
+    fn hosted_groups(home: &Path, store: &Store) -> Vec<[u8; 16]> {
+        hosted(home, store)
+            .expect("hosted")
+            .iter()
+            .map(|h| h.group.address)
+            .collect()
     }
 }

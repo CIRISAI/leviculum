@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `groups` | address, name, admin, epoch, created_at | the group; its key is a file ([`crate::home::group`]) |
 //! | `group_members` | grp, address, name, flags, added_at, left_at | membership, the epoch's content, the stock/Loquax split |
-//! | `group_fanout` | grp, original, member, copy, state, sent_at, proven_at, read_at, digest | copy id to original (replies, receipts), the ticks; the digest a held copy went out in (schema 12) |
+//! | `group_fanout` | grp, original, member, copy, state, sent_at, proven_at, read_at, digest, propagated | copy id to original (replies, receipts), the ticks; the digest a held copy went out in (schema 12); a node took it (schema 13) |
 //!
 //! Every row is the owner's (`identity`), as every other table's. The epoch
 //! counts membership changes: each add, leave or removal moves it by one,
@@ -28,6 +28,11 @@ pub const MEMBER_ADMIN: i64 = 4;
 /// A member's flag: it joined, by the invitation's Join or by writing to
 /// the group.
 pub const MEMBER_JOINED: i64 = 8;
+
+/// A member's flag (1307 pass four): its newest message to the group said
+/// capability bit 0, it sends read receipts; the writer's "read by N of M"
+/// counts only these.
+pub const MEMBER_RECEIPTS: i64 = 16;
 
 /// A copy's state: handed to the outbox, no proof yet.
 pub const COPY_SENT: i64 = 0;
@@ -105,6 +110,25 @@ pub struct Copy {
     pub read_at: Option<i64>,
     /// The LXMF id of the digest this copy went out in, for a held one.
     pub digest: Option<[u8; 32]>,
+    /// A propagation node took it (1307 pass four): a restart tries it
+    /// direct again, and never uploads it twice.
+    pub propagated: bool,
+}
+
+/// What a group's copies of one original say (study 2.3): the `lev` key
+/// `0x03` its writer gets, counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Counts {
+    /// Copies proven.
+    pub delivered: u64,
+    /// Copies read, by a member that sends receipts.
+    pub read: u64,
+    /// Copies of members present now, or proven before they left.
+    pub members: u64,
+    /// Of those, the members that send receipts.
+    pub readers: u64,
+    /// Copies sent alone (not held, in no digest) and not proven.
+    pub waiting_alone: u64,
 }
 
 impl Copy {
@@ -126,6 +150,7 @@ impl Copy {
             proven_at: None,
             read_at: None,
             digest: None,
+            propagated: false,
         }
     }
 
@@ -308,8 +333,8 @@ impl Store {
         for copy in copies {
             tx.execute(
                 "INSERT OR IGNORE INTO group_fanout(identity, grp, original, member, copy, \
-                 state, sent_at, proven_at, read_at, digest) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 state, sent_at, proven_at, read_at, digest, propagated) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     &identity[..],
                     &copy.group[..],
@@ -320,7 +345,8 @@ impl Store {
                     copy.sent_at,
                     copy.proven_at,
                     copy.read_at,
-                    copy.digest.as_ref().map(|d| &d[..])
+                    copy.digest.as_ref().map(|d| &d[..]),
+                    copy.propagated
                 ],
             )
             .map_err(|e| failed(&path, e))?;
@@ -392,6 +418,93 @@ impl Store {
         self.group_copy(copy)
     }
 
+    /// A propagation node took `copy` (1307 pass four): kept, so a restart
+    /// hands it to the outbox as propagated and it is not uploaded again.
+    /// `false` for an id that is no copy.
+    pub fn group_copy_propagated(&mut self, copy: &[u8; 32]) -> Result<bool, StoreError> {
+        self.conn
+            .execute(
+                "UPDATE group_fanout SET propagated = 1 WHERE identity = ?1 AND copy = ?2",
+                params![&self.identity[..], &copy[..]],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|e| self.failed(e))
+    }
+
+    /// `member` read its copy `copy` at `at` (1307 pass four): a read
+    /// receipt it sent the group named it. The copy as it now is, when this
+    /// receipt was the first for it; `None` for an id that is no copy of
+    /// `member`'s, or one read before.
+    pub fn group_copy_read(
+        &mut self,
+        copy: &[u8; 32],
+        member: &[u8; 16],
+        at: i64,
+    ) -> Result<Option<Copy>, StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE group_fanout SET read_at = ?4 \
+                 WHERE identity = ?1 AND copy = ?2 AND member = ?3 AND read_at IS NULL",
+                params![&self.identity[..], &copy[..], &member[..], at],
+            )
+            .map_err(|e| self.failed(e))?;
+        match changed {
+            0 => Ok(None),
+            _ => self.group_copy(copy),
+        }
+    }
+
+    /// The counts of `original`'s copies in `group` (study 2.3): what its
+    /// writer's `0x03` says. A member that left before proving its copy is
+    /// not counted: the two ticks wait for the members present.
+    pub fn group_counts(
+        &self,
+        group: &[u8; 16],
+        original: &[u8; 32],
+    ) -> Result<Counts, StoreError> {
+        let members = self.group_members(group)?;
+        let mut counts = Counts::default();
+        for copy in self.group_copies(group, original)? {
+            let Some(member) = members.iter().find(|m| m.address == copy.member) else {
+                continue;
+            };
+            let proven = copy.state == COPY_PROVEN;
+            if !(member.present() || proven) {
+                continue;
+            }
+            counts.members += 1;
+            counts.delivered += u64::from(proven);
+            let reader = member.flags & MEMBER_RECEIPTS != 0;
+            counts.readers += u64::from(reader);
+            counts.read += u64::from(reader && copy.read_at.is_some());
+            counts.waiting_alone += u64::from(copy.state == COPY_SENT && copy.digest.is_none());
+        }
+        Ok(counts)
+    }
+
+    /// The group at `group` is gone (1307 pass four, its admin deleted
+    /// it): its row, its members, its copies and the device's own row of
+    /// it, in one transaction. Deleting a group not kept changes nothing.
+    pub fn group_delete(&mut self, group: &[u8; 16]) -> Result<(), StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        for sql in [
+            "DELETE FROM group_fanout WHERE identity = ?1 AND grp = ?2",
+            "DELETE FROM group_members WHERE identity = ?1 AND grp = ?2",
+            "DELETE FROM groups WHERE identity = ?1 AND address = ?2",
+            "DELETE FROM client_groups WHERE identity = ?1 AND address = ?2",
+        ] {
+            tx.execute(sql, params![&identity[..], &group[..]])
+                .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))
+    }
+
     /// The outbox gave up on `copy`; a proven copy stays proven.
     pub fn group_copy_ended(&mut self, copy: &[u8; 32]) -> Result<(), StoreError> {
         self.conn
@@ -438,6 +551,22 @@ impl Store {
     /// A copy that went out in the digest with LXMF id `digest`.
     pub fn group_digest_copy(&self, digest: &[u8; 32]) -> Result<Option<Copy>, StoreError> {
         self.copy_where("digest = ?2", &digest[..])
+    }
+
+    /// Every copy that went out in the digest `digest`, in the order the
+    /// digest carries them.
+    pub fn group_digest_copies(&self, digest: &[u8; 32]) -> Result<Vec<Copy>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "{COPY_SELECT} WHERE identity = ?1 AND digest = ?2 ORDER BY sent_at, rowid"
+            ))
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..], &digest[..]], copy_row)
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter().map(|row| self.copy_of(row)).collect()
     }
 
     /// The held copies `copies` went out in the digest `digest` at `at`:
@@ -611,7 +740,8 @@ impl Store {
     }
 
     fn copy_of(&self, row: CopyRow) -> Result<Copy, StoreError> {
-        let (group, original, member, copy, state, sent_at, proven_at, read_at, digest) = row;
+        let (group, original, member, copy, state, sent_at, proven_at, read_at, digest, propagated) =
+            row;
         let id = |bytes: Vec<u8>| {
             <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| StoreError::Corrupt {
                 path: self.path.clone(),
@@ -628,6 +758,7 @@ impl Store {
             proven_at,
             read_at,
             digest: digest.map(id).transpose()?,
+            propagated,
         })
     }
 }
@@ -644,10 +775,11 @@ type CopyRow = (
     Option<i64>,
     Option<i64>,
     Option<Vec<u8>>,
+    bool,
 );
 
 const COPY_SELECT: &str = "SELECT grp, original, member, copy, state, sent_at, proven_at, \
-                           read_at, digest FROM group_fanout";
+                           read_at, digest, propagated FROM group_fanout";
 
 fn group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
     Ok((
@@ -670,6 +802,7 @@ fn copy_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CopyRow> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
     ))
 }
 

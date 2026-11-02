@@ -924,6 +924,9 @@ pub struct Chat {
     /// with Join above the compose bar.
     pub invite: Option<super::group_scene::InviteNode>,
     pub compose: Compose,
+    /// A group its admin deleted (1307 pass four): the line drawn where the
+    /// compose bar was, "Lew ended the group"; nothing can be written.
+    pub ended: Option<Text>,
     pub a11y: A11y,
 }
 
@@ -1461,6 +1464,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
             .filter(|b| b.standing == super::groups::Standing::Invited)
             .and_then(|_| super::group_scene::invite(model, &peer, false)),
         compose: compose(model, c),
+        ended: super::group_scene::ended(model, &peer),
         a11y: A11y::of(NodeId::Chat, Role::Chat, Text::Raw(name)),
     }
 }
@@ -2019,6 +2023,10 @@ impl BubbleNode {
             if b.note {
                 map.insert("note".into(), Value::Bool(true));
             }
+            // A line that arrived late (1307 pass four), only where one is.
+            if b.late {
+                map.insert("late".into(), Text::key(StrId::GroupArrivedLate).to_json());
+            }
         }
         value
     }
@@ -2078,6 +2086,9 @@ impl Chat {
         });
         if let (Some(invite), Value::Object(map)) = (&self.invite, &mut value) {
             map.insert("invite".into(), invite.to_json());
+        }
+        if let (Some(ended), Value::Object(map)) = (&self.ended, &mut value) {
+            map.insert("ended".into(), ended.to_json());
         }
         value
     }

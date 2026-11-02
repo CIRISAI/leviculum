@@ -600,6 +600,8 @@ impl Intent {
                 Verb::Leave { .. } => StrId::GroupLeave,
                 Verb::Remove { .. } => StrId::GroupRemove,
                 Verb::Add { .. } => StrId::GroupAdd,
+                Verb::Delete { .. } => StrId::GroupDelete,
+                Verb::Again { .. } => StrId::GroupAgain,
                 Verb::Close => StrId::Close,
             },
             Intent::NewConversation => StrId::NewConversation,

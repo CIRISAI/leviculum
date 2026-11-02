@@ -184,6 +184,12 @@ leviculum_ui::catalogue! {
     GroupStateLeft = "group_state_left", "left", "ausgetreten";
     GroupHomeTooOld = "group_home_too_old", "Your home cannot host groups yet. Update it.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.";
     GroupYouLeft = "group_you_left", "You left %1$s", "Du hast %1$s verlassen";
+    GroupDelete = "group_delete", "Delete group", "Gruppe löschen";
+    GroupDeleteAsk = "group_delete_ask", "Delete %1$s for everyone?", "%1$s für alle löschen?";
+    GroupRemoveFromList = "group_remove_from_list", "Remove from list", "Aus der Liste entfernen";
+    GroupAgain = "group_again", "Start again with the same people", "Mit denselben Leuten neu starten";
+    GroupEnded = "group_ended", "%1$s ended the group", "%1$s hat die Gruppe beendet";
+    GroupArrivedLate = "group_arrived_late", "arrived late", "kam verspätet";
     MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";

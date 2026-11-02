@@ -135,6 +135,12 @@
     <string name="group_state_left">ausgetreten</string>
     <string name="group_home_too_old">Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.</string>
     <string name="group_you_left">Du hast %1$s verlassen</string>
+    <string name="group_delete">Gruppe löschen</string>
+    <string name="group_delete_ask">%1$s für alle löschen?</string>
+    <string name="group_remove_from_list">Aus der Liste entfernen</string>
+    <string name="group_again">Mit denselben Leuten neu starten</string>
+    <string name="group_ended">%1$s hat die Gruppe beendet</string>
+    <string name="group_arrived_late">kam verspätet</string>
     <string name="scene_my_code">Mein Code</string>
     <string name="scene_name">Dein Name</string>
     <string name="scene_pull">Nachrichten abholen</string>

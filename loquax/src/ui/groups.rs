@@ -31,6 +31,15 @@
 //! sheet's "Leave group" sends the group the reader alone, flagged left,
 //! and the admin's "Remove" sends it the removed member alone, flagged
 //! left. Leave and Remove ask once.
+//!
+//! 1307 pass four: the home's status (`0x03`) moves the reader's own line
+//! to two ticks once every present member's copy is proven, and to read
+//! once every member that sends receipts read it; until then the group's
+//! proof is one tick (the group has it). The admin deletes the group from
+//! the member sheet ("Delete group", asked once, through the home,
+//! `/groupdelete`): the admin's devices forget it whole, a member's keep
+//! the history, closed, with the line "Lew ended the group." A group the
+//! reader left or that ended can be started again with the same people.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -38,9 +47,11 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
 use leviculum_lxmf::lev::{
-    Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, MEMBER_ADMIN, MEMBER_JOINED, MEMBER_LEFT,
+    GroupStatus, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, MEMBER_ADMIN, MEMBER_JOINED,
+    MEMBER_LEFT,
 };
 use leviculum_lxmf::Field;
+use leviculum_ui::delivery::DeliveryState;
 
 use super::contacts::Ask;
 use super::intent::Target;
@@ -78,6 +89,9 @@ pub enum Standing {
     Joined,
     /// Left, or removed.
     Left,
+    /// Its admin deleted it (1307 pass four): the history stays readable,
+    /// nothing can be written to it any more.
+    Ended,
 }
 
 /// One member as the newest membership says it.
@@ -200,6 +214,8 @@ pub struct Draft {
 pub enum Confirm {
     Leave,
     Remove([u8; 16]),
+    /// The admin's "Delete group" (1307 pass four).
+    Delete,
 }
 
 /// The member sheet of a group.
@@ -240,6 +256,13 @@ pub enum Verb {
         member: Option<[u8; 16]>,
         confirmed: bool,
     },
+    /// The admin's "Delete group" on the member sheet (1307 pass four):
+    /// asked first unless `confirmed`; the home deletes it for everyone.
+    Delete { group: Target, confirmed: bool },
+    /// "Start again with the same people" on a group the reader left or
+    /// that ended (study 4.7): "New group" opens at its name step, the
+    /// members ticked and the old name in the field; Create makes it.
+    Again { group: Target },
     /// The picker, the sheet or its question closes.
     Close,
 }
@@ -300,14 +323,24 @@ pub fn membership_note(
             .flatten()
     };
     let now = list(messages.get(index)?)?;
-    let before = messages[..index].iter().rev().find_map(list)?;
-    if now.epoch <= before.epoch {
-        return None;
-    }
     let name = |m: &Member| match own == Some(m.address) {
         true => "You".to_string(),
         false => m.name.clone(),
     };
+    // The group's end (1307 pass four) is a line of its own, the first list
+    // loaded or not.
+    if now.ended {
+        let admin = now
+            .members
+            .iter()
+            .find(|m| m.flags & MEMBER_ADMIN != 0)
+            .map_or_else(|| "The admin".to_string(), name);
+        return Some(alloc::format!("{admin} ended the group."));
+    }
+    let before = messages[..index].iter().rev().find_map(list)?;
+    if now.epoch <= before.epoch {
+        return None;
+    }
     let mut lines = Vec::new();
     for member in &now.members {
         let was = before.members.iter().find(|b| b.address == member.address);
@@ -444,6 +477,9 @@ impl<B> UiModel<B> {
 
     fn learn_lev(&mut self, peer: [u8; 16], outbound: bool, lev: &Lev) {
         let own = self.address;
+        if let (Some(status), false) = (&lev.status, outbound) {
+            self.learn_status(peer, status);
+        }
         if let Some(invite) = &lev.invite {
             let group = self
                 .groups
@@ -489,7 +525,12 @@ impl<B> UiModel<B> {
             if members.epoch >= group.epoch {
                 group.epoch = members.epoch;
                 group.members = members.members.iter().map(member_of).collect();
-                if let Some(me) = own.and_then(|own| group.member(&own)).cloned() {
+                if members.ended {
+                    // Deleted by its admin (1307 pass four): nothing more
+                    // is written to it; the admin's own devices forget it
+                    // once the message is in ([`UiModel::forget_deleted_groups`]).
+                    group.standing = Standing::Ended;
+                } else if let Some(me) = own.and_then(|own| group.member(&own)).cloned() {
                     group.ours |= me.admin;
                     group.standing = match (me.left, me.joined) {
                         (true, _) => Standing::Left,
@@ -509,6 +550,123 @@ impl<B> UiModel<B> {
         }
     }
 
+    /// The newest status the group at `peer` sent of our message `id`
+    /// (1307 pass four, `lev 0x03`): the detail view's "delivered to N of
+    /// M" and "read by N of M".
+    pub fn group_status(&self, peer: &[u8; 16], id: &[u8; 32]) -> Option<GroupStatus> {
+        if !self.groups.contains_key(peer) {
+            return None;
+        }
+        self.conversations
+            .iter()
+            .find(|c| c.peer == *peer)?
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| !m.outbound)
+            .filter_map(|m| Lev::from_fields(&m.fields)?.status)
+            .find(|status| status.original == *id)
+    }
+
+    /// The detail view's lines of our message `id` in the group at `peer`
+    /// (1307 pass four): how many have it, and how many of those that send
+    /// read receipts read it. Empty where `peer` is no group.
+    pub fn group_detail_rows(&self, peer: &[u8; 16], id: &[u8; 32]) -> Vec<String> {
+        if !self.groups.contains_key(peer) {
+            return Vec::new();
+        }
+        let Some(status) = self.group_status(peer, id) else {
+            return alloc::vec!["group  no member's copy is confirmed yet".to_string()];
+        };
+        let mut rows = alloc::vec![alloc::format!(
+            "group  delivered to {} of {}",
+            status.delivered,
+            status.members
+        )];
+        rows.push(match status.readers {
+            0 => "read   nobody in it sends read receipts".to_string(),
+            readers => alloc::format!("read   by {} of {readers}", status.read),
+        });
+        let quiet = status.members.saturating_sub(status.readers);
+        if quiet > 0 && status.readers > 0 {
+            rows.push(alloc::format!(
+                "       {quiet} send no read receipts and are not counted"
+            ));
+        }
+        rows
+    }
+
+    /// The group's status of our message (1307 pass four): two ticks once
+    /// every present member's copy is proven, read once every member that
+    /// sends receipts read it; the counts go into its ledger either way,
+    /// so the detail view says them. Read is never taken back.
+    fn learn_status(&mut self, peer: [u8; 16], status: &GroupStatus) {
+        if !self.groups.contains_key(&peer) {
+            return;
+        }
+        let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
+            return;
+        };
+        let Some(m) = self.conversations[c]
+            .messages
+            .iter()
+            .position(|m| m.outbound && m.id == Some(status.original))
+        else {
+            return;
+        };
+        let now = self.now;
+        let at = now.map_or(0, |n| u32::try_from(n.unix_secs).unwrap_or(0));
+        let next = match (status.read_by_all(), status.delivered_to_all()) {
+            (true, _) => Some(DeliveryState::Read { at }),
+            (false, true) => Some(DeliveryState::Delivered),
+            (false, false) => None,
+        };
+        let Some(message) = self.message_mut(c, m) else {
+            return;
+        };
+        message.note(
+            now,
+            &alloc::format!(
+                "the group: delivered to {} of {}, read by {} of {}",
+                status.delivered,
+                status.members,
+                status.read,
+                status.readers
+            ),
+        );
+        if matches!(message.delivery, Some(DeliveryState::Read { .. })) {
+            return;
+        }
+        if let Some(next) = next {
+            message.delivery = Some(next);
+        }
+    }
+
+    /// Forget every group its admin deleted that the reader made (1307
+    /// pass four): the admin's devices keep no copy, the conversation and
+    /// its messages go. Called once the message that said so is in.
+    pub(super) fn forget_deleted_groups(&mut self) {
+        let gone: Vec<[u8; 16]> = self
+            .groups
+            .values()
+            .filter(|g| g.ours && g.standing == Standing::Ended)
+            .map(|g| g.address)
+            .collect();
+        for group in gone {
+            self.forget_group(group);
+        }
+    }
+
+    /// The group at `group` and its conversation leave this device.
+    fn forget_group(&mut self, group: [u8; 16]) {
+        self.groups.remove(&group);
+        self.groups_changed.remove(&group);
+        if self.group_sheet.is_some_and(|s| s.group == group) {
+            self.group_sheet = None;
+        }
+        self.delete_conversation(group, false);
+    }
+
     /// Learn every group the restored conversations speak of.
     pub(super) fn learn_groups(&mut self) {
         let seen: Vec<([u8; 16], bool, Vec<Field>)> = self
@@ -524,6 +682,7 @@ impl<B> UiModel<B> {
         for (peer, outbound, fields) in seen {
             self.learn_group(peer, outbound, &fields);
         }
+        self.forget_deleted_groups();
     }
 }
 
@@ -640,6 +799,16 @@ impl<B: Default> UiModel<B> {
                 let Some(group) = self.group_target(group, false) else {
                     return Vec::new();
                 };
+                let ended = self
+                    .groups
+                    .get(&group)
+                    .is_some_and(|g| g.standing == Standing::Ended);
+                if ended && confirmed {
+                    // "Remove from list": an ended group has nobody to
+                    // tell; it leaves this device (1307 pass four).
+                    self.forget_group(group);
+                    return Vec::new();
+                }
                 if !confirmed {
                     self.group_sheet = Some(Sheet {
                         group,
@@ -687,6 +856,63 @@ impl<B: Default> UiModel<B> {
                     confirm: None,
                 });
                 return self.group_state(group, Some((member, MEMBER_LEFT)));
+            }
+            Verb::Delete { group, confirmed } => {
+                let Some(group) = self.group_target(group, false) else {
+                    return Vec::new();
+                };
+                let admin = self
+                    .groups
+                    .get(&group)
+                    .is_some_and(|g| g.ours && g.standing == Standing::Joined);
+                if !admin {
+                    self.toast(
+                        leviculum_ui::toast::ToastKind::Info,
+                        "only the group's admin deletes it".to_string(),
+                    );
+                    return Vec::new();
+                }
+                if !confirmed {
+                    self.group_sheet = Some(Sheet {
+                        group,
+                        confirm: Some(Confirm::Delete),
+                    });
+                    return Vec::new();
+                }
+                self.group_sheet = Some(Sheet {
+                    group,
+                    confirm: None,
+                });
+                return alloc::vec![UiEffect::DeleteGroup { group }];
+            }
+            Verb::Again { group } => {
+                let Some(group) = self.group_target(group, false) else {
+                    return Vec::new();
+                };
+                let Some(info) = self
+                    .groups
+                    .get(&group)
+                    .filter(|g| matches!(g.standing, Standing::Left | Standing::Ended))
+                else {
+                    return Vec::new();
+                };
+                let picked: Vec<[u8; 16]> = info
+                    .members
+                    .iter()
+                    .map(|m| m.address)
+                    .filter(|a| self.address != Some(*a))
+                    .collect();
+                if picked.is_empty() {
+                    return Vec::new();
+                }
+                self.group_draft = Some(Draft {
+                    step: Step::Name,
+                    picked,
+                    name: info.name.clone(),
+                    asked: false,
+                    to: None,
+                });
+                self.group_sheet = None;
             }
             Verb::Close => match self.group_sheet.as_mut() {
                 Some(sheet) if sheet.confirm.is_some() => sheet.confirm = None,
@@ -1025,6 +1251,28 @@ impl<B: Default> UiModel<B> {
         Vec::new()
     }
 
+    /// The home's answer to "Delete group" (1307 pass four): the group and
+    /// its conversation leave this device at once (the home's last
+    /// membership tells the reader's other devices), or the reader is told
+    /// why not and the sheet stays.
+    pub(super) fn group_deleted(&mut self, deleted: Result<[u8; 16], String>) -> Vec<UiEffect> {
+        match deleted {
+            Ok(group) => {
+                let name = self.names.label(&group);
+                self.forget_group(group);
+                self.toast(
+                    leviculum_ui::toast::ToastKind::Info,
+                    alloc::format!("{name} deleted for everyone"),
+                );
+            }
+            Err(why) => self.toast(
+                leviculum_ui::toast::ToastKind::Error,
+                alloc::format!("The group was not deleted: {why}"),
+            ),
+        }
+        Vec::new()
+    }
+
     /// Join: the group hears an empty message with the mark, and the home
     /// answers with the members.
     fn join_group(&mut self, group: [u8; 16]) -> Vec<UiEffect> {
@@ -1103,7 +1351,9 @@ mod tests {
 
     use leviculum_lxmf::lev::{GroupCopy, Invite};
 
+    use super::super::intent::Intent;
     use super::super::strings::Lang;
+    use super::super::strings::StrId;
     use super::super::tests::Field as Line;
     use super::super::{update, UiEvent, NONE_OPEN};
     use super::*;
@@ -2060,5 +2310,521 @@ mod tests {
         }
         let said = words(&mut model);
         assert_eq!(said[0].1, "invited", "{said:?}");
+    }
+
+    /// A group the reader is in (1307 pass four): invited by Lew and
+    /// joined, with Anna and Bob in it, its chat open.
+    fn in_familie(admin: bool) -> UiModel<Line> {
+        let mut model = reader(&[LEW]);
+        arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+        let me = if admin { 2 | 4 } else { 4 };
+        let lew = if admin { 4 } else { 2 | 4 };
+        arrive(
+            &mut model,
+            GROUP,
+            2,
+            "",
+            members(
+                1,
+                &[
+                    (LEW, "Lew", lew),
+                    (ME, "Me", me),
+                    (ANNA, "Anna", 4),
+                    (BOB, "Bob", 4),
+                ],
+            ),
+        );
+        update(&mut model, UiEvent::Open { peer: GROUP });
+        model
+    }
+
+    fn group_chat(model: &UiModel<Line>) -> usize {
+        model
+            .conversations
+            .iter()
+            .position(|c| c.peer == GROUP)
+            .expect("the group's chat")
+    }
+
+    fn status(original: [u8; 32], delivered: u64, read: u64, readers: u64) -> Lev {
+        Lev {
+            capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+            status: Some(GroupStatus {
+                original,
+                delivered,
+                read,
+                members: 3,
+                readers,
+            }),
+            ..Lev::default()
+        }
+    }
+
+    /// 1307 pass four, the reviewer's two ticks: the group's proof of our
+    /// line is one tick (the group has it), the home's status with every
+    /// copy proven two, and with every member that sends receipts read
+    /// the read mark; the detail view says "read by N of M" of those
+    /// members alone. Controls: a status with one copy unproven moves
+    /// nothing, the same status from an address that is no group moves
+    /// nothing, and a late group proof does not take the two ticks back.
+    #[test]
+    fn our_line_has_one_tick_from_the_group_and_two_from_its_status() {
+        const OURS: [u8; 32] = [0x44; 32];
+        let mut model = in_familie(false);
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer: GROUP,
+                body: "Brot ist da".into(),
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Queued { message_id: OURS }),
+        );
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::State {
+                message_id: OURS,
+                state: leviculum_lxmf::router::MessageState::Delivered,
+            }),
+        );
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        let c = group_chat(&model);
+        let ours = |model: &UiModel<Line>| {
+            model.conversations[c]
+                .messages
+                .iter()
+                .find(|m| m.id == Some(OURS))
+                .and_then(|m| m.delivery)
+        };
+        assert_eq!(ours(&model), Some(DeliveryState::InMailbox), "one tick");
+        let detail = super::super::message_detail(
+            &model,
+            GROUP,
+            model.conversations[c]
+                .messages
+                .iter()
+                .find(|m| m.id == Some(OURS))
+                .map(|m| m.activity)
+                .unwrap_or_default(),
+        )
+        .expect("detail");
+        assert!(
+            detail
+                .rows
+                .iter()
+                .any(|r| r.contains("no member's copy is confirmed yet")),
+            "{:?}",
+            detail.rows
+        );
+
+        arrive(&mut model, GROUP, 10, "", status(OURS, 2, 0, 2));
+        assert_eq!(ours(&model), Some(DeliveryState::InMailbox), "one unproven");
+        arrive(&mut model, BOB, 11, "", status(OURS, 3, 0, 2));
+        assert_eq!(
+            ours(&model),
+            Some(DeliveryState::InMailbox),
+            "not the group's word"
+        );
+
+        arrive(&mut model, GROUP, 12, "", status(OURS, 3, 1, 2));
+        assert_eq!(ours(&model), Some(DeliveryState::Delivered), "two ticks");
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::State {
+                message_id: OURS,
+                state: leviculum_lxmf::router::MessageState::Delivered,
+            }),
+        );
+        assert_eq!(ours(&model), Some(DeliveryState::Delivered), "kept");
+        let key = model.conversations[c]
+            .messages
+            .iter()
+            .find(|m| m.id == Some(OURS))
+            .map(|m| m.activity)
+            .unwrap_or_default();
+        let rows = super::super::message_detail(&model, GROUP, key)
+            .expect("detail")
+            .rows;
+        assert!(
+            rows.iter().any(|r| r == "group  delivered to 3 of 3"),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|r| r == "read   by 1 of 2"), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("1 send no read receipts")),
+            "{rows:?}"
+        );
+
+        arrive(&mut model, GROUP, 13, "", status(OURS, 3, 2, 2));
+        assert!(
+            matches!(ours(&model), Some(DeliveryState::Read { .. })),
+            "read by every reader"
+        );
+        // The statuses are no bubbles.
+        let bodies: Vec<String> = super::super::chat::bubbles(&model, c)
+            .into_iter()
+            .map(|b| b.body)
+            .collect();
+        assert_eq!(
+            bodies.iter().filter(|b| b.is_empty()).count(),
+            0,
+            "{bodies:?}"
+        );
+    }
+
+    fn digest(lines: &[([u8; 16], u64, &str)]) -> Lev {
+        Lev {
+            capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+            digest: Some(
+                lines
+                    .iter()
+                    .map(|(sender, sent_ms, text)| leviculum_lxmf::lev::DigestLine {
+                        sender: *sender,
+                        sent_ms: *sent_ms,
+                        text: (*text).into(),
+                    })
+                    .collect(),
+            ),
+            ..Lev::default()
+        }
+    }
+
+    fn copy_at(writer: [u8; 16], sent_ms: u64) -> Lev {
+        Lev {
+            capabilities: Some(CAP_GROUPS),
+            group_copy: Some(GroupCopy {
+                sender: writer,
+                sent_ms,
+                epoch: 1,
+            }),
+            ..Lev::default()
+        }
+    }
+
+    /// 1307 pass four, the digest drawn and the copies deduplicated (study
+    /// 5.3, 6.1, 6.2): a digest is one bubble a line, under its writer's
+    /// name and at the writer's time; a copy of a line the digest already
+    /// carried is not shown again; a line older than one shown before it
+    /// is marked as arrived late. Controls: the digest's text without the
+    /// `0x06` (a stock member's) stays one bubble, and a copy newer than
+    /// everything before it is not late.
+    #[test]
+    fn a_digest_is_a_bubble_a_writer_and_a_line_is_shown_once() {
+        const T: u64 = 1_800_000_000_000;
+        let mut model = in_familie(false);
+        arrive(
+            &mut model,
+            GROUP,
+            20,
+            "Anna: Brot\nBob: Danke",
+            digest(&[(ANNA, T, "Brot"), (BOB, T + 2_000, "Danke")]),
+        );
+        // Bob's line once more, as a copy of its own (a second acceptance).
+        arrive(&mut model, GROUP, 21, "Bob: Danke", copy_at(BOB, T + 2_000));
+        // Anna's newer line, alone: not late.
+        arrive(
+            &mut model,
+            GROUP,
+            22,
+            "Anna: Bis gleich",
+            copy_at(ANNA, T + 9_000),
+        );
+        // A line of Bob's from before it, retried late.
+        arrive(
+            &mut model,
+            GROUP,
+            23,
+            "Bob: Wer kommt?",
+            copy_at(BOB, T + 5_000),
+        );
+        let c = group_chat(&model);
+        type Drawn = (Option<[u8; 16]>, String, bool, Option<i64>);
+        let drawn: Vec<Drawn> = super::super::chat::bubbles(&model, c)
+            .into_iter()
+            .filter(|b| !b.note && !b.ours)
+            .map(|b| {
+                (
+                    b.writer.map(|w| w.0),
+                    b.body,
+                    b.late,
+                    b.at.map(|a| a.unix_secs),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (Some(ANNA), "Brot".to_string(), false, Some(1_800_000_000)),
+                (Some(BOB), "Danke".to_string(), false, Some(1_800_000_002)),
+                (Some(ANNA), "Bis gleich".to_string(), false, None),
+                (Some(BOB), "Wer kommt?".to_string(), true, None),
+            ]
+            .map(|(w, b, l, at)| (w, b, l, at.or(model.now.map(|n| n.unix_secs)))),
+            "Bob's second copy is not drawn"
+        );
+        let names: Vec<String> = super::super::chat::bubbles(&model, c)
+            .into_iter()
+            .filter_map(|b| b.writer.map(|w| w.1))
+            .take(2)
+            .collect();
+        assert_eq!(names, ["Anna", "Bob"], "the admin's names");
+
+        // Control: a stock member's digest, the text alone, is one bubble.
+        let mut stock = in_familie(false);
+        arrive(
+            &mut stock,
+            GROUP,
+            20,
+            "Anna: Brot\nBob: Danke",
+            Lev::default(),
+        );
+        let c = group_chat(&stock);
+        let bodies: Vec<String> = super::super::chat::bubbles(&stock, c)
+            .into_iter()
+            .filter(|b| !b.note)
+            .map(|b| b.body)
+            .collect();
+        assert_eq!(bodies, ["Anna: Brot\nBob: Danke"]);
+    }
+
+    fn ended(epoch: u64, list: &[([u8; 16], &str, u64)]) -> Lev {
+        let mut lev = members(epoch, list);
+        if let Some(members) = lev.members.as_mut() {
+            members.ended = true;
+        }
+        lev
+    }
+
+    /// 1307 pass four, the owner deletes the group: Members, Delete group,
+    /// Yes is 3 taps and one ask of the home; its answer takes the group
+    /// and every message of it off the device. On a member's device the
+    /// home's last membership ends it: the history stays, the line "Lew
+    /// ended the group." is drawn, compose is closed (a send is refused and
+    /// the scene draws the line where the bar was), Leave is "Remove from
+    /// list", and that removes it. Controls: a member's sheet has no
+    /// Delete, and its Delete verb asks nothing; the owner's other device,
+    /// told by the same membership, forgets the group too.
+    #[test]
+    fn the_owner_deletes_a_group_and_a_member_keeps_it_closed() {
+        // The owner.
+        let mut owner = in_familie(true);
+        arrive(&mut owner, GROUP, 30, "Anna: Hallo", copy(ANNA));
+        let mut taps = 0;
+        verb(
+            &mut owner,
+            Verb::Members {
+                group: Target::Open,
+            },
+        );
+        taps += 1;
+        let sheet = super::super::group_scene::member_sheet(&owner).expect("sheet");
+        let delete = sheet.delete.expect("the admin's Delete");
+        let Intent::Group(delete) = delete.intent else {
+            panic!("a group verb");
+        };
+        assert!(verb(&mut owner, delete).is_empty(), "asked first");
+        taps += 1;
+        let ask = super::super::group_scene::member_sheet(&owner)
+            .and_then(|s| s.ask)
+            .expect("the question");
+        let Intent::Group(yes) = ask.yes.intent else {
+            panic!("a group verb");
+        };
+        let effects = verb(&mut owner, yes);
+        taps += 1;
+        assert_eq!(taps, 3);
+        assert_eq!(effects, [UiEffect::DeleteGroup { group: GROUP }]);
+        assert!(owner.group(&GROUP).is_some(), "until the home answers");
+        let _ = owner.take_writes();
+        update(&mut owner, UiEvent::GroupDeleted(Ok(GROUP)));
+        assert!(owner.group(&GROUP).is_none());
+        assert!(owner.conversations.iter().all(|c| c.peer != GROUP));
+        assert!(owner.take_writes().iter().any(|w| matches!(
+            w,
+            super::super::history::StoreWrite::ForgetConversation { peer } if *peer == GROUP
+        )));
+        // The owner's other device learns it from the home's membership.
+        let mut other = in_familie(true);
+        arrive(
+            &mut other,
+            GROUP,
+            31,
+            "",
+            ended(
+                2,
+                &[(LEW, "Lew", 1), (ME, "Me", 2 | 4 | 1), (ANNA, "Anna", 5)],
+            ),
+        );
+        assert!(other.group(&GROUP).is_none());
+        assert!(other.conversations.iter().all(|c| c.peer != GROUP));
+
+        // A member.
+        let mut member = in_familie(false);
+        arrive(&mut member, GROUP, 30, "Anna: Hallo", copy(ANNA));
+        verb(
+            &mut member,
+            Verb::Members {
+                group: Target::Open,
+            },
+        );
+        let sheet = super::super::group_scene::member_sheet(&member).expect("sheet");
+        assert!(sheet.delete.is_none(), "control: no Delete for a member");
+        assert!(
+            verb(
+                &mut member,
+                Verb::Delete {
+                    group: Target::Open,
+                    confirmed: true
+                }
+            )
+            .is_empty(),
+            "control: a member's Delete asks nothing"
+        );
+        verb(&mut member, Verb::Close);
+        arrive(
+            &mut member,
+            GROUP,
+            31,
+            "",
+            ended(
+                2,
+                &[
+                    (LEW, "Lew", 2 | 1),
+                    (ME, "Me", 5),
+                    (ANNA, "Anna", 5),
+                    (BOB, "Bob", 5),
+                ],
+            ),
+        );
+        let info = member.group(&GROUP).expect("kept");
+        assert_eq!(info.standing, Standing::Ended);
+        let c = group_chat(&member);
+        let bubbles = super::super::chat::bubbles(&member, c);
+        assert!(
+            bubbles.iter().any(|b| b.body == "Hallo"),
+            "the history stays"
+        );
+        assert!(
+            bubbles
+                .iter()
+                .any(|b| b.note && b.body == "Lew ended the group."),
+            "{:?}",
+            bubbles.iter().map(|b| &b.body).collect::<Vec<_>>()
+        );
+        let chat = super::super::scene::chat(&member, c);
+        assert_eq!(
+            chat.ended.map(|t| t.resolve(Lang::En)),
+            Some("Lew ended the group".to_string())
+        );
+        let before = member.conversations[c].messages.len();
+        assert!(
+            verb_send(&mut member, "noch da?").is_empty(),
+            "compose is closed"
+        );
+        assert_eq!(member.conversations[c].messages.len(), before);
+        verb(
+            &mut member,
+            Verb::Members {
+                group: Target::Open,
+            },
+        );
+        let sheet = super::super::group_scene::member_sheet(&member).expect("sheet");
+        let remove = sheet.leave.expect("Remove from list");
+        assert_eq!(remove.label_key, StrId::GroupRemoveFromList);
+        assert!(sheet.again.is_some(), "and Start again");
+        let Intent::Group(remove) = remove.intent else {
+            panic!("a group verb");
+        };
+        assert!(verb(&mut member, remove).is_empty(), "nobody to tell");
+        assert!(member.group(&GROUP).is_none());
+        assert!(member.conversations.iter().all(|c| c.peer != GROUP));
+    }
+
+    fn verb_send(model: &mut UiModel<Line>, body: &str) -> Vec<UiEffect> {
+        update(
+            model,
+            UiEvent::Write {
+                peer: GROUP,
+                body: body.into(),
+            },
+        )
+    }
+
+    /// Study 4.7, "Start again with the same people": from the sheet of a
+    /// group that ended, one tap opens "New group" at its name with the
+    /// same people ticked and the old name, and Create asks the home: 2
+    /// taps. Controls: a group the reader is still in offers no Start
+    /// again, and its verb opens nothing.
+    #[test]
+    fn an_ended_group_starts_again_with_the_same_people_in_two_taps() {
+        let mut model = in_familie(false);
+        verb(
+            &mut model,
+            Verb::Members {
+                group: Target::Open,
+            },
+        );
+        assert!(
+            super::super::group_scene::member_sheet(&model)
+                .expect("sheet")
+                .again
+                .is_none(),
+            "control: in it, nothing to start again"
+        );
+        verb(
+            &mut model,
+            Verb::Again {
+                group: Target::Open,
+            },
+        );
+        assert!(
+            model.group_draft.is_none(),
+            "control: the verb opens nothing"
+        );
+        verb(&mut model, Verb::Close);
+        arrive(
+            &mut model,
+            GROUP,
+            31,
+            "",
+            ended(
+                2,
+                &[
+                    (LEW, "Lew", 2 | 1),
+                    (ME, "Me", 5),
+                    (ANNA, "Anna", 5),
+                    (BOB, "Bob", 5),
+                ],
+            ),
+        );
+        verb(
+            &mut model,
+            Verb::Members {
+                group: Target::Open,
+            },
+        );
+        let again = super::super::group_scene::member_sheet(&model)
+            .and_then(|s| s.again)
+            .expect("Start again");
+        let Intent::Group(again) = again.intent else {
+            panic!("a group verb");
+        };
+        let mut taps = 0;
+        verb(&mut model, again);
+        taps += 1;
+        let draft = model.group_draft.clone().expect("the draft");
+        assert_eq!(draft.step, Step::Name);
+        assert_eq!(draft.name, "Familie");
+        assert_eq!(draft.picked, [LEW, ANNA, BOB]);
+        let effects = verb(&mut model, Verb::Create);
+        taps += 1;
+        assert_eq!(taps, 2);
+        let [UiEffect::CreateGroup { name, members, .. }] = effects.as_slice() else {
+            panic!("one ask: {effects:?}");
+        };
+        assert_eq!(name, "Familie");
+        assert_eq!(members.len(), 3);
     }
 }

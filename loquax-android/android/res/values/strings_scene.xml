@@ -135,6 +135,12 @@
     <string name="group_state_left">left</string>
     <string name="group_home_too_old">Your home cannot host groups yet. Update it.</string>
     <string name="group_you_left">You left %1$s</string>
+    <string name="group_delete">Delete group</string>
+    <string name="group_delete_ask">Delete %1$s for everyone?</string>
+    <string name="group_remove_from_list">Remove from list</string>
+    <string name="group_again">Start again with the same people</string>
+    <string name="group_ended">%1$s ended the group</string>
+    <string name="group_arrived_late">arrived late</string>
     <string name="scene_my_code">My code</string>
     <string name="scene_name">Your name</string>
     <string name="scene_pull">Fetch messages</string>

@@ -694,6 +694,35 @@ pub fn read_group_add_request(data: &[u8]) -> Result<GroupAddRequest, Malformed>
     })
 }
 
+/// One `/groupdelete` (1307 pass four): the admin's home deletes its group
+/// `group` for everyone. Answered with a status; asked again, or for a
+/// group no longer hosted, it is `Ok`: the group is gone either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupDeleteRequest {
+    pub client_id: [u8; 16],
+    pub group: [u8; 16],
+}
+
+pub fn group_delete_request(request: &GroupDeleteRequest) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, &request.client_id);
+    msgpack::bin(&mut out, &request.group);
+    out
+}
+
+/// A `/groupdelete` as the home reads it.
+pub fn read_group_delete_request(data: &[u8]) -> Result<GroupDeleteRequest, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    let client_id =
+        <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let group = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    Ok(GroupDeleteRequest { client_id, group })
+}
+
 pub fn group_answer(group: &[u8; 16]) -> Vec<u8> {
     let mut out = Vec::new();
     msgpack::array(&mut out, 2);
@@ -1077,6 +1106,21 @@ mod tests {
             read_group_add_request(&group_add_request(&crowd)),
             Err(Malformed)
         );
+        // `/groupdelete` (pass four): round trips; a group of 8 bytes is
+        // malformed.
+        let delete = GroupDeleteRequest {
+            client_id: [6; 16],
+            group: [7; 16],
+        };
+        assert_eq!(
+            read_group_delete_request(&group_delete_request(&delete)),
+            Ok(delete)
+        );
+        let mut short = Vec::new();
+        msgpack::array(&mut short, 2);
+        msgpack::bin(&mut short, &[6; 16]);
+        msgpack::bin(&mut short, &[7; 8]);
+        assert_eq!(read_group_delete_request(&short), Err(Malformed));
     }
 
     #[test]

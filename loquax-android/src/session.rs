@@ -1953,6 +1953,16 @@ impl Inner {
                         wake.notify_one();
                     });
                 }
+                UiEffect::DeleteGroup { group } => {
+                    let client = self.client.clone();
+                    let done = self.finished_tx.clone();
+                    let wake = Arc::clone(&self.wake);
+                    self.runtime.spawn(async move {
+                        let event = runner::delete_group(client, group, BUDGET).await;
+                        let _ = done.send(Finished::Event(event));
+                        wake.notify_one();
+                    });
+                }
                 // What the terminal does with its screen and its maps has
                 // no place here yet.
                 _ => {}
@@ -3143,6 +3153,11 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
                     confirmed,
                 },
                 "add" => Verb::Add { group: group()? },
+                "delete" => Verb::Delete {
+                    group: group()?,
+                    confirmed,
+                },
+                "again" => Verb::Again { group: group()? },
                 "close" => Verb::Close,
                 other => return Err(format!("no group verb {other:?}")),
             })

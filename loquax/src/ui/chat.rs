@@ -515,6 +515,9 @@ pub struct Bubble {
     /// or was added ([`super::groups::membership_note`]); a screen draws
     /// it centred, as no one's bubble.
     pub note: bool,
+    /// A group's line that came after newer ones (1307 pass four, study
+    /// 6.1): a screen says "arrived late" under it, so nobody misses it.
+    pub late: bool,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -527,7 +530,30 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let chips = reactions::gather(conversation);
     let newest_report = conversation.newest_fix_report();
     let liveness = newest_report.map(|_| model.liveness(&conversation.peer));
-    let group = model.group(&conversation.peer).is_some();
+    let info = model.group(&conversation.peer);
+    let group = info.is_some();
+    // A group's lines by their writer and the writer's clock (study 6.2):
+    // one already shown, alone or in a digest, is not shown again, and one
+    // older than a line shown before it arrived late (6.1).
+    let mut seen: Vec<([u8; 16], u64)> = Vec::new();
+    let mut newest_ms = 0u64;
+    let mut once = move |sender: [u8; 16], sent_ms: u64| -> Option<bool> {
+        if seen.contains(&(sender, sent_ms)) {
+            return None;
+        }
+        seen.push((sender, sent_ms));
+        let late = sent_ms < newest_ms;
+        newest_ms = newest_ms.max(sent_ms);
+        Some(late)
+    };
+    let writer_name = |address: &[u8; 16], name: &str| match model.names.shown(address) {
+        Some(shown) => shown.to_string(),
+        None if !name.is_empty() => name.to_string(),
+        None => info
+            .and_then(|g| g.member(address))
+            .filter(|m| !m.name.is_empty())
+            .map_or_else(|| model.names.label(address), |m| m.name.clone()),
+    };
     conversation
         .messages
         .iter()
@@ -541,7 +567,7 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
         .filter(|(m, message, note)| {
             (!message.is_aside() || note.is_some()) && !conversation.report_folded(*m)
         })
-        .map(|(m, message, note)| {
+        .flat_map(|(m, message, note)| {
             let fix = model.message_fix(c, m);
             let run = conversation.run(m);
             let (updates, since) = match run.len() {
@@ -552,23 +578,29 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 .filter(|_| group && !message.outbound);
             // The reader's own word for the writer, else the admin's
             // (1307); the bare name, as a group's sender line has it.
-            let writer = copy.map(|(address, name, _)| {
-                let shown = match model.names.shown(&address) {
-                    Some(shown) => shown.to_string(),
-                    None if !name.is_empty() => name.to_string(),
-                    None => model.names.label(&address),
-                };
-                (address, shown)
-            });
+            let writer = copy.map(|(address, name, _)| (address, writer_name(&address, name)));
+            let lev = (group && !message.outbound)
+                .then(|| leviculum_lxmf::lev::Lev::from_fields(&message.fields))
+                .flatten();
+            let late = match lev.as_ref().and_then(|lev| lev.group_copy) {
+                Some(pair) => match once(pair.sender, pair.sent_ms) {
+                    Some(late) => late,
+                    // Shown before: in a digest, or the same line again.
+                    None => return Vec::new(),
+                },
+                None => false,
+            };
+            let digest = lev.and_then(|lev| lev.digest);
             let invite = leviculum_lxmf::lev::Lev::from_fields(&message.fields)
                 .and_then(|lev| lev.invite)
                 .map(|invite| invite.group)
                 .filter(|group| model.group(group).is_some());
-            Bubble {
+            let bubble = Bubble {
                 key: message.activity,
                 id: message.id,
                 ours: message.outbound,
                 note: note.is_some(),
+                late,
                 body: match (message.is_report(), &fix, copy) {
                     _ if note.is_some() => note.clone().unwrap_or_default(),
                     (true, Some(_), _) => String::new(),
@@ -608,7 +640,30 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 photo: super::photos::photo_of(&message.fields),
                 files: super::files::files_of(&message.fields),
                 voice: super::voice::voice_of(&message.fields),
-            }
+            };
+            // A digest (1307 pass four): one bubble a line, under its
+            // writer's name and at its writer's time, as if each had come
+            // alone; a stock member keeps the text.
+            let Some(lines) = digest else {
+                return Vec::from([bubble]);
+            };
+            let offset = message.at.map_or(0, |at| at.offset_secs);
+            lines
+                .into_iter()
+                .filter_map(|line| {
+                    let late = once(line.sender, line.sent_ms)?;
+                    Some(Bubble {
+                        body: line.text,
+                        writer: Some((line.sender, writer_name(&line.sender, ""))),
+                        at: Some(WallTime {
+                            unix_secs: i64::try_from(line.sent_ms / 1000).unwrap_or(i64::MAX),
+                            offset_secs: offset,
+                        }),
+                        late,
+                        ..bubble.clone()
+                    })
+                })
+                .collect()
         })
         .collect()
 }
@@ -1025,6 +1080,7 @@ mod tests {
             writer: None,
             invite: None,
             note: false,
+            late: false,
         }
     }
 
