@@ -332,6 +332,9 @@ pub struct Engine<S> {
     /// first comes [`START_ANNOUNCE_GAP_SECS`] later instead of an
     /// interval later.
     start_announce_owed: bool,
+    /// The `occasion=` of the next scheduled announce's `ANN_TX` line:
+    /// `start` until the start announces are out, `periodic` after.
+    next_announce_occasion: &'static str,
     /// Peering cadences in milliseconds, the reference's unless a test sets
     /// them ([`Self::with_sync_interval`], [`Self::with_rotation_interval`]);
     /// handed to the peering runtime when the role registers.
@@ -519,6 +522,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 announce_interval_secs,
                 announce_delay_secs,
                 start_announce_owed,
+                next_announce_occasion: "start",
                 sync_interval_ms: SYNC_INTERVAL_SECS * 1000,
                 rotation_interval_ms: ROTATION_INTERVAL_SECS * 1000,
                 next_maintenance_at: 0,
@@ -1095,16 +1099,31 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         }
     }
 
+    /// Announce the node and its control destination. `occasion` names
+    /// why on the node's own `ANN_TX` line: `start` for the first and the
+    /// deferred start announce, `periodic` for the interval, `host` for
+    /// one asked for. The core logs no `ANN_TX` for an announce it sends
+    /// on every interface, so without this line the node's own log could
+    /// not prove its cadence; miauhaus showed only the path responses,
+    /// 18 lines in 113 h, and the 6-hour announces only on lnsd's side.
     fn announce(
         &mut self,
         ready: &mut Ready<S>,
         core: &mut StdNodeCoreRef<'_>,
+        occasion: &'static str,
         out: &mut TickOutput,
     ) {
         let app_data = ready.node.announce_app_data(unix_secs());
         match core.announce_destination(&ready.destination_hash, Some(&app_data)) {
             Ok(send) => {
                 out.merge(send);
+                tracing::debug!(
+                    event = "ANN_TX",
+                    occasion = occasion,
+                    dst = full_hex(ready.destination_hash.as_bytes()),
+                    hops = 0u8,
+                    iface = "all",
+                );
                 self.emit(EngineEvent::Announced);
             }
             Err(error) => tracing::warn!("lnpnd: announce failed: {error:?}"),
@@ -1145,7 +1164,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             ready.control_allowed.push(identity_hash);
         }
         Self::register_control_handlers(core, &ready.control_hash);
-        self.announce(&mut ready, core, out);
+        self.announce(&mut ready, core, "host", out);
         self.state = State::Ready(ready);
         true
     }
@@ -1163,7 +1182,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         out: &mut TickOutput,
     ) -> Option<[u8; 16]> {
         let mut ready = self.take_ready(core)?;
-        self.announce(&mut ready, core, out);
+        self.announce(&mut ready, core, "host", out);
         let hash = *ready.destination_hash.as_bytes();
         self.state = State::Ready(ready);
         Some(hash)
@@ -1922,13 +1941,14 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
             .next_announce_at
             .get_or_insert(now_ms + self.announce_delay_secs * 1000);
         if now_ms >= next_announce {
-            self.announce(&mut ready, core, &mut out);
+            self.announce(&mut ready, core, self.next_announce_occasion, &mut out);
             // The interval runs from the deferred start announce, as
             // `lxmd`'s timer runs from its deferred start jobs
             // (`reference/LXMF/LXMF/Utilities/lxmd.py:506`).
             let wait_secs = if std::mem::take(&mut self.start_announce_owed) {
                 START_ANNOUNCE_GAP_SECS
             } else {
+                self.next_announce_occasion = "periodic";
                 self.announce_interval_secs
             };
             self.next_announce_at = Some(now_ms + wait_secs * 1000);
@@ -2298,6 +2318,41 @@ mod tests {
             "router announce, deferred start announce, then the interval \
              from the second (seconds after start)"
         );
+    }
+
+    /// Each of those announces leaves an `ANN_TX` line in the node's own
+    /// log, so the log proves the cadence: the core logs none for an
+    /// announce it sends on every interface, and on miauhaus the 6-hour
+    /// announces were visible only on lnsd's side (1294).
+    #[test]
+    fn every_own_announce_logs_an_ann_tx_with_its_occasion() {
+        enable_log_dispatch();
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        let second = ANNOUNCE_DELAY_SECS + START_ANNOUNCE_GAP_SECS;
+        let times = tracing::subscriber::with_default(subscriber, || {
+            node_announce_times(true, second + 3600)
+        });
+        assert_eq!(times.len(), 3, "the cadence the test above pins");
+        let log = capture.unquoted();
+        let occasions: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=ANN_TX"))
+            .map(|line| {
+                assert!(
+                    line.contains("hops=0") && line.contains("iface=all"),
+                    "{line}"
+                );
+                line.split_whitespace()
+                    .find_map(|field| field.strip_prefix("occasion="))
+                    .unwrap_or("-")
+            })
+            .collect();
+        assert_eq!(occasions, vec!["start", "start", "periodic"], "{log}");
     }
 
     /// With `announce_at_start = no` only the router's own start announce
