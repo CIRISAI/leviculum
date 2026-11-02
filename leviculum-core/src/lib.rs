@@ -111,6 +111,8 @@ pub mod embedded_storage;
 pub mod envelope;
 pub mod event_scalar;
 pub mod fixed_position_store;
+/// +ciris (leviculum#93).
+pub mod forward_meter;
 pub mod framing;
 /// Fuzzing-only entry points exposing crate-internal parsers to the detached
 /// cargo-fuzz harness. Compiled only under `--cfg fuzzing` (set by cargo-fuzz).

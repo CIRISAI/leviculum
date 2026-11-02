@@ -292,3 +292,66 @@ fn a_host_budget_is_one_attempt_and_no_retry() {
     assert!(!retried, "no retried request");
     assert_eq!(mesh.a.link_list().len(), 0, "the link is gone");
 }
+
+// leviculum#93: what a relay forwards, metered, refused and capped.
+
+/// A link request the relay's rule refuses is never forwarded: the link
+/// cannot establish through it, and the refusal is counted.
+#[test]
+fn a_refused_request_is_not_forwarded() {
+    let mut mesh = Mesh::new();
+    mesh.c[0].set_forward_admission(Some(std::boxed::Box::new(
+        |_: &crate::forward_meter::ForwardRequest| crate::forward_meter::ForwardDecision::Refuse,
+    )));
+    let relay = mesh.relay_id(0);
+    let (key, dest) = (mesh.key, mesh.dest);
+    let (_, out) = mesh.a.connect_via(dest, &key, relay, Some(2_000)).unwrap();
+    let fwd = packets(&mesh.c[0].handle_packet(InterfaceId(mesh.c_a[0]), &packets(&out)[0]));
+    assert!(fwd.is_empty(), "not forwarded: {fwd:?}");
+    assert_eq!(mesh.c[0].forward_refusals(), 1);
+    assert!(mesh.c[0].forwarded_links().is_empty());
+}
+
+/// Admitted links are metered each way, and a byte cap drops above it.
+#[test]
+fn forwarded_links_are_metered_and_a_cap_drops_above_it() {
+    let mut mesh = Mesh::new();
+    mesh.c[1].set_forward_admission(Some(std::boxed::Box::new(
+        |_: &crate::forward_meter::ForwardRequest| crate::forward_meter::ForwardDecision::Admit {
+            max_bytes_per_s: Some(400),
+            max_packets_per_s: None,
+        },
+    )));
+    let relay = mesh.relay_id(1);
+    let (key, dest) = (mesh.key, mesh.dest);
+    let (link, out) = mesh.a.connect_via(dest, &key, relay, None).unwrap();
+    assert!(mesh.establish_over(1, &packets(&out)[0]));
+    let before = mesh.c[1].forwarded_links()[0];
+    assert!(
+        before.toward_destination.packets >= 1,
+        "the RTT packet went through: {before:?}"
+    );
+
+    // Five 200-byte messages at once: a 400 B/s cap passes about two.
+    let mut forwarded = 0;
+    for _ in 0..5 {
+        let Ok(out) = mesh.a.send_on_link(&link, &[7u8; 200]) else {
+            let now = mesh.a.transport().clock().now_ms();
+            mesh.a.transport().clock().set(now + 50);
+            continue;
+        };
+        for p in packets(&out) {
+            forwarded += packets(&mesh.c[1].handle_packet(InterfaceId(mesh.c_a[1]), &p)).len();
+        }
+    }
+    let after = mesh.c[1].forwarded_links()[0];
+    assert!(after.toward_destination.dropped_over_cap > 0, "{after:?}");
+    assert_eq!(
+        after.toward_destination.packets - before.toward_destination.packets,
+        forwarded as u64,
+        "counted what it forwarded"
+    );
+    assert!(after.toward_destination.bytes > before.toward_destination.bytes);
+    assert_eq!(after.link_id, *link.as_bytes());
+    assert_eq!(after.destination_hash, *dest.as_bytes());
+}

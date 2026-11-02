@@ -156,3 +156,25 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 }
+
+/// +ciris (leviculum#93): what this node forwards for others' links.
+impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
+    /// Set (or clear, with `None`) the rule that admits or refuses each link
+    /// request this transport node would forward for others, with optional
+    /// per-link rate caps; see [`crate::forward_meter`]. The rule runs with
+    /// the node's lock held and must not call back into the node.
+    pub fn set_forward_admission(&mut self, hook: Option<crate::forward_meter::AdmissionHook>) {
+        self.transport.forward_meters_mut().set_hook(hook);
+    }
+
+    /// Every link this node forwards, with bytes and packets each way and
+    /// what its caps dropped.
+    pub fn forwarded_links(&self) -> Vec<crate::forward_meter::ForwardedLink> {
+        self.transport.forward_meters().links()
+    }
+
+    /// Link requests the admission rule refused so far.
+    pub fn forward_refusals(&self) -> u64 {
+        self.transport.forward_meters().refused()
+    }
+}
