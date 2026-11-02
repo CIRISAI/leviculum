@@ -1125,6 +1125,15 @@ pub struct FriendRow {
     pub live: String,
     #[serde(default)]
     pub ring: String,
+    /// A node the mesh announced that is no contact (1302): the map draws
+    /// a neutral grey pin without an avatar, and its card says "Nearby,
+    /// not in your contacts" with "Add" in place of Chat.
+    #[serde(default)]
+    pub nearby: bool,
+    /// The name the node announced, without the hash the list adds: what
+    /// "Add" names the new contact.
+    #[serde(default)]
+    pub announced: String,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
