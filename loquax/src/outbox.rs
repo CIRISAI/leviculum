@@ -306,7 +306,10 @@ pub enum OutboxEvent {
     /// not yet sanitised: the screen does that ([`crate::names`]).
     /// `path_response` says the announce answered a path request, as a rule
     /// from a cache: it names the peer as well as a live one does, and says
-    /// nothing of whether the peer is there (1330).
+    /// nothing of whether the peer is there (1330). A repeat of the last
+    /// announce heard from a recipient of a packed message is one too,
+    /// however it came: a shared instance forwards an answer from the
+    /// network as a plain announce (1332, `Engine::replayed`).
     Announced {
         destination: [u8; 16],
         name: Option<String>,

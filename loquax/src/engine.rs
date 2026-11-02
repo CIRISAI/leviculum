@@ -52,6 +52,7 @@ use core::future::Future;
 use core::pin::pin;
 use core::task::Poll;
 
+use leviculum_core::constants::RANDOM_HASHBYTES;
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
@@ -326,6 +327,12 @@ pub struct Engine {
     /// since the start: each is an `LXMF_RX_UNDECRYPTABLE` line and carries
     /// this count. See [`Engine::undecryptable`].
     undecryptable: u64,
+    /// The recipients of packed messages this run sent, each with the random
+    /// hash of the last announce heard from it. See [`Engine::replayed`].
+    recipients: BTreeMap<[u8; 16], Option<[u8; RANDOM_HASHBYTES]>>,
+    /// The recipient whose announce the event being handled repeats, set
+    /// for the length of one [`Engine::on_event`].
+    replayed: Option<[u8; 16]>,
 }
 
 impl Engine {
@@ -352,6 +359,8 @@ impl Engine {
             unheard: BTreeMap::new(),
             hands_out_packed: false,
             undecryptable: 0,
+            recipients: BTreeMap::new(),
+            replayed: None,
         }
     }
 
@@ -563,10 +572,11 @@ impl Engine {
                 announce,
                 path_response,
             } => {
+                let destination = destination.into_bytes();
                 self.emit(OutboxEvent::Announced {
-                    destination: destination.into_bytes(),
+                    destination,
                     name: announce.display_name(),
-                    path_response,
+                    path_response: path_response || self.replayed == Some(destination),
                 });
             }
             RouterEvent::PropagationSyncComplete(result) => {
@@ -731,6 +741,9 @@ impl Engine {
             Via::Propagated => DeliveryMethod::Propagated,
             Via::Direct | Via::Link => DeliveryMethod::Direct,
         };
+        self.recipients
+            .entry(message.destination_hash)
+            .or_insert(None);
         // A recipient whose key this node does not hold (a group's engine
         // started again after a kill, 1307 G2, keeps no known identities):
         // ask its path, as a stock app does before it writes to an address
@@ -1795,6 +1808,13 @@ impl Engine {
         let Some(mut ready) = self.take_ready(core) else {
             return out;
         };
+        self.replayed = match event {
+            NodeEvent::AnnounceReceived { announce, .. } => self.replayed(
+                announce.destination_hash().into_bytes(),
+                announce.random_hash(),
+            ),
+            _ => None,
+        };
         if let (Some(pending), NodeEvent::AnnounceReceived { announce, .. }) =
             (&mut self.pending_selection, event)
         {
@@ -1831,8 +1851,35 @@ impl Engine {
         self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
         self.poll_unheard(&mut ready, core, now_ms, &mut out);
         self.report_departures(&ready);
+        self.replayed = None;
         self.state = State::Ready(ready);
         out
+    }
+
+    /// Whether an announce from `destination` with `random` repeats the
+    /// last one heard from it, for a recipient this run sent to: `Some` of
+    /// it if so, and the announce becomes the last one heard either way.
+    ///
+    /// A repeat is a cache's copy, which says nothing of whether the
+    /// recipient is there (1332). The router asks a recipient's path again
+    /// whenever a direct link to it closes with a message still waiting
+    /// (`leviculum-lxmf/src/router.rs`, `needs_direct_link`), and a shared
+    /// instance forwards the network's answer to its client as a plain
+    /// announce, as the reference does (`Transport.py:1910-1930`, cited at
+    /// the pending forward in `leviculum-core/src/transport.rs`), so the
+    /// `PATH_RESPONSE` context 1330 reads is gone by then. On miauhaus every
+    /// copy handed on was tried direct again some 46 s after each attempt
+    /// nobody answered. Only a recipient that announces again sends a new
+    /// random hash.
+    fn replayed(
+        &mut self,
+        destination: [u8; 16],
+        random: &[u8; RANDOM_HASHBYTES],
+    ) -> Option<[u8; 16]> {
+        let last = self.recipients.get_mut(&destination)?;
+        let repeat = last.as_ref() == Some(random);
+        *last = Some(*random);
+        repeat.then_some(destination)
     }
 
     /// The periodic slot: commands, finished stamps, resolves and the
@@ -2121,6 +2168,84 @@ mod tests {
         let mut bytes = [0u8; 512];
         let len = packet.pack(&mut bytes).expect("pack");
         bytes[..len].to_vec()
+    }
+
+    /// 1332: an announce from a recipient this run sent to that repeats the
+    /// last one heard from it is a cache's copy, reported as heard from a
+    /// cache however it came; the recipient's next own announce is live. A
+    /// peer nothing was sent to is reported as the wire says.
+    #[test]
+    fn a_repeat_of_a_recipients_announce_is_reported_as_heard_from_a_cache() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let member = leviculum_std::generate_identity();
+        let address = delivery_address(&member).expect("address");
+        let sender = leviculum_std::generate_identity();
+        let packed = leviculum_lxmf::Message::create(
+            address,
+            delivery_address(&sender).expect("address"),
+            &sender,
+            1_793_500_000.0,
+            Vec::new(),
+            b"Brot ist da".to_vec(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message")
+        .pack();
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Link,
+        });
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let hear = |engine: &mut Engine, core: &mut StdNodeCore, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(core, event);
+            }
+            drain(engine)
+                .into_iter()
+                .filter_map(|event| match event {
+                    OutboxEvent::Announced {
+                        destination,
+                        path_response,
+                        ..
+                    } if destination == address => Some(path_response),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let once = announce_bytes(&member, "lxmf", &["delivery"], b"");
+        assert_eq!(
+            hear(&mut engine, &mut core, &once),
+            [false],
+            "first heard: live"
+        );
+        // A direct link that fails its handshake expires the path, and the
+        // router asks it again: a transport node's copy comes back, one hop
+        // further, the same announce.
+        assert!(core.remove_path(&address));
+        let mut replay = once.clone();
+        replay[1] = replay[1].saturating_add(1);
+        assert_eq!(
+            hear(&mut engine, &mut core, &replay),
+            [true],
+            "the same announce again"
+        );
+        let again = announce_bytes(&member, "lxmf", &["delivery"], b"");
+        assert_eq!(
+            hear(&mut engine, &mut core, &again),
+            [false],
+            "the member announced"
+        );
     }
 
     /// 1302: a `lev.position` announce the core heard reaches the screen's
