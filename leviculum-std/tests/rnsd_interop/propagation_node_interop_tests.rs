@@ -54,8 +54,9 @@ fn unix_secs() -> u64 {
 /// hashes over a 256 KB workblock on average, and these tests are about
 /// serving, not minting. Cost 1 silences the line.
 ///
-/// The default flexibility of 3 leaves the minimum an upload must prove at
-/// 0, so nothing here validates a stamp, and that is deliberate: the
+/// A flexibility of 3, named in the config because the role's default is
+/// 0 since order 1294, leaves the minimum an upload must prove at 0, so
+/// nothing here validates a stamp, and that is deliberate: the
 /// client's link-packet receipt times out at `max(rtt * 6, 5 ms)`
 /// (`reference/Reticulum/RNS/Packet.py:431`), a few milliseconds on
 /// loopback, and one workblock expansion in a debug build took 73 ms
@@ -106,6 +107,7 @@ impl PnHost {
             MemoryPropagationStore::new(64 * 1024),
             PropagationNodeConfig {
                 stamp_cost: PN_STAMP_COST,
+                stamp_cost_flexibility: 3,
                 // This role never offers to a peer, so it needs no values.
                 always_compute_stamp_value: false,
                 ..PropagationNodeConfig::default()

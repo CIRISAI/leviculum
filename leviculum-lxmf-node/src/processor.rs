@@ -1071,10 +1071,14 @@ impl LxmfHelperProcessor {
         }
         // The interop helper keeps the costs its scenarios were written
         // against, 0 and 0, rather than the role's shipped 13 / 1: a cell
-        // that wants costs names them as `pn_enable` options.
+        // that wants costs names them as `pn_enable` options. Flexibility
+        // stays the reference's 3, what the Python helper's router runs
+        // (`PROPAGATION_COST_FLEX`, `reference/LXMF/LXMF/LXMRouter.py:53`),
+        // where the role's default is 0 since order 1294.
         let mut node_config = PropagationNodeConfig {
             name: Some(self.config.display_name.clone()),
             stamp_cost: 0,
+            stamp_cost_flexibility: 3,
             peering_cost: 0,
             ..PropagationNodeConfig::default()
         };

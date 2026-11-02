@@ -1051,9 +1051,13 @@ fn a_message_accepted_at_cost_0_before_any_demanding_peer_is_offered_to_one() {
     let region = SharedRegion::new(SECTORS);
     let mut log = block_on(fresh(SECTORS));
     sync(&region, &mut log);
+    // The flexibility named: the role's default is 0 since order 1294.
     let mut role = PropagationNode::new(
         PnStore::new(region.clone(), SECTORS),
-        board_role_config(3, 1, b"board".to_vec(), 4_000),
+        leviculum_lxmf::PropagationNodeConfig {
+            stamp_cost_flexibility: 3,
+            ..board_role_config(3, 1, b"board".to_vec(), 4_000)
+        },
     );
     assert_eq!(role.min_accepted_cost(), 0, "cost 3 less flexibility 3");
 

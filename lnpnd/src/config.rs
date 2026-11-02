@@ -370,10 +370,12 @@ autopeer_maxdepth = 6
 
 # propagation_stamp_cost_target = 13
 
-# How far below the target a stamp from another propagation node may
-# fall and still be accepted.
+# How far below the target a stamp may fall and still be accepted.
+# The default is 0: a stock peer only takes messages worth 13 or more
+# from us, so with the target at 13 anything lower would stay on this
+# node until it expired. lxmd's 3 goes with its target of 16.
 
-# propagation_stamp_cost_flexibility = 3
+# propagation_stamp_cost_flexibility = 0
 
 # The peering key value required of nodes that want to deliver
 # messages to this one. The default is 1, the cheapest cost a stock

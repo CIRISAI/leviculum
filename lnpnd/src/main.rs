@@ -462,8 +462,8 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             file.get_u64("propagation", "propagation_sync_max_accepted_size")?
                 .unwrap_or(32),
         ),
-        // Unset costs are the role's own defaults, 13 / 3 / 1 (Lead,
-        // 2026-09-12), one source with the board's.
+        // Unset costs are the role's own defaults, 13 / 0 / 1 (Lead,
+        // 2026-09-12; flexibility 0 since 1294), one source with the board's.
         stamp_cost: args.stamp_cost.unwrap_or(
             file.get_u8("propagation", "propagation_stamp_cost_target")?
                 .unwrap_or(leviculum_lxmf::PropagationNodeConfig::default().stamp_cost),
@@ -677,6 +677,23 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         name: effective.node_name.clone().map(String::into_bytes),
         ..leviculum_lxmf::PropagationNodeConfig::default()
     };
+    // Honoured, but said: a message stamped below what a stock peer takes
+    // from us stays on this node until it expires (order 1294).
+    if leviculum_lxmf::PropagationNode::new(
+        leviculum_lxmf::MemoryPropagationStore::new(0),
+        node_config.clone(),
+    )
+    .accepts_below_stock_peers()
+    {
+        tracing::warn!(
+            "lnpnd: stamp cost {} minus flexibility {} accepts messages a stock \
+             propagation node refuses (it demands {}); they stay here until they \
+             expire",
+            effective.stamp_cost,
+            effective.stamp_cost_flexibility,
+            leviculum_lxmf::STOCK_PEER_MIN_STAMP_VALUE
+        );
+    }
     let peering = peering_config(&effective);
     let peer_store = match leviculum_std::FilePeerStore::open(data_dir.join("peers")) {
         Ok(store) => store,
@@ -1069,8 +1086,9 @@ mod tests {
         );
     }
 
-    /// A config that names no cost runs the Lead's decision of 2026-09-12:
-    /// stamp cost 13 with flexibility 3, peering cost 1. Peering cost 0
+    /// A config that names no cost runs the Lead's decision of 2026-09-12,
+    /// stamp cost 13 and peering cost 1, with flexibility 0 since order
+    /// 1294 (13 and up, what a stock peer takes from us). Peering cost 0
     /// would leave every stock lxmd peer unable to sync toward us
     /// (`peering_key_ready` returns false on a falsy cost,
     /// `reference/LXMF/LXMF/LXMPeer.py:228`). The mailbox's own stamp cost
@@ -1086,7 +1104,7 @@ mod tests {
                 effective.stamp_cost_flexibility,
                 effective.peering_cost
             ],
-            [13, 3, 1]
+            [13, 0, 1]
         );
         assert_eq!(effective.mailbox_stamp_cost, 12);
     }
@@ -1143,7 +1161,7 @@ mod tests {
         let template = lnpnd::config::EXAMPLE_CONFIG;
         for line in [
             "# propagation_stamp_cost_target = 13",
-            "# propagation_stamp_cost_flexibility = 3",
+            "# propagation_stamp_cost_flexibility = 0",
             "# peering_cost = 1",
             "\nautopeer_maxdepth = 6\n",
         ] {

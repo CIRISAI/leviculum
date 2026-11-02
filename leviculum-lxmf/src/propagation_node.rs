@@ -49,6 +49,15 @@ use crate::{
 /// (`PN_META_NAME`, `reference/LXMF/LXMF/LXMF.py:133`).
 pub const PN_META_NAME: u64 = 0x01;
 
+/// The stamp value a stock peer demands of every message we offer it:
+/// its `PROPAGATION_COST` 16 minus its `PROPAGATION_COST_FLEX` 3
+/// (`reference/LXMF/LXMF/LXMRouter.py:53-54`), applied by the offering
+/// side (`min_accepted_cost`, `reference/LXMF/LXMF/LXMPeer.py:331`, the
+/// drop at `:340-353`). A message stored below it never leaves this node
+/// toward such a peer; [`PropagationNode::accepts_below_stock_peers`]
+/// says when a configuration admits one.
+pub const STOCK_PEER_MIN_STAMP_VALUE: u8 = 13;
+
 /// Messages expire after 30 days
 /// (`MESSAGE_EXPIRY`, `reference/LXMF/LXMF/LXMRouter.py:38`).
 pub const MESSAGE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
@@ -338,7 +347,17 @@ pub struct PropagationNodeConfig {
     pub stamp_cost: u8,
     /// Announce field 5\[1\]: how far below our cost a stamp may fall and
     /// still be accepted (`PROPAGATION_COST_FLEX`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:53`, default 3).
+    /// `reference/LXMF/LXMF/LXMRouter.py:53`).
+    ///
+    /// Default 0, where the reference's is 3: the reference pairs its 3
+    /// with cost 16 (`PROPAGATION_COST`, `:54`), so it accepts 13 and
+    /// up, and 13 is what every stock peer demands of what we offer it
+    /// (`min_accepted_cost = max(0, cost - flexibility)`,
+    /// `reference/LXMF/LXMF/LXMPeer.py:331`, filtered at `:340-353`).
+    /// At our cost 13 a flexibility of 3 accepted 10 to 12, which no stock
+    /// peer takes, so such a message stayed on this node for 30 days and
+    /// reached nobody beyond it (leviculum#478, order 1294). Our clients
+    /// mine to the announced cost, so 0 refuses none of theirs.
     pub stamp_cost_flexibility: u8,
     /// Announce field 5\[2\]: the peering cost another node mines to `/offer`
     /// us batches. Default 1 (Lead, 2026-09-12), not 0: 0 is wire-legal,
@@ -419,7 +438,9 @@ impl Default for PropagationNodeConfig {
             // cost (`reference/LXMF/LXMF/LXMPeer.py:228`), so it would
             // never sync toward us.
             stamp_cost: leviculum_core::pn_config_store::DEFAULT_STAMP_COST,
-            stamp_cost_flexibility: 3,
+            // Cost 13 minus 0 accepts exactly what a stock peer will take
+            // from us (`STOCK_PEER_MIN_STAMP_VALUE`).
+            stamp_cost_flexibility: 0,
             peering_cost: leviculum_core::pn_config_store::DEFAULT_PEERING_COST,
             name: None,
             message_expiry_secs: MESSAGE_EXPIRY_SECS,
@@ -1006,6 +1027,14 @@ impl<S: PropagationStore> PropagationNode<S> {
         self.config
             .stamp_cost
             .saturating_sub(self.config.stamp_cost_flexibility)
+    }
+
+    /// Whether this configuration accepts stamps that a stock peer then
+    /// refuses to take from us ([`STOCK_PEER_MIN_STAMP_VALUE`]): such a
+    /// message stays here until it expires. A host warns at start; the
+    /// configuration is honoured, a cost below 13 is the operator's call.
+    pub fn accepts_below_stock_peers(&self) -> bool {
+        self.min_accepted_cost() < STOCK_PEER_MIN_STAMP_VALUE
     }
 
     /// The seven-field announce app-data, exactly as the reference builds it

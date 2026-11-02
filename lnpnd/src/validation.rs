@@ -336,6 +336,66 @@ mod tests {
         assert_eq!(stamps[1].0, full_hash(&body_b));
     }
 
+    /// The default floor with real stamps (order 1294): an upload whose
+    /// stamp is worth 12 is refused with the reference's
+    /// `ERROR_INVALID_STAMP`, one worth 13 is stored. 13 is what a stock
+    /// peer demands of what we offer it (`LXMPeer.py:331`, `:340-353`), so
+    /// a 12 taken here would stay here until it expired.
+    #[test]
+    fn the_default_floor_refuses_a_stamp_of_12_and_takes_13() {
+        use leviculum_lxmf::propagation::PropagationSignal;
+        use leviculum_lxmf::{
+            MemoryPropagationStore, PropagationNode, PropagationNodeConfig, UploadOutcome,
+            WorkblockStream, STOCK_PEER_MIN_STAMP_VALUE,
+        };
+
+        let lxmf = vec![0x42u8; LXMF_OVERHEAD + 40];
+        let transient_id = full_hash(&lxmf);
+        let mut stream = WorkblockStream::new(WORKBLOCK_EXPAND_ROUNDS_PN);
+        stream.advance(&transient_id, WORKBLOCK_EXPAND_ROUNDS_PN);
+        let (mut twelve, mut thirteen) = (None, None);
+        // About 2^13 candidates for each; a candidate is one SHA-256 over
+        // the finished workblock state.
+        for n in 0u64..1 << 20 {
+            let mut stamp = [0u8; STAMP_SIZE];
+            stamp[..8].copy_from_slice(&n.to_le_bytes());
+            match stream.value(&stamp) {
+                12 if twelve.is_none() => twelve = Some(stamp),
+                value if value >= 13 && thirteen.is_none() => thirteen = Some(stamp),
+                _ => {}
+            }
+            if twelve.is_some() && thirteen.is_some() {
+                break;
+            }
+        }
+        let (twelve, thirteen) = (twelve.expect("a 12"), thirteen.expect("a 13"));
+
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(64_000),
+            PropagationNodeConfig::default(),
+        );
+        let min_cost = node.min_accepted_cost();
+        assert_eq!(min_cost, STOCK_PEER_MIN_STAMP_VALUE);
+        let validate =
+            |id: &TransientId, stamp: &[u8; 32]| validate_stamp_value(id, stamp, min_cost, true);
+
+        let low = PropagationUpload::single(1.0, lxmf.clone(), twelve).encode();
+        match node.handle_upload(&low, 100, validate) {
+            UploadOutcome::InvalidStamp { reject } => assert_eq!(
+                PropagationSignal::decode(&reject).expect("a signal"),
+                PropagationSignal::InvalidStamp
+            ),
+            other => panic!("a stamp worth 12 must be refused: {other:?}"),
+        }
+        assert!(node.store().is_empty());
+
+        let good = PropagationUpload::single(1.0, lxmf, thirteen).encode();
+        match node.handle_upload(&good, 100, validate) {
+            UploadOutcome::Accepted { stamp_value, .. } => assert!(stamp_value >= 13),
+            other => panic!("a stamp worth 13 must be taken: {other:?}"),
+        }
+    }
+
     /// A payload neither parser accepts yields no stamps and no panic;
     /// the engine's own re-run classifies it as malformed.
     #[test]

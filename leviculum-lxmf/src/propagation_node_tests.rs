@@ -350,7 +350,8 @@ fn announce_defaults_are_the_concept_papers_numbers() {
 }
 
 /// Field 5 of a default node's own announce is the Lead's decision of
-/// 2026-09-12: stamp cost 13 with flexibility 3, peering cost 1. Peering
+/// 2026-09-12, stamp cost 13 and peering cost 1, with flexibility 0 since
+/// order 1294 (so it accepts 13 and up, what a stock peer takes). Peering
 /// cost 0 would be wire-legal and dead: a stock peer's
 /// `peering_key_ready` returns false on a falsy cost
 /// (`reference/LXMF/LXMF/LXMPeer.py:228`) and its sync never pushes to us.
@@ -367,8 +368,25 @@ fn the_default_config_announces_the_decided_costs() {
             announce.stamp_cost_flexibility,
             announce.peering_cost
         ],
-        [13, 3, 1]
+        [13, 0, 1]
     );
+    assert_eq!(node.min_accepted_cost(), STOCK_PEER_MIN_STAMP_VALUE);
+    assert!(!node.accepts_below_stock_peers());
+}
+
+/// A cost a stock peer would refuse to take from us is honoured but
+/// flagged, so the host can say so at start (order 1294).
+#[test]
+fn a_floor_below_the_stock_peers_is_flagged() {
+    let node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            stamp_cost_flexibility: 3,
+            ..PropagationNodeConfig::default()
+        },
+    );
+    assert_eq!(node.min_accepted_cost(), 10);
+    assert!(node.accepts_below_stock_peers());
 }
 
 /// The board's deferred-durability path: a store flush that failed after
