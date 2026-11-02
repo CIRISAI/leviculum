@@ -863,6 +863,23 @@ class InputText(unittest.TestCase):
             walk.input_text_arg("Grüße")
 
 
+class GroupHosted(unittest.TestCase):
+    """1307: the mailbox's line for a hosted group, by its name."""
+
+    LOG = (
+        "2026-11-02T06:00:00Z WARN GROUP hosted name=Familie address=00112233445566778899aabbccddeeff\n"
+        "2026-11-02T06:00:01Z WARN GROUP hosted name=Walk Group 123 address=ffeeddccbbaa99887766554433221100\n"
+    )
+
+    def test_the_named_groups_address(self):
+        self.assertEqual(
+            walk.group_hosted(self.LOG, "Walk Group 123"), "ffeeddccbbaa99887766554433221100"
+        )
+
+    def test_another_name_is_none(self):
+        self.assertIsNone(walk.group_hosted(self.LOG, "Walk Group 12"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

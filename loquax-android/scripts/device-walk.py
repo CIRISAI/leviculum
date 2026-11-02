@@ -88,6 +88,9 @@ STEPS = [
     "receive_report",
     "position_pin",
     "draft",
+    "group_create",
+    "group_join",
+    "group_message",
     "network_wifi_toggle",
     "network_mobile_switch",
     "flight_mode",
@@ -296,6 +299,16 @@ REC_LINE = re.compile(
 # the start of every contact code its QR and the profile's hold.
 WELCOME_ACTIVITY = "network.leviculum.loquax.WelcomeActivity"
 LXMA_PREFIX = "lxma://"
+# Group chats (1307): the pencil's "New group" row, the picker's Next and
+# the name step's Create (the catalogue's group_next, group_create), the
+# mailbox's line when it hosts a group, and the line a member who joined
+# by writing makes in the group's chat (1307 G2).
+GROUP_NEW = "new_group"
+GROUP_NEXT = "Next"
+GROUP_CREATE = "Create"
+GROUP_JOINED = "{} joined."
+
+
 # The pencil (1263, finding 3): its two rows, top to bottom, the fold
 # that hides the typed address, and the sentence for a text that is no
 # code (the catalogue's code_foreign).
@@ -511,6 +524,18 @@ def accepted_to(log: str, peer: str) -> int:
         for line in log.splitlines()
         if "HOME send accepted" in line and f"to={peer}" in line
     )
+
+
+def group_hosted(log: str, name: str) -> str | None:
+    """The address the mailbox hosts the group `name` at (`GROUP hosted
+    name=<name> address=<hex>`, 1307), the newest such line's."""
+    found = None
+    prefix = f"GROUP hosted name={name} address="
+    for line in log.splitlines():
+        at = line.find(prefix)
+        if at >= 0:
+            found = line[at + len(prefix):].split()[0]
+    return found
 
 
 def chip_problems(nodes: list[Node], words) -> list[str]:
@@ -3596,6 +3621,132 @@ class Walk:
             if node.bounds[1] <= middle <= node.bounds[3]:
                 return node
         raise StepFailed(f"no avatar beside {shown!r}")
+
+    def step_group_create(self) -> str:
+        """A group from the phone (1307, study 4.1): the pencil, "New
+        group", the host's sender ticked, Next, the name, Create; 4 + k
+        taps and the name with k = 1. The mailbox makes the group and hosts
+        its engine, and the list shows the group's row; its address stays
+        for the next two steps."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        friend = fixture.manifest["open"]["shown"]
+        name = f"Walk Group {self.nonce}"
+        self.back_to_chats()
+        taps = 0
+        dev.tap_node(self.wait_id("write", 10)[0])
+        taps += 1
+        dev.tap_node(self.wait_id(GROUP_NEW, 10)[0])
+        taps += 1
+        self.tap_text(friend)
+        taps += 1
+        self.tap_text(GROUP_NEXT)
+        taps += 1
+        fields = []
+
+        def field_up():
+            nonlocal fields
+            fields = [n for n in dev.dump() if "EditText" in n.cls]
+            return bool(fields)
+
+        if not wait_for(field_up, 10, every=0.3):
+            raise StepFailed("no name field after Next")
+        dev.tap_node(fields[0])
+        dev.type_text(name)
+        self.tap_text(GROUP_CREATE)
+        taps += 1
+        address = None
+
+        def hosted():
+            nonlocal address
+            address = group_hosted(fixture.mailbox_log(), name)
+            return address is not None
+
+        if not wait_for(hosted, 30, every=0.5):
+            raise StepFailed(f"the mailbox hosts no {name!r}: {fixture.mailbox_log()[-400:]}")
+        self.group = (name, address)
+        self.back_to_chats()
+        self.wait_text(name, 30)
+        if taps != 5:
+            raise StepFailed(f"{taps} taps, not 4 + 1")
+        return f"taps={taps}+name group={address[:8]} row=shown"
+
+    def need_group(self) -> tuple[str, str]:
+        group = getattr(self, "group", None)
+        if group is None:
+            raise StepFailed("no group: run group_create first")
+        return group
+
+    def step_group_join(self) -> str:
+        """A member who joins by writing (1307 G2): the host's sender, a
+        member the phone ticked, writes to the group's address. The group
+        copies the line to the phone as "<name>: <text>" with the writer
+        above the bubble, and tells the phone the new list, which the
+        group's chat shows as the line "<name> joined."."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        name, address = self.need_group()
+        friend = fixture.manifest["open"]["shown"]
+        body = f"walk group hello {self.nonce}"
+        send = subprocess.run(
+            [self.args.loquax, "send", "--config", str(fixture.cfg), "--via", "direct", address, body],
+            env=self.host_env(),
+            capture_output=True,
+            timeout=90,
+        )
+        if send.returncode != 0:
+            raise StepFailed(f"loquax send exit={send.returncode}: {send.stderr.decode()[-300:]}")
+        self.back_to_chats()
+        self.open_conversation(name)
+        start = time.monotonic()
+        self.wait_text(body, 30)
+        line_ms = int((time.monotonic() - start) * 1000)
+        nodes = dev.dump()
+        joined = GROUP_JOINED.format(friend)
+        if not find(nodes, text=joined, contains=True):
+            # The admin's name for the member is the phone's word at
+            # Create time; a phone without one names it by its address.
+            said = [t for t in texts(nodes) if t.endswith(" joined.")]
+            if not said:
+                raise StepFailed(f"no line '... joined.' in the chat: {texts(nodes)[-8:]}")
+            joined = said[0]
+        return f"line_ms={line_ms} note={joined!r}"
+
+    def step_group_message(self) -> str:
+        """The phone writes in its group (1307): the bubble gets its tick
+        from the group's proof, which the mailbox gives once it archived
+        the line ("the group has it"); the mailbox books a copy for the
+        member."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        name, _ = self.need_group()
+        body = f"walk group line {self.nonce}"
+        self.back_to_chats()
+        self.open_conversation(name)
+        dev.tap_node(self.wait_id("compose", 5)[0])
+        dev.type_text(body)
+        sends = find(dev.dump(), rid="send")
+        if not sends:
+            raise StepFailed("no send button")
+        start = time.monotonic()
+        dev.tap_node(sends[0])
+        mark = ""
+
+        def ticked():
+            nonlocal mark
+            nodes = dev.dump()
+            mine = [n for n in by_top(find(nodes, rid="body")) if n.text == body]
+            if not mine:
+                return False
+            y = mine[-1].bounds[1]
+            marks = [n for n in by_top(marks_on(nodes)) if n.bounds[1] >= y]
+            mark = mark_rid(marks[0]) if marks else ""
+            return mark in TICKS
+
+        if not wait_for(ticked, 30, every=0.3):
+            raise StepFailed(f"no tick on {body!r} within 30s; mark={mark!r}")
+        tick_ms = int((time.monotonic() - start) * 1000)
+        return f"tick_ms={tick_ms} mark={mark!r}"
 
     def network_kind(self) -> str:
         return default_network(self.need_device().shell("dumpsys connectivity", check=False))
