@@ -584,7 +584,14 @@ impl<B: Default> UiModel<B> {
                     }
                     return Vec::new();
                 }
-                let found = self.find_candidate(&typed);
+                // A friend by name, or a pasted code or address (the
+                // order's "members from contacts or pasted codes").
+                let found = self.find_candidate(&typed).or_else(|| {
+                    crate::code::read(&typed)
+                        .ok()
+                        .and_then(|code| code.address())
+                        .filter(|peer| self.address != Some(*peer))
+                });
                 match found {
                     Some(peer) => {
                         self.group_verb(Verb::Pick(peer));
@@ -1242,6 +1249,53 @@ mod tests {
             row.last
         );
         assert_ne!(again.selected, NONE_OPEN);
+    }
+
+    /// The terminal's flow through the palette: `new group`, a friend by
+    /// name, a pasted address, an empty line, the name: one ask with both.
+    /// Controls: a word that names nobody ticks nobody, and the reader's
+    /// own address is no member.
+    #[test]
+    fn the_palette_makes_a_group_from_names_and_pasted_addresses() {
+        use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+        let mut model = reader(&[ANNA]);
+        model.names.remember(ANNA, "Anna");
+        let key = |model: &mut UiModel<Line>, code| {
+            update(model, UiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+        };
+        let typed = |model: &mut UiModel<Line>, text: &str| {
+            for c in text.chars() {
+                update(
+                    model,
+                    UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                );
+            }
+        };
+        update(
+            &mut model,
+            UiEvent::Run(leviculum_ui::commands::Command::NewGroup),
+        );
+        for word in [
+            "nobody",
+            "anna",
+            &crate::address::to_hex(&BOB),
+            &crate::address::to_hex(&ME),
+        ] {
+            typed(&mut model, word);
+            key(&mut model, KeyCode::Enter);
+        }
+        assert_eq!(
+            model.group_draft.as_ref().map(|d| d.picked.clone()),
+            Some(vec![ANNA, BOB])
+        );
+        key(&mut model, KeyCode::Enter);
+        typed(&mut model, "Familie");
+        let effects = key(&mut model, KeyCode::Enter);
+        let [UiEffect::CreateGroup { name, members }] = effects.as_slice() else {
+            panic!("one ask: {effects:?}");
+        };
+        assert_eq!(name, "Familie");
+        assert_eq!(members.iter().map(|m| m.0).collect::<Vec<_>>(), [ANNA, BOB]);
     }
 
     /// Every client says bit 1; bit 0 rides with the switch.
