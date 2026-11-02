@@ -302,10 +302,11 @@ const PEER_REFLEXIVE_MAX: usize = 4;
 /// Punch toward every address in `targets` at once until one of them is
 /// proven both ways: an ack arrives FROM an address this end punched, so
 /// its punch reached the peer there and the peer's answer came back over
-/// the same pair (+ciris; ICE's symmetric check, RFC 8445 7.2.5.2.1). That
-/// address is the path. An ack from anywhere else proves nothing about the
-/// pair this end would send on, and accepting it let the two ends settle on
-/// different paths.
+/// the same pair (+ciris; ICE's symmetric check, RFC 8445 7.2.5.2.1), and a
+/// punch from the peer has arrived from that same address and been acked,
+/// so the peer can complete too. That address is the path. An ack from
+/// anywhere else proves nothing about the pair this end would send on, and
+/// accepting it let the two ends settle on different paths.
 ///
 /// Every punch heard is acked to where it came from, and that address is
 /// punched too from then on (a peer-reflexive candidate): behind a NAT that
@@ -330,6 +331,10 @@ pub(crate) async fn punch(
     let advertised = targets.len();
     // Addresses a punch actually left for; only an ack from one counts.
     let mut punched: Vec<SocketAddr> = Vec::new();
+    // Addresses a valid punch came from (each acked at once), and those an
+    // ack came from; the path is the first address in both, and punched.
+    let mut heard: Vec<SocketAddr> = Vec::new();
+    let mut acked: Vec<SocketAddr> = Vec::new();
     let mut early: Vec<Vec<u8>> = Vec::new();
     let mut early_bytes = 0usize;
     let mut seq: u32 = 0;
@@ -361,10 +366,13 @@ pub(crate) async fn punch(
                             tracing::debug!("direct link: peer-reflexive candidate {src}");
                             targets.push(src);
                         }
+                        if !heard.contains(&src) && heard.len() < targets.len() {
+                            heard.push(src);
+                        }
                     }
                     Some((PunchKind::Ack, _)) => {
-                        if punched.contains(&src) {
-                            return Some(Punched { peer: src, early });
+                        if punched.contains(&src) && !acked.contains(&src) {
+                            acked.push(src);
                         }
                     }
                     None => {
@@ -379,6 +387,9 @@ pub(crate) async fn punch(
                             early.push(frame.to_vec());
                         }
                     }
+                }
+                if let Some(path) = acked.iter().find(|a| heard.contains(a)) {
+                    return Some(Punched { peer: *path, early });
                 }
             }
         }
