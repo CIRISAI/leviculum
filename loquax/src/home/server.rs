@@ -62,6 +62,9 @@ pub struct Answer {
     /// A `/group` made a group (1307): the daemon starts its engine and
     /// hands it the membership for the admin.
     pub group: Option<NewGroup>,
+    /// A `/groupadd` added members (1307 G2): the group, and the new
+    /// membership its own engine sends the members that understand groups.
+    pub added: Option<([u8; 16], Vec<super::group::Outgoing>)>,
 }
 
 /// A group a `/group` made: hosted from now on, and what its own engine
@@ -80,6 +83,7 @@ impl Answer {
             learned: None,
             gone: false,
             group: None,
+            added: None,
         }
     }
 }
@@ -111,6 +115,7 @@ pub fn answer(
         super::MOVE_PATH => Answer::only(move_page(store, home, data, device)),
         super::MOVED_PATH => moved(store, home, data, device),
         super::GROUP_PATH => group(store, home, data, device, now),
+        super::GROUP_ADD_PATH => group_add(store, home, data, device, now),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -203,6 +208,7 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
                 learned: None,
                 gone: false,
                 group: None,
+                added: None,
             }
         }
         Ok(Accepted::Again { id }) => Answer::only(wire::send_answer(&id)),
@@ -336,6 +342,102 @@ fn group(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now:
         learned: None,
         gone: false,
         group: Some(NewGroup { hosted, welcome }),
+        added: None,
+    }
+}
+
+/// `/groupadd` (1307 G2, study 4.5): the home adds the members to a group
+/// it hosts and its owner is admin of ([`super::group::add`]), puts an
+/// invitation to each new one in its outbox, and hands the daemon the new
+/// membership for the group's engine. A member already in it is skipped,
+/// so asked again it adds nobody and answers the same.
+fn group_add(
+    store: &mut Store,
+    home: &Home<'_>,
+    data: &[u8],
+    device: [u8; 16],
+    now: f64,
+) -> Answer {
+    let Ok(request) = wire::read_group_add_request(data) else {
+        return Answer::only(wire::status_answer(Status::Malformed));
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "group add") {
+        return Answer::only(refused);
+    }
+    let Some((dir, owner_name)) = home.groups else {
+        tracing::info!("HOME group add refused: this mailbox hosts no groups");
+        return Answer::only(wire::status_answer(Status::Failed));
+    };
+    let hosted = match super::group::hosted(dir, store) {
+        Ok(hosted) => hosted
+            .into_iter()
+            .find(|h| h.group.address == request.group && h.group.admin == home.address),
+        Err(error) => {
+            tracing::warn!("HOME group add: {error}");
+            return Answer::only(wire::status_answer(Status::Failed));
+        }
+    };
+    let Some(hosted) = hosted else {
+        tracing::info!(
+            "HOME group add refused: {} is no group of this mailbox's",
+            crate::address::to_hex(&request.group)
+        );
+        return Answer::only(wire::status_answer(Status::Failed));
+    };
+    let members: Vec<([u8; 16], alloc::string::String)> = request
+        .members
+        .iter()
+        .filter(|(member, _)| *member != home.address)
+        .cloned()
+        .collect();
+    let (invitations, told) =
+        match super::group::add(home.identity, &hosted, owner_name, store, &members, now) {
+            Ok(added) => added,
+            Err(error) => {
+                tracing::warn!("HOME group add: {error}");
+                return Answer::only(wire::status_answer(Status::Failed));
+            }
+        };
+    let at = now as i64;
+    let mut accepted = Vec::new();
+    for invitation in invitations {
+        let client_id = invitation_client_id(&request.client_id, &invitation.destination);
+        match store.outbox_accept(
+            &client_id,
+            &invitation.id,
+            &invitation.destination,
+            &invitation.packed,
+            at,
+            home.cap_bytes,
+        ) {
+            Ok(Accepted::New { .. }) => accepted.push(Outgoing {
+                id: invitation.id,
+                destination: invitation.destination,
+                packed: invitation.packed,
+                created_at: at,
+                propagated: false,
+            }),
+            Ok(Accepted::Again { .. }) => {}
+            Err(error) => {
+                tracing::warn!("HOME group invitation: {error}");
+                return Answer::only(wire::status_answer(Status::Failed));
+            }
+        }
+    }
+    tracing::info!(
+        "HOME group added device={} group={} invited={}",
+        crate::address::to_hex(&device),
+        crate::address::to_hex(&request.group),
+        accepted.len()
+    );
+    Answer {
+        bytes: wire::group_answer(&request.group),
+        accepted,
+        watching: None,
+        learned: None,
+        gone: false,
+        group: None,
+        added: Some((request.group, told)),
     }
 }
 
@@ -480,6 +582,7 @@ fn seen(
         learned: None,
         gone: false,
         group: None,
+        added: None,
     }
 }
 
@@ -711,6 +814,7 @@ fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
                 learned: None,
                 gone: false,
                 group: None,
+                added: None,
             }
         }
         Err(error) => {
@@ -750,6 +854,7 @@ fn key(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
         learned: Some((peer, public_key)),
         gone: false,
         group: None,
+        added: None,
     }
 }
 
@@ -840,6 +945,7 @@ fn moved(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> A
             Answer {
                 gone: true,
                 group: None,
+                added: None,
                 ..Answer::only(wire::status_answer(Status::Ok))
             }
         }
@@ -970,6 +1076,86 @@ mod tests {
     fn admitted(store: &mut Store) {
         store.issue_token(&TOKEN, "laptop", 90).expect("issue");
         assert_eq!(join(store, LAPTOP, TOKEN), Status::Ok);
+    }
+
+    /// 1307 G2, item 6 (study 4.5): `/groupadd` from an admitted device
+    /// adds Cara to the owner's group: her invitation goes into the
+    /// outbox, the daemon gets the new list for the group's engine.
+    /// Controls: the same request again adds nobody; a group that is not
+    /// this home's is refused; a device not admitted is refused.
+    #[test]
+    fn a_member_is_added_once_to_the_owners_group() {
+        let (dir, mut store) = store();
+        let mut hosting = home();
+        hosting.groups = Some((dir.path(), "Lew"));
+        admitted(&mut store);
+        let made = answer(
+            &mut store,
+            &hosting,
+            crate::home::GROUP_PATH,
+            &wire::group_request(&wire::GroupRequest {
+                client_id: [7; 16],
+                name: "Familie".into(),
+                members: alloc::vec![([0x44; 16], "Anna".into())],
+            }),
+            Some(LAPTOP),
+            300.0,
+        );
+        let group = wire::read_group_answer(&made.bytes)
+            .expect("answer")
+            .expect("made");
+        let request = wire::GroupAddRequest {
+            client_id: [8; 16],
+            group,
+            members: alloc::vec![([0x66; 16], "Cara".into()), ([0x44; 16], "Anna".into())],
+        };
+        let ask = |store: &mut Store, device, request: &wire::GroupAddRequest| {
+            answer(
+                store,
+                &hosting,
+                crate::home::GROUP_ADD_PATH,
+                &wire::group_add_request(request),
+                Some(device),
+                400.0,
+            )
+        };
+        let added = ask(&mut store, LAPTOP, &request);
+        assert_eq!(wire::read_group_answer(&added.bytes), Ok(Ok(group)));
+        assert_eq!(added.accepted.len(), 1, "Cara's invitation, not Anna's");
+        assert_eq!(added.accepted[0].destination, [0x66; 16]);
+        let (to, told) = added.added.expect("the list for the engine");
+        assert_eq!(to, group);
+        assert_eq!(
+            told.len(),
+            1,
+            "the admin, the one member that understands groups"
+        );
+        let members = store.group_members(&group).expect("members");
+        assert!(members
+            .iter()
+            .any(|m| m.address == [0x66; 16] && m.present()));
+        assert_eq!(store.group(&group).expect("g").expect("g").epoch, 2);
+
+        let again = ask(&mut store, LAPTOP, &request);
+        assert_eq!(wire::read_group_answer(&again.bytes), Ok(Ok(group)));
+        assert!(again.accepted.is_empty());
+        assert!(again.added.is_some_and(|(_, told)| told.is_empty()));
+        assert_eq!(store.group(&group).expect("g").expect("g").epoch, 2);
+
+        let stranger = wire::GroupAddRequest {
+            group: [0x99; 16],
+            ..request.clone()
+        };
+        let refused = ask(&mut store, LAPTOP, &stranger);
+        assert_eq!(
+            wire::read_group_answer(&refused.bytes),
+            Ok(Err(Status::Failed))
+        );
+        let refused = ask(&mut store, [0x77; 16], &request);
+        assert_eq!(
+            wire::read_group_answer(&refused.bytes),
+            Ok(Err(Status::NotAdmitted))
+        );
     }
 
     /// 1307 pass two: `/group` from an admitted device makes the group with

@@ -86,6 +86,12 @@ pub const ANNOUNCE_EVERY: Duration = Duration::from_secs(360 * 60);
 /// the 2 % announce cap (`RNS/Reticulum.py:114`) on a 1200 bit/s link.
 pub const ANNOUNCE_EVERY_AFTER_MOVE: Duration = Duration::from_secs(30 * 60);
 
+/// How often a hosted group announces its own destination (1307 G2), on
+/// its own clock, beside the one at its engine's start: a stock member
+/// that lacks the group's key finds it by path request meanwhile (study
+/// 5.2). At 585 ms an announce at SF8 that is 0.016 % of the hour.
+pub const GROUP_ANNOUNCE_EVERY: Duration = Duration::from_secs(60 * 60);
+
 /// How long the shorter cadence lasts after a move.
 pub const AFTER_MOVE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -446,8 +452,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         )
         .await
         {
-            Ok(engine) => {
+            Ok(mut engine) => {
                 knows_owner(&engine, address, &signer);
+                // The copies a restart cut off go again; the outbox's next
+                // tick hands them to the engine.
+                resume_group(&mut store, &mut engine, unix_now());
                 groups.push(engine);
             }
             Err(error) => tracing::warn!("GROUP {name} not hosted: {error}"),
@@ -481,6 +490,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         );
     }
     let mut next_announce = tokio::time::Instant::now() + announce_period(moved_at, unix_now());
+    // Each group announced with its engine's registration; the next ones
+    // on the groups' own hour (1307 G2).
+    let mut next_group_announce = tokio::time::Instant::now() + GROUP_ANNOUNCE_EVERY;
     // The delivery announce went out with the registration; the home
     // destination's goes beside it, and beside every one that follows.
     announce_home(&node, &home_destination).await;
@@ -500,8 +512,20 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 let (link, remote) = (request.link_id, request.remote);
                 serving.handover =
                     handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
-                let (accepted, watching, gone, made) =
+                let (accepted, watching, gone, (made, added)) =
                     answer(&node, &mut store, &serving, request).await;
+                if let Some((address, told)) = added {
+                    // Members added (1307 G2): the new membership goes out
+                    // on the group's own engine.
+                    if let Some(engine) = groups.iter_mut().find(|g| g.hosted.group.address == address) {
+                        let now = unix_now();
+                        for out in told {
+                            engine.outgoing.add(out.id, out.destination, out.packed, now, false);
+                        }
+                        let acts = engine.outgoing.tick(now);
+                        sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn);
+                    }
+                }
                 if let Some(made) = made {
                     // A group a device made (1307 pass two): hosted from
                     // now on, its membership to the admin on its engine.
@@ -568,8 +592,16 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 let acts = outgoing.tick(unix_now());
                 sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
                 for hosted in &mut groups {
+                    digests(&mut store, hosted, unix_now());
                     let acts = hosted.outgoing.tick(unix_now());
                     sender.carry_out(&mut hosted.engine, &mut store, &mut hosted.outgoing, acts, selected_pn);
+                }
+            }
+            _ = tokio::time::sleep_until(next_group_announce) => {
+                next_group_announce = tokio::time::Instant::now() + GROUP_ANNOUNCE_EVERY;
+                for hosted in &groups {
+                    // A group whose engine went away is said by its pump.
+                    let _ = hosted.engine.submit(Command::Announce);
                 }
             }
             _ = pump.tick() => {
@@ -691,10 +723,6 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     break Err("the message engine stopped".to_string());
                 }
                 announce_home(&node, &home_destination).await;
-                for hosted in &groups {
-                    // A group whose engine went away is said by its pump.
-                    let _ = hosted.engine.submit(Command::Announce);
-                }
             }
             _ = signalled(terminate.as_mut()) => break Ok(()),
             _ = stopped(stop.as_mut()) => break Ok(()),
@@ -909,6 +937,86 @@ fn pump_group<O: Outbox>(
             }
             _ => {}
         }
+    }
+}
+
+/// A group's copies a restart cut off (1307 G2, study 2.4): every copy
+/// sent alone with no proof yet is made again from the archived original,
+/// byte for byte, and handed to the group's outbox with its acceptance
+/// time, so the outbox's retry bound counts from then; a copy that cannot
+/// be made again (its original evicted, its member gone) is ended. Every
+/// copy that went out in a digest with no proof is held again, and the
+/// next digest carries it.
+fn resume_group<O>(store: &mut Store, group: &mut GroupEngine<O>, now: i64) -> usize {
+    let address = group.hosted.group.address;
+    let name = group.hosted.group.name.clone();
+    match store.group_digests_reopen(&address) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("GROUP {name} holds {n} lines again for their digest"),
+        Err(error) => tracing::warn!("GROUP {name} digests: {error}"),
+    }
+    let open = match store.group_copies_open(&address) {
+        Ok(open) => open,
+        Err(error) => {
+            tracing::warn!("GROUP {name} open copies: {error}");
+            return 0;
+        }
+    };
+    let mut resumed = 0;
+    for row in open {
+        match group::rebuild(store, &group.hosted, &row) {
+            Ok(Some(out)) => {
+                group.outgoing.add(
+                    out.id,
+                    out.destination,
+                    out.packed,
+                    row.sent_at.min(now),
+                    false,
+                );
+                resumed += 1;
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "GROUP {name} copy {} cannot be made again: ended",
+                    crate::address::to_hex(&row.copy)
+                );
+                if let Err(error) = store.group_copy_ended(&row.copy) {
+                    tracing::warn!("GROUP {name} copy record: {error}");
+                }
+            }
+            Err(error) => tracing::warn!("GROUP {name} copy rebuild: {error}"),
+        }
+    }
+    if resumed > 0 {
+        tracing::warn!("GROUP {name} resumed {resumed} copies from the archive");
+    }
+    resumed
+}
+
+/// Send every digest due for `group`'s slow members (study 5.3) through
+/// its outbox; the held copies are booked as sent in it.
+fn digests<O>(store: &mut Store, group: &mut GroupEngine<O>, now: i64) {
+    let due = match group::due_digests(store, &group.hosted, now) {
+        Ok(due) => due,
+        Err(error) => {
+            tracing::warn!("GROUP {} digest: {error}", group.hosted.group.name);
+            return;
+        }
+    };
+    for (out, copies) in due {
+        if let Err(error) = store.group_digest_sent(&copies, &out.id, now) {
+            tracing::warn!("GROUP {} digest: {error}", group.hosted.group.name);
+            continue;
+        }
+        tracing::info!(
+            "GROUP {} digest of {} lines message={}",
+            group.hosted.group.name,
+            copies.len(),
+            crate::address::to_hex(&out.id)
+        );
+        group
+            .outgoing
+            .add(out.id, out.destination, out.packed, now, false);
     }
 }
 
@@ -1226,7 +1334,10 @@ async fn answer(
     Vec<crate::store::Outgoing>,
     Option<u64>,
     bool,
-    Option<super::server::NewGroup>,
+    (
+        Option<super::server::NewGroup>,
+        Option<([u8; 16], Vec<group::Outgoing>)>,
+    ),
 ) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1262,9 +1373,14 @@ async fn answer(
         // The outbox has the message whether the answer arrived or not: a
         // client that retries with the same id is answered from it.
         tracing::warn!("HOME answer to {}: {error}", request.path);
-        return (answer.accepted, None, false, answer.group);
+        return (answer.accepted, None, false, (answer.group, answer.added));
     }
-    (answer.accepted, answer.watching, answer.gone, answer.group)
+    (
+        answer.accepted,
+        answer.watching,
+        answer.gone,
+        (answer.group, answer.added),
+    )
 }
 
 /// What carrying out the outbox's acts needs besides the engine and the
@@ -1781,6 +1897,15 @@ mod tests {
             100,
         )
         .expect("create");
+        // Anna joined before: her line goes with no list beside it (G2
+        // tells the others of a member who joins by writing).
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
         let original = leviculum_lxmf::Message::create(
             hosted.group.address,
             anna.1,
@@ -1857,5 +1982,174 @@ mod tests {
                 message_id: original.message_id
             }]
         );
+    }
+
+    /// 1307 G2, item 1: the daemon dies between the fan-out and the
+    /// proofs; started again on the same store, it hands the group's
+    /// engine the very copies it had sent (rebuilt from the archive) and
+    /// books their proofs. Controls: a copy proven before the restart is
+    /// not sent again; a start that skips `resume_group` sends nothing, so
+    /// the resend is the resume's.
+    #[test]
+    fn a_restart_between_fan_out_and_proof_sends_the_same_copies_again() {
+        use crate::outbox::fake::FakeOutbox;
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna, bob, cara) = (person(), person(), person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[
+                (anna.1, "Anna".into()),
+                (bob.1, "Bob".into()),
+                (cara.1, "Cara".into()),
+            ],
+            100,
+        )
+        .expect("create");
+        // Anna joined before: her line is a line, with no list beside it.
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
+        let original = leviculum_lxmf::Message::create(
+            hosted.group.address,
+            anna.1,
+            &anna.0,
+            1_800_000_000.0,
+            Vec::new(),
+            b"Bin gleich da".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let sender = || Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: false,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+        };
+        let sends = |commands: Vec<Command>| -> Vec<Vec<u8>> {
+            let mut out: Vec<Vec<u8>> = commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::SendPacked { packed, .. } => Some(packed),
+                    _ => None,
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(vec![OutboxEvent::Packed {
+                message_id: original.message_id,
+                packed: original.pack(),
+            }]),
+            outgoing: Outgoing::new(Policy::default()),
+        };
+        let mut first_sender = sender();
+        pump_group(&mut store, &mut first_sender, &mut engine, None);
+        let before = sends(engine.engine.commands.take());
+        assert_eq!(before.len(), 3, "Lew, Bob and Cara");
+        // Cara's copy is proven before the daemon dies.
+        let caras = store
+            .group_copy_for(&hosted.group.address, &original.message_id, &cara.1)
+            .expect("row")
+            .expect("copy")
+            .copy;
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: caras,
+            last: Some(MessageState::Delivered),
+        });
+        pump_group(&mut store, &mut first_sender, &mut engine, None);
+        // Killed: the engine, its outbox and the store go.
+        drop(engine);
+        drop(store);
+
+        let mut store = Store::open_in(home.path(), lew.1).expect("store again");
+        let hosted = group::hosted(home.path(), &store)
+            .expect("hosted")
+            .pop()
+            .expect("the group");
+        let start = |store: &mut Store, resume: bool| {
+            let mut engine = GroupEngine {
+                hosted: hosted.clone(),
+                engine: FakeOutbox::new(Vec::new()),
+                outgoing: Outgoing::new(Policy::default()),
+            };
+            if resume {
+                resume_group(store, &mut engine, unix_now());
+            }
+            let acts = engine.outgoing.tick(unix_now());
+            sender().carry_out(&mut engine.engine, store, &mut engine.outgoing, acts, None);
+            engine
+        };
+        let skipped = start(&mut store, false);
+        assert!(
+            sends(skipped.engine.commands.take()).is_empty(),
+            "control: no resume, no send"
+        );
+        let mut engine = start(&mut store, true);
+        let after = sends(engine.engine.commands.take());
+        let expected: Vec<Vec<u8>> = {
+            let caras_packed = before
+                .iter()
+                .find(|p| {
+                    leviculum_lxmf::Message::unpack(
+                        p,
+                        None,
+                        None,
+                        leviculum_lxmf::DeliveryMethod::Direct,
+                    )
+                    .is_ok_and(|m| m.message_id == caras)
+                })
+                .expect("cara's")
+                .clone();
+            before
+                .iter()
+                .filter(|p| **p != caras_packed)
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            after, expected,
+            "Lew's and Bob's copies, byte for byte; not Cara's"
+        );
+        // Their proofs come now and are booked.
+        for member in [lew.1, bob.1] {
+            let copy = store
+                .group_copy_for(&hosted.group.address, &original.message_id, &member)
+                .expect("row")
+                .expect("copy")
+                .copy;
+            engine.engine.events.push_back(OutboxEvent::Left {
+                message_id: copy,
+                last: Some(MessageState::Delivered),
+            });
+        }
+        pump_group(&mut store, &mut sender(), &mut engine, None);
+        let states: Vec<i64> = store
+            .group_copies(&hosted.group.address, &original.message_id)
+            .expect("copies")
+            .iter()
+            .map(|c| c.state)
+            .collect();
+        assert_eq!(states, [crate::store::groups::COPY_PROVEN; 3]);
+        assert!(store
+            .group_copies_open(&hosted.group.address)
+            .expect("open")
+            .is_empty());
     }
 }

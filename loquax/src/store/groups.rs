@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `groups` | address, name, admin, epoch, created_at | the group; its key is a file ([`crate::home::group`]) |
 //! | `group_members` | grp, address, name, flags, added_at, left_at | membership, the epoch's content, the stock/Loquax split |
-//! | `group_fanout` | grp, original, member, copy, state, sent_at, proven_at, read_at | copy id to original (replies, receipts), the ticks |
+//! | `group_fanout` | grp, original, member, copy, state, sent_at, proven_at, read_at, digest | copy id to original (replies, receipts), the ticks; the digest a held copy went out in (schema 12) |
 //!
 //! Every row is the owner's (`identity`), as every other table's. The epoch
 //! counts membership changes: each add, leave or removal moves it by one,
@@ -37,6 +37,11 @@ pub const COPY_PROVEN: i64 = 1;
 
 /// A copy's state: the outbox gave up on it.
 pub const COPY_ENDED: i64 = 2;
+
+/// A copy's state (1307 G2): held for a slow member's next digest, not
+/// sent. Its `copy` is the id the copy would have had alone, so a reply
+/// still maps; `sent_at` is the acceptance time until the digest goes.
+pub const COPY_HELD: i64 = 3;
 
 /// A group as the store keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +103,8 @@ pub struct Copy {
     pub sent_at: i64,
     pub proven_at: Option<i64>,
     pub read_at: Option<i64>,
+    /// The LXMF id of the digest this copy went out in, for a held one.
+    pub digest: Option<[u8; 32]>,
 }
 
 impl Copy {
@@ -118,6 +125,21 @@ impl Copy {
             sent_at: at,
             proven_at: None,
             read_at: None,
+            digest: None,
+        }
+    }
+
+    /// A copy held for a slow member's digest, accepted at `at`.
+    pub fn held(
+        group: [u8; 16],
+        original: [u8; 32],
+        member: [u8; 16],
+        copy: [u8; 32],
+        at: i64,
+    ) -> Self {
+        Self {
+            state: COPY_HELD,
+            ..Self::sent(group, original, member, copy, at)
         }
     }
 }
@@ -286,7 +308,8 @@ impl Store {
         for copy in copies {
             tx.execute(
                 "INSERT OR IGNORE INTO group_fanout(identity, grp, original, member, copy, \
-                 state, sent_at, proven_at, read_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 state, sent_at, proven_at, read_at, digest) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     &identity[..],
                     &copy.group[..],
@@ -296,7 +319,8 @@ impl Store {
                     copy.state,
                     copy.sent_at,
                     copy.proven_at,
-                    copy.read_at
+                    copy.read_at,
+                    copy.digest.as_ref().map(|d| &d[..])
                 ],
             )
             .map_err(|e| failed(&path, e))?;
@@ -380,6 +404,157 @@ impl Store {
             .map_err(|e| self.failed(e))
     }
 
+    /// Every copy of `group` sent alone and not proven yet, the oldest
+    /// first (1307 G2): what a restart hands the outbox again, rebuilt
+    /// from the archived original.
+    pub fn group_copies_open(&self, group: &[u8; 16]) -> Result<Vec<Copy>, StoreError> {
+        self.copies_select(
+            "grp = ?2 AND state = 0 AND digest IS NULL ORDER BY sent_at, original, member",
+            group,
+        )
+    }
+
+    /// Every copy of `group` held for a digest, the oldest first.
+    pub fn group_copies_held(&self, group: &[u8; 16]) -> Result<Vec<Copy>, StoreError> {
+        self.copies_select(
+            "grp = ?2 AND state = 3 ORDER BY sent_at, original, member",
+            group,
+        )
+    }
+
+    /// At a restart: every copy of `group` that went out in a digest with
+    /// no proof yet is held again, its time kept, so the next digest
+    /// carries it (the digest itself is not rebuilt: its retries lived in
+    /// memory). The count held again.
+    pub fn group_digests_reopen(&mut self, group: &[u8; 16]) -> Result<usize, StoreError> {
+        self.conn
+            .execute(
+                "UPDATE group_fanout SET state = ?3, digest = NULL \
+                 WHERE identity = ?1 AND grp = ?2 AND state = ?4 AND digest IS NOT NULL",
+                params![&self.identity[..], &group[..], COPY_HELD, COPY_SENT],
+            )
+            .map_err(|e| self.failed(e))
+    }
+
+    /// A copy that went out in the digest with LXMF id `digest`.
+    pub fn group_digest_copy(&self, digest: &[u8; 32]) -> Result<Option<Copy>, StoreError> {
+        self.copy_where("digest = ?2", &digest[..])
+    }
+
+    /// The held copies `copies` went out in the digest `digest` at `at`:
+    /// sent, and `sent_at` from now on the digest's time, which the
+    /// member's proof is measured from.
+    pub fn group_digest_sent(
+        &mut self,
+        copies: &[[u8; 32]],
+        digest: &[u8; 32],
+        at: i64,
+    ) -> Result<(), StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        for copy in copies {
+            tx.execute(
+                "UPDATE group_fanout SET state = ?3, digest = ?4, sent_at = ?5 \
+                 WHERE identity = ?1 AND copy = ?2 AND state IN (0, 3)",
+                params![&identity[..], &copy[..], COPY_SENT, &digest[..], at],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// The digest `digest` was proven at `at`, or (`proven` false) the
+    /// outbox gave up on it: every copy in it changes with it. The count
+    /// of copies changed; 0 for an id that is no digest (and for an end
+    /// after the proof).
+    pub fn group_digest_changed(
+        &mut self,
+        digest: &[u8; 32],
+        proven: bool,
+        at: i64,
+    ) -> Result<usize, StoreError> {
+        let changed = if proven {
+            self.conn.execute(
+                "UPDATE group_fanout SET state = ?3, proven_at = COALESCE(proven_at, ?4) \
+                 WHERE identity = ?1 AND digest = ?2",
+                params![&self.identity[..], &digest[..], COPY_PROVEN, at],
+            )
+        } else {
+            self.conn.execute(
+                "UPDATE group_fanout SET state = ?3 \
+                 WHERE identity = ?1 AND digest = ?2 AND state = ?4",
+                params![&self.identity[..], &digest[..], COPY_ENDED, COPY_SENT],
+            )
+        };
+        changed.map_err(|e| self.failed(e))
+    }
+
+    /// How long `member`'s last `n` proofs in `group` took, seconds, the
+    /// newest first: from a copy's sending, or its digest's, to its proof.
+    /// A digest counts once (study 5.3, the slow member's measure).
+    pub fn group_proof_times(
+        &self,
+        group: &[u8; 16],
+        member: &[u8; 16],
+        n: usize,
+    ) -> Result<Vec<i64>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT MAX(proven_at - sent_at), MAX(proven_at) FROM group_fanout \
+                 WHERE identity = ?1 AND grp = ?2 AND member = ?3 AND state = 1 \
+                 GROUP BY COALESCE(digest, copy) ORDER BY 2 DESC, 1 DESC LIMIT ?4",
+            )
+            .map_err(|e| self.failed(e))?;
+        statement
+            .query_map(
+                params![
+                    &self.identity[..],
+                    &group[..],
+                    &member[..],
+                    i64::try_from(n).unwrap_or(i64::MAX)
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Clear `flags` of `member` in `group`; the epoch stays.
+    pub fn group_unflag(
+        &mut self,
+        group: &[u8; 16],
+        address: &[u8; 16],
+        flags: i64,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE group_members SET flags = flags & ~?4 \
+                 WHERE identity = ?1 AND grp = ?2 AND address = ?3",
+                params![&self.identity[..], &group[..], &address[..], flags],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
+    }
+
+    fn copies_select(&self, condition: &str, group: &[u8; 16]) -> Result<Vec<Copy>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "{COPY_SELECT} WHERE identity = ?1 AND {condition}"
+            ))
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..], &group[..]], copy_row)
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter().map(|row| self.copy_of(row)).collect()
+    }
+
     fn membership_change(
         &mut self,
         group: &[u8; 16],
@@ -437,7 +612,7 @@ impl Store {
     }
 
     fn copy_of(&self, row: CopyRow) -> Result<Copy, StoreError> {
-        let (group, original, member, copy, state, sent_at, proven_at, read_at) = row;
+        let (group, original, member, copy, state, sent_at, proven_at, read_at, digest) = row;
         let id = |bytes: Vec<u8>| {
             <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| StoreError::Corrupt {
                 path: self.path.clone(),
@@ -453,6 +628,7 @@ impl Store {
             sent_at,
             proven_at,
             read_at,
+            digest: digest.map(id).transpose()?,
         })
     }
 }
@@ -468,10 +644,11 @@ type CopyRow = (
     i64,
     Option<i64>,
     Option<i64>,
+    Option<Vec<u8>>,
 );
 
 const COPY_SELECT: &str = "SELECT grp, original, member, copy, state, sent_at, proven_at, \
-                           read_at FROM group_fanout";
+                           read_at, digest FROM group_fanout";
 
 fn group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
     Ok((
@@ -493,6 +670,7 @@ fn copy_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CopyRow> {
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
     ))
 }
 
@@ -690,6 +868,57 @@ mod tests {
             refused
                 .to_string()
                 .contains("table group_fanout is missing"),
+            "{refused}"
+        );
+    }
+
+    /// 1307 G2: a schema 11 store, as G1's loquax wrote it, gains the
+    /// digest column and the device's group table, its copies kept; a
+    /// store of schema 12 without `client_groups` is refused.
+    #[test]
+    fn a_schema_11_store_migrates_and_keeps_its_copies() {
+        use super::super::*;
+        let home = tempfile::tempdir().expect("home");
+        let conn = rusqlite::Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} {SCHEMA_V6} \
+             {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
+             PRAGMA user_version = 11; COMMIT;"
+        ))
+        .expect("schema 11");
+        drop(conn);
+        let mut store = Store::open_in(home.path(), US).expect("schema 11 opens");
+        store
+            .group_create(&familie(), &[GroupMember::new(LEW, "Lew", 100)])
+            .expect("group");
+        store
+            .group_fanout_add(&[Copy::held(GROUP, [1; 32], LEW, [2; 32], 100)])
+            .expect("held");
+        store
+            .group_digest_sent(&[[2; 32]], &[3; 32], 160)
+            .expect("digest");
+        let copy = store
+            .group_digest_copy(&[3; 32])
+            .expect("row")
+            .expect("copy");
+        assert_eq!(
+            (copy.copy, copy.digest, copy.sent_at),
+            ([2; 32], Some([3; 32]), 160)
+        );
+        assert_eq!(store.group_digests_reopen(&GROUP).expect("reopen"), 1);
+        assert_eq!(store.group_copies_held(&GROUP).expect("held").len(), 1);
+        drop(store);
+        let conn = rusqlite::Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch("DROP TABLE client_groups")
+            .expect("drop");
+        drop(conn);
+        let Err(refused) = Store::open_in(home.path(), US) else {
+            panic!("a store without client_groups opened");
+        };
+        assert!(
+            refused
+                .to_string()
+                .contains("table client_groups is missing"),
             "{refused}"
         );
     }

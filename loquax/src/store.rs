@@ -82,8 +82,9 @@
 //! `unverified`, schema 4 the home node's three tables, schema 5 its
 //! outbox, schema 6 the two provenance columns of imported messages, schema 7
 //! a conversation's mute, archive and verification, schema 8 the drafts,
-//! schema 9 the two read-receipt columns, and schema 10 the shares, nothing
-//! else, so
+//! schema 9 the two read-receipt columns, schema 10 the shares, schema 11
+//! the groups a home hosts and schema 12 a copy's digest and the groups a
+//! device knows, nothing else, so
 //! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
@@ -124,7 +125,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -354,6 +355,27 @@ CREATE TABLE group_fanout(
 CREATE UNIQUE INDEX group_fanout_by_copy ON group_fanout(identity, copy);
 ";
 
+/// What schema 12 adds to schema 11 (1307 G2): the digest a held copy went
+/// out in (`group_fanout.digest`, null for a copy sent alone), and the
+/// groups a device knows (`client_groups`), kept as the messages taught
+/// them, so a restart lists every group before any of its messages is
+/// loaded. `members` is the `lev` key `0x05` as the wire carries it.
+const SCHEMA_V12: &str = "
+ALTER TABLE group_fanout ADD COLUMN digest BLOB;
+CREATE INDEX group_fanout_by_digest ON group_fanout(identity, digest);
+CREATE TABLE client_groups(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admin_name TEXT NOT NULL,
+    inviter BLOB,
+    ours INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    standing INTEGER NOT NULL,
+    members BLOB NOT NULL,
+    PRIMARY KEY (identity, address));
+";
+
 pub mod groups;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -401,6 +423,9 @@ const TABLES_V10: [&str; 1] = ["shares"];
 
 /// The tables schema 11 adds.
 const TABLES_V11: [&str; 3] = ["groups", "group_members", "group_fanout"];
+
+/// The table schema 12 adds.
+const TABLES_V12: [&str; 1] = ["client_groups"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -529,7 +554,7 @@ impl Store {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
-             PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V12} PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -616,6 +641,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 12 {
+            if let Some(missing) = missing(&TABLES_V12) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate();
         }
@@ -660,7 +690,10 @@ impl Store {
                 if version < 10 {
                     batch.push_str(SCHEMA_V10);
                 }
-                batch.push_str(SCHEMA_V11);
+                if version < 11 {
+                    batch.push_str(SCHEMA_V11);
+                }
+                batch.push_str(SCHEMA_V12);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");

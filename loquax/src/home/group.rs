@@ -33,8 +33,25 @@
 //! no longer in Familie.". A join tells every member that understands
 //! groups the new list.
 //!
-//! Not here yet (later slices of the order): reactions are not fanned out,
-//! read receipts to the group are not booked, slow members get no digest.
+//! G2 (1307 pass three):
+//!
+//! - a copy's retries survive a restart: [`rebuild`] makes an open copy
+//!   again from the archived original, byte for byte (study 2.4);
+//! - a member whose last [`SLOW_PROOFS`] proofs each took more than
+//!   [`SLOW_PROOF_SECS`] is slow ([`measured`]); its lines are held and go
+//!   as one digest per [`DIGEST_WINDOW_SECS`] ([`due_digests`]): the text
+//!   `"Lew: …\nAnna: …"` for everyone, the `lev` key `0x06` for a Loquax
+//!   member; an attachment above [`SLOW_ATTACHMENT_BYTES`] becomes the line
+//!   "Lew sent a photo (too large for the radio)";
+//! - a reaction goes to every other member that understands groups, its
+//!   target rewritten to the recipient's own copy as a reply's is; a stock
+//!   member gets none (decided), a slow one none either;
+//! - a member who joins by writing (a stock member's first line) is told
+//!   to the Loquax members with the membership, as a Join is; the admin
+//!   adds members with [`add`].
+//!
+//! Not here yet: read receipts to the group are not booked, the group
+//! status `0x03` is not sent.
 
 use std::path::{Path, PathBuf};
 
@@ -44,13 +61,16 @@ use leviculum_lxmf::constants::{
     FIELD_REACTION, FIELD_REPLY_TO,
 };
 use leviculum_lxmf::lev::{
-    GroupCopy, Invite, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, MEMBER_LEFT,
+    DigestLine, GroupCopy, Invite, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, MEMBER_LEFT,
 };
 use leviculum_lxmf::message::Field;
+use leviculum_lxmf::reaction::Reaction;
 use leviculum_lxmf::reply::Reply;
 use leviculum_lxmf::{DeliveryMethod, Message};
 
-use crate::store::groups::{Copy, Group, GroupMember, MEMBER_ADMIN, MEMBER_GROUPS, MEMBER_JOINED};
+use crate::store::groups::{
+    Copy, Group, GroupMember, MEMBER_ADMIN, MEMBER_GROUPS, MEMBER_JOINED, MEMBER_SLOW,
+};
 use crate::store::Store;
 
 /// The directory under the loquax home with the key of every group this
@@ -59,6 +79,22 @@ pub const GROUPS_DIR: &str = "groups";
 
 /// What a stock member writes to leave (study 3.1); the invitation says so.
 pub const LEAVE_WORD: &str = "/leave";
+
+/// How long a slow member's lines are held before they go as one digest
+/// (study 5.3), seconds.
+pub const DIGEST_WINDOW_SECS: i64 = 60;
+
+/// A proof slower than this, seconds, counts toward a slow member (study
+/// 5.3: a copy and its proof over one LoRa hop at SF8 take 1.1 s, over the
+/// internet tens of milliseconds).
+pub const SLOW_PROOF_SECS: i64 = 2;
+
+/// How many proofs in a row make a member slow, or fast again.
+pub const SLOW_PROOFS: usize = 3;
+
+/// The largest attachment a slow member still gets; above it the line
+/// says what was sent instead (study 5.3).
+pub const SLOW_ATTACHMENT_BYTES: usize = 2048;
 
 /// A group this home hosts: its row and its identity, private key and all.
 #[derive(Clone)]
@@ -86,7 +122,8 @@ pub enum Arrival {
     /// A member left: the others are told.
     Left(Vec<Outgoing>),
     /// Proven and archived, nothing sent: a writer who is no member, a
-    /// message with nothing to show (a receipt, a mark), a reaction.
+    /// message with nothing to show (a receipt, a mark), a reaction nobody
+    /// gets.
     Kept,
 }
 
@@ -101,19 +138,68 @@ pub fn book(
     now: i64,
 ) -> Result<bool, String> {
     use crate::home::outgoing::Change;
-    if store.group_copy(id).map_err(|e| e.to_string())?.is_none() {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let Some(copy) = store
+        .group_copy(id)
+        .map_err(failed)?
+        .or(store.group_digest_copy(id).map_err(failed)?)
+    else {
         return Ok(false);
-    }
+    };
+    let digest = copy.copy != *id;
     match change {
         Change::Delivered => {
-            store
-                .group_copy_proven(id, now)
-                .map_err(|e| e.to_string())?;
+            if digest {
+                store.group_digest_changed(id, true, now).map_err(failed)?;
+            } else {
+                store.group_copy_proven(id, now).map_err(failed)?;
+            }
+            measured(store, &copy.group, &copy.member)?;
         }
-        Change::Ended { .. } => store.group_copy_ended(id).map_err(|e| e.to_string())?,
+        Change::Ended { .. } if digest => {
+            store.group_digest_changed(id, false, now).map_err(failed)?;
+        }
+        Change::Ended { .. } => store.group_copy_ended(id).map_err(failed)?,
         Change::Propagated | Change::Stalled => {}
     }
     Ok(true)
+}
+
+/// Measure `member` after a proof (study 5.3): slow once each of its last
+/// [`SLOW_PROOFS`] proofs took more than [`SLOW_PROOF_SECS`], fast again
+/// once each took no more. Between the two it stays as it was, so one
+/// odd proof moves nothing. Whether it is slow now.
+pub fn measured(store: &mut Store, group: &[u8; 16], member: &[u8; 16]) -> Result<bool, String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let times = store
+        .group_proof_times(group, member, SLOW_PROOFS)
+        .map_err(failed)?;
+    let was = store
+        .group_members(group)
+        .map_err(failed)?
+        .iter()
+        .any(|m| m.address == *member && m.flags & MEMBER_SLOW != 0);
+    if times.len() < SLOW_PROOFS {
+        return Ok(was);
+    }
+    if !was && times.iter().all(|t| *t > SLOW_PROOF_SECS) {
+        store
+            .group_flag(group, member, MEMBER_SLOW)
+            .map_err(failed)?;
+        tracing::info!("GROUP member {} is slow", crate::address::to_hex(member));
+        return Ok(true);
+    }
+    if was && times.iter().all(|t| *t <= SLOW_PROOF_SECS) {
+        store
+            .group_unflag(group, member, MEMBER_SLOW)
+            .map_err(failed)?;
+        tracing::info!(
+            "GROUP member {} is fast again",
+            crate::address::to_hex(member)
+        );
+        return Ok(false);
+    }
+    Ok(was)
 }
 
 /// Every message an arrival sends.
@@ -344,77 +430,386 @@ pub fn accept(
             .fields
             .iter()
             .any(|(k, _)| [FIELD_IMAGE, FIELD_FILE_ATTACHMENTS, FIELD_AUDIO].contains(k));
-    let reaction = original.fields.iter().any(|(k, _)| *k == FIELD_REACTION);
-    if !shows || reaction {
-        if joined && understands {
-            let group_row = store.group(&group).map_err(failed)?;
-            let epoch = group_row.map_or(hosted.group.epoch, |g| g.epoch);
-            let members = store.group_members(&group).map_err(failed)?;
-            // The joiner gets the list; every other member that
-            // understands groups learns that it joined (pass two).
-            return Ok(Arrival::Joined(
-                members
-                    .iter()
-                    .filter(|m| m.present() && (m.address == sender || m.understands_groups()))
-                    .map(|m| membership(hosted, m, epoch, &members, accepted_at))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ));
-        }
-        return Ok(Arrival::Kept);
-    }
+    let reaction = reaction_of(original);
     let epoch = store
         .group(&group)
         .map_err(failed)?
         .map_or(hosted.group.epoch, |g| g.epoch);
-    // The message the writer replied to, as the group knows it: the
-    // original of the copy the writer has, or an original itself (the
-    // writer's own message).
-    let replied = match Reply::from_fields(&original.fields) {
-        Some(reply) => Some(
-            store
-                .group_copy(&reply.to)
-                .map_err(failed)?
-                .filter(|copy| copy.group == group && copy.member == sender)
-                .map_or(reply.to, |copy| copy.original),
-        ),
-        None => None,
+    let members = store.group_members(&group).map_err(failed)?;
+    // A member that joined with this message, by a Join or by writing: it
+    // gets the list when it understands groups, and every other member
+    // that does learns that it joined (pass two; a stock member who joins
+    // by writing, G2).
+    let told = match joined {
+        true => members
+            .iter()
+            .filter(|m| {
+                m.present()
+                    && ((m.address == sender && understands)
+                        || (m.address != sender && m.understands_groups()))
+            })
+            .map(|m| membership(hosted, m, epoch, &members, accepted_at))
+            .collect::<Result<Vec<_>, _>>()?,
+        false => Vec::new(),
     };
+    if !shows && reaction.is_none() {
+        return Ok(match told.is_empty() {
+            true => Arrival::Kept,
+            false => Arrival::Joined(told),
+        });
+    }
     let mut copies = Vec::new();
     let mut rows = Vec::new();
     for member in members
         .iter()
         .filter(|m| m.present() && m.address != sender)
     {
-        let reply_to = match replied {
-            Some(replied) => Some(reply_for(store, &group, &replied, member.address)?),
-            None => None,
-        };
-        let copy = copy(
+        // A reaction goes to the members that understand groups and are
+        // not slow; a stock member gets none (decided for G2).
+        if reaction.is_some() && (!member.understands_groups() || member.flags & MEMBER_SLOW != 0) {
+            continue;
+        }
+        let out = copy_for(
+            store,
             hosted,
             original,
             &writer.name,
             member,
             epoch,
             accepted_at,
-            reply_to,
         )?;
-        rows.push(Copy::sent(
-            group,
-            original.message_id,
-            member.address,
-            copy.id,
-            accepted_at as i64,
-        ));
-        copies.push(copy);
+        let held =
+            reaction.is_none() && member.flags & MEMBER_SLOW != 0 && !too_small_to_hold(original);
+        rows.push(match held {
+            true => Copy::held(
+                group,
+                original.message_id,
+                member.address,
+                out.id,
+                accepted_at as i64,
+            ),
+            false => Copy::sent(
+                group,
+                original.message_id,
+                member.address,
+                out.id,
+                accepted_at as i64,
+            ),
+        });
+        if !held {
+            copies.push(out);
+        }
     }
     store.group_fanout_add(&rows).map_err(failed)?;
-    Ok(Arrival::Line(copies))
+    copies.extend(told);
+    Ok(match copies.is_empty() {
+        true => Arrival::Kept,
+        false => Arrival::Line(copies),
+    })
+}
+
+/// The reaction `original` carries, when it is one.
+fn reaction_of(original: &Message) -> Option<Reaction> {
+    original
+        .fields
+        .iter()
+        .find(|(k, _)| *k == FIELD_REACTION)
+        .and_then(|(_, value)| Reaction::decode_field_value(value))
+}
+
+/// Whether a slow member gets `original` alone rather than in a digest: it
+/// carries an attachment small enough to send (a digest carries text
+/// only); a larger one goes into the digest as the line saying what it was.
+fn too_small_to_hold(original: &Message) -> bool {
+    let size = attachment_bytes(original);
+    size > 0 && size <= SLOW_ATTACHMENT_BYTES
+}
+
+/// The bytes of `original`'s attachments: photo, files, voice.
+fn attachment_bytes(original: &Message) -> usize {
+    original
+        .fields
+        .iter()
+        .filter(|(k, _)| [FIELD_IMAGE, FIELD_FILE_ATTACHMENTS, FIELD_AUDIO].contains(k))
+        .map(|(_, value)| value.len())
+        .sum()
+}
+
+/// The copy of `original` for `member` at `epoch`, its reply or reaction
+/// target the id `member` knows the target by: what [`accept`] sends, and
+/// what [`rebuild`] makes again.
+fn copy_for(
+    store: &Store,
+    hosted: &Hosted,
+    original: &Message,
+    writer_name: &str,
+    member: &GroupMember,
+    epoch: u64,
+    accepted_at: f64,
+) -> Result<Outgoing, String> {
+    let group = hosted.group.address;
+    let sender = original.source_hash;
+    // The message the writer replied or reacted to, as the group knows it:
+    // the original of the copy the writer has, or an original itself (the
+    // writer's own message).
+    let target = Reply::from_fields(&original.fields)
+        .map(|reply| reply.to)
+        .or(reaction_of(original).map(|reaction| reaction.to));
+    let target = match target {
+        Some(to) => {
+            let original_of = store
+                .group_copy(&to)
+                .map_err(|e| e.to_string())?
+                .filter(|copy| copy.group == group && copy.member == sender)
+                .map_or(to, |copy| copy.original);
+            Some(reply_for(store, &group, &original_of, member.address)?)
+        }
+        None => None,
+    };
+    copy(
+        hosted,
+        original,
+        writer_name,
+        member,
+        epoch,
+        accepted_at,
+        target,
+    )
+}
+
+/// The copy `row` booked, made again from the archived original (1307 G2,
+/// study 2.4), at a restart that lost its retries: the same bytes and id,
+/// since a copy is a function of the original, the acceptance time, the
+/// member, the epoch and the group key. The row keeps no epoch, so the
+/// epochs are tried from the group's newest down and the one whose id is
+/// the row's is taken. `None` when the original is no longer archived,
+/// its writer or member is gone from the table, or no epoch makes the id.
+pub fn rebuild(store: &Store, hosted: &Hosted, row: &Copy) -> Result<Option<Outgoing>, String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let Some(packed) = store
+        .archive_entry(crate::home::KIND_GROUP, &row.original)
+        .map_err(failed)?
+    else {
+        return Ok(None);
+    };
+    let original = Message::unpack(&packed, None, None, DeliveryMethod::Direct)
+        .map_err(|e| format!("archived group message: {e:?}"))?;
+    let members = store.group_members(&row.group).map_err(failed)?;
+    let (Some(writer), Some(member)) = (
+        members.iter().find(|m| m.address == original.source_hash),
+        members.iter().find(|m| m.address == row.member),
+    ) else {
+        return Ok(None);
+    };
+    let newest = store
+        .group(&row.group)
+        .map_err(failed)?
+        .map_or(hosted.group.epoch, |g| g.epoch);
+    // The groups bit may have come after the copy went: try the member as
+    // it is and as it was.
+    let without = GroupMember {
+        flags: member.flags & !MEMBER_GROUPS,
+        ..member.clone()
+    };
+    for epoch in (1..=newest).rev() {
+        for member in [member, &without] {
+            let out = copy_for(
+                store,
+                hosted,
+                &original,
+                &writer.name,
+                member,
+                epoch,
+                row.sent_at as f64,
+            )?;
+            if out.id == row.copy {
+                return Ok(Some(out));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The digests due at `now` (study 5.3): for every member with copies held
+/// for [`DIGEST_WINDOW_SECS`] or longer (its oldest held one), one message
+/// from the group with every held line, oldest first, and the held copies
+/// it carries, for [`Store::group_digest_sent`]. A line whose original is
+/// no longer archived is said as "a message (no longer here)".
+pub fn due_digests(store: &Store, hosted: &Hosted, now: i64) -> Result<Vec<Digest>, String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let group = hosted.group.address;
+    let held = store.group_copies_held(&group).map_err(failed)?;
+    let members = store.group_members(&group).map_err(failed)?;
+    let mut due: Vec<[u8; 16]> = Vec::new();
+    for row in &held {
+        if row.sent_at + DIGEST_WINDOW_SECS <= now && !due.contains(&row.member) {
+            due.push(row.member);
+        }
+    }
+    let mut out = Vec::new();
+    for address in due {
+        let Some(member) = members.iter().find(|m| m.address == address) else {
+            continue;
+        };
+        let rows: Vec<&Copy> = held.iter().filter(|r| r.member == address).collect();
+        let mut lines = Vec::new();
+        for row in &rows {
+            let packed = store
+                .archive_entry(crate::home::KIND_GROUP, &row.original)
+                .map_err(failed)?;
+            let original = packed.and_then(|packed| {
+                Message::unpack(&packed, None, None, DeliveryMethod::Direct).ok()
+            });
+            let line = match original {
+                Some(original) => {
+                    let name = members
+                        .iter()
+                        .find(|m| m.address == original.source_hash)
+                        .map_or_else(String::new, |m| m.name.clone());
+                    (
+                        original.source_hash,
+                        sent_ms(original.timestamp),
+                        name,
+                        digest_text(&original),
+                    )
+                }
+                None => (
+                    [0; 16],
+                    0,
+                    String::new(),
+                    "a message (no longer here)".to_string(),
+                ),
+            };
+            lines.push(line);
+        }
+        let text = lines
+            .iter()
+            .map(|(_, _, name, text)| match text.starts_with(SENT_WORD) {
+                true => format!("{name} {text}"),
+                false => format!("{name}: {text}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut fields = Vec::new();
+        if member.understands_groups() {
+            Lev {
+                capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+                digest: Some(
+                    lines
+                        .iter()
+                        .map(|(sender, sent_ms, _, text)| DigestLine {
+                            sender: *sender,
+                            sent_ms: *sent_ms,
+                            text: text.clone(),
+                        })
+                        .collect(),
+                ),
+                ..Lev::default()
+            }
+            .put_into(&mut fields);
+        }
+        let digest = sign(
+            &hosted.identity,
+            group,
+            address,
+            now as f64,
+            text.into_bytes(),
+            fields,
+        )?;
+        out.push((digest, rows.iter().map(|r| r.copy).collect()));
+    }
+    Ok(out)
+}
+
+/// A digest for one slow member, and the held copies it carries.
+pub type Digest = (Outgoing, Vec<[u8; 32]>);
+
+/// How a refused attachment's line begins: "Lew sent a photo …".
+const SENT_WORD: &str = "sent a ";
+
+/// The words of `original` in a digest: its text, or for an attachment
+/// above [`SLOW_ATTACHMENT_BYTES`] what it was, with its text after.
+fn digest_text(original: &Message) -> String {
+    let text = String::from_utf8_lossy(&original.content).into_owned();
+    if attachment_bytes(original) <= SLOW_ATTACHMENT_BYTES {
+        return text;
+    }
+    let has = |key: i64| original.fields.iter().any(|(k, _)| *k == key);
+    let what = if has(FIELD_IMAGE) {
+        "photo"
+    } else if has(FIELD_AUDIO) {
+        "voice message"
+    } else {
+        "file"
+    };
+    let said = format!("{SENT_WORD}{what} (too large for the radio)");
+    match text.trim().is_empty() {
+        true => said,
+        false => format!("{said}: {text}"),
+    }
+}
+
+/// The admin adds `members` to the group (study 4.5, 1307 G2): each is
+/// kept, the epoch moves once per member, and what goes out comes back:
+/// the invitations from the admin, for the home's outbox, and the new
+/// membership from the group to every present member that understands
+/// groups, for the group's engine. A member already present is skipped;
+/// one that had left is invited again.
+pub fn add(
+    admin: &Identity,
+    hosted: &Hosted,
+    admin_name: &str,
+    store: &mut Store,
+    members: &[([u8; 16], String)],
+    now: f64,
+) -> Result<(Vec<Outgoing>, Vec<Outgoing>), String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let group = hosted.group.address;
+    let before = store.group_members(&group).map_err(failed)?;
+    let mut added = Vec::new();
+    for (address, name) in members {
+        if *address == hosted.group.admin
+            || before.iter().any(|m| m.address == *address && m.present())
+            || added.contains(address)
+        {
+            continue;
+        }
+        store
+            .group_add(&group, &GroupMember::new(*address, name, now as i64))
+            .map_err(failed)?;
+        added.push(*address);
+    }
+    if added.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let epoch = store
+        .group(&group)
+        .map_err(failed)?
+        .map_or(hosted.group.epoch, |g| g.epoch);
+    let current = Hosted {
+        group: Group {
+            epoch,
+            ..hosted.group.clone()
+        },
+        identity: hosted.identity.clone(),
+    };
+    let invitations = added
+        .iter()
+        .map(|address| invitation(admin, &current, admin_name, *address, now))
+        .collect::<Result<Vec<_>, _>>()?;
+    let members = store.group_members(&group).map_err(failed)?;
+    let told = members
+        .iter()
+        .filter(|m| m.present() && m.understands_groups())
+        .map(|m| membership(hosted, m, epoch, &members, now))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((invitations, told))
 }
 
 /// The copy of `original` for `member`, as the module header says.
-/// `reply_to` is the id the recipient knows the replied message by, when
-/// the original replies and the recipient has it; `None` drops the reply
-/// target, the quote stays.
+/// `reply_to` is the id the recipient knows the replied (or reacted-to)
+/// message by; `None` drops the reply target, the quote stays, and drops
+/// a reaction.
 pub fn copy(
     hosted: &Hosted,
     original: &Message,
@@ -435,6 +830,14 @@ pub fn copy(
                     fields.push((FIELD_REPLY_TO, value));
                 }
             }
+            FIELD_REACTION => {
+                // The reaction's target, the recipient's own copy (G2).
+                if let (Some(to), Some(reaction)) = (reply_to, Reaction::decode_field_value(value))
+                {
+                    let value = Reaction { to, ..reaction }.encode_field_value();
+                    fields.push((FIELD_REACTION, value));
+                }
+            }
             _ => fields.push((*key, value.clone())),
         }
     }
@@ -453,12 +856,17 @@ pub fn copy(
         }
         .put_into(&mut fields);
     }
+    // A reaction is no line: its text (none, mostly) goes as it is.
+    let content = match reaction_of(original) {
+        Some(_) => original.content.clone(),
+        None => prefixed(writer_name, &original.content),
+    };
     sign(
         &hosted.identity,
         hosted.group.address,
         member.address,
         accepted_at,
-        prefixed(writer_name, &original.content),
+        content,
         fields,
     )
 }
@@ -758,6 +1166,12 @@ mod tests {
     #[test]
     fn a_line_goes_to_every_other_member_with_the_name_and_the_groups_time() {
         let mut scene = scene();
+        // Anna joined before (a first line would join her, and the list
+        // would go out with it: see the stock member's join below).
+        scene
+            .store
+            .group_flag(&scene.hosted.group.address, &scene.anna.1, MEMBER_JOINED)
+            .expect("joined");
         let mut fields = Vec::new();
         Lev {
             capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
@@ -1137,5 +1551,454 @@ mod tests {
     fn a_name_goes_in_front_of_every_text_and_alone_before_a_photo() {
         assert_eq!(prefixed("Lew", b"Hallo"), b"Lew: Hallo");
         assert_eq!(prefixed("Lew", b""), b"Lew:");
+    }
+
+    fn archived(scene: &mut Scene, message: &Message) {
+        scene
+            .store
+            .archive_append(
+                crate::home::KIND_GROUP,
+                &message.message_id,
+                &message.pack(),
+                ACCEPTED as i64,
+                u64::MAX,
+            )
+            .expect("archive");
+    }
+
+    fn groups_mark() -> Vec<Field> {
+        let mut fields = Vec::new();
+        Lev {
+            capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+            ..Lev::default()
+        }
+        .put_into(&mut fields);
+        fields
+    }
+
+    /// 1307 G2, item 1: a copy whose retries a restart cut off is made
+    /// again from the archived original, byte for byte, a reply's rewritten
+    /// target and all, though the epoch moved since (Bob left after it).
+    /// Controls: a proven copy is not open; a row whose time is not the
+    /// acceptance time makes no copy (the id is checked, not trusted).
+    #[test]
+    fn a_copy_a_restart_cut_off_is_made_again_byte_for_byte() {
+        let mut scene = scene();
+        let hosted = scene.hosted.clone();
+        let group = hosted.group.address;
+        let bob_line = to_group(&scene, &scene.bob, 1.0, "Wer holt Brot?", Vec::new());
+        archived(&mut scene, &bob_line);
+        let first = line(accept(&mut scene.store, &hosted, &bob_line, ACCEPTED).expect("bob"));
+        let annas = first
+            .iter()
+            .find(|c| c.destination == scene.anna.1)
+            .expect("anna's copy")
+            .id;
+        let mut fields = groups_mark();
+        fields.extend(
+            Reply {
+                to: annas,
+                quote: None,
+            }
+            .fields(),
+        );
+        let reply = to_group(&scene, &scene.anna, 2.0, "Ich", fields);
+        archived(&mut scene, &reply);
+        let sent = line(accept(&mut scene.store, &hosted, &reply, ACCEPTED + 1.0).expect("anna"));
+        // Bob leaves: the epoch moves to 2 after Anna's reply went at 1.
+        let leave = to_group(&scene, &scene.bob, 3.0, LEAVE_WORD, Vec::new());
+        accept(&mut scene.store, &hosted, &leave, ACCEPTED + 2.0).expect("leave");
+        assert_eq!(scene.store.group(&group).expect("g").expect("g").epoch, 2);
+        // Lew's copy of Bob's line is proven; everything else is open.
+        let lews_of_bob = first
+            .iter()
+            .find(|c| c.destination == scene.lew.1)
+            .expect("lew")
+            .id;
+        scene
+            .store
+            .group_copy_proven(&lews_of_bob, ACCEPTED as i64 + 5)
+            .expect("proven");
+        let open = scene.store.group_copies_open(&group).expect("open");
+        assert_eq!(open.len(), 3, "Anna's of Bob's, Lew's and Bob's of Anna's");
+        assert!(open.iter().all(|row| row.copy != lews_of_bob));
+        for row in &open {
+            let again = rebuild(&scene.store, &hosted, row)
+                .expect("rebuild")
+                .expect("made again");
+            let before = first
+                .iter()
+                .chain(&sent)
+                .find(|c| c.id == row.copy)
+                .expect("sent before");
+            assert_eq!(&again, before, "byte for byte");
+        }
+        let lews_reply = pick(&scene, &sent, scene.lew.1);
+        assert_eq!(
+            reply_of(&lews_reply),
+            Some(open_copy(&scene, &first, scene.lew.1))
+        );
+        let shifted = Copy {
+            sent_at: open[0].sent_at + 1,
+            ..open[0].clone()
+        };
+        assert_eq!(
+            rebuild(&scene.store, &hosted, &shifted).expect("rebuild"),
+            None
+        );
+    }
+
+    fn open_copy(_scene: &Scene, copies: &[Outgoing], member: [u8; 16]) -> [u8; 32] {
+        copies
+            .iter()
+            .find(|c| c.destination == member)
+            .expect("copy")
+            .id
+    }
+
+    /// Book `n` proofs of `member` that took `secs` each, on lines of
+    /// Lew's accepted from `at` on.
+    fn proofs(scene: &mut Scene, member: [u8; 16], n: usize, secs: i64, at: f64) {
+        let hosted = scene.hosted.clone();
+        for i in 0..n {
+            let accepted = at + i as f64 * 10.0;
+            let message = to_group(
+                scene,
+                &scene.lew,
+                accepted,
+                &format!("Zeile {accepted}"),
+                groups_mark(),
+            );
+            archived(scene, &message);
+            accept(&mut scene.store, &hosted, &message, accepted).expect("line");
+            let copy = scene
+                .store
+                .group_copy_for(&hosted.group.address, &message.message_id, &member)
+                .expect("row")
+                .expect("copy");
+            assert!(book(
+                &mut scene.store,
+                &copy.copy,
+                crate::home::outgoing::Change::Delivered,
+                copy.sent_at + secs,
+            )
+            .expect("book"));
+        }
+    }
+
+    fn slow(scene: &Scene, member: [u8; 16]) -> bool {
+        scene
+            .store
+            .group_members(&scene.hosted.group.address)
+            .expect("members")
+            .iter()
+            .any(|m| m.address == member && m.flags & MEMBER_SLOW != 0)
+    }
+
+    /// 1307 G2, item 4 (study 5.3): three proofs over 2 s make a member
+    /// slow; its lines are held and go after 60 s as one digest, the text
+    /// for every member and `0x06` for a Loquax one; a photo above 2 KB is
+    /// the line saying so, one at 1 KB goes alone at once. Controls: two
+    /// slow proofs make nobody slow; at 59 s nothing is due; the digest's
+    /// proof proves every line in it; three fast digests make it fast.
+    #[test]
+    fn a_slow_member_gets_its_lines_as_one_digest() {
+        let mut scene = scene();
+        let hosted = scene.hosted.clone();
+        let group = hosted.group.address;
+        let (anna, bob) = (scene.anna.1, scene.bob.1);
+        proofs(&mut scene, anna, 2, 5, ACCEPTED);
+        proofs(&mut scene, bob, 2, 5, ACCEPTED);
+        assert!(
+            !slow(&scene, anna) && !slow(&scene, bob),
+            "two proofs are no measure"
+        );
+        proofs(&mut scene, anna, 1, 5, ACCEPTED + 100.0);
+        proofs(&mut scene, bob, 1, 2, ACCEPTED + 100.0);
+        assert!(slow(&scene, anna), "three proofs over 2 s");
+        assert!(!slow(&scene, bob), "2 s is not over 2 s");
+        proofs(&mut scene, bob, 2, 3, ACCEPTED + 200.0);
+        assert!(!slow(&scene, bob), "one fast proof among the last three");
+        proofs(&mut scene, bob, 1, 3, ACCEPTED + 300.0);
+        assert!(slow(&scene, bob));
+
+        // What the measuring lines held goes first, so the window below
+        // is the one under test.
+        flush(&mut scene, i64::MAX / 2);
+        let t = ACCEPTED + 1000.0;
+        let eins = to_group(&scene, &scene.lew, t, "eins", groups_mark());
+        let mut big = groups_mark();
+        let mut photo = Vec::new();
+        leviculum_lxmf::msgpack::bin(&mut photo, &[7u8; 3000]);
+        big.push((FIELD_IMAGE, photo));
+        let zwei = to_group(&scene, &scene.lew, t + 10.0, "zwei", big);
+        let mut small = groups_mark();
+        let mut thumb = Vec::new();
+        leviculum_lxmf::msgpack::bin(&mut thumb, &[7u8; 1000]);
+        small.push((FIELD_IMAGE, thumb));
+        let drei = to_group(&scene, &scene.lew, t + 20.0, "", small);
+        for (i, m) in [&eins, &zwei, &drei].into_iter().enumerate() {
+            archived(&mut scene, m);
+            let out = accept(&mut scene.store, &hosted, m, t + 10.0 * i as f64).expect("accept");
+            let to: Vec<[u8; 16]> = out.outgoing().iter().map(|o| o.destination).collect();
+            match i {
+                2 => assert_eq!(to, [anna, bob], "the small photo goes alone"),
+                _ => assert!(to.is_empty(), "held: {to:?}"),
+            }
+        }
+        assert!(due_digests(&scene.store, &hosted, t as i64 + 59)
+            .expect("due")
+            .is_empty());
+        let due = due_digests(&scene.store, &hosted, t as i64 + 60).expect("due");
+        assert_eq!(due.len(), 2, "one digest each");
+        let text = "Lew: eins\nLew sent a photo (too large for the radio): zwei";
+        for (out, copies) in &due {
+            assert_eq!(copies.len(), 2);
+            let message = opened(&scene, out);
+            assert_eq!(String::from_utf8_lossy(&message.content), text);
+            let lev = Lev::from_fields(&message.fields);
+            if out.destination == anna {
+                let lines = lev.and_then(|l| l.digest).expect("0x06 for Loquax");
+                assert_eq!(lines.len(), 2);
+                assert_eq!(lines[0].sender, scene.lew.1);
+                assert_eq!(lines[0].text, "eins");
+                assert_eq!(lines[0].sent_ms, (t * 1000.0) as u64);
+            } else {
+                assert_eq!(lev, None, "text only for the stock member");
+            }
+        }
+        let (bobs, bob_copies) = due.iter().find(|(o, _)| o.destination == bob).expect("bob");
+        scene
+            .store
+            .group_digest_sent(bob_copies, &bobs.id, t as i64 + 60)
+            .expect("sent");
+        assert!(
+            due_digests(&scene.store, &hosted, t as i64 + 120)
+                .expect("due")
+                .iter()
+                .all(|(o, _)| o.destination == anna),
+            "bob's lines went"
+        );
+        assert!(book(
+            &mut scene.store,
+            &bobs.id,
+            crate::home::outgoing::Change::Delivered,
+            t as i64 + 61
+        )
+        .expect("book"));
+        for original in [&eins, &zwei] {
+            let row = scene
+                .store
+                .group_copy_for(&group, &original.message_id, &bob)
+                .expect("row")
+                .expect("copy");
+            assert_eq!(row.state, crate::store::groups::COPY_PROVEN);
+            assert_eq!(row.digest, Some(bobs.id));
+        }
+        // Digests proven at once: with the one above (1 s) three fast
+        // proofs make Bob fast again, and a line goes to him alone; after
+        // the first of them he is still slow.
+        flush(&mut scene, i64::MAX / 2);
+        for i in 0..2 {
+            assert!(slow(&scene, bob), "not yet fast before digest {i}");
+            let at = t + 1000.0 + 100.0 * i as f64;
+            let m = to_group(&scene, &scene.lew, at, "schnell", groups_mark());
+            archived(&mut scene, &m);
+            accept(&mut scene.store, &hosted, &m, at).expect("line");
+            let due = due_digests(&scene.store, &hosted, at as i64 + 60).expect("due");
+            let (out, copies) = due
+                .iter()
+                .find(|(o, _)| o.destination == bob)
+                .expect("bob's");
+            scene
+                .store
+                .group_digest_sent(copies, &out.id, at as i64 + 60)
+                .expect("sent");
+            book(
+                &mut scene.store,
+                &out.id,
+                crate::home::outgoing::Change::Delivered,
+                at as i64 + 60,
+            )
+            .expect("book");
+        }
+        assert!(!slow(&scene, bob), "three fast proofs");
+        let m = to_group(&scene, &scene.lew, t + 2000.0, "allein", groups_mark());
+        let out = accept(&mut scene.store, &hosted, &m, t + 2000.0).expect("line");
+        assert!(out.outgoing().iter().any(|o| o.destination == bob));
+    }
+
+    /// Every digest due by `now` goes, booked as sent.
+    fn flush(scene: &mut Scene, now: i64) {
+        let hosted = scene.hosted.clone();
+        for (out, copies) in due_digests(&scene.store, &hosted, now).expect("due") {
+            scene
+                .store
+                .group_digest_sent(&copies, &out.id, 0)
+                .expect("sent");
+        }
+    }
+
+    fn reaction(to: [u8; 32]) -> Vec<Field> {
+        let mut fields = groups_mark();
+        fields.push((
+            FIELD_REACTION,
+            Reaction {
+                to,
+                content: "\u{1F44D}".into(),
+            }
+            .encode_field_value(),
+        ));
+        fields
+    }
+
+    /// 1307 G2, item 5: a reaction goes to the other members that
+    /// understand groups, its target each one's own copy (or own original),
+    /// its text without a name in front; a stock member gets none, by the
+    /// decision. A stock member's reaction reaches the Loquax members too.
+    #[test]
+    fn a_reaction_names_each_loquax_members_own_copy_and_skips_stock() {
+        let mut scene = scene();
+        let hosted = scene.hosted.clone();
+        let anna_line = to_group(&scene, &scene.anna, 1.0, "Brot ist da", groups_mark());
+        let copies = line(accept(&mut scene.store, &hosted, &anna_line, ACCEPTED).expect("line"));
+        let lews = open_copy(&scene, &copies, scene.lew.1);
+        let bobs = open_copy(&scene, &copies, scene.bob.1);
+        let thumbs = to_group(&scene, &scene.lew, 2.0, "", reaction(lews));
+        let out = line(accept(&mut scene.store, &hosted, &thumbs, ACCEPTED + 1.0).expect("react"));
+        let to: Vec<_> = out.iter().map(|o| o.destination).collect();
+        assert_eq!(to, [scene.anna.1], "Anna, not Bob's stock client");
+        let annas = opened(&scene, &out[0]);
+        assert!(annas.content.is_empty(), "no name in front of a reaction");
+        let read = annas
+            .fields
+            .iter()
+            .find(|(k, _)| *k == FIELD_REACTION)
+            .and_then(|(_, v)| Reaction::decode_field_value(v))
+            .expect("reaction");
+        assert_eq!(read.to, anna_line.message_id, "her own original");
+        let lev = Lev::from_fields(&annas.fields).expect("lev");
+        assert_eq!(
+            lev.group_copy.map(|c| c.sender),
+            Some(scene.lew.1),
+            "who reacted"
+        );
+        // Bob reacts from his stock client to his copy: Lew's names Lew's
+        // copy, Anna's her original; Bob is joined by it.
+        let bob_thumbs = to_group(
+            &scene,
+            &scene.bob,
+            3.0,
+            "",
+            vec![(
+                FIELD_REACTION,
+                Reaction {
+                    to: bobs,
+                    content: "\u{2764}".into(),
+                }
+                .encode_field_value(),
+            )],
+        );
+        let out =
+            line(accept(&mut scene.store, &hosted, &bob_thumbs, ACCEPTED + 2.0).expect("bob"));
+        let targets: Vec<([u8; 16], Option<[u8; 32]>)> = out
+            .iter()
+            .map(|o| {
+                let m = opened(&scene, o);
+                let to = m
+                    .fields
+                    .iter()
+                    .find(|(k, _)| *k == FIELD_REACTION)
+                    .and_then(|(_, v)| Reaction::decode_field_value(v))
+                    .map(|r| r.to);
+                (o.destination, to)
+            })
+            .collect();
+        assert!(targets.contains(&(scene.lew.1, Some(lews))), "{targets:?}");
+        assert!(targets.contains(&(scene.anna.1, Some(anna_line.message_id))));
+        assert!(targets.iter().all(|(to, _)| *to != scene.bob.1));
+    }
+
+    /// 1307 G2, item 6: a stock member who joins by writing is told to the
+    /// Loquax members with the membership, as a Join is: Bob's first line
+    /// goes out with the list to Lew and Anna, Bob flagged joined. Control:
+    /// his second line carries no list.
+    #[test]
+    fn a_stock_member_who_joins_by_writing_is_told_to_the_loquax_members() {
+        let mut scene = scene();
+        let hosted = scene.hosted.clone();
+        let hello = to_group(&scene, &scene.bob, 1.0, "Hallo", Vec::new());
+        let out = line(accept(&mut scene.store, &hosted, &hello, ACCEPTED).expect("hello"));
+        let lists: Vec<[u8; 16]> = out
+            .iter()
+            .filter(|o| {
+                Lev::from_fields(&opened(&scene, o).fields).is_some_and(|l| l.members.is_some())
+            })
+            .map(|o| o.destination)
+            .collect();
+        assert_eq!(lists, [scene.lew.1, scene.anna.1]);
+        let members = Lev::from_fields(&opened(&scene, &out[out.len() - 1]).fields)
+            .and_then(|l| l.members)
+            .expect("list");
+        let bob = members
+            .members
+            .iter()
+            .find(|m| m.address == scene.bob.1)
+            .expect("bob");
+        assert_ne!(bob.flags & leviculum_lxmf::lev::MEMBER_JOINED, 0);
+        let again = to_group(&scene, &scene.bob, 2.0, "Noch da", Vec::new());
+        let out = line(accept(&mut scene.store, &hosted, &again, ACCEPTED + 1.0).expect("again"));
+        assert_eq!(out.len(), 2, "the two copies, no list");
+    }
+
+    /// 1307 G2, item 6 (study 4.5): the admin adds Cara: she is invited
+    /// from the admin, the epoch moves, and every present member that
+    /// understands groups gets the list with her in it. Control: adding a
+    /// present member again sends nothing and moves nothing.
+    #[test]
+    fn the_admin_adds_a_member_who_is_invited_and_told() {
+        let mut scene = scene();
+        let hosted = scene.hosted.clone();
+        let group = hosted.group.address;
+        let cara = person();
+        let (invites, told) = add(
+            &scene.lew.0,
+            &hosted,
+            "Lew",
+            &mut scene.store,
+            &[(cara.1, "Cara".into()), (scene.anna.1, "Anna".into())],
+            ACCEPTED,
+        )
+        .expect("add");
+        assert_eq!(invites.len(), 1);
+        assert_eq!(invites[0].destination, cara.1);
+        let invite = Message::unpack(&invites[0].packed, None, None, DeliveryMethod::Direct)
+            .expect("invite");
+        assert_eq!(invite.source_hash, scene.lew.1, "from the admin");
+        let card = Lev::from_fields(&invite.fields)
+            .and_then(|l| l.invite)
+            .expect("card");
+        assert_eq!((card.group, card.epoch), (group, 2));
+        let to: Vec<_> = told.iter().map(|o| o.destination).collect();
+        assert_eq!(to, [scene.lew.1, scene.anna.1]);
+        let list = Lev::from_fields(&opened(&scene, &told[1]).fields)
+            .and_then(|l| l.members)
+            .expect("list");
+        assert_eq!(list.epoch, 2);
+        assert!(list
+            .members
+            .iter()
+            .any(|m| m.address == cara.1 && m.name == "Cara"));
+        let (invites, told) = add(
+            &scene.lew.0,
+            &hosted,
+            "Lew",
+            &mut scene.store,
+            &[(scene.anna.1, "Anna".into())],
+            ACCEPTED,
+        )
+        .expect("again");
+        assert!(invites.is_empty() && told.is_empty());
+        assert_eq!(scene.store.group(&group).expect("g").expect("g").epoch, 2);
     }
 }

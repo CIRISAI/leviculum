@@ -130,6 +130,8 @@ Link requests on `loquax.home`, msgpack on the wire:
 /moved [token: bin16, cursor: uint] -> [status]
 /group [client_id: bin16, name: str, [[address: bin16, name: str], ...]]
                                    -> [status, group: bin16]
+/groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -151,7 +153,20 @@ outbox, and the group's own engine sends the owner the membership, so
 every device learns the group from its archive. The same client id asked
 again answers the group it made then. A home that archives an invitation
 learns the group's key from it, so a Join from any of its devices goes
-out before the group's announce is heard. A `/sync` answer carries the entries after the cursor, oldest
+out before the group's announce is heard.
+
+`/groupadd` (1307 G2) adds members to a group the home hosts and its
+owner is admin of: each new one gets an invitation from the owner, the
+epoch moves, and every member that understands groups gets the new
+membership from the group. A member already in it is skipped, so the
+same request again adds nobody. Beside the requests, the home keeps a
+group going on its own (G2): a copy's retries survive a restart (open
+copies are made again from the archived original, byte for byte), each
+group announces every hour on its own clock beside the announce at its
+engine's start, a member whose last three proofs each took more than
+2 s gets its lines held for 60 s and sent as one digest (`lev` key
+`0x06`), and a reaction goes to the members that understand groups with
+its target rewritten to each one's own copy (stock members get none). A `/sync` answer carries the entries after the cursor, oldest
 first, up to 64 KiB of messages (one larger entry still goes, alone), and
 `more` when others follow; the client asks again from the last sequence it
 got, over the same link. An answer too large for one packet goes as a

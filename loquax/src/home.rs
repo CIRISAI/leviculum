@@ -171,6 +171,9 @@ pub const MOVED_PATH: &str = "/moved";
 /// 1307: make a group the home hosts and invite its members.
 pub const GROUP_PATH: &str = "/group";
 
+/// 1307 G2: add members to a group the home hosts (study 4.5).
+pub const GROUP_ADD_PATH: &str = "/groupadd";
+
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
 /// A message a client handed in with `/send`, packed as the home node
