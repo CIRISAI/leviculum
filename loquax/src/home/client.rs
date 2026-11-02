@@ -221,6 +221,41 @@ async fn ask_retrying(
     data: &[u8],
     budget: Duration,
 ) -> Result<(), HomeError> {
+    let bytes = answer_retrying(node, public_key, device, path, data, budget).await?;
+    match wire::read_status(&bytes).map_err(|_| HomeError::Malformed)? {
+        Status::Ok => Ok(()),
+        status => Err(HomeError::Refused(status)),
+    }
+}
+
+/// Make a group on the home node (1307 pass two): `/group`, asked again
+/// with the same request when the answer was lost; the home node answers
+/// a client id it has seen with the group it made then. The group's
+/// address.
+pub async fn group(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    request: &wire::GroupRequest,
+    budget: Duration,
+) -> Result<[u8; 16], HomeError> {
+    let data = wire::group_request(request);
+    let bytes = answer_retrying(node, public_key, device, super::GROUP_PATH, &data, budget).await?;
+    wire::read_group_answer(&bytes)
+        .map_err(|_| HomeError::Malformed)?
+        .map_err(HomeError::Refused)
+}
+
+/// One request on a link of its own, asked again up to three times when
+/// the answer was lost: its answer's bytes.
+async fn answer_retrying(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    path: &str,
+    data: &[u8],
+    budget: Duration,
+) -> Result<Vec<u8>, HomeError> {
     let deadline = tokio::time::Instant::now() + budget;
     let mut attempt = 0;
     loop {
@@ -234,12 +269,7 @@ async fn ask_retrying(
             Err(error) => Err(error),
         };
         match answer {
-            Ok(bytes) => {
-                return match wire::read_status(&bytes).map_err(|_| HomeError::Malformed)? {
-                    Status::Ok => Ok(()),
-                    status => Err(HomeError::Refused(status)),
-                }
-            }
+            Ok(bytes) => return Ok(bytes),
             Err(HomeError::Transfer(_) | HomeError::Timeout)
                 if attempt < 3 && tokio::time::Instant::now() < deadline => {}
             Err(error) => return Err(error),

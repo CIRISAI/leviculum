@@ -88,6 +88,7 @@ impl Mailbox {
             token_ttl_secs: 3_600,
             cap_bytes: u64::MAX,
             handover: None,
+            groups: None,
         };
         let answer = answer(
             &mut self.store,

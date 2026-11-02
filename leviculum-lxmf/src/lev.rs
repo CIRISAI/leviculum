@@ -67,6 +67,11 @@ pub const MEMBER_LEFT: u64 = 1;
 /// A member's flag in [`Members`]: it is the group's admin.
 pub const MEMBER_ADMIN: u64 = 2;
 
+/// A member's flag in [`Members`]: it joined, by the invitation's Join or
+/// by writing to the group (1307 pass two); an invited member without it
+/// has not answered yet.
+pub const MEMBER_JOINED: u64 = 4;
+
 /// The length of an identity's public key, X25519 then Ed25519, as an
 /// invitation carries it (the `lxma://` code carries the same 64 bytes).
 pub const PUBLIC_KEY_BYTES: usize = 64;

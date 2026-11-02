@@ -412,12 +412,19 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         archive_cap_bytes,
         outgoing.len()
     );
+    // The name the owner goes by in the groups it makes (1307): its
+    // announced name, else the start of its address.
+    let owner_name = match own_name.trim() {
+        "" => crate::address::to_hex(&address)[..8].to_string(),
+        name => name.to_string(),
+    };
     let mut serving = super::server::Home {
         identity: &signer,
         address,
         token_ttl_secs,
         cap_bytes: archive_cap_bytes,
         handover: None,
+        groups: Some((&home, &owner_name)),
     };
     let mut sender = Sender {
         cap_bytes: archive_cap_bytes,
@@ -439,7 +446,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         )
         .await
         {
-            Ok(engine) => groups.push(engine),
+            Ok(engine) => {
+                knows_owner(&engine, address, &signer);
+                groups.push(engine);
+            }
             Err(error) => tracing::warn!("GROUP {name} not hosted: {error}"),
         }
     }
@@ -490,7 +500,35 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 let (link, remote) = (request.link_id, request.remote);
                 serving.handover =
                     handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
-                let (accepted, watching, gone) = answer(&node, &mut store, &serving, request).await;
+                let (accepted, watching, gone, made) =
+                    answer(&node, &mut store, &serving, request).await;
+                if let Some(made) = made {
+                    // A group a device made (1307 pass two): hosted from
+                    // now on, its membership to the admin on its engine.
+                    let name = made.hosted.group.name.clone();
+                    match attach_group(
+                        &group_upstream,
+                        &group_storage,
+                        &home,
+                        made.hosted,
+                        &group_network,
+                        policy,
+                    )
+                    .await
+                    {
+                        Ok(mut engine) => {
+                            knows_owner(&engine, address, &signer);
+                            let now = unix_now();
+                            for out in made.welcome {
+                                engine.outgoing.add(out.id, out.destination, out.packed, now, false);
+                            }
+                            let acts = engine.outgoing.tick(now);
+                            sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn);
+                            groups.push(engine);
+                        }
+                        Err(error) => tracing::warn!("GROUP {name} not hosted: {error}"),
+                    }
+                }
                 if gone {
                     // The new device holds everything (1281): this mailbox
                     // ends here, once its answer had a moment to leave.
@@ -562,6 +600,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 if let Some(source) = source_of(&packed) {
                                     related(&mut store, &mut relations, source, archive_cap_bytes);
                                 }
+                                learn_invited_key(&node, &packed);
                             }
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
@@ -984,6 +1023,44 @@ fn relations_at_start(store: &Store, home: &std::path::Path) -> Result<Relations
 }
 
 /// The source of an LXMF message as packed: its second sixteen bytes.
+/// The group an archived invitation names (1307 pass two): the node
+/// learns its key, so a Join from any device of this home reaches it
+/// before the group's announce is heard.
+fn learn_invited_key(node: &ReticulumNode, packed: &[u8]) {
+    let Ok(message) =
+        leviculum_lxmf::Message::unpack(packed, None, None, leviculum_lxmf::DeliveryMethod::Direct)
+    else {
+        return;
+    };
+    let Some((group, public_key)) = group::invited_key(&message.fields) else {
+        return;
+    };
+    match leviculum_core::Identity::from_public_key_bytes(&public_key) {
+        Ok(identity) => {
+            tracing::info!("HOME invited to group={}", crate::address::to_hex(&group));
+            node.remember_identity(leviculum_core::DestinationHash::new(group), identity);
+        }
+        Err(error) => tracing::warn!("HOME invitation key: {error:?}"),
+    }
+}
+
+/// A group's node knows the home's own identity from the start: the
+/// membership and the admin's copies go to it before its announce is heard.
+fn knows_owner(
+    engine: &GroupEngine<Attached>,
+    address: [u8; 16],
+    signer: &leviculum_core::Identity,
+) {
+    if let Ok(identity) =
+        leviculum_core::Identity::from_public_key_bytes(&signer.public_key_bytes())
+    {
+        engine
+            .engine
+            .node()
+            .remember_identity(leviculum_core::DestinationHash::new(address), identity);
+    }
+}
+
 fn source_of(packed: &[u8]) -> Option<[u8; 16]> {
     packed.get(16..32)?.try_into().ok()
 }
@@ -1145,7 +1222,12 @@ async fn answer(
     store: &mut Store,
     serving: &super::server::Home<'_>,
     request: HomeRequest,
-) -> (Vec<crate::store::Outgoing>, Option<u64>, bool) {
+) -> (
+    Vec<crate::store::Outgoing>,
+    Option<u64>,
+    bool,
+    Option<super::server::NewGroup>,
+) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64());
@@ -1180,9 +1262,9 @@ async fn answer(
         // The outbox has the message whether the answer arrived or not: a
         // client that retries with the same id is answered from it.
         tracing::warn!("HOME answer to {}: {error}", request.path);
-        return (answer.accepted, None, false);
+        return (answer.accepted, None, false, answer.group);
     }
-    (answer.accepted, answer.watching, answer.gone)
+    (answer.accepted, answer.watching, answer.gone, answer.group)
 }
 
 /// What carrying out the outbox's acts needs besides the engine and the

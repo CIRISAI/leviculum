@@ -140,8 +140,11 @@ str admin's name, uint epoch]` (`VEC-MSG-LEV-GROUP-INVITE`); the study
 wrote `bin32` for the key, but an identity's public key is 64 bytes, as
 the `lxma://` code carries it. `0x05` is the membership `[uint epoch,
 [[bin16 address, str name, uint flags], ...]]`, flags bit 0 left, bit 1
-admin (`VEC-MSG-LEV-GROUP-MEMBERS`); a member that leaves sends itself
-alone, flagged left (`VEC-MSG-LEV-GROUP-LEAVE`). Keys `0x03` (group
+admin, bit 2 joined (`VEC-MSG-LEV-GROUP-MEMBERS`); a member that leaves
+sends itself alone, flagged left (`VEC-MSG-LEV-GROUP-LEAVE`), and the
+admin removes a member by sending the group that member alone, flagged
+left. Every Loquax client sets bit 1 on every message it sends, with
+read receipts off too (`{0x00: 2}`). Keys `0x03` (group
 status) and `0x06` (digest) are the study's and not written yet.
 
 ### What other clients do with it

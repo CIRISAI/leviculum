@@ -798,6 +798,7 @@ async fn attach_through<N: Effects + Send + 'static>(
             crate::home::KEY_PATH,
             crate::home::MOVE_PATH,
             crate::home::MOVED_PATH,
+            crate::home::GROUP_PATH,
         ] {
             node.register_request_handler(hash, path, RequestPolicy::AllowAll);
         }

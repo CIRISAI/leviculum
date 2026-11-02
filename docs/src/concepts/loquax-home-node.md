@@ -128,6 +128,8 @@ Link requests on `loquax.home`, msgpack on the wire:
                                        known: bin, name: str, first: uint, more: bool,
                                        [[seq, kind, id: bin32, at, packed], ...]]
 /moved [token: bin16, cursor: uint] -> [status]
+/group [client_id: bin16, name: str, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -139,7 +141,17 @@ archive's newest entry).
 [how Loquax reaches its mailbox](loquax-reachability.md), "Moving to a new
 phone". They are answered only to an admitted device whose request
 carries the token of the move the owner opened on the mailbox itself
-(`loquax/src/home/handover.rs`), never to an admitted device alone. A `/sync` answer carries the entries after the cursor, oldest
+(`loquax/src/home/handover.rs`), never to an admitted device alone.
+
+`/group` (1307) makes a group the home hosts, its owner the admin
+(`loquax/src/home/group.rs`, the study
+`docs/drafts/group-chats-study-2026-11.md`): the group's key stays on the
+home, an invitation from the owner to every member goes through the
+outbox, and the group's own engine sends the owner the membership, so
+every device learns the group from its archive. The same client id asked
+again answers the group it made then. A home that archives an invitation
+learns the group's key from it, so a Join from any of its devices goes
+out before the group's announce is heard. A `/sync` answer carries the entries after the cursor, oldest
 first, up to 64 KiB of messages (one larger entry still goes, alone), and
 `more` when others follow; the client asks again from the last sequence it
 got, over the same link. An answer too large for one packet goes as a

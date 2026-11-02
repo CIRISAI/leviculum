@@ -16,6 +16,8 @@
 //!                                                 known: bin, name: str, first: uint, more: bool,
 //!                                                 [[seq, kind, id: bin32, at, packed], ...]]
 //! /moved [token: bin16, cursor: uint]         -> [status]
+//! /group [client_id: bin16, name: str,
+//!         [[address: bin16, name: str], ...]] -> [status, group: bin16]
 //!
 //! wake   ["pull", newest: uint]               home node to client, on the
 //!                                             link that asked /watch
@@ -541,6 +543,89 @@ pub fn read_key_request(data: &[u8]) -> Result<([u8; 16], [u8; 64]), Malformed> 
     Ok((peer, key))
 }
 
+/// The most members one `/group` names (1307): a family, a team, a
+/// club's board; the home sends each an invitation at once.
+pub const GROUP_MEMBERS_MAX: usize = 64;
+
+/// One `/group` (1307, `docs/drafts/group-chats-study-2026-11.md` 4.1): make
+/// a group hosted by the home, its admin the home's owner, and invite the
+/// members, each under the name the admin gives it. The same `client_id`
+/// handed in again is the same group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupRequest {
+    pub client_id: [u8; 16],
+    pub name: alloc::string::String,
+    pub members: Vec<([u8; 16], alloc::string::String)>,
+}
+
+pub fn group_request(request: &GroupRequest) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 3);
+    msgpack::bin(&mut out, &request.client_id);
+    msgpack::string(&mut out, &request.name);
+    msgpack::array(&mut out, request.members.len());
+    for (address, name) in &request.members {
+        msgpack::array(&mut out, 2);
+        msgpack::bin(&mut out, address);
+        msgpack::string(&mut out, name);
+    }
+    out
+}
+
+/// A `/group` as the home reads it: a group with no name, no member or more
+/// than [`GROUP_MEMBERS_MAX`] is malformed.
+pub fn read_group_request(data: &[u8]) -> Result<GroupRequest, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 3 {
+        return Err(Malformed);
+    }
+    let client_id =
+        <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let name: alloc::string::String = msgpack::read_str(data, &mut p)?.trim().into();
+    let count = msgpack::array_len(data, &mut p)?;
+    if name.is_empty() || count == 0 || count > GROUP_MEMBERS_MAX {
+        return Err(Malformed);
+    }
+    let mut members = Vec::with_capacity(count);
+    for _ in 0..count {
+        if msgpack::array_len(data, &mut p)? != 2 {
+            return Err(Malformed);
+        }
+        let address =
+            <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+        let name = msgpack::read_str(data, &mut p)?.trim().into();
+        members.push((address, name));
+    }
+    Ok(GroupRequest {
+        client_id,
+        name,
+        members,
+    })
+}
+
+pub fn group_answer(group: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::uint(&mut out, Status::Ok.code());
+    msgpack::bin(&mut out, group);
+    out
+}
+
+/// A `/group` answer: the group's address, or the status that refused it.
+pub fn read_group_answer(data: &[u8]) -> Result<Result<[u8; 16], Status>, Malformed> {
+    let status = read_status(data)?;
+    if status != Status::Ok {
+        return Ok(Err(status));
+    }
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    msgpack::read_uint(data, &mut p)?;
+    let group = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    Ok(Ok(group))
+}
+
 /// A `/send` answer: the message id, or the status that refused it.
 pub fn read_send_answer(data: &[u8]) -> Result<Result<[u8; 32], Status>, Malformed> {
     let status = read_status(data)?;
@@ -809,6 +894,51 @@ mod tests {
             read_send_answer(&status_answer(Status::NotAdmitted)),
             Ok(Err(Status::NotAdmitted))
         );
+    }
+
+    /// 1307: a `/group` and its answer round trip; a group without a name
+    /// or a member, or with one member too many, is malformed.
+    #[test]
+    fn a_group_request_and_its_answer_round_trip() {
+        let request = GroupRequest {
+            client_id: [5; 16],
+            name: "Familie".into(),
+            members: alloc::vec![([1; 16], "Anna".into()), ([2; 16], "Bob".into())],
+        };
+        assert_eq!(
+            read_group_request(&group_request(&request)),
+            Ok(request.clone())
+        );
+        assert_eq!(read_group_answer(&group_answer(&[9; 16])), Ok(Ok([9; 16])));
+        assert_eq!(
+            read_group_answer(&status_answer(Status::NotAdmitted)),
+            Ok(Err(Status::NotAdmitted))
+        );
+        let nameless = GroupRequest {
+            name: "  ".into(),
+            ..request.clone()
+        };
+        assert_eq!(
+            read_group_request(&group_request(&nameless)),
+            Err(Malformed)
+        );
+        let alone = GroupRequest {
+            members: Vec::new(),
+            ..request.clone()
+        };
+        assert_eq!(read_group_request(&group_request(&alone)), Err(Malformed));
+        let crowd = GroupRequest {
+            members: (0..=GROUP_MEMBERS_MAX)
+                .map(|n| ([n as u8; 16], "x".into()))
+                .collect(),
+            ..request.clone()
+        };
+        assert_eq!(read_group_request(&group_request(&crowd)), Err(Malformed));
+        let full = GroupRequest {
+            members: crowd.members[..GROUP_MEMBERS_MAX].to_vec(),
+            ..request
+        };
+        assert_eq!(read_group_request(&group_request(&full)), Ok(full));
     }
 
     #[test]

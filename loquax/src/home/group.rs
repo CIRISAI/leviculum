@@ -25,6 +25,14 @@
 //! fan-out run again produces the same bytes (study 2.4). The copies and
 //! their proofs are booked in `group_fanout` ([`crate::store::groups`]).
 //!
+//! Made from a device (pass two): `/group` ([`crate::home::server`]) makes
+//! the group, the admin's invitations go through the home's outbox and the
+//! membership to the admin through the group's engine ([`opening`]). The
+//! admin removes a member by sending the group that member alone, flagged
+//! left; the others are told "Lew removed Anna.", the removed one "You are
+//! no longer in Familie.". A join tells every member that understands
+//! groups the new list.
+//!
 //! Not here yet (later slices of the order): reactions are not fanned out,
 //! read receipts to the group are not booked, slow members get no digest.
 
@@ -221,6 +229,45 @@ pub fn invitation(
     )
 }
 
+/// What a group made at `now` sends (1307 pass two): the invitation from
+/// the admin to every other member, for the home's outbox, and the
+/// membership from the group to the admin, for the group's own engine, so
+/// every device of the admin learns the members from its archive.
+pub fn opening(
+    admin: &Identity,
+    hosted: &Hosted,
+    admin_name: &str,
+    store: &Store,
+    now: f64,
+) -> Result<(Vec<Outgoing>, Vec<Outgoing>), String> {
+    let group = &hosted.group;
+    let members = store
+        .group_members(&group.address)
+        .map_err(|e| e.to_string())?;
+    let invitations = members
+        .iter()
+        .filter(|m| m.address != group.admin)
+        .map(|m| invitation(admin, hosted, admin_name, m.address, now))
+        .collect::<Result<Vec<_>, _>>()?;
+    let welcome = members
+        .iter()
+        .filter(|m| m.address == group.admin)
+        .map(|m| membership(hosted, m, group.epoch, &members, now))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((invitations, welcome))
+}
+
+/// The group an invitation names, with the key that makes its address,
+/// when `fields` carry one whose key does (1307 pass two): the home of an
+/// invited member learns the group's identity from it, so a Join and
+/// every line after it can be encrypted to the group before its announce
+/// is heard.
+pub fn invited_key(fields: &[Field]) -> Option<([u8; 16], [u8; 64])> {
+    let invite = Lev::from_fields(fields)?.invite?;
+    let address = crate::home::lxmf_address(&invite.public_key).ok()?;
+    (address == invite.group).then_some((invite.group, invite.public_key))
+}
+
 /// Take in `original`, a message to the group the home has archived and
 /// proves, accepted at `accepted_at` (unix seconds, the copies' timestamp),
 /// and say what to send for it; the copies are booked in `group_fanout`
@@ -259,6 +306,26 @@ pub fn accept(
         store.group_flag(&group, &sender, flags).map_err(failed)?;
     }
     let understands = writer.understands_groups() || flags & MEMBER_GROUPS != 0;
+    if let Some(removed) = removal(original, &lev, &hosted.group, &members) {
+        let epoch = store
+            .group_leave(&group, &removed.address, accepted_at as i64)
+            .map_err(failed)?;
+        let members = store.group_members(&group).map_err(failed)?;
+        let line = format!("{} removed {}.", writer.name, removed.name);
+        let mut told = members
+            .iter()
+            .filter(|m| m.present())
+            .map(|m| notice(hosted, m, &line, epoch, &members, accepted_at))
+            .collect::<Result<Vec<_>, _>>()?;
+        let gone = members
+            .iter()
+            .find(|m| m.address == removed.address)
+            .cloned()
+            .unwrap_or(removed);
+        let bye = format!("You are no longer in {}.", hosted.group.name);
+        told.push(notice(hosted, &gone, &bye, epoch, &members, accepted_at)?);
+        return Ok(Arrival::Left(told));
+    }
     if is_leave(original, &lev) {
         let epoch = store
             .group_leave(&group, &sender, accepted_at as i64)
@@ -283,18 +350,15 @@ pub fn accept(
             let group_row = store.group(&group).map_err(failed)?;
             let epoch = group_row.map_or(hosted.group.epoch, |g| g.epoch);
             let members = store.group_members(&group).map_err(failed)?;
-            let writer = members
-                .iter()
-                .find(|m| m.address == sender)
-                .cloned()
-                .unwrap_or(writer);
-            return Ok(Arrival::Joined(vec![membership(
-                hosted,
-                &writer,
-                epoch,
-                &members,
-                accepted_at,
-            )?]));
+            // The joiner gets the list; every other member that
+            // understands groups learns that it joined (pass two).
+            return Ok(Arrival::Joined(
+                members
+                    .iter()
+                    .filter(|m| m.present() && (m.address == sender || m.understands_groups()))
+                    .map(|m| membership(hosted, m, epoch, &members, accepted_at))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ));
         }
         return Ok(Arrival::Kept);
     }
@@ -423,6 +487,31 @@ fn is_leave(original: &Message, lev: &Lev) -> bool {
     listed || original.content.trim_ascii() == LEAVE_WORD.as_bytes()
 }
 
+/// The member the admin removes with `original`: the `lev` membership from
+/// the admin listing one other present member alone, flagged left
+/// (study 4.6). A member that is not the admin removes nobody.
+fn removal(
+    original: &Message,
+    lev: &Lev,
+    group: &Group,
+    members: &[GroupMember],
+) -> Option<GroupMember> {
+    if original.source_hash != group.admin {
+        return None;
+    }
+    let listed = lev.members.as_ref()?;
+    let [only] = listed.members.as_slice() else {
+        return None;
+    };
+    if only.flags & MEMBER_LEFT == 0 || only.address == group.admin {
+        return None;
+    }
+    members
+        .iter()
+        .find(|m| m.address == only.address && m.present())
+        .cloned()
+}
+
 /// The id `member` knows `original` by: its copy's, or the original's own
 /// when the member has no copy (it wrote it).
 fn reply_for(
@@ -450,6 +539,11 @@ fn members_key(epoch: u64, members: &[GroupMember]) -> Members {
                 flags: if m.present() { 0 } else { MEMBER_LEFT }
                     | if m.flags & MEMBER_ADMIN != 0 {
                         leviculum_lxmf::lev::MEMBER_ADMIN
+                    } else {
+                        0
+                    }
+                    | if m.flags & MEMBER_JOINED != 0 {
+                        leviculum_lxmf::lev::MEMBER_JOINED
                     } else {
                         0
                     },
@@ -783,7 +877,8 @@ mod tests {
             Arrival::Line(_)
         ));
         // Anna's Join: an empty message with bit 1. The membership goes
-        // back to her and to no one else.
+        // back to her and to Lew, who understands groups (pass two), not
+        // to Bob's stock client.
         let mut fields = Vec::new();
         Lev {
             capabilities: Some(CAP_GROUPS),
@@ -796,7 +891,9 @@ mod tests {
         else {
             panic!("not a join");
         };
-        assert_eq!(back.len(), 1);
+        let to: Vec<_> = back.iter().map(|b| b.destination).collect();
+        assert_eq!(to, [scene.lew.1, scene.anna.1]);
+        let back = &back[1..];
         let members = Lev::from_fields(&opened(&scene, &back[0]).fields)
             .and_then(|lev| lev.members)
             .expect("membership");
@@ -861,6 +958,127 @@ mod tests {
             panic!("not a leave");
         };
         assert_eq!(told.len(), 1, "Lew alone is left to tell");
+    }
+
+    /// 1307 pass two: the admin removes Anna by sending the group her alone,
+    /// flagged left. The others are told who removed whom, Anna that she is
+    /// no longer in it, with the list for both who understand groups; her
+    /// next line goes nowhere. Controls: the same list from Bob or Anna,
+    /// who are no admins, removes nobody. (The admin listing himself is
+    /// his leave, as any member's.)
+    #[test]
+    fn the_admin_removes_a_member_and_nobody_else_can() {
+        let mut scene = scene();
+        let hosted = scene.hosted.clone();
+        let group = hosted.group.address;
+        let list = |who: [u8; 16], name: &str| {
+            let mut fields = Vec::new();
+            Lev {
+                // No capability: Bob's stock client stays stock.
+                capabilities: None,
+                members: Some(Members {
+                    epoch: 1,
+                    members: vec![Member {
+                        address: who,
+                        name: name.into(),
+                        flags: MEMBER_LEFT,
+                    }],
+                }),
+                ..Lev::default()
+            }
+            .put_into(&mut fields);
+            fields
+        };
+        let by_bob = to_group(&scene, &scene.bob, 1.0, "", list(scene.anna.1, "Anna"));
+        assert!(!matches!(
+            accept(&mut scene.store, &hosted, &by_bob, ACCEPTED).expect("bob"),
+            Arrival::Left(_)
+        ));
+        let by_anna = to_group(&scene, &scene.anna, 2.0, "", list(scene.bob.1, "Bob"));
+        assert!(!matches!(
+            accept(&mut scene.store, &hosted, &by_anna, ACCEPTED).expect("anna"),
+            Arrival::Left(_)
+        ));
+        assert!(scene
+            .store
+            .group_members(&group)
+            .expect("members")
+            .iter()
+            .all(GroupMember::present));
+
+        let removal = to_group(&scene, &scene.lew, 3.0, "", list(scene.anna.1, "Anna"));
+        let Arrival::Left(told) =
+            accept(&mut scene.store, &hosted, &removal, ACCEPTED).expect("removal")
+        else {
+            panic!("not a removal");
+        };
+        let to: Vec<_> = told.iter().map(|t| t.destination).collect();
+        assert_eq!(to, [scene.lew.1, scene.bob.1, scene.anna.1]);
+        assert_eq!(opened(&scene, &told[1]).content, b"Lew removed Anna.");
+        assert!(
+            Lev::from_fields(&opened(&scene, &told[1]).fields).is_none(),
+            "Bob is stock"
+        );
+        let bye = opened(&scene, &told[2]);
+        assert_eq!(bye.content, b"You are no longer in Familie.");
+        let members = Lev::from_fields(&bye.fields)
+            .and_then(|lev| lev.members)
+            .expect("Anna's list");
+        assert_eq!(members.epoch, 2);
+        assert!(members
+            .members
+            .iter()
+            .any(|m| m.address == scene.anna.1 && m.flags & MEMBER_LEFT != 0));
+        let after = to_group(&scene, &scene.anna, 4.0, "Hallo?", Vec::new());
+        assert_eq!(
+            accept(&mut scene.store, &hosted, &after, ACCEPTED).expect("after"),
+            Arrival::Kept
+        );
+    }
+
+    /// 1307 pass two: a group's opening is one invitation a member from the
+    /// admin and the membership from the group to the admin; the key an
+    /// invitation carries is learned only when it makes the group's
+    /// address (control: a key of someone else's is not).
+    #[test]
+    fn a_new_group_invites_and_tells_its_admin() {
+        let scene = scene();
+        let (invitations, welcome) =
+            opening(&scene.lew.0, &scene.hosted, "Lew", &scene.store, 7.0).expect("opening");
+        let to: Vec<_> = invitations.iter().map(|i| i.destination).collect();
+        assert_eq!(to, [scene.anna.1, scene.bob.1]);
+        assert_eq!(welcome.len(), 1);
+        let welcome = opened(&scene, &welcome[0]);
+        assert_eq!(welcome.destination_hash, scene.lew.1);
+        assert!(welcome.content.is_empty());
+        let list = Lev::from_fields(&welcome.fields)
+            .and_then(|lev| lev.members)
+            .expect("list");
+        let admin = list
+            .members
+            .iter()
+            .find(|m| m.address == scene.lew.1)
+            .expect("Lew");
+        assert_eq!(
+            admin.flags,
+            leviculum_lxmf::lev::MEMBER_ADMIN | leviculum_lxmf::lev::MEMBER_JOINED
+        );
+        let card = Message::unpack(&invitations[0].packed, None, None, DeliveryMethod::Direct)
+            .expect("card");
+        assert_eq!(
+            invited_key(&card.fields),
+            Some((
+                scene.hosted.group.address,
+                scene.hosted.identity.public_key_bytes()
+            ))
+        );
+        let mut forged = Lev::from_fields(&card.fields).expect("lev");
+        if let Some(invite) = forged.invite.as_mut() {
+            invite.public_key = scene.bob.0.public_key_bytes();
+        }
+        let mut fields = Vec::new();
+        forged.put_into(&mut fields);
+        assert_eq!(invited_key(&fields), None);
     }
 
     #[test]

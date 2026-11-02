@@ -168,6 +168,9 @@ pub const MOVE_PATH: &str = "/move";
 /// past the cursor, which the new device takes with `/move` first.
 pub const MOVED_PATH: &str = "/moved";
 
+/// 1307: make a group the home hosts and invite its members.
+pub const GROUP_PATH: &str = "/group";
+
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
 /// A message a client handed in with `/send`, packed as the home node

@@ -29,6 +29,10 @@ pub struct Home<'a> {
     /// The move its owner opened (1281), when one is open: what `/move`
     /// and `/moved` are checked against and carry.
     pub handover: Option<Handover>,
+    /// Where the home keeps its groups' keys (the loquax home, 1307), and
+    /// the name the owner goes by in them; none where the home hosts no
+    /// groups, and `/group` is refused.
+    pub groups: Option<(&'a std::path::Path, &'a str)>,
 }
 
 /// An open move (1281, [`super::handover`]): the token the new device
@@ -55,6 +59,16 @@ pub struct Answer {
     /// A `/moved` took: the identity is on the new device now, and this
     /// mailbox ends once the answer is out (1281).
     pub gone: bool,
+    /// A `/group` made a group (1307): the daemon starts its engine and
+    /// hands it the membership for the admin.
+    pub group: Option<NewGroup>,
+}
+
+/// A group a `/group` made: hosted from now on, and what its own engine
+/// sends first.
+pub struct NewGroup {
+    pub hosted: super::group::Hosted,
+    pub welcome: Vec<super::group::Outgoing>,
 }
 
 impl Answer {
@@ -65,6 +79,7 @@ impl Answer {
             watching: None,
             learned: None,
             gone: false,
+            group: None,
         }
     }
 }
@@ -95,6 +110,7 @@ pub fn answer(
         super::KEY_PATH => key(store, data, device),
         super::MOVE_PATH => Answer::only(move_page(store, home, data, device)),
         super::MOVED_PATH => moved(store, home, data, device),
+        super::GROUP_PATH => group(store, home, data, device, now),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -186,6 +202,7 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
                 watching: None,
                 learned: None,
                 gone: false,
+                group: None,
             }
         }
         Ok(Accepted::Again { id }) => Answer::only(wire::send_answer(&id)),
@@ -193,6 +210,132 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
             tracing::warn!("HOME send: {error}");
             Answer::only(wire::status_answer(Status::Failed))
         }
+    }
+}
+
+/// The client id of the invitation a `/group` with `client_id` sends
+/// `member`: the same request asked again finds the invitations it made
+/// then in the outbox, and through them its group.
+fn invitation_client_id(client_id: &[u8; 16], member: &[u8; 16]) -> [u8; 16] {
+    let hash = leviculum_core::crypto::sha256(&[&b"loquax group "[..], client_id, member].concat());
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
+/// The group a `/group` made before, by its first invitation in the outbox.
+fn group_made_before(
+    store: &Store,
+    request: &wire::GroupRequest,
+    admin: &[u8; 16],
+) -> Result<Option<[u8; 16]>, crate::store::StoreError> {
+    let Some((first, _)) = request.members.iter().find(|(m, _)| m != admin) else {
+        return Ok(None);
+    };
+    let Some(id) = store.outbox_by_client(&invitation_client_id(&request.client_id, first))? else {
+        return Ok(None);
+    };
+    Ok(store
+        .archive_entry(crate::home::KIND_SENT, &id)?
+        .and_then(|packed| {
+            leviculum_lxmf::Message::unpack(&packed, None, None, DeliveryMethod::Direct).ok()
+        })
+        .and_then(|message| leviculum_lxmf::lev::Lev::from_fields(&message.fields))
+        .and_then(|lev| lev.invite)
+        .map(|invite| invite.group))
+}
+
+/// `/group` (1307 pass two): the home makes the group with its owner as
+/// admin ([`super::group::create`]), puts an invitation to every member in
+/// its outbox, and answers the group's address. Asked again with the same
+/// client id, it answers the group it made then.
+fn group(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: f64) -> Answer {
+    let Ok(request) = wire::read_group_request(data) else {
+        return Answer::only(wire::status_answer(Status::Malformed));
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "group") {
+        return Answer::only(refused);
+    }
+    let Some((dir, owner_name)) = home.groups else {
+        tracing::info!("HOME group refused: this mailbox hosts no groups");
+        return Answer::only(wire::status_answer(Status::Failed));
+    };
+    match group_made_before(store, &request, &home.address) {
+        Ok(Some(address)) => return Answer::only(wire::group_answer(&address)),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!("HOME group: {error}");
+            return Answer::only(wire::status_answer(Status::Failed));
+        }
+    }
+    let members: Vec<([u8; 16], alloc::string::String)> = request
+        .members
+        .iter()
+        .filter(|(member, _)| *member != home.address)
+        .cloned()
+        .collect();
+    if members.is_empty() {
+        return Answer::only(wire::status_answer(Status::Malformed));
+    }
+    let made = super::group::create(
+        dir,
+        store,
+        &request.name,
+        (home.address, owner_name),
+        &members,
+        now as i64,
+    )
+    .and_then(|hosted| {
+        let (invitations, welcome) =
+            super::group::opening(home.identity, &hosted, owner_name, store, now)?;
+        Ok((hosted, invitations, welcome))
+    });
+    let (hosted, invitations, welcome) = match made {
+        Ok(made) => made,
+        Err(error) => {
+            tracing::warn!("HOME group: {error}");
+            return Answer::only(wire::status_answer(Status::Failed));
+        }
+    };
+    let at = now as i64;
+    let mut accepted = Vec::new();
+    for invitation in invitations {
+        let client_id = invitation_client_id(&request.client_id, &invitation.destination);
+        match store.outbox_accept(
+            &client_id,
+            &invitation.id,
+            &invitation.destination,
+            &invitation.packed,
+            at,
+            home.cap_bytes,
+        ) {
+            Ok(Accepted::New { .. }) => accepted.push(Outgoing {
+                id: invitation.id,
+                destination: invitation.destination,
+                packed: invitation.packed,
+                created_at: at,
+                propagated: false,
+            }),
+            Ok(Accepted::Again { .. }) => {}
+            Err(error) => {
+                tracing::warn!("HOME group invitation: {error}");
+                return Answer::only(wire::status_answer(Status::Failed));
+            }
+        }
+    }
+    tracing::info!(
+        "HOME group made device={} group={} members={}",
+        crate::address::to_hex(&device),
+        crate::address::to_hex(&hosted.group.address),
+        members.len()
+    );
+    Answer {
+        bytes: wire::group_answer(&hosted.group.address),
+        accepted,
+        watching: None,
+        learned: None,
+        gone: false,
+        group: Some(NewGroup { hosted, welcome }),
     }
 }
 
@@ -336,6 +479,7 @@ fn seen(
         watching: None,
         learned: None,
         gone: false,
+        group: None,
     }
 }
 
@@ -566,6 +710,7 @@ fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
                 watching: Some(newest),
                 learned: None,
                 gone: false,
+                group: None,
             }
         }
         Err(error) => {
@@ -604,6 +749,7 @@ fn key(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
         watching: None,
         learned: Some((peer, public_key)),
         gone: false,
+        group: None,
     }
 }
 
@@ -693,6 +839,7 @@ fn moved(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> A
             );
             Answer {
                 gone: true,
+                group: None,
                 ..Answer::only(wire::status_answer(Status::Ok))
             }
         }
@@ -757,6 +904,7 @@ mod tests {
             token_ttl_secs: DAY,
             cap_bytes: u64::MAX,
             handover: None,
+            groups: None,
         }
     }
 
@@ -822,6 +970,109 @@ mod tests {
     fn admitted(store: &mut Store) {
         store.issue_token(&TOKEN, "laptop", 90).expect("issue");
         assert_eq!(join(store, LAPTOP, TOKEN), Status::Ok);
+    }
+
+    /// 1307 pass two: `/group` from an admitted device makes the group with
+    /// the owner as admin, puts one invitation a member in the outbox (from
+    /// the owner, carrying the card's `0x04`) and hands the daemon the
+    /// group with the membership for the admin. The same client id again
+    /// is the same group and nothing new; a home that hosts no groups, a
+    /// device not admitted and a group of only the owner are refused.
+    /// Positive control for the idempotence: another client id makes a
+    /// second group.
+    #[test]
+    fn a_group_from_a_device_is_made_once_and_invites_its_members() {
+        use leviculum_lxmf::lev::Lev;
+        let (dir, mut store) = store();
+        let request = wire::GroupRequest {
+            client_id: [7; 16],
+            name: "Familie".into(),
+            members: alloc::vec![
+                (HOME, "Lew".into()),
+                ([0x44; 16], "Anna".into()),
+                ([0x55; 16], "Bob".into())
+            ],
+        };
+        let ask = |store: &mut Store, home: &Home<'_>, device, request: &wire::GroupRequest| {
+            let answer = answer(
+                store,
+                home,
+                crate::home::GROUP_PATH,
+                &wire::group_request(request),
+                Some(device),
+                300.0,
+            );
+            let group = wire::read_group_answer(&answer.bytes).expect("answer");
+            (group, answer)
+        };
+        // Not admitted yet: refused, nothing made.
+        let mut hosting = home();
+        hosting.groups = Some((dir.path(), "Lew"));
+        let (refused, _) = ask(&mut store, &hosting, LAPTOP, &request);
+        assert_eq!(refused, Err(Status::NotAdmitted));
+        admitted(&mut store);
+        // A home that hosts no groups refuses.
+        let (refused, _) = ask(&mut store, &home(), LAPTOP, &request);
+        assert_eq!(refused, Err(Status::Failed));
+        assert!(store.groups().expect("groups").is_empty());
+
+        let (made, answer) = ask(&mut store, &hosting, LAPTOP, &request);
+        let group = made.expect("made");
+        let new = answer.group.expect("a group for the daemon");
+        assert_eq!(new.hosted.group.address, group);
+        assert_eq!(new.hosted.group.admin, HOME);
+        assert!(crate::home::group::key_path(dir.path(), &group).exists());
+        // The owner is the admin, not invited.
+        assert_eq!(
+            answer.accepted.len(),
+            2,
+            "one invitation each to Anna and Bob"
+        );
+        for invitation in &answer.accepted {
+            let message = leviculum_lxmf::Message::unpack(
+                &invitation.packed,
+                None,
+                Some(hosting.identity),
+                DeliveryMethod::Direct,
+            )
+            .expect("unpack");
+            assert_eq!(message.source_hash, HOME);
+            let invite = Lev::from_fields(&message.fields)
+                .and_then(|lev| lev.invite)
+                .expect("the card's key");
+            assert_eq!(invite.group, group);
+            assert_eq!(invite.name, "Familie");
+            assert_eq!(invite.admin_name, "Lew");
+            assert_eq!(
+                crate::home::group::invited_key(&message.fields),
+                Some((group, new.hosted.identity.public_key_bytes()))
+            );
+        }
+        assert_eq!(new.welcome.len(), 1);
+        assert_eq!(
+            new.welcome[0].destination, HOME,
+            "the membership to the admin"
+        );
+
+        let (again, answer) = ask(&mut store, &hosting, LAPTOP, &request);
+        assert_eq!(again, Ok(group));
+        assert!(answer.group.is_none() && answer.accepted.is_empty());
+        assert_eq!(store.groups().expect("groups").len(), 1);
+        let other = wire::GroupRequest {
+            client_id: [8; 16],
+            ..request.clone()
+        };
+        let (second, _) = ask(&mut store, &hosting, LAPTOP, &other);
+        assert_ne!(second.expect("a second group"), group);
+        assert_eq!(store.groups().expect("groups").len(), 2);
+
+        let alone = wire::GroupRequest {
+            client_id: [9; 16],
+            members: alloc::vec![(HOME, "Lew".into())],
+            ..request
+        };
+        let (refused, _) = ask(&mut store, &hosting, LAPTOP, &alone);
+        assert_eq!(refused, Err(Status::Malformed));
     }
 
     #[test]
