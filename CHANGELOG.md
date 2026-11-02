@@ -50,6 +50,28 @@ Steering, metering and live-media asks from CIRISEdge for the CIRIS mesh
   request on one interface only, so a single relay can be asked. Not
   throttled.
 
+- Channel frames with a deadline, for live media (leviculum#94).
+  - `LinkHandle::try_send_timed(data, ttl)` (core
+    `send_on_link_timed(link_id, data, ttl_ms)`) sends a frame that is
+    retransmitted only until `ttl` has passed. After that, an expired marker
+    goes out in its place under the same sequence number, so the ordered
+    stream stays whole and the stale frame is never resent.
+  - The receiver drops a frame that reaches it older than its `ttl` instead
+    of delivering it late; that is the case of a frame that waited in the
+    reorder buffer behind a gap. Age is measured above the fastest delivery
+    seen on the link, so the two clocks need not agree.
+  - A fresh frame arrives as an ordinary `MessageReceived`.
+  - Every drop raises `NodeEvent::ChannelMessageExpired { link_id, sequence,
+    expiry }`, where `expiry` is `FrameExpiry::Sender`, `MarkedByPeer` or
+    `ArrivedLate { age_ms }`.
+  - Wire: system message types `0xFD01` (a timed frame: 10-byte header) and
+    `0xFD00` (the expired marker). Only leviculum 0.33.0+ciris.1 and later
+    understand them, so send timed frames only to such peers.
+  - `try_send_timed` never waits: a full window or a pacing delay comes back
+    at once, for the caller to drop or keep the frame.
+  - Witnesses: `leviculum-core/src/node/mvr_timed_frames.rs` and
+    `leviculum-std/tests/relay_steering.rs`.
+
 ### Fixed
 
 - Direct links: a punch completes only once its path is proven in both
@@ -66,6 +88,12 @@ Steering, metering and live-media asks from CIRISEdge for the CIRIS mesh
 - `leviculum_std::Error` gained `NoRouteViaRelay`; an exhaustive match must
   add it. The FFI maps it to `LEV_ERR_LINK`.
 - `LinkInfo` gained `via_relay`.
+- `NodeEvent` gained `RelayRouteLearned` and `ChannelMessageExpired`, and
+  `ChannelAction` (core) gained `Expired`; exhaustive matches must add them.
+- Per-link delivery telemetry (leviculum#35) was already available as
+  `ReticulumNode::link_stats(&link_id)`: delivered bytes, smoothed, minimum
+  and latest RTT, window and pacing rejections (backpressure), window size
+  and outstanding frames.
 
 ## [0.32.0+ciris.1] — CIRIS fork
 

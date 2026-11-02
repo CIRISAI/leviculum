@@ -177,3 +177,52 @@ async fn two_links_to_one_destination_each_through_its_own_relay() {
     got.sort();
     assert_eq!(got, [b"via 0".to_vec(), b"via 1".to_vec()]);
 }
+
+/// leviculum#94 (+ciris): a timed frame crosses a relay over real TCP and
+/// arrives as an ordinary message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_timed_frame_crosses_a_relay_as_a_plain_message() {
+    let port = ports::free_port();
+    let _c = relay(port).await;
+    let mut a = leaf([port, port]).await;
+    let mut b = leaf([port, port]).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let signing_key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "relaysteer",
+        &["timed"],
+    )
+    .expect("destination");
+    dest.set_accepts_links(true);
+    let hash = *dest.hash();
+    b.node.register_destination(dest);
+    b.node
+        .announce_destination(&hash, None)
+        .await
+        .expect("announce");
+    next_event(&mut a.rx, Duration::from_secs(15), |ev| {
+        matches!(ev, NodeEvent::AnnounceReceived { .. })
+    })
+    .await
+    .expect("A hears B");
+    let handle = a.node.connect(&hash, &signing_key).await.expect("connect");
+    a.node
+        .await_link_established(handle.link_id())
+        .await
+        .expect("link");
+    handle
+        .try_send_timed(b"live", Duration::from_millis(500))
+        .await
+        .expect("timed send");
+    let ev = next_event(&mut b.rx, Duration::from_secs(10), |ev| {
+        matches!(ev, NodeEvent::MessageReceived { .. })
+    })
+    .await
+    .expect("delivered");
+    assert!(matches!(ev, NodeEvent::MessageReceived { data, msgtype: 0, .. } if data == b"live"));
+}
