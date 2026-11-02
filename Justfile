@@ -2523,7 +2523,7 @@ loquax-core-no-std:
 # the esp fork is installed, for the M9's xtensa-esp32s3-none-elf (a SKIP line
 # says when it is not). Positive control first: a `std::fs` call injected into
 # a temp copy of the core is refused. In `guards`, see the ledger.
-[doc('Check the lnomad core and its parser build no_std for the firmware triples (#475)')]
+[doc('Check the lnomad core and micron build no_std for firmware (#475)')]
 lnomad-core-no-std:
     @bash scripts/check-lnomad-core-no-std.sh
 
