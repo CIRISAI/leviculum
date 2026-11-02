@@ -41,6 +41,7 @@
   - [Loquax: the map](concepts/loquax-map.md)
   - [Loquax: the home node](concepts/loquax-home-node.md)
   - [Loquax: reaching the mailbox from anywhere](concepts/loquax-reachability.md)
+  - [Loquax: N homes under one identity](concepts/loquax-homes.md)
   - [Loquax on Android: navigation and views](concepts/loquax-android-navigation.md)
   - [Loquax on Android: the scripted device walk](concepts/loquax-device-walk.md)
   - [Loquax on a phone: what it costs, tier P proxies](concepts/loquax-phone-power.md)
