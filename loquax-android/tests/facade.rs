@@ -2030,7 +2030,18 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
         facade_event(10, "reconnecting", state("reconnecting"));
         facade_event(20, "back", state("back"));
         let took = began.elapsed();
-        link_event(true, 10);
+        // The interface is up again: its level, not a `link` event. The
+        // session reads the level once a second, and a re-dial on loopback
+        // is up within a millisecond, so it may never read it down and has
+        // no edge to say (1334).
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !started(&loquax_android::start(&schema::encode(&first))).link {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the interface not up again in 10 s"
+            );
+            let _ = loquax_android::next_event(Duration::from_millis(200));
+        }
         facade_home_link(true, 60);
         send_through_facade(&peer, "nach dem Netzwechsel", 60);
         // One reconnect for the burst: no second line within the settle.

@@ -461,11 +461,16 @@ mod driver {
     /// rotation of the process: the phone's leaf and its own mailbox hear
     /// the same change. It also counts the rotations that re-dial for a
     /// change and are not up again yet, which is what the app's line says
-    /// ("Reconnecting…" while there is one).
+    /// ("Reconnecting…" while there is one), and the re-dials begun, so a
+    /// re-dial that is up again before the line was looked at still reads
+    /// as one; each start and end of one wakes whoever waits in
+    /// [`Network::turned`] (1334).
     #[derive(Debug, Clone)]
     pub struct Network {
         notes: Arc<tokio::sync::watch::Sender<Note>>,
         owed: Arc<AtomicUsize>,
+        redials: Arc<AtomicUsize>,
+        turned: Arc<tokio::sync::Notify>,
     }
 
     impl Default for Network {
@@ -473,6 +478,8 @@ mod driver {
             Self {
                 notes: Arc::new(tokio::sync::watch::Sender::new(Note::default())),
                 owed: Arc::new(AtomicUsize::new(0)),
+                redials: Arc::new(AtomicUsize::new(0)),
+                turned: Arc::new(tokio::sync::Notify::new()),
             }
         }
     }
@@ -500,6 +507,30 @@ mod driver {
             self.owed.load(Ordering::Relaxed) > 0
         }
 
+        /// How many re-dials for a change have begun, wrapping: a count
+        /// that moved since the last look is a re-dial even when it is up
+        /// again already (a loopback entry is up within a millisecond).
+        pub fn redials(&self) -> usize {
+            self.redials.load(Ordering::Relaxed)
+        }
+
+        /// Until a re-dial for a change begins or ends. One that happened
+        /// while nobody waited is not lost: the next wait returns at once.
+        pub async fn turned(&self) {
+            self.turned.notified().await;
+        }
+
+        /// A rotation's share of the count, none owed yet. Not the notes:
+        /// the rotation holding a sender would keep its own channel open.
+        fn owed(&self) -> Owed {
+            Owed {
+                count: Arc::clone(&self.owed),
+                redials: Arc::clone(&self.redials),
+                turned: Arc::clone(&self.turned),
+                owed: false,
+            }
+        }
+
         fn subscribe(&self) -> Heard {
             let mut notes = self.notes.subscribe();
             // What was said before the rotation started is no change to it.
@@ -512,6 +543,8 @@ mod driver {
     /// it is up again or its task ends.
     struct Owed {
         count: Arc<AtomicUsize>,
+        redials: Arc<AtomicUsize>,
+        turned: Arc<tokio::sync::Notify>,
         owed: bool,
     }
 
@@ -519,10 +552,13 @@ mod driver {
         fn set(&mut self, owed: bool) {
             match (self.owed, owed) {
                 (false, true) => {
+                    self.redials.fetch_add(1, Ordering::Relaxed);
                     self.count.fetch_add(1, Ordering::Relaxed);
+                    self.turned.notify_one();
                 }
                 (true, false) => {
                     self.count.fetch_sub(1, Ordering::Relaxed);
+                    self.turned.notify_one();
                 }
                 _ => {}
             }
@@ -697,10 +733,7 @@ mod driver {
         let mut notes = dial.network.subscribe();
         let mut notes_open = true;
         let mut settle = Settle::default();
-        let mut owed = Owed {
-            count: Arc::clone(&dial.network.owed),
-            owed: false,
-        };
+        let mut owed = dial.network.owed();
         let mut rotation = Rotation::new(dial.entries.len(), dial.timing);
         let mut ids = spawn(&dial.node, &dial, rotation.active());
         tell(rotation.active(), false);
@@ -874,6 +907,32 @@ mod driver {
             // Heard once: the same network said again is no change.
             network.say(NetworkKind::Mobile, false);
             assert_eq!(notes.take(), (NetworkKind::Mobile, false));
+        }
+
+        /// A re-dial that begins and ends before anyone looks still counts
+        /// and still wakes the waiter (1334): the session's pump, asleep
+        /// for the keepalive's ceiling, otherwise saw "not reconnecting"
+        /// before and after and never said the line.
+        #[tokio::test]
+        async fn a_redial_up_again_before_the_look_still_counts_and_wakes() {
+            let network = Network::new();
+            let before = network.redials();
+            let mut owed = network.owed();
+            owed.set(true);
+            assert!(network.reconnecting());
+            owed.set(false);
+            assert!(!network.reconnecting());
+            assert_ne!(network.redials(), before);
+            tokio::time::timeout(Duration::from_secs(1), network.turned())
+                .await
+                .expect("the re-dial woke the waiter");
+            // Up again without a re-dial: no count, and dropped not owed,
+            // no share given back twice.
+            let counted = network.redials();
+            owed.set(false);
+            drop(owed);
+            assert_eq!(network.redials(), counted);
+            assert!(!network.reconnecting());
         }
 
         /// A change said before the rotation subscribed is not one to it.

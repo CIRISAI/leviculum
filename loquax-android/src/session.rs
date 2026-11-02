@@ -184,10 +184,11 @@ struct Inner {
     /// What the recorder is to do (1276, `UiEffect::Recording`), by peer,
     /// until [`schema::Query::Recording`] hands it out.
     recorder: Vec<([u8; 16], Effect)>,
-    /// The platform's word on the network (1298), and whether the line
-    /// says "Reconnecting…" now.
+    /// The platform's word on the network (1298), whether the line says
+    /// "Reconnecting…" now, and the re-dials it has seen begin.
     network: loquax::home::rendezvous::Network,
     reconnecting: bool,
+    redials_seen: usize,
 }
 
 /// A running session.
@@ -401,7 +402,8 @@ impl Session {
         runtime.spawn(watch::run(watching, heard_tx));
         runtime.spawn(relay_watch(heard_rx, watch_tx, Arc::clone(&wake)));
         let mut inner = inner;
-        inner.network = network;
+        inner.redials_seen = network.redials();
+        inner.network = network.clone();
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
@@ -411,6 +413,10 @@ impl Session {
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     () = pump_wake.notified() => {}
+                    // A re-dial for a network change began or ended: the
+                    // line follows it even while the pump sleeps idle
+                    // (1334).
+                    () = network.turned() => {}
                 }
                 let Ok(mut inner) = pumped.lock() else {
                     return;
@@ -1638,6 +1644,7 @@ impl Inner {
             recorder: Vec::new(),
             network: loquax::home::rendezvous::Network::new(),
             reconnecting: false,
+            redials_seen: 0,
         })
     }
 
@@ -1791,21 +1798,30 @@ impl Inner {
 
     /// After a network change (1298): the line says "Reconnecting…" while
     /// a rotation that dropped its connection for it is not up again, and
-    /// is gone once every one is.
+    /// is gone once every one is. A re-dial that began and is up again
+    /// since the last look says both, in order (1334): the pump looks on
+    /// each begin and end, but a loopback or fast entry is up before it.
     fn look_at_network(&mut self) {
+        let redials = self.network.redials();
+        let began = redials != self.redials_seen;
+        self.redials_seen = redials;
         let now = self.network.reconnecting();
-        if now != self.reconnecting {
-            self.reconnecting = now;
-            let state = match now {
-                true => "reconnecting",
-                false => "back",
-            };
-            tracing::info!("NETWORK {state}");
-            let _ = self.events.send(Event::Network {
-                v: VERSION,
-                state: state.to_string(),
-            });
+        if (now || began) && !self.reconnecting {
+            self.reconnecting = true;
+            self.say_network("reconnecting");
         }
+        if !now && self.reconnecting {
+            self.reconnecting = false;
+            self.say_network("back");
+        }
+    }
+
+    fn say_network(&self, state: &str) {
+        tracing::info!("NETWORK {state}");
+        let _ = self.events.send(Event::Network {
+            v: VERSION,
+            state: state.to_string(),
+        });
     }
 
     /// The interface came back: ask for the home destination's path. The
