@@ -3207,6 +3207,7 @@ dependencies = [
  "iced",
  "leviculum-ui",
  "mundy",
+ "png",
 ]
 
 [[package]]

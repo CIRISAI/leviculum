@@ -262,6 +262,10 @@ fn window(frames: Frames, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::Re
     .title("Loquax")
     .subscription(App::subscription)
     .theme(App::theme)
+    .window(iced::window::Settings {
+        icon: leviculum_ui_iced::window_icon(),
+        ..iced::window::Settings::default()
+    })
     .window_size(Size::new(WINDOW.0, WINDOW.1))
     .run()
 }

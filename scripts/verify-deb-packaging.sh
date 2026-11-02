@@ -378,6 +378,9 @@ check_package loquax loquax loquax
 # (`debian-installed`, then `was-enabled`); the enabling fragment has no
 # `debian-installed` test and enables on a fresh install.
 contains "$CONTENTS" "loquax-mailbox.service" "ships the Loquax Mailbox unit"
+# The launcher entry and its icon, the jackdaw (1336).
+contains "$CONTENTS" "./usr/share/applications/loquax.desktop" "ships the launcher entry"
+contains "$CONTENTS" "./usr/share/icons/hicolor/256x256/apps/loquax.png" "ships the 256 px icon"
 LOQUAX_POSTINST="$(cat "$CTRL_DIR/postinst")"
 case "$LOQUAX_POSTINST" in
 *"_dh_action=start"* | *"deb-systemd-invoke start loquax-mailbox.service"* | \

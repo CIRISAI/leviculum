@@ -59,6 +59,11 @@ assets = [
     ["target/release/loquax", "usr/bin/", "755"],
     # Rendered from docs/src/man/ by scripts/md2man.py in scripts/build-deb.sh.
     ["../target/man/loquax.1", "usr/share/man/man1/loquax.1", "644"],
+    # The launcher entry and the jackdaw for it (1336): the deb's loquax is
+    # the terminal messenger, so the entry opens it in a terminal. The PNG
+    # is written by loquax-android/scripts/render-icon.py.
+    ["../packaging/loquax/loquax.desktop", "usr/share/applications/loquax.desktop", "644"],
+    ["../packaging/loquax/loquax.png", "usr/share/icons/hicolor/256x256/apps/loquax.png", "644"],
     ["README.md", "usr/share/doc/loquax/README.md", "644"],
     ["../packaging/lintian/loquax", "usr/share/lintian/overrides/loquax", "644"],
     # Codeberg #288; see leviculum-cli/Cargo.toml.

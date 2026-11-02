@@ -13,6 +13,7 @@
 //! fills from its own tokens. A key as the keymap's ([`key`]). And a view without a window ([`headless`]):
 //! drawn into pixels for the goldens, clicked for the tests. The desktop's
 //! light or dark, which iced alone does not read on Linux ([`desktop`]).
+//! The suite's window icon ([`window_icon`]).
 //!
 //! Generic over the program's message: a press is the `M` it was given.
 //!
@@ -34,6 +35,8 @@ pub mod icon;
 pub mod key;
 pub mod paint;
 pub mod wave;
+pub mod window_icon;
 
 pub use icon::{drawing, Icon};
 pub use paint::{colour, rgb, Palette};
+pub use window_icon::window_icon;

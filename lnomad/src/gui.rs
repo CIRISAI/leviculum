@@ -1328,6 +1328,10 @@ pub async fn run_gui(
         .theme(Window::theme)
         .font(MONO_BYTES)
         .font(MONO_BOLD_BYTES)
+        .window(iced::window::Settings {
+            icon: leviculum_ui_iced::window_icon(),
+            ..iced::window::Settings::default()
+        })
         .window_size(Size::new(WINDOW.0, WINDOW.1))
         .run()
     });
