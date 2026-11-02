@@ -428,13 +428,33 @@ mod driver {
         Peer,
     }
 
-    /// One word of the platform about the network, numbered so a rotation
-    /// sees each.
+    /// The platform's newest word about the network, and how many of all
+    /// its words said "another network". A watch keeps only the newest
+    /// value, so a burst said before a rotation looks (lost, available,
+    /// capabilities, inside a millisecond) reaches it as its last word
+    /// alone; the count is what tells it that an earlier one of the burst
+    /// changed the network (1334).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     struct Note {
-        seq: u64,
         kind: NetworkKind,
-        changed: bool,
+        changes: u64,
+    }
+
+    /// A rotation's ear on [`Network`]: what it heard last of the count.
+    struct Heard {
+        notes: tokio::sync::watch::Receiver<Note>,
+        changes: u64,
+    }
+
+    impl Heard {
+        /// The newest kind, and whether any word since the last take said
+        /// "another network".
+        fn take(&mut self) -> (NetworkKind, bool) {
+            let note = *self.notes.borrow_and_update();
+            let changed = note.changes != self.changes;
+            self.changes = note.changes;
+            (note.kind, changed)
+        }
     }
 
     /// The platform's word on the phone's network (1298), handed to every
@@ -468,9 +488,10 @@ mod driver {
         /// from none). Every rotation evaluates it once the burst settled.
         pub fn say(&self, kind: NetworkKind, changed: bool) {
             self.notes.send_modify(|note| {
-                note.seq = note.seq.wrapping_add(1);
                 note.kind = kind;
-                note.changed = changed;
+                if changed {
+                    note.changes = note.changes.wrapping_add(1);
+                }
             });
         }
 
@@ -479,11 +500,11 @@ mod driver {
             self.owed.load(Ordering::Relaxed) > 0
         }
 
-        fn subscribe(&self) -> tokio::sync::watch::Receiver<Note> {
+        fn subscribe(&self) -> Heard {
             let mut notes = self.notes.subscribe();
             // What was said before the rotation started is no change to it.
-            notes.mark_unchanged();
-            notes
+            let changes = notes.borrow_and_update().changes;
+            Heard { notes, changes }
         }
     }
 
@@ -713,10 +734,10 @@ mod driver {
                     Some(_) => continue,
                     None => return,
                 },
-                said = notes.changed(), if notes_open => match said {
+                said = notes.notes.changed(), if notes_open => match said {
                     Ok(()) => {
-                        let note = *notes.borrow_and_update();
-                        settle.note(now_ms(), note.kind, note.changed);
+                        let (kind, changed) = notes.take();
+                        settle.note(now_ms(), kind, changed);
                         continue;
                     }
                     // Every handle is gone: nobody says a change again.
@@ -830,6 +851,40 @@ mod driver {
                     rotation.return_refused(now_ms());
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The platform says lost, available and its capabilities inside a
+        /// millisecond; the rotation's task, busy or not yet scheduled,
+        /// looks only after the third (1334). The burst said "another
+        /// network" twice: the rotation must hear that, not just the last
+        /// word's "the same one".
+        #[test]
+        fn a_burst_said_before_the_rotation_looks_keeps_its_change() {
+            let network = Network::new();
+            let mut notes = network.subscribe();
+            network.say(NetworkKind::None, true);
+            network.say(NetworkKind::Mobile, true);
+            network.say(NetworkKind::Mobile, false);
+            assert_eq!(notes.take(), (NetworkKind::Mobile, true));
+            // Heard once: the same network said again is no change.
+            network.say(NetworkKind::Mobile, false);
+            assert_eq!(notes.take(), (NetworkKind::Mobile, false));
+        }
+
+        /// A change said before the rotation subscribed is not one to it.
+        #[test]
+        fn a_change_said_before_the_rotation_started_is_none_to_it() {
+            let network = Network::new();
+            network.say(NetworkKind::Wifi, true);
+            let mut notes = network.subscribe();
+            assert!(!notes.notes.has_changed().unwrap_or(true));
+            network.say(NetworkKind::Wifi, false);
+            assert_eq!(notes.take(), (NetworkKind::Wifi, false));
         }
     }
 }
