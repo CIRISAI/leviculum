@@ -216,6 +216,26 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "group"))));
     }
 
+    /**
+     * A verb of the Browse tab (1337): `tab`, `chats`, `back`, `forward`,
+     * `reload`, `places`, `dismiss`, `activate` with a scene node, `go` with
+     * the address, `fill` with a field and its text, `scroll` with `up`,
+     * `down`, `pageup` or `pagedown`; the error in words, or null.
+     */
+    static String browse(String verb, String node, String text) {
+        return command(map("t", "browse", "verb", verb, "node", node, "text", text));
+    }
+
+    /** The page view's size in cells, which the page is laid out on (1337). */
+    static String browseSize(int cols, int rows) {
+        return command(map("t", "browse", "verb", "size", "cols", cols, "rows", rows));
+    }
+
+    /** The Browse tab as the library words and lays it out (1337). */
+    static Map<String, Object> browseScreen() {
+        return answer(Native.query(MsgPack.pack(map("t", "browse"))));
+    }
+
     /** One request; the error in words, or null. */
     static String command(Map<String, Object> request) {
         Map<String, Object> done = answer(Native.command(MsgPack.pack(request)));

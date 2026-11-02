@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording`, `browse` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked`, `browse` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -487,6 +487,25 @@ pub enum Request {
         #[serde(default)]
         confirmed: bool,
     },
+    /// A verb of the Browse tab (1337), lnomad's browser hosted: `tab`
+    /// (it comes to the front), `chats` (it leaves), `back`, `forward`,
+    /// `reload`, `places`, `dismiss`, `activate` with `node` (a scene
+    /// node's resource: `link_3`, `field_1`, `place_0`, `name_2`,
+    /// `address`), `go` with the address field's `text`, `fill` with a
+    /// field's `node` and `text`, `scroll` with `text` `up`, `down`,
+    /// `pageup`, `pagedown`, `top` or `bottom`, and `size` with the page
+    /// view's `cols` and `rows` in cells.
+    Browse {
+        verb: String,
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        cols: u16,
+        #[serde(default)]
+        rows: u16,
+    },
     #[serde(rename = "addcontact")]
     AddContact {
         lxma: String,
@@ -791,6 +810,8 @@ pub enum Query {
     /// "New group" or the open member sheet (1307); answered as
     /// [`GroupScreen`].
     Group,
+    /// The Browse tab (1337); answered as [`BrowseScreen`].
+    Browse,
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -1961,6 +1982,100 @@ pub struct GroupScreen {
     pub yes: String,
     #[serde(default)]
     pub no: String,
+}
+
+/// What [`Query::Browse`] answers (1337): the hosted browser's scene in the
+/// phone's language, flat for `MsgPack.java`. The page is the scene's
+/// window of lines, each a list of runs from lnomad's one layout; Java
+/// draws them in a monospace grid and parses no micron.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseScreen {
+    pub v: u32,
+    /// The tab is in front.
+    pub open: bool,
+    /// The browser's bar: the page's title, whether back is offered, and
+    /// its actions (`forward`, `reload`, `bookmark`, `identify`) with
+    /// their words and whether they may be tapped.
+    pub title: String,
+    pub back: bool,
+    #[serde(default)]
+    pub actions: Vec<BrowseAction>,
+    /// The address field: what it holds, its hint.
+    pub address: String,
+    pub address_hint: String,
+    /// The top bar's state (identity, cache, hops) and the status line.
+    #[serde(default)]
+    pub chips: Vec<String>,
+    #[serde(default)]
+    pub status: String,
+    /// The page: the window's lines, the line it starts at, how many the
+    /// page has, and the focused node's resource (`link_2`, `field_1`) or
+    /// empty.
+    #[serde(default)]
+    pub lines: Vec<BrowseLine>,
+    pub first: u32,
+    pub total: u32,
+    #[serde(default)]
+    pub focus: String,
+    /// The places panel or the name results, while open: its title and
+    /// rows.
+    #[serde(default)]
+    pub sheet: String,
+    #[serde(default)]
+    pub rows: Vec<BrowseRow>,
+    #[serde(default)]
+    pub toast: String,
+}
+
+/// An action of [`BrowseScreen`]'s bar.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseAction {
+    /// The verb [`Request::Browse`] takes for it.
+    pub verb: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+/// One line of [`BrowseScreen`]'s page.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseLine {
+    pub runs: Vec<BrowseRun>,
+}
+
+/// A stretch of a line with one style, one link and one field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseRun {
+    pub text: String,
+    /// `#rrggbb`, a 256-colour index as a number in words, or empty for
+    /// the view's own.
+    #[serde(default)]
+    pub fg: String,
+    #[serde(default)]
+    pub bg: String,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub reverse: bool,
+    /// The node a tap on it activates (`link_3`, `field_1`), or empty.
+    #[serde(default)]
+    pub node: String,
+}
+
+/// A row of [`BrowseScreen`]'s sheet: a heading, a line that says the
+/// section is empty, a place or result a tap opens (`node`), or a note.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseRow {
+    /// `heading`, `placeholder`, `item` or `note`.
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub selected: bool,
 }
 
 /// One row of [`GroupScreen`].

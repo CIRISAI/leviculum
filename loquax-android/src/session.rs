@@ -145,6 +145,12 @@ struct Inner {
     /// The phone's language: the scene's words are said in it (1217).
     lang: Lang,
     sends: VecDeque<([u8; 16], String, Vec<Field>)>,
+    /// What the Browse tab asked of the platform (1337), oldest first: the
+    /// fetches, downloads and stores of lnomad's [`lnomad::Effect`]. The
+    /// fetch through the mailbox's node is slice 3 of
+    /// `docs/src/concepts/lnomad-everywhere.md`; until it lands they wait
+    /// here and the page says it is loading.
+    browse_owed: Vec<lnomad::Effect>,
     sending: bool,
     pull_owed: bool,
     pulling: bool,
@@ -1138,6 +1144,10 @@ impl Session {
                 self.lock().apply(UiEvent::Record { peer, input });
                 Ok(())
             }
+            Platform::Browse(event) => {
+                self.lock().apply(event);
+                Ok(())
+            }
             Platform::Unlink { peer } => self.lock().unlink(peer),
             Platform::NotNow { peer } => {
                 let mut inner = self.lock();
@@ -1378,6 +1388,7 @@ impl Session {
             schema::Query::Bar { peer } => schema::encode(&inner.bar(parse_peer(&peer)?)),
             schema::Query::Shares => schema::encode(&inner.shares()),
             schema::Query::Group => schema::encode(&inner.group_screen()),
+            schema::Query::Browse => crate::browser::encode(&inner.model, inner.lang, VERSION),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
                 let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
@@ -1569,6 +1580,8 @@ impl Inner {
         model.lang = lang;
         model.home_client = true;
         model.list_apart = true;
+        // The phone hosts lnomad as its Browse tab (1337).
+        model.browse.enabled = true;
         model.reading.on = config.read_receipts.unwrap_or(true);
         model.photo_size = config.photo_size.unwrap_or_default();
         model.bar.abilities = compose::Abilities::phone(camera);
@@ -1612,6 +1625,7 @@ impl Inner {
             offset,
             lang,
             sends: VecDeque::new(),
+            browse_owed: Vec::new(),
             sending: false,
             pull_owed: false,
             pulling: false,
@@ -1894,6 +1908,7 @@ impl Inner {
             match effect {
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
+                UiEffect::Browse(effect) => self.browse_owed.push(effect),
                 // Every rotation of the session hears it (1298).
                 UiEffect::Network { kind, changed } => self.network.say(kind, changed),
                 UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
@@ -2995,6 +3010,9 @@ pub enum Platform {
         peer: [u8; 16],
         input: Input,
     },
+    /// A verb of the Browse tab (1337), as the model's event: lnomad's
+    /// intent carried, the tab switch, or the page view's size.
+    Browse(UiEvent),
 }
 
 /// `request` as an intent, with its addresses and ids parsed: every
@@ -3100,6 +3118,16 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             }))
         }
         R::Relink { rows } => return Ok(Decoded::Platform(Platform::Relink { rows })),
+        R::Browse {
+            verb,
+            node,
+            text,
+            cols,
+            rows,
+        } => {
+            return crate::browser::event(&verb, &node, &text, cols, rows)
+                .map(|event| Decoded::Platform(Platform::Browse(event)))
+        }
         R::Rename { peer, name } => Intent::Rename {
             peer: Target::Peer(parse_peer(&peer)?),
             name: Some(name),

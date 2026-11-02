@@ -75,6 +75,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private boolean homeClient;
     /** The map tab is selected; its pane is made on first selection. */
     private boolean onMap;
+    /** The Browse tab is in front (1337), and its pane once built. */
+    private boolean onBrowse;
+    private BrowsePane browsePane;
     private MapPane mapPane;
     /** The map was opened on a friend from a pin: Back goes to the chats. */
     private boolean mapFromPin;
@@ -232,7 +235,50 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 select(true);
             }
         });
+        findViewById(R.id.tab_browse).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                browse();
+            }
+        });
+        tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
         select(map);
+    }
+
+    /**
+     * The Browse tab (1337): lnomad's browser, its pane drawn by
+     * {@link BrowsePane} from the library's scene. Chats or Map leaves it.
+     */
+    private void browse() {
+        if (query.getVisibility() == View.VISIBLE) {
+            searching(false);
+        }
+        if (onMap && mapPane != null) {
+            mapPane.pause();
+        }
+        onMap = false;
+        onBrowse = true;
+        if (browsePane == null) {
+            browsePane = new BrowsePane(this, new BrowsePane.Host() {
+                @Override
+                public void left() {
+                    if (onBrowse) {
+                        select(false);
+                    }
+                }
+            });
+        }
+        findViewById(R.id.pane_chats).setVisibility(View.GONE);
+        findViewById(R.id.pane_map).setVisibility(View.GONE);
+        findViewById(R.id.pane_browse).setVisibility(View.VISIBLE);
+        title.setText(R.string.tab_browse);
+        tint(R.id.tab_chats_icon, R.id.tab_chats_label, Glyph.Kind.CHAT, false);
+        tint(R.id.tab_map_icon, R.id.tab_map_label, Glyph.Kind.PIN, false);
+        tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, true);
+        findViewById(R.id.tab_chats).setSelected(false);
+        findViewById(R.id.tab_map).setSelected(false);
+        findViewById(R.id.tab_browse).setSelected(true);
+        browsePane.show();
     }
 
     /** Show the map (`true`) or the chats, each pane keeping its state. */
@@ -241,6 +287,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             searching(false);
         }
         onMap = map;
+        if (onBrowse) {
+            onBrowse = false;
+            Core.browse("chats", "", "");
+            findViewById(R.id.pane_browse).setVisibility(View.GONE);
+            tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
+            findViewById(R.id.tab_browse).setSelected(false);
+        }
         if (map && mapPane == null) {
             mapPane = new MapPane(this, new MapPane.Host() {
                 @Override
@@ -457,6 +510,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     public void onBackPressed() {
         if (query.getVisibility() == View.VISIBLE) {
             searching(false);
+            return;
+        }
+        // The browser's back while it has one, then the chats (1337).
+        if (onBrowse) {
+            if (!browsePane.back()) {
+                select(false);
+            }
             return;
         }
         if (onMap && mapFromPin) {

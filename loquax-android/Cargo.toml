@@ -46,6 +46,8 @@ leviculum-mapfill = { path = "../leviculum-mapfill" }
 leviculum-core = { path = "../leviculum-core" }
 leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
 leviculum-std = { path = "../leviculum-std" }
+# The Browse tab's types (1337): lnomad's browser core, which loquax hosts.
+lnomad = { path = "../lnomad", default-features = false }
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # The admission token the phone's own mailbox issues its screens (1152).
 rand_core = { workspace = true, features = ["getrandom"] }

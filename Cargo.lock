@@ -3490,6 +3490,7 @@ dependencies = [
  "leviculum-mapfill",
  "leviculum-std",
  "leviculum-ui",
+ "lnomad",
  "loquax",
  "png",
  "proptest",
