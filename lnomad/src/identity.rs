@@ -10,14 +10,21 @@
 //! A missing or corrupt file is not an error: a fresh identity is minted and
 //! written in its place, matching the reference browser's first-run behaviour.
 
+use alloc::format;
+use alloc::string::String;
+
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "std")]
 use leviculum_core::identity_store::{decode_identity, encode_identity};
+#[cfg(feature = "std")]
 use leviculum_std::Identity;
 
 /// The lnomad app config dir: `${XDG_CONFIG_HOME:-~/.config}/lnomad`. `None`
 /// when neither `XDG_CONFIG_HOME` nor `HOME` is set, in which case the browser
 /// runs without persistence (same convention as the bookmarks store).
+#[cfg(feature = "std")]
 pub fn app_config_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -28,6 +35,7 @@ pub fn app_config_dir() -> Option<PathBuf> {
 
 /// The default identity-file path: `${XDG_CONFIG_HOME:-~/.config}/lnomad/
 /// identity`.
+#[cfg(feature = "std")]
 pub fn default_path() -> Option<PathBuf> {
     Some(app_config_dir()?.join("identity"))
 }
@@ -36,6 +44,7 @@ pub fn default_path() -> Option<PathBuf> {
 /// the file is missing or corrupt. Only a filesystem error writing the fresh
 /// identity is surfaced; a decode failure never is, so a hand-mangled file
 /// cannot block startup.
+#[cfg(feature = "std")]
 pub fn load_or_create(path: &Path) -> std::io::Result<Identity> {
     if let Ok(bytes) = std::fs::read(path) {
         if let Some(identity) = decode_identity(&bytes) {

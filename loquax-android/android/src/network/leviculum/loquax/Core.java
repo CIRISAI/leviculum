@@ -117,13 +117,38 @@ final class Core {
      * it restores the address first. Blocks: not on the UI thread.
      */
     static Map<String, Object> startHere(String dir, String restore, String passphrase) {
+        return startHere(dir, restore, passphrase, false);
+    }
+
+    /**
+     * {@link #startHere}, and with `anyway` a restore goes on though its address answers on another
+     * device right now (1281): the user saw the warning (`need` live) and chose to.
+     */
+    static Map<String, Object> startHere(String dir, String restore, String passphrase, boolean anyway) {
         Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(), "here", true,
                 "camera", camera);
         if (restore != null) {
             request.put("restore", restore);
             request.put("passphrase", passphrase);
         }
+        if (anyway) request.put("anyway", true);
         return answer(Native.start(MsgPack.pack(request)));
+    }
+
+    /**
+     * Move in from the old phone (1281): the library takes the mailbox over with the code the old
+     * phone's "Move to a new phone" shows, then starts it here. `name` is how the old phone names this
+     * one. Blocks: not on the UI thread.
+     */
+    static Map<String, Object> moveIn(String dir, String code, String name) {
+        return answer(Native.start(MsgPack.pack(map("dir", dir, "offset", (long) offset(), "lang", lang(),
+                "here", true, "camera", camera, "moving", code, "name", name))));
+    }
+
+    /** "Use this phone again" on a phone whose mailbox moved away (1281). Blocks: not on the UI thread. */
+    static Map<String, Object> takeBack(String dir) {
+        return answer(Native.start(MsgPack.pack(map("dir", dir, "offset", (long) offset(), "lang", lang(),
+                "camera", camera, "take_back", true))));
     }
 
     /** The address's backup line and its paper code, sealed with `passphrase`; `error` when not. */
@@ -151,6 +176,16 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "linked"))));
     }
 
+    /** A fresh code for the new phone (1281), as {@link #linkDevice}'s; `error` when not. */
+    static Map<String, Object> movePhone() {
+        return answer(Native.query(MsgPack.pack(map("t", "movephone"))));
+    }
+
+    /** Where the newest move code stands: `state` waiting, moved (with `name`), over or none. */
+    static Map<String, Object> moving() {
+        return answer(Native.query(MsgPack.pack(map("t", "moving"))));
+    }
+
     /** Whose contact code `text` is (`address`, `lxma`, `known`); `error` when it is none. */
     static Map<String, Object> lxma(String text) {
         return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text, "lang", lang()))));
@@ -164,6 +199,21 @@ final class Core {
     /** The name recipients see, for the mailbox on this phone. Blocks a moment: not on the UI thread. */
     static String name(String name) {
         return command(map("t", "name", "name", name));
+    }
+
+    /**
+     * A verb on groups (1307): `new`, `pick`, `next`, `name`, `create`,
+     * `join`, `members`, `leave`, `remove`, `close`, with the group (or the
+     * friend picked) in `peer`; the error in words, or null.
+     */
+    static String group(String verb, String peer, String member, String text, boolean confirmed) {
+        return command(map("t", "group", "verb", verb, "peer", peer, "member", member,
+                "text", text, "confirmed", confirmed));
+    }
+
+    /** "New group" or the open member sheet (1307), as the library words it. */
+    static Map<String, Object> groupScreen() {
+        return answer(Native.query(MsgPack.pack(map("t", "group"))));
     }
 
     /** One request; the error in words, or null. */
@@ -548,6 +598,15 @@ final class Core {
         return answer(Native.query(MsgPack.pack(request)));
     }
 
+    /**
+     * The Maps page's last row, after its question (1290): every
+     * downloaded region deleted; null, or the line why not. Off the UI
+     * thread, as {@link #mapRegions} is.
+     */
+    static String deleteRegions() {
+        return command(map("t", "deleteregions"));
+    }
+
     /** Every link: peer, lookup, contact_id, name. */
     static List<Map<String, Object>> links() {
         return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");
@@ -608,6 +667,14 @@ final class Core {
     /** A screen came to the front or left it: in front, a down watching link pulls every minute. */
     static String front(boolean front) {
         return command(map("t", "front", "front", front));
+    }
+
+    /**
+     * The phone's network is `kind` now (`none`, `wifi`, `mobile`, `other`),
+     * `changed` when it is another network than before (1298, {@link NetWatch}).
+     */
+    static String network(String kind, boolean changed) {
+        return command(map("t", "network", "kind", kind, "changed", changed));
     }
 
     /**

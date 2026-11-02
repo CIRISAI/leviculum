@@ -13,7 +13,11 @@ use std::{
 
 const LXMF_VERSION: &str = "1.1.0";
 const LXMF_HEAD: &str = "795fdaa2b0777c13033787d933d1afc94a2377cb";
-// Updated 2026-11-01 for VEC-MSG-LEV-MARK and VEC-MSG-LEV-RECEIPT (the lev
+// Updated 2026-11-02 for VEC-MSG-LEV-GROUP-DIGEST (the digest key 0x06 of
+// the lev namespace, 1307 G2): 29 added lines, none removed. Before that
+// 2026-11-02 for VEC-MSG-LEV-GROUP-COPY, -INVITE, -MEMBERS and
+// -LEAVE (the group keys of the lev namespace, 1307): 97 added lines, none
+// removed. Before that 2026-11-01 for VEC-MSG-LEV-MARK and VEC-MSG-LEV-RECEIPT (the lev
 // namespace, 1230): 38 added lines, none removed. Before that 2026-10-29 for
 // VEC-MSG-REPLY and VEC-MSG-COMMENT (replies, 1137):
 // 32 added lines, none removed. Before that 2026-10-29 for VEC-MSG-REACTION and VEC-MSG-REACTION-TEXT
@@ -22,7 +26,7 @@ const LXMF_HEAD: &str = "795fdaa2b0777c13033787d933d1afc94a2377cb";
 // Before that 2026-09-12 for VEC-PN-CONTROL (leviculum#384 part 4), the same
 // way.
 const VECTOR_FIXTURE_SHA256: &str =
-    "d1bad961ee2f508bb16812ec9811fb319f32298fe32883e216c18433fe98db10";
+    "183f52d5a2494244b897a35e98aa44e32bebf7e007489588affaf9aff856eadd";
 
 const REFERENCE_FILES: &[(&str, &str)] = &[
     (

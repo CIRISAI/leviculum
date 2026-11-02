@@ -67,6 +67,12 @@ pub enum Role {
     Home {
         requests: UnboundedSender<HomeRequest>,
     },
+    /// A group the home node hosts (1307, [`crate::home::group`]): the
+    /// group identity's delivery destination, announced with the group's
+    /// name, handing every received message out packed as the home's does,
+    /// its proof held until the archive keeps it. No home destination: the
+    /// group is reached by its members' messages alone.
+    Group,
 }
 
 impl Processor {
@@ -238,6 +244,10 @@ pub struct LeafConfig<N = Terminal> {
     /// The keepalive of the connection to the home node, from the config
     /// file's `tcp_*` keys (1176); the default is the reference's.
     pub tcp: crate::config::TcpLiveness,
+    /// The platform's word on the network (1298): a change re-evaluates
+    /// the rotation. [`Network::default`](crate::home::rendezvous::Network)
+    /// where nothing says one.
+    pub network: crate::home::rendezvous::Network,
 }
 
 /// What attaching a mailbox that runs its own node needs: a phone's
@@ -265,6 +275,8 @@ pub struct MeshConfig<N = Terminal> {
     /// The keepalive of the connections to the entry servers, as
     /// [`LeafConfig::tcp`].
     pub tcp: crate::config::TcpLiveness,
+    /// The platform's word on the network, as [`LeafConfig::network`].
+    pub network: crate::home::rendezvous::Network,
 }
 
 /// `host:port` as the leaf dials it: the host as written (a name, an IPv4
@@ -418,6 +430,19 @@ pub struct Attached {
     pub outbox: InProcessOutbox,
     /// The rendezvous rotation, when this node dials one.
     rendezvous: Option<crate::home::rendezvous::Rendezvous>,
+    /// The network word the rotation listens to (1298).
+    network: crate::home::rendezvous::Network,
+}
+
+/// A group's engine is driven as the home's is, through its outbox.
+impl Outbox for Attached {
+    fn submit(&self, command: Command) -> Result<(), crate::outbox::OutboxGone> {
+        self.outbox.submit(command)
+    }
+
+    fn try_next_event(&mut self) -> Result<Option<OutboxEvent>, crate::outbox::OutboxGone> {
+        self.outbox.try_next_event()
+    }
 }
 
 impl Attached {
@@ -432,18 +457,27 @@ impl Attached {
         self.rendezvous.as_ref().map(|r| r.state())
     }
 
+    /// The network word this node's rotation listens to (1298): what
+    /// [`UiEffect::Network`](crate::ui::UiEffect::Network) is said to, and
+    /// shared with every other rotation that was handed the same one.
+    pub fn network(&self) -> &crate::home::rendezvous::Network {
+        &self.network
+    }
+
     /// Dial `servers` (`host:port` each) one at a time with failover, as
     /// `side` ([`crate::home::rendezvous`]), replacing a rotation already
     /// running. An empty list dials nothing. A shared instance's client
     /// may dial too: the mailbox beside a daemon keeps its own peer
     /// connection to the rendezvous that way, with transport off, so it
-    /// relays nothing between the two.
+    /// relays nothing between the two. `network` is the platform's word on
+    /// the network the rotation re-evaluates on (1298).
     pub fn dial(
         &mut self,
         servers: &[String],
         side: crate::home::rendezvous::Side,
         tcp: crate::config::TcpLiveness,
         timing: crate::home::rendezvous::Timing,
+        network: crate::home::rendezvous::Network,
     ) -> Result<(), AttachError> {
         let entries = servers
             .iter()
@@ -455,6 +489,7 @@ impl Attached {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.rendezvous = None;
+        self.network = network.clone();
         if entries.is_empty() {
             return Ok(());
         }
@@ -465,6 +500,7 @@ impl Attached {
                 side,
                 tcp,
                 timing,
+                network,
             },
         ));
         Ok(())
@@ -539,6 +575,7 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
         display_name,
         notices,
         tcp,
+        network,
     } = config;
     for server in &servers {
         parse_server(server).map_err(|detail| AttachError::NoServer {
@@ -559,7 +596,7 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
         }
         None => crate::home::rendezvous::Side::Peer,
     };
-    attached.dial(&servers, side, tcp, timing)?;
+    attached.dial(&servers, side, tcp, timing, network)?;
     Ok(attached)
 }
 
@@ -581,6 +618,7 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
         display_name,
         notices,
         tcp,
+        network,
     } = config;
     for server in &servers {
         parse_server(server).map_err(|detail| AttachError::NoServer {
@@ -595,7 +633,13 @@ pub async fn attach_mesh<N: Effects + Send + 'static>(
         notices,
     };
     let mut attached = attach_through(joined, role, Upstream::Mesh { screens }).await?;
-    attached.dial(&servers, crate::home::rendezvous::Side::Peer, tcp, timing)?;
+    attached.dial(
+        &servers,
+        crate::home::rendezvous::Side::Peer,
+        tcp,
+        timing,
+        network,
+    )?;
     Ok(attached)
 }
 
@@ -677,7 +721,9 @@ async fn attach_through<N: Effects + Send + 'static>(
     let engine = match role {
         Role::Messenger => Engine::new(config.identity, config.display_name),
         Role::Client { address } => Engine::client(address),
-        Role::Home { .. } => Engine::new(config.identity, config.display_name).handing_out_packed(),
+        Role::Home { .. } | Role::Group => {
+            Engine::new(config.identity, config.display_name).handing_out_packed()
+        }
     };
     let processor = Processor {
         engine,
@@ -750,6 +796,10 @@ async fn attach_through<N: Effects + Send + 'static>(
             crate::home::PEERSTATE_PATH,
             crate::home::WATCH_PATH,
             crate::home::KEY_PATH,
+            crate::home::MOVE_PATH,
+            crate::home::MOVED_PATH,
+            crate::home::GROUP_PATH,
+            crate::home::GROUP_ADD_PATH,
         ] {
             node.register_request_handler(hash, path, RequestPolicy::AllowAll);
         }
@@ -762,6 +812,7 @@ async fn attach_through<N: Effects + Send + 'static>(
             events: events_rx,
         },
         rendezvous: None,
+        network: crate::home::rendezvous::Network::default(),
     })
 }
 

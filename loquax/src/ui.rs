@@ -136,6 +136,8 @@ pub mod chat;
 pub mod compose;
 pub mod contacts;
 pub mod files;
+pub mod group_scene;
+pub mod groups;
 pub mod history;
 pub mod hit;
 pub mod intent;
@@ -152,6 +154,7 @@ pub mod search;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod viewload;
 pub mod voice;
 pub mod zoom;
 
@@ -472,7 +475,7 @@ impl Conversation {
     /// The message after `index` that has a row of its own: reactions are
     /// drawn under their target, so they sit in no run's way.
     fn next_shown(&self, index: usize) -> Option<usize> {
-        (index + 1..self.messages.len()).find(|&i| !self.messages[i].is_reaction())
+        (index + 1..self.messages.len()).find(|&i| !self.messages[i].is_aside())
     }
 
     /// Whether the report at `index` is folded into the next one, so the
@@ -505,7 +508,7 @@ impl Conversation {
         let mut at = index;
         while let Some(before) = (0..at)
             .rev()
-            .find(|&i| !self.messages[i].is_reaction())
+            .find(|&i| !self.messages[i].is_aside())
             .filter(|&i| self.report_folded(i))
         {
             run.push(before);
@@ -531,7 +534,7 @@ impl Conversation {
             if left == 0 {
                 break;
             }
-            if message.outbound || message.is_reaction() {
+            if message.outbound || message.is_aside() {
                 continue;
             }
             left -= 1;
@@ -841,6 +844,20 @@ pub struct UiModel<B> {
     pub voice_tracks: BTreeMap<([u8; 16], u64), recording::LevelTrack>,
     /// The running position shares (1273).
     pub shares: share::Shares,
+    /// The groups the reader is in, was invited to or left (1307), learned
+    /// from the messages ([`groups`]).
+    pub groups: groups::Groups,
+    /// The group being made, while "New group" is open.
+    pub group_draft: Option<groups::Draft>,
+    /// A group's member sheet, while it is open.
+    pub group_sheet: Option<groups::Sheet>,
+    /// The groups whose state changed since the store last learned it
+    /// (1307 G2): written by [`UiModel::take_writes`].
+    groups_changed: BTreeSet<[u8; 16]>,
+    /// The language the model's own sentences from the catalogue are said
+    /// in ([`strings::StrId`]): English unless the shell knows better, as
+    /// the phone does.
+    pub lang: strings::Lang,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -938,6 +955,11 @@ impl<B: InputBuffer + Default> UiModel<B> {
             recording: recording::Recording::default(),
             voice_tracks: BTreeMap::new(),
             shares: share::Shares::default(),
+            groups: groups::Groups::new(),
+            group_draft: None,
+            group_sheet: None,
+            groups_changed: BTreeSet::new(),
+            lang: strings::Lang::En,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1341,6 +1363,16 @@ pub enum UiEvent {
     Elapsed(u64),
     /// The machine woke from suspend (`crate::sync::resumed`).
     Resumed,
+    /// The platform says the device's network is `kind` now (1298),
+    /// `changed` when it is another network than before: another WLAN,
+    /// WLAN to mobile data, back from none. Also said with `changed` off
+    /// after the phone's Doze, so the first wake re-runs the evaluation.
+    /// Asks the shell to re-evaluate its interfaces
+    /// ([`UiEffect::Network`]); nothing the screen shows changes here.
+    Network {
+        kind: crate::home::NetworkKind,
+        changed: bool,
+    },
     /// On a client of a home node: the home node said its archive grew
     /// past this device's cursor ([`crate::home::watch`]), so a pull starts,
     /// or follows the one running.
@@ -1493,6 +1525,22 @@ pub enum UiEvent {
     /// The shell's newest own fix, or none (1270): the position sheet
     /// shows it and its age.
     OwnFix(Option<leviculum_lxmf::telemetry::Location>),
+    /// A node announced its position to the mesh (1302,
+    /// [`crate::mesh_position`]): `identity` the hash of the identity the
+    /// announce proved, `fix` its position, `name` the name a shell knows
+    /// for it, if any, and `age` how many seconds ago the node heard it.
+    /// A state, not a message: it joins the peer's telemetry positions,
+    /// the newest fix winning ([`UiModel::mesh_position`]), and the store
+    /// keeps none of it.
+    MeshPosition {
+        identity: [u8; 16],
+        fix: leviculum_lxmf::telemetry::Location,
+        name: Option<String>,
+        age: u32,
+    },
+    /// The map card's "Add" on a node nearby that is no contact (1302):
+    /// its conversation opens, named by its announced name.
+    AddNearby { peer: [u8; 16] },
     /// The position sheet's "Now, once": the own fix goes to `peer` as a
     /// report.
     ShareFix { peer: [u8; 16] },
@@ -1547,6 +1595,15 @@ pub enum UiEvent {
         key: u64,
         track: recording::LevelTrack,
     },
+    /// One of the reader's verbs on groups (1307): "New group", a tick,
+    /// Next, the name, Create, Join, the member sheet, Leave, Remove.
+    Group(groups::Verb),
+    /// The home's answer to [`UiEffect::CreateGroup`]: the group's
+    /// address, or why it was not made.
+    GroupMade(Result<[u8; 16], groups::NotMade>),
+    /// The home's answer to [`UiEffect::AddMembers`] (1307 G2): the
+    /// group's address, or why nobody was added.
+    MembersAdded(Result<[u8; 16], String>),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1567,6 +1624,14 @@ pub enum MapLoad {
 /// What the shell is asked to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiEffect {
+    /// Re-evaluate the interfaces for a network change
+    /// ([`UiEvent::Network`]): every rendezvous rotation hears it
+    /// (`crate::home::rendezvous::Network`), drops a dead connection,
+    /// dials again, asks its paths, bounded and idempotent.
+    Network {
+        kind: crate::home::NetworkKind,
+        changed: bool,
+    },
     /// Send `body` to `to` the way `loquax send --via auto` does. The shell
     /// runs sends one at a time in this order and reports each with
     /// [`UiEvent::SendDone`]. `fields` go with it as they are: a reaction's
@@ -1638,6 +1703,19 @@ pub enum UiEffect {
     PlayVoice { peer: [u8; 16], key: u64 },
     /// Stop the one that plays.
     PauseVoice { peer: [u8; 16], key: u64 },
+    /// Ask the home to make the group `name` with `members`, each under
+    /// the name the reader knows it by (1307, `/group`); answered with
+    /// [`UiEvent::GroupMade`].
+    CreateGroup {
+        name: String,
+        members: Vec<([u8; 16], String)>,
+    },
+    /// Ask the home to add `members` to its group `group` (1307 G2,
+    /// `/groupadd`); answered with [`UiEvent::MembersAdded`].
+    AddMembers {
+        group: [u8; 16],
+        members: Vec<([u8; 16], String)>,
+    },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.
     Recording {
@@ -1669,10 +1747,8 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // or alone once due (1231).
     model.read_step(&mut effects);
     // Every message sent says the sender takes read receipts (1230), while
-    // the switch is on.
-    if model.reading.on {
-        receipts::mark_sends(&mut effects);
-    }
+    // the switch is on, and understands groups (1307), always.
+    receipts::mark_sends(&mut effects, groups::client_caps(model.reading.on));
     effects
 }
 
@@ -1741,6 +1817,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.set_front(front);
             Vec::new()
         }
+        UiEvent::Network { kind, changed } => vec![UiEffect::Network { kind, changed }],
         UiEvent::ReadReceipts(on) => model.set_receipts(on),
         UiEvent::SendPhoto { peer, format, data } => model.send_photo(peer, &format, data),
         UiEvent::StagePhoto { peer, format, data } => {
@@ -1763,6 +1840,16 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.bar.own_fix = fix;
             model.shares_due()
         }
+        UiEvent::MeshPosition {
+            identity,
+            fix,
+            name,
+            age,
+        } => {
+            model.mesh_position(identity, fix, name.as_deref(), age);
+            Vec::new()
+        }
+        UiEvent::AddNearby { peer } => model.add_nearby(peer),
         UiEvent::StartShare { peer, span } => model.start_share(peer, span),
         UiEvent::StopShare { peer } => model.stop_share(peer),
         UiEvent::ShareFix { peer } => model.share_fix(peer),
@@ -1795,6 +1882,9 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::Engine(event) => on_engine(model, event),
         UiEvent::Rename { peer, name } => model.rename(peer, &name),
+        UiEvent::Group(verb) => model.group_verb(verb),
+        UiEvent::GroupMade(made) => model.group_made(made),
+        UiEvent::MembersAdded(added) => model.members_added(added),
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -2459,11 +2549,16 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
     Vec::new()
 }
 
-/// A pin chosen by `Enter` or a click: that peer's conversation, opened.
+/// A pin chosen by `Enter` or a click: that peer's conversation, opened;
+/// a node nearby that is no contact is added so (1302), the card's "Add".
 fn open_pin<B: InputBuffer>(model: &mut UiModel<B>, peer: [u8; 16]) -> Vec<UiEffect> {
     if Some(peer) == model.address {
         model.toast(ToastKind::Info, "that pin is you".to_string());
         return Vec::new();
+    }
+    if model.is_nearby(&peer) {
+        model.map = None;
+        return model.add_nearby(peer);
     }
     let index = model.conversation(peer);
     model.select(index);
@@ -3442,6 +3537,72 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.ask_code(true);
             Vec::new()
         }
+        // The terminal's group flows (1307): the palette asks as `rename`
+        // does; the verbs are the scene's.
+        PaletteCommand::NewGroup => {
+            model.group_verb(groups::Verb::New);
+            model.palette = Some(Palette {
+                ask: Some(contacts::Ask::GroupPick),
+                ..Palette::default()
+            });
+            Vec::new()
+        }
+        PaletteCommand::JoinGroup => model.group_verb(groups::Verb::Join {
+            group: intent::Target::Open,
+        }),
+        PaletteCommand::Members => match model
+            .conversations
+            .get(model.selected)
+            .map(|c| c.peer)
+            .filter(|p| model.groups.contains_key(p))
+        {
+            Some(group) => {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::Members(group)),
+                    ..Palette::default()
+                });
+                Vec::new()
+            }
+            None => {
+                model.toast(ToastKind::Info, "this conversation is no group".to_string());
+                Vec::new()
+            }
+        },
+        PaletteCommand::LeaveGroup => match model
+            .conversations
+            .get(model.selected)
+            .map(|c| c.peer)
+            .filter(|p| model.groups.contains_key(p))
+        {
+            Some(group) => {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::LeaveGroup(group)),
+                    ..Palette::default()
+                });
+                Vec::new()
+            }
+            None => {
+                model.toast(ToastKind::Info, "this conversation is no group".to_string());
+                Vec::new()
+            }
+        },
+        PaletteCommand::AddMembers => {
+            let effects = model.group_verb(groups::Verb::Add {
+                group: intent::Target::Open,
+            });
+            if model.group_draft.as_ref().is_some_and(|d| d.to.is_some()) {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::GroupPick),
+                    ..Palette::default()
+                });
+            }
+            effects
+        }
+        PaletteCommand::RemoveMember => model.group_verb(groups::Verb::Remove {
+            group: intent::Target::Open,
+            member: None,
+            confirmed: false,
+        }),
         PaletteCommand::MyCode => {
             match model.own_code {
                 Some(_) => {
@@ -3615,6 +3776,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             message_id,
             last: Some(state),
         } => apply_state(model, message_id, state),
+        OutboxEvent::MeshPosition {
+            identity,
+            location,
+            name,
+        } => model.mesh_position(identity, location, name.as_deref(), 0),
         // Our own announce, echoed back, names nobody.
         OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
         OutboxEvent::Announced { destination, name } => {
@@ -3667,6 +3833,8 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             {
                 return Vec::new();
             }
+            model.learn_group(source, false, &fields);
+            let state = groups::is_state(&String::from_utf8_lossy(&body), &fields);
             let at = model.now;
             let activity = model.bump();
             let conversation = &mut model.conversations[index];
@@ -3711,6 +3879,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             model.changed.insert((peer, activity));
             let mut effects = take_telemetry(model, index, message_id);
             effects.extend(model.take_lev(source, lev.as_ref()));
+            // A group's state (1307) is kept and stored, and asks for no
+            // attention: no unread, no toast, no cursor.
+            if state {
+                return effects;
+            }
             // A reaction: kept and stored, drawn under its target, and the
             // reader told; it is no unread message and moves no cursor.
             if let Some((_, content)) = reaction {
@@ -3890,6 +4063,7 @@ impl<B> UiModel<B> {
         map::pins_of(
             &shown,
             |peer| self.names.label(peer),
+            |peer| self.is_nearby(peer),
             self.address,
             self.now.map(|now| now.unix_secs),
         )
@@ -3898,11 +4072,30 @@ impl<B> UiModel<B> {
     /// Whether `peer`'s position is alive (1209), at the model's clock
     /// ([`Conversation::liveness`]); stale for a peer without one.
     pub fn liveness(&self, peer: &[u8; 16]) -> liveness::Liveness {
-        self.conversations
+        let now = self.now.map(|now| now.unix_secs);
+        let reports = self
+            .conversations
             .iter()
             .find(|c| c.peer == *peer)
-            .map(|c| c.liveness(self.now.map(|now| now.unix_secs)))
-            .unwrap_or_default()
+            .map(|c| c.liveness(now))
+            .unwrap_or_default();
+        // A position the mesh announced (1302) that is newer than every
+        // report is the peer's newest fix: the row's pin and ring go by it,
+        // judged as one report alone, and keep the reports' cadence.
+        let announced = self
+            .positions
+            .get(peer)
+            .filter(|fix| fix.source == telemetry::Source::Mesh)
+            .map(Fix::order_time)
+            .filter(|at| reports.last_fix_at.is_none_or(|last| *at > last));
+        match announced {
+            Some(at) => liveness::Liveness {
+                state: liveness::Liveness::of(&[at], now).state,
+                cadence_s: reports.cadence_s,
+                last_fix_at: Some(at),
+            },
+            None => reports,
+        }
     }
 
     /// The fix message `m` of conversation `c` carries ([`message_fix`]).
@@ -3978,6 +4171,80 @@ impl<B> UiModel<B> {
             if newer {
                 self.positions.insert(fix.peer, fix);
             }
+        }
+    }
+
+    /// A position the mesh announced (1302): the peer is the delivery
+    /// address of the identity that announced, so it joins the peer's
+    /// telemetry positions, and the newest fix wins by [`Fix::newer_than`]
+    /// whichever way it came; [`Fix::source`] says which. The store keeps
+    /// none of it: the node announces again at its cadence, and a node
+    /// nearby that is no contact leaves no trace once it is gone.
+    pub fn mesh_position(
+        &mut self,
+        identity: [u8; 16],
+        location: leviculum_lxmf::telemetry::Location,
+        name: Option<&str>,
+        age: u32,
+    ) {
+        let peer = crate::mesh_position::delivery_of(&identity);
+        if name.is_some() {
+            self.names.heard(peer, name);
+        }
+        let fix = Fix {
+            peer,
+            via: peer,
+            message: None,
+            received_at: self
+                .now
+                .map(|now| now.unix_secs.saturating_sub(i64::from(age))),
+            location,
+            telemetry: Vec::new(),
+            source: telemetry::Source::Mesh,
+        };
+        let newer = self
+            .positions
+            .get(&peer)
+            .is_none_or(|held| fix.newer_than(held));
+        if newer {
+            self.positions.insert(peer, fix);
+        }
+    }
+
+    /// Whether `peer` is one of the reader's people: ourselves, a peer
+    /// with a conversation, or one the reader named or linked. A node the
+    /// mesh shows on the map and is none of these is nearby (1302).
+    pub fn is_contact(&self, peer: &[u8; 16]) -> bool {
+        self.address == Some(*peer)
+            || self.conversations.iter().any(|c| c.peer == *peer)
+            || self.names.trust(peer) != Trust::Unknown
+    }
+
+    /// Whether `peer`'s pin is a node nearby (1302): its position came
+    /// from the mesh, and it is none of the reader's people. A peer known
+    /// from a collector's stream keeps the pin it had.
+    pub fn is_nearby(&self, peer: &[u8; 16]) -> bool {
+        self.positions
+            .get(peer)
+            .is_some_and(|fix| fix.source == telemetry::Source::Mesh)
+            && !self.is_contact(peer)
+    }
+
+    /// The card's "Add" on a node nearby (1302): its conversation is
+    /// listed and opened as a friend's code opens it (1263), and the name
+    /// it announced becomes the reader's name for it, so it stays a
+    /// contact by name whatever the mesh says next.
+    pub(crate) fn add_nearby(&mut self, peer: [u8; 16]) -> Vec<UiEffect> {
+        if self.address == Some(peer) {
+            return Vec::new();
+        }
+        self.show_blocked = false;
+        let index = self.conversation(peer);
+        self.select(index);
+        self.focus = Pane::Compose;
+        match self.names.announced(&peer).map(str::to_string) {
+            Some(name) if self.names.petname(&peer).is_none() => self.rename(peer, &name),
+            _ => Vec::new(),
         }
     }
 }
@@ -4096,6 +4363,7 @@ fn home_sent<B>(
         unix_secs: sent_at,
         ..now
     });
+    model.learn_group(destination, true, &fields);
     let mut message = Message::ours(String::from_utf8_lossy(&body).into_owned(), at);
     message.id = Some(message_id);
     message.delivery = Some(DeliveryState::Sent);
@@ -4121,6 +4389,17 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
         return match result {
             Ok(()) => Vec::new(),
             Err(detail) => vec![UiEffect::Log(format!("RECEIPT not sent: {detail}"))],
+        };
+    }
+    // Nor has a group's state (1307), but the reader asked for it: a
+    // failure is said.
+    if c == groups::STATE_SEND {
+        return match result {
+            Ok(()) => pull_after_send(model),
+            Err(detail) => {
+                model.toast(ToastKind::Error, NOT_SENT.to_string());
+                vec![UiEffect::Notice(format!("group: {detail}"))]
+            }
         };
     }
     if let Some(message) = model.message_mut(c, m) {
@@ -4152,7 +4431,7 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
     let Some((c, m)) = model.sending.pop_front() else {
         return Vec::new();
     };
-    if c == receipts::RECEIPT_SEND {
+    if c == receipts::RECEIPT_SEND || c == groups::STATE_SEND {
         return Vec::new();
     }
     let now = model.now;
@@ -4792,9 +5071,26 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         .filter(|&until| model.tick < until)
         .and_then(|_| model.map_setup.drawings.get(model.map_setup.drawing))
         .map_or(String::new(), |d| format!("{} · ", d.name));
+    // The selected pin's card (1302): a node nearby that is no contact
+    // says so, and how to add it.
+    let card = model
+        .map
+        .as_ref()
+        .and_then(|state| state.selected)
+        .filter(|peer| {
+            map.as_ref()
+                .is_some_and(|m| m.pins.iter().any(|p| p.peer == *peer && p.nearby))
+        })
+        .map_or(String::new(), |_| {
+            format!(
+                " · {} · {}",
+                strings::StrId::NearbyCard.text(strings::Lang::En),
+                strings::StrId::NearbyEnterAdds.text(strings::Lang::En)
+            )
+        });
     let (messages_title, messages_title_right) = match &map {
         Some(shown) => (
-            MAP_TITLE.to_string(),
+            format!("{MAP_TITLE}{card}"),
             match &model.map_loading {
                 Some(word) => format!(
                     "{named}z{} · {} in view · {word}",
@@ -5076,13 +5372,22 @@ pub fn help_groups() -> Vec<HelpGroup> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// `fields` as the model sends them: with the read-receipt mark (1230).
+    /// The mark every send of a Loquax with receipts on carries: bit 0
+    /// and, since 1307, bit 1.
     fn marked(mut fields: Vec<leviculum_lxmf::Field>) -> Vec<leviculum_lxmf::Field> {
-        leviculum_lxmf::lev::Lev::mark().put_into(&mut fields);
+        caps(groups::client_caps(true)).put_into(&mut fields);
         fields
+    }
+
+    fn caps(capabilities: u64) -> leviculum_lxmf::lev::Lev {
+        leviculum_lxmf::lev::Lev {
+            capabilities: Some(capabilities),
+            ..leviculum_lxmf::lev::Lev::default()
+        }
     }
 
     /// A minimal field for the model's tests: insert and backspace at the
@@ -5090,7 +5395,7 @@ mod tests {
     /// places, which the next edit puts back at the end. The terminal's
     /// field is `tui_input::Input`.
     #[derive(Default, Clone, Debug)]
-    pub(super) struct Field(String, Option<usize>);
+    pub(crate) struct Field(String, Option<usize>);
 
     impl InputBuffer for Field {
         fn value(&self) -> &str {
@@ -5612,9 +5917,9 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: Vec::new(),
+                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
             }],
-            "the switch off sends no mark"
+            "the switch off sends no receipt bit, the groups bit still (1307)"
         );
     }
 
@@ -5623,7 +5928,7 @@ mod tests {
     /// it is asks nothing; a message written while off carries no mark,
     /// one written after it is on again does.
     #[test]
-    fn the_switch_round_trips_and_a_message_sent_while_off_carries_no_mark() {
+    fn the_switch_round_trips_and_a_message_sent_while_off_carries_no_receipt_bit() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         assert!(model.reading.on, "on by default");
         let write = |model: &mut UiModel<Field>| {
@@ -5650,9 +5955,9 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: Vec::new(),
+                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
             }],
-            "off: no mark"
+            "off: no receipt bit, the groups bit still (1307)"
         );
         assert_eq!(
             update(&mut model, UiEvent::ReadReceipts(true)),
@@ -5917,7 +6222,7 @@ mod tests {
         assert!(!receipts(&model), "the latest message decides");
         let off = Lev {
             capabilities: Some(0),
-            receipt: None,
+            ..Lev::default()
         };
         engine(&mut model, with_lev(PEER, [4; 32], "turned off", &off));
         assert!(!receipts(&model));
@@ -5927,6 +6232,7 @@ mod tests {
                 read_at: 1,
                 ids: Vec::new(),
             }),
+            ..Lev::default()
         };
         engine(&mut model, with_lev(PEER, [5; 32], "", &bare));
         assert!(receipts(&model), "a receipt proves it");
@@ -8953,6 +9259,7 @@ mod tests {
             messages,
             earlier,
             draft: history::Draft::default(),
+            group: None,
         }
     }
 
@@ -9699,11 +10006,169 @@ mod tests {
             received_at: Some(t),
             location: fix_at(lat, 0, t).location.expect("a location"),
             telemetry: Vec::new(),
+            source: crate::telemetry::Source::Telemetry,
         };
         model.restore_positions(vec![fix(2, 200), fix(1, 100)]);
         assert_eq!(model.positions[&PEER].location.latitude_e6, 2);
         model.delete_conversation(PEER, true);
         assert!(model.positions.is_empty());
+    }
+
+    /// A node's `lev.position` announce at `lat`, fixed `ago` seconds
+    /// before 14:00, heard `age` seconds ago (1302).
+    fn mesh_fix(identity: [u8; 16], lat: i32, ago: i64, age: u32) -> UiEvent {
+        UiEvent::MeshPosition {
+            identity,
+            fix: fix_at(lat, 11_260_000, two_pm() - ago)
+                .location
+                .expect("a location"),
+            name: None,
+            age,
+        }
+    }
+
+    /// 1302, the merge rule: an announced position joins the telemetry
+    /// positions of the identity's delivery address, the newest fix wins
+    /// whichever way it came, and the fix remembers how it came. The store
+    /// is handed none of the announced ones.
+    #[test]
+    fn an_announced_position_merges_with_telemetry_by_identity_the_newest_winning() {
+        const ANNA: [u8; 16] = [0x33; 16];
+        let peer = crate::mesh_position::delivery_of(&ANNA);
+        let mut model = UiModel::<Field>::new(&[peer]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            peer,
+            1,
+            "",
+            report_of(&fix_at(1_000_000, 11_260_000, two_pm() - 240)),
+        );
+        let _ = model.take_writes();
+        // Older than the report: the report stays.
+        update(&mut model, mesh_fix(ANNA, 2_000_000, 600, 0));
+        assert_eq!(model.positions[&peer].location.latitude_e6, 1_000_000);
+        assert_eq!(model.positions[&peer].source, telemetry::Source::Telemetry);
+        // Newer: the announce wins, and says so.
+        update(&mut model, mesh_fix(ANNA, 3_000_000, 60, 0));
+        assert_eq!(model.positions[&peer].location.latitude_e6, 3_000_000);
+        assert_eq!(model.positions[&peer].source, telemetry::Source::Mesh);
+        assert_eq!(model.positions[&peer].received_at, Some(two_pm()));
+        // Heard a while ago: received then, not now.
+        update(&mut model, mesh_fix(ANNA, 3_000_001, 30, 20));
+        assert_eq!(model.positions[&peer].received_at, Some(two_pm() - 20));
+        let positions = model
+            .take_writes()
+            .iter()
+            .filter(|w| matches!(w, StoreWrite::Position(_)))
+            .count();
+        assert_eq!(positions, 0, "the store keeps no announced position");
+        // A newer report wins back.
+        arrive(
+            &mut model,
+            peer,
+            2,
+            "",
+            report_of(&fix_at(4_000_000, 11_260_000, two_pm() - 5)),
+        );
+        assert_eq!(model.positions[&peer].location.latitude_e6, 4_000_000);
+        assert_eq!(model.positions[&peer].source, telemetry::Source::Telemetry);
+        // The same fix through the engine's seam.
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::MeshPosition {
+                identity: ANNA,
+                location: fix_at(5_000_000, 0, two_pm()).location.expect("a location"),
+                name: None,
+            }),
+        );
+        assert_eq!(model.positions[&peer].location.latitude_e6, 5_000_000);
+    }
+
+    /// 1302: an announced position newer than every report is the row's
+    /// newest fix, so the list's pin (1224) and the ring see it; an older
+    /// one changes nothing.
+    #[test]
+    fn an_announced_position_is_the_rows_newest_fix() {
+        const ANNA: [u8; 16] = [0x33; 16];
+        let peer = crate::mesh_position::delivery_of(&ANNA);
+        let mut model = UiModel::<Field>::new(&[peer]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            peer,
+            1,
+            "",
+            report_of(&fix_at(1_000_000, 11_260_000, two_pm() - 3 * 3600)),
+        );
+        assert_eq!(model.liveness(&peer).state, liveness::State::Recent);
+        update(&mut model, mesh_fix(ANNA, 2_000_000, 4 * 3600, 0));
+        assert_eq!(
+            model.liveness(&peer).last_fix_at,
+            Some(two_pm() - 3 * 3600),
+            "an older announce is no newer fix"
+        );
+        update(&mut model, mesh_fix(ANNA, 2_000_000, 120, 0));
+        let l = model.liveness(&peer);
+        assert_eq!(l.last_fix_at, Some(two_pm() - 120));
+        assert_eq!(l.state, liveness::State::Live);
+        let row = chat::list_row(&model, &peer);
+        assert!(
+            scene::PositionBadge::of(&peer, &row.name, &row.liveness, Some(two_pm())).is_some(),
+            "the row carries its map pin"
+        );
+    }
+
+    /// 1302: a node the mesh shows that is no contact is a pin with its
+    /// announced name, marked nearby; the map's title is its card while it
+    /// is selected, and Enter adds it: its conversation opens, named by its
+    /// announce, and its pin is a friend's from then on. A contact's pin
+    /// and our own are never nearby.
+    #[test]
+    fn a_node_nearby_is_a_neutral_pin_with_a_card_and_enter_adds_it() {
+        const STRANGER: [u8; 16] = [0x44; 16];
+        let peer = crate::mesh_position::delivery_of(&STRANGER);
+        let mut model = mapped();
+        update(
+            &mut model,
+            UiEvent::MeshPosition {
+                identity: STRANGER,
+                fix: fix_at(43_775_500, 11_263_000, two_pm() - 120)
+                    .location
+                    .expect("a location"),
+                name: Some("Wanderer".to_string()),
+                age: 0,
+            },
+        );
+        let pins = model.map_pins();
+        let nearby: Vec<&map::MapPin> = pins.iter().filter(|p| p.nearby).collect();
+        assert_eq!(nearby.len(), 1, "{pins:?}");
+        assert_eq!(nearby[0].peer, peer);
+        assert!(
+            nearby[0].label.starts_with("Wanderer "),
+            "{}",
+            nearby[0].label
+        );
+        assert!(
+            pins.iter().filter(|p| p.peer != peer).all(|p| !p.nearby),
+            "bob, Alice and we are not nearby: {pins:?}"
+        );
+        update(&mut model, key(KeyCode::Char('M')));
+        let shown = model.map_view().expect("open");
+        assert!(shown.pins.iter().any(|p| p.peer == peer && p.nearby));
+        while model.map.and_then(|m| m.selected) != Some(peer) {
+            update(&mut model, key(KeyCode::Tab));
+        }
+        assert_eq!(
+            view(&model).messages_title,
+            "map · Nearby, not in your contacts · Enter adds"
+        );
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_none(), "the map gives way to the chat");
+        assert_eq!(model.conversations[model.selected].peer, peer);
+        assert_eq!(model.names.petname(&peer), Some("Wanderer"));
+        assert!(model.is_contact(&peer));
+        assert!(model.map_pins().iter().all(|p| !p.nearby));
     }
 
     /// The Florence fixture's header, z11 to z15: the region the map
@@ -9733,6 +10198,7 @@ mod tests {
                 .location
                 .expect("a location"),
             telemetry: Vec::new(),
+            source: crate::telemetry::Source::Telemetry,
         };
         model.restore_positions(vec![
             fix(PEER, 43_775_000, 11_261_000, 240),

@@ -11,7 +11,18 @@
     <string name="new_conversation">Neue Unterhaltung</string>
     <string name="paste">Einfügen</string>
     <string name="open">Öffnen</string>
-    <string name="refresh">Aktualisieren</string>
+    <string name="pulling">Suche nach Nachrichten…</string>
+    <string name="reconnecting">Verbinde neu…</string>
+    <plurals name="pulled">
+        <item quantity="one">%1$d neue Nachricht.</item>
+        <item quantity="other">%1$d neue Nachrichten.</item>
+    </plurals>
+    <string name="pulled_nothing">Keine neuen Nachrichten.</string>
+    <string name="pull_failed">Suche nach Nachrichten fehlgeschlagen, neuer Versuch läuft</string>
+    <string name="battery_title">Im Hintergrund verbunden bleiben?</string>
+    <string name="battery_text">Loquax hält eine Verbindung zu deinem Postfach, damit neue Nachrichten ankommen, während die App geschlossen ist. Androids Akku-Optimierung kann diese Verbindung trennen, wenn das Telefon still liegt. Erlauben nimmt Loquax davon aus; das lässt sich später in den Systemeinstellungen ändern.</string>
+    <string name="battery_yes">Erlauben</string>
+    <string name="battery_no">Nicht jetzt</string>
     <string name="map_loading">Die Karte dieser Gegend lädt…</string>
     <string name="map_offline">Offline</string>
     <string name="map_no_map">Hier gibt es noch keine Karte</string>
@@ -98,12 +109,12 @@
     <string name="share">Teilen</string>
     <string name="share_text">Als Text teilen</string>
     <string name="nickname">Spitzname</string>
-    <string name="nickname_none">Keiner; der Name, den der Kontakt meldet</string>
+    <string name="nickname_none">Keiner; der Name, den sie gewählt haben</string>
     <string name="sounds">Töne &amp; Benachrichtigungen</string>
     <string name="phone_contact">Telefonkontakt-Details</string>
     <string name="phone_contact_none">Mit keinem Kontakt verknüpft</string>
     <string name="identity">Identität</string>
-    <string name="identity_why">Vergleiche diese Adresse persönlich, oder lass das andere Telefon den Code scannen. Die Adresse ist ein Hash des öffentlichen Schlüssels der Identität: stimmt sie überein, ist es derselbe Schlüssel.</string>
+    <string name="identity_why">Vergleiche diese Adresse persönlich, oder lass das andere Telefon den Code scannen. Zeigen beide dasselbe, schreibst du der richtigen Person.</string>
     <string name="address_copied">Adresse kopiert</string>
     <string name="mark_verified">Als verifiziert markieren</string>
     <string name="clear_verified">Verifizierung aufheben</string>
@@ -113,7 +124,7 @@
     <string name="last_to_them">Letzte Nachricht an sie</string>
     <string name="never">noch keine</string>
     <string name="path">Pfad</string>
-    <string name="path_home">kennt dein Postfach, das für dieses Telefon routet</string>
+    <string name="path_home">dein Postfach findet den Weg für dieses Telefon</string>
     <string name="positions">Positionen</string>
     <string name="block">Blockieren</string>
     <string name="unblock">Blockierung aufheben</string>
@@ -181,8 +192,8 @@
     <string name="mailbox_here">Dein Postfach ist auf diesem Telefon.</string>
     <string name="mailbox_away">Dein Postfach ist auf einem anderen Gerät; dieses Telefon liest es.</string>
     <string name="advanced">Erweitert</string>
-    <string name="propagation_node">Propagation Node</string>
-    <string name="propagation_node_text">Solange dein Postfach offline ist, wartet Post für dich bei einem Propagation Node im Netz, den Loquax selbst wählt.</string>
+    <string name="propagation_node">Relais</string>
+    <string name="propagation_node_text">Solange dein Postfach offline ist, wartet Post für dich bei einem Relais im Netz, das Loquax selbst wählt.</string>
     <string name="here_running">Dein Postfach läuft auf diesem Telefon</string>
     <string name="here_running_unread">Dein Postfach läuft auf diesem Telefon, %1$d ungelesen</string>
     <string name="connecting">Nicht verbunden, neuer Versuch läuft</string>
@@ -209,12 +220,11 @@
     <string name="settings_chats_summary">Fotogröße</string>
     <string name="settings_privacy">Privatsphäre</string>
     <string name="settings_privacy_summary">Lesebestätigungen, blockierte Kontakte, geteilte Positionen</string>
-    <string name="settings_maps">Karten</string>
     <string name="settings_maps_summary">Karten auf diesem Telefon, automatisch laden</string>
     <string name="settings_backup">Sicherung</string>
     <string name="settings_backup_summary">Das Postfach sichern</string>
     <string name="settings_backup_away">Dein Postfach ist auf einem anderen Gerät. Sichere es dort.</string>
-    <string name="settings_advanced_summary">Propagation Node, Nachgleiten, Dienst beenden</string>
+    <string name="settings_advanced_summary">Relais, Nachgleiten, Dienst beenden</string>
     <string name="settings_map_theme">Karte</string>
     <string name="map_theme_auto">Wie das Telefon</string>
     <string name="map_theme_light">Hell</string>
@@ -242,7 +252,6 @@
     <string name="map_fling_text">Nach einem Wisch gleitet die Karte weiter und wird langsamer, wenn dein Finger loslässt.</string>
     <string name="maps_auto">Karten automatisch laden</string>
     <string name="maps_auto_text">Die Karte der Gegend, die du anschaust, lädt von selbst und bleibt auf dem Telefon.</string>
-    <string name="maps_used">Belegter Speicher: %1$s</string>
     <string name="maps_none">Noch keine Karten auf diesem Telefon.</string>
     <string name="maps_region">Um %1$s</string>
     <string name="maps_region_line">%1$s · %2$s · Zoom %3$d bis %4$d</string>
@@ -275,6 +284,20 @@
     <string name="link_share">Code teilen</string>
     <string name="join_existing">Einem bestehenden Postfach beitreten</string>
     <string name="join_existing_text">Tippe auf dem Handy mit deinem Postfach auf dein Bild, dann auf „Gerät verbinden“. Scanne den Code, den es zeigt, hier oder füge ihn ein.</string>
+    <!-- Auf ein neues Handy umziehen (1281). -->
+    <string name="profile_move_phone">Auf ein neues Handy umziehen</string>
+    <string name="move_title">Auf ein neues Handy umziehen</string>
+    <string name="move_text">Installiere Loquax auf deinem neuen Handy, wähle „Von meinem alten Handy umziehen“ und scanne diesen Code. Deine Adresse, deine Kontakte und deine Nachrichten ziehen mit um, und dieses Handy hört dann auf.</string>
+    <string name="move_waiting">Warte auf das neue Handy…</string>
+    <string name="move_moved">Umgezogen auf %1$s. Dieses Handy hat aufgehört.</string>
+    <string name="move_from_old">Von meinem alten Handy umziehen</string>
+    <string name="move_from_old_text">Tippe auf deinem alten Handy auf dein Bild, dann auf „Auf ein neues Handy umziehen“. Scanne den Code, den es zeigt, hier oder füge ihn ein.</string>
+    <string name="move_go">Umziehen</string>
+    <string name="moved_title">Dieses Handy ist umgezogen</string>
+    <string name="take_back">Dieses Handy wieder verwenden</string>
+    <string name="take_back_warning">Dein Postfach läuft auf deinem neuen Handy. Verwendet dieses Handy es auch wieder, verlieren beide Nachrichten. Tu das nur, wenn das neue Handy weg ist.</string>
+    <string name="restore_live_title">Diese Adresse ist in Betrieb</string>
+    <string name="restore_anyway">Trotzdem wiederherstellen</string>
     <string name="profile_identity">Identitäts-Hash</string>
     <string name="profile_home_node">Heimknoten</string>
     <string name="profile_rendezvous">Treffpunkt (● verbunden)</string>

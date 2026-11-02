@@ -9,6 +9,7 @@ members = [
     "leviculum-map-tool",
     "leviculum-ui",
     "leviculum-ui-ratatui",
+    "leviculum-ui-iced",
     "lnomad",
     "lblogd",
     "leviculum-lxmf",

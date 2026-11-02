@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// A running server; it stops when dropped.
 pub struct Serve {
@@ -24,7 +25,21 @@ struct Shared {
     /// Answer every request with `503`, for a source that fails.
     failing: AtomicBool,
     stop: AtomicBool,
+    /// A slow link (1291): bytes a second all answers share, 0 for none,
+    /// and the wait before each answer's first byte.
+    link: Mutex<Link>,
 }
+
+#[derive(Default)]
+struct Link {
+    rate: u64,
+    latency: Duration,
+    /// When the link is free for the next chunk.
+    free: Option<Instant>,
+}
+
+/// The bytes a throttled answer sends at once.
+const CHUNK: usize = 16 * 1024;
 
 impl Serve {
     /// Serve `files` (path without the leading slash, bytes) on a port of
@@ -37,6 +52,7 @@ impl Serve {
             requests: AtomicUsize::new(0),
             failing: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            link: Mutex::new(Link::default()),
         });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -77,6 +93,51 @@ impl Serve {
     pub fn fail(&self, failing: bool) {
         self.shared.failing.store(failing, Ordering::SeqCst);
     }
+
+    /// Send at most `rate` bytes a second over every connection together,
+    /// each answer's first byte `latency` after its request: a slow link,
+    /// for the tests and the measurement of a region arriving (1291). A
+    /// rate of 0 sends at full speed again.
+    pub fn throttle(&self, rate: u64, latency: Duration) {
+        let mut link = self
+            .shared
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *link = Link {
+            rate,
+            latency,
+            free: None,
+        };
+    }
+}
+
+/// Write `body` to `stream` at the link's rate.
+fn send(shared: &Shared, stream: &mut TcpStream, body: &[u8]) -> std::io::Result<()> {
+    let (rate, latency) = {
+        let link = shared.link.lock().unwrap_or_else(PoisonError::into_inner);
+        (link.rate, link.latency)
+    };
+    std::thread::sleep(latency);
+    if rate == 0 {
+        return stream.write_all(body);
+    }
+    for chunk in body.chunks(CHUNK) {
+        // Book the chunk's time on the shared link, then wait for it.
+        let start = {
+            let mut link = shared.link.lock().unwrap_or_else(PoisonError::into_inner);
+            let now = Instant::now();
+            let start = link.free.map_or(now, |f| f.max(now));
+            let takes = Duration::from_secs_f64(chunk.len() as f64 / link.rate.max(1) as f64);
+            link.free = Some(start + takes);
+            start + takes
+        };
+        if let Some(wait) = start.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        stream.write_all(chunk)?;
+    }
+    Ok(())
 }
 
 impl Drop for Serve {
@@ -146,7 +207,7 @@ fn answer(shared: &Shared, mut stream: TcpStream) -> std::io::Result<()> {
                 "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{len}\r\nConnection: close\r\n\r\n",
                 body.len()
             )?;
-            stream.write_all(body)
+            send(shared, &mut stream, body)
         }
         Some(_) => write!(
             stream,
@@ -157,7 +218,7 @@ fn answer(shared: &Shared, mut stream: TcpStream) -> std::io::Result<()> {
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
             )?;
-            stream.write_all(&file)
+            send(shared, &mut stream, &file)
         }
     }
 }

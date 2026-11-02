@@ -38,6 +38,8 @@ fn fast() -> Timing {
         return_max_ms: 6_000,
         up_look_ms: 300,
         dial_look_ms: 100,
+        network_settle_ms: 300,
+        network_settle_max_ms: 1_500,
     }
 }
 
@@ -136,6 +138,7 @@ impl Mailbox {
                 fetch_budget: Duration::from_secs(10),
                 wake: true,
                 stop: Some(stopped),
+                network: Default::default(),
             },
         ));
         Self {
@@ -189,6 +192,7 @@ impl Phone {
                 display_name: Vec::new(),
                 notices: loquax::effects::Terminal::new(std::env::temp_dir()),
                 tcp: Default::default(),
+                network: Default::default(),
             },
             Role::Client { address },
         )
@@ -643,4 +647,256 @@ async fn four_steps_again(phone: &Phone, mailbox: &Mailbox) {
     assert!(!pulled.entries.is_empty(), "{pulled:?}");
     drop(events);
     watching.abort();
+}
+
+// ---------------------------------------------------------------------------
+// A network change (1298): the platform's word, `UiEffect::Network`, reaches
+// the rotation through `loquax::home::rendezvous::Network`. The servers here
+// are fakes, bare TCP listeners that only count who connects and when a
+// connection ends, so the dial order and the bound are what the test sees.
+
+/// What the fakes saw, in order: `A+` a connection to A, `A-` its end.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A rendezvous that answers TCP and nothing else.
+struct Fake {
+    name: &'static str,
+    addr: SocketAddr,
+    seen: Seen,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Fake {
+    async fn start(name: &'static str, seen: &Seen) -> Self {
+        let mut fake = Self {
+            name,
+            addr: "127.0.0.1:0".parse().expect("an address"),
+            seen: std::sync::Arc::clone(seen),
+            task: None,
+        };
+        fake.up().await;
+        fake
+    }
+
+    /// Listen again, on the port it had.
+    async fn up(&mut self) {
+        let listener = tokio::net::TcpListener::bind(self.addr)
+            .await
+            .expect("the fake's port");
+        self.addr = listener.local_addr().expect("the fake's address");
+        let (name, seen) = (self.name, std::sync::Arc::clone(&self.seen));
+        self.task = Some(tokio::spawn(async move {
+            let mut held = tokio::task::JoinSet::new();
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                seen.lock().expect("seen").push(format!("{name}+"));
+                let seen = std::sync::Arc::clone(&seen);
+                // Dropped with the set when the fake goes down, which ends
+                // the connection from this side.
+                held.spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = [0u8; 512];
+                    while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+                    seen.lock().expect("seen").push(format!("{name}-"));
+                });
+            }
+        }));
+    }
+
+    /// Stop listening and end every connection.
+    async fn down(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+fn seen(seen: &Seen) -> Vec<String> {
+    seen.lock().expect("seen").clone()
+}
+
+/// How many connections `name` took so far.
+fn dials(seen: &Seen, name: &str) -> usize {
+    let plus = format!("{name}+");
+    self::seen(seen).iter().filter(|s| **s == plus).count()
+}
+
+/// A leaf over `servers` that hears `network`.
+async fn leaf(
+    servers: Vec<String>,
+    timing: Timing,
+    network: loquax::home::rendezvous::Network,
+) -> (tempfile::TempDir, Attached) {
+    let dir = tempfile::tempdir().expect("phone dir");
+    let storage = dir.path().join("storage");
+    std::fs::create_dir_all(&storage).expect("storage");
+    let attached = attach_leaf(
+        LeafConfig {
+            servers,
+            home_destination: Some([0x6c; 16]),
+            timing,
+            storage_dir: storage,
+            identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
+            display_name: Vec::new(),
+            notices: loquax::effects::Terminal::new(std::env::temp_dir()),
+            tcp: Default::default(),
+            network,
+        },
+        Role::Client {
+            address: [0x6d; 16],
+        },
+    )
+    .await
+    .expect("the leaf");
+    (dir, attached)
+}
+
+/// Nothing new in `seen` for `ms`: what a bound or a pause promises.
+async fn quiet_for(seen_now: &Seen, ms: u64, what: &str) {
+    let before = seen(seen_now);
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+    assert_eq!(seen(seen_now), before, "{what}");
+}
+
+/// The five changes of the order, time compressed, against two fakes A
+/// and B: each one that asks for it drops the connection and dials the
+/// first entry at once, a burst is one dial, no network dials nothing,
+/// and the same network with the connection up keeps it. The return to
+/// A after a failover is set far out, so a dial of A in the fifth change
+/// can only be the evaluation's.
+#[tokio::test(flavor = "multi_thread")]
+async fn network_changes_redial_the_first_entry_once_each() {
+    logs();
+    let log: Seen = Seen::default();
+    let mut a = Fake::start("A", &log).await;
+    let b = Fake::start("B", &log).await;
+    let timing = Timing {
+        return_first_ms: 600_000,
+        return_max_ms: 600_000,
+        ..fast()
+    };
+    let network = loquax::home::rendezvous::Network::new();
+    let (_dir, phone) = leaf(vec![entry(a.addr), entry(b.addr)], timing, network.clone()).await;
+    let entry_a = entry(a.addr);
+    let entry_b = entry(b.addr);
+    let up_on = |want: &str| active(&phone).as_deref() == Some(want);
+    wait_until("the first dial is up on A", 10, || up_on(&entry_a)).await;
+    assert_eq!(seen(&log), ["A+"]);
+    assert!(!network.reconnecting());
+
+    // 1. WLAN off and on: no network drops A and dials nothing, the
+    //    WLAN back dials A once.
+    network.say(loquax::home::NetworkKind::None, true);
+    wait_until("no network drops A", 5, || seen(&log).len() == 2).await;
+    assert_eq!(seen(&log), ["A+", "A-"]);
+    assert!(network.reconnecting(), "the line says Reconnecting");
+    quiet_for(&log, 1_500, "no network dials nothing").await;
+    network.say(loquax::home::NetworkKind::Wifi, true);
+    wait_until("the WLAN back dials A", 5, || up_on(&entry_a)).await;
+    assert_eq!(seen(&log), ["A+", "A-", "A+"]);
+    wait_until("the line is gone", 5, || !network.reconnecting()).await;
+
+    // 2. WLAN to mobile data: the platform says lost and available, a
+    //    WLAN at the edge of its reach comes and goes once more, then
+    //    mobile data and its capabilities, all within the settle; one
+    //    drop and one dial of A for all of it. Each word on its own would
+    //    have dropped and dialled A twice more.
+    for (kind, changed) in [
+        (loquax::home::NetworkKind::None, true),
+        (loquax::home::NetworkKind::Wifi, true),
+        (loquax::home::NetworkKind::None, true),
+        (loquax::home::NetworkKind::Mobile, true),
+        (loquax::home::NetworkKind::Mobile, false),
+    ] {
+        network.say(kind, changed);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    wait_until("mobile data dials A", 5, || dials(&log, "A") == 3).await;
+    wait_until("up on A", 5, || up_on(&entry_a)).await;
+    quiet_for(&log, 1_500, "the burst was one dial").await;
+    assert_eq!(seen(&log), ["A+", "A-", "A+", "A-", "A+"]);
+
+    // 3. Flight mode for "two minutes" (two seconds here): nothing is
+    //    dialled while it lasts, one dial when it ends.
+    network.say(loquax::home::NetworkKind::None, true);
+    wait_until("flight mode drops A", 5, || seen(&log).len() == 6).await;
+    quiet_for(&log, 2_000, "flight mode dials nothing").await;
+    network.say(loquax::home::NetworkKind::Mobile, true);
+    wait_until("the end of flight mode dials A", 5, || up_on(&entry_a)).await;
+    assert_eq!(dials(&log, "A"), 4);
+
+    // 4. A new WLAN with another subnet: the connection of the old one is
+    //    dropped and A dialled anew, though it looked up.
+    network.say(loquax::home::NetworkKind::Wifi, true);
+    wait_until("the new WLAN dials A", 5, || dials(&log, "A") == 5).await;
+    wait_until("up on A", 5, || up_on(&entry_a)).await;
+    assert_eq!(
+        seen(&log),
+        ["A+", "A-", "A+", "A-", "A+", "A-", "A+", "A-", "A+"]
+    );
+
+    // 5. Asleep, and the same network back: with the connection up it is
+    //    kept (no dial, no drop), however often it is said.
+    for _ in 0..3 {
+        network.say(loquax::home::NetworkKind::Wifi, false);
+    }
+    quiet_for(&log, 1_500, "the same network with A up keeps A").await;
+    assert!(up_on(&entry_a));
+    assert!(!network.reconnecting());
+
+    // The order: A gone, the rotation fails over to B. A answers again,
+    // and a change dials the first entry, A, not the B that carries it.
+    a.down().await;
+    wait_until("the failover to B", 15, || up_on(&entry_b)).await;
+    a.up().await;
+    let before = seen(&log).len();
+    network.say(loquax::home::NetworkKind::Wifi, true);
+    wait_until("the change dials A first", 5, || up_on(&entry_a)).await;
+    let after: Vec<String> = seen(&log)[before..].to_vec();
+    assert_eq!(after.first().map(String::as_str), Some("B-"), "{after:?}");
+    assert!(after.contains(&"A+".to_string()), "{after:?}");
+    assert!(!after.contains(&"B+".to_string()), "{after:?}");
+
+    phone.stop().await;
+    a.down().await;
+    let mut b = b;
+    b.down().await;
+}
+
+/// The first wake after Doze: the same network, the connection down and a
+/// long backoff running. The evaluation cuts the backoff short and dials
+/// the first entry at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wake_after_doze_cuts_the_backoff_short() {
+    logs();
+    let log: Seen = Seen::default();
+    let mut a = Fake::start("A", &log).await;
+    let timing = Timing {
+        backoff_first_ms: 60_000,
+        backoff_max_ms: 60_000,
+        ..fast()
+    };
+    let network = loquax::home::rendezvous::Network::new();
+    let (_dir, phone) = leaf(vec![entry(a.addr)], timing, network.clone()).await;
+    let entry_a = entry(a.addr);
+    let up_on = |want: &str| active(&phone).as_deref() == Some(want);
+    wait_until("up on A", 10, || up_on(&entry_a)).await;
+    // Asleep: the connection died and the rotation waits out a minute.
+    a.down().await;
+    wait_until("A is down", 10, || active(&phone).is_none()).await;
+    tokio::time::sleep(Duration::from_millis(
+        fast().dial_grace_ms + fast().dial_look_ms * 3,
+    ))
+    .await;
+    a.up().await;
+    quiet_for(&log, 1_000, "the backoff holds the dial").await;
+    let dialled = dials(&log, "A");
+    network.say(loquax::home::NetworkKind::Wifi, false);
+    wait_until("the wake dials A at once", 5, || up_on(&entry_a)).await;
+    assert_eq!(dials(&log, "A"), dialled + 1, "{:?}", seen(&log));
+    phone.stop().await;
+    a.down().await;
 }

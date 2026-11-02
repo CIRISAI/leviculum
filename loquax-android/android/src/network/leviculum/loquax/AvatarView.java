@@ -53,11 +53,12 @@ public class AvatarView extends View {
 
     /** Show the peer `peer` (hex) as `row` of the facade describes it. */
     void show(String peer, Map<String, Object> row) {
-        initials = Core.str(row, "initials");
+        boolean nearby = Core.bool(row, "nearby");
+        initials = nearby ? "" : Core.str(row, "initials");
         int[] colours = colours(peer, row);
         circle.setColor(colours[0]);
         letters.setColor(colours[1]);
-        photo = photo(Core.str(row, "photo"));
+        photo = nearby ? null : photo(Core.str(row, "photo"));
         liveRing = ring(getContext(), row);
         setContentDescription(Core.str(row, "name"));
         invalidate();
@@ -76,6 +77,12 @@ public class AvatarView extends View {
         }
     }
 
+    /**
+     * A node nearby that is no contact (1302): a neutral grey circle, no
+     * letters and no photo, so it never looks like a friend.
+     */
+    static final int NEARBY = 0xFF9E9E9E;
+
     /** The ring's width as a share of the avatar's side: thin. */
     static final float RING = 0.06f;
 
@@ -85,6 +92,9 @@ public class AvatarView extends View {
      * with white letters.
      */
     static int[] colours(String peer, Map<String, Object> row) {
+        if (Core.bool(row, "nearby")) {
+            return new int[] {NEARBY, Color.WHITE};
+        }
         int bg = colour(Core.str(row, "icon_bg"));
         int fg = colour(Core.str(row, "icon_fg"));
         if (bg == 0 || fg == 0) {
@@ -112,8 +122,9 @@ public class AvatarView extends View {
         letters.setColor(colours[1]);
         letters.setTextAlign(Paint.Align.CENTER);
         letters.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        paint(canvas, cx, cy, side, photo(Core.str(row, "photo")), Core.str(row, "initials"),
-                circle, letters, picture);
+        boolean nearby = Core.bool(row, "nearby");
+        paint(canvas, cx, cy, side, nearby ? null : photo(Core.str(row, "photo")),
+                nearby ? "" : Core.str(row, "initials"), circle, letters, picture);
     }
 
     /** The photo's middle square in the circle, or the circle with the initials. */

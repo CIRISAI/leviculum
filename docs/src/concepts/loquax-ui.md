@@ -84,22 +84,23 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:992-1029`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:1004-1041`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1019-1029`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1031-1041`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
 **What must not be copied**: `lnomad` quits on `Ctrl-C` from any mode,
-before the mode dispatch (`lnomad/src/app/event.rs:436-439`). In a messenger
+before the mode dispatch (the quit row's `Ctrl-c`, in every pane,
+`lnomad/src/app/keys.rs:330`). In a messenger
 that is a half-written message thrown away by a reflex. `Ctrl-C` in the
 compose pane clears the buffer to a recoverable draft; quitting needs
 `Ctrl-Q` or the palette.
 
 **The keymap must be one table.** `lnomad` applied single-source-of-truth
 discipline to scrolling and nowhere else, and its help overlay's other
-groups are hand-typed strings that can drift
-(`lnomad/src/app/chrome.rs:492-535`). Every binding here is one table read by
+groups were hand-typed strings that could drift, until its slice 1b made
+them rows of one table (`lnomad/src/app/keys.rs:150`). Every binding here is one table read by
 the key handler, the help overlay, the palette and the footer hints. That
 table is also the natural place to hang user configuration later, which
 `lnomad` has none of.
@@ -112,7 +113,7 @@ count how often focus is in the compose pane.
 
 **The quiet keyboard, with its one exception** (decided 2026-08-08). The
 `lnomad` rule that single letters are reserved for cheap local actions
-(`lnomad/src/app/event.rs:833-836`) generalises here to: **no single keystroke
+(`lnomad/src/app/keys.rs:189-191`) generalises here to: **no single keystroke
 may put bytes on the air — except `Enter` in the compose pane.** The
 exception is principled, not a leak: the deliberate act was typing the
 message into a deliberately focused pane, and `Enter` completes that act.
@@ -439,6 +440,10 @@ The phone and the window draw with one table of colours and sizes,
 `loquax/src/ui/chat.rs` (`LIGHT`, `DARK`, `size`). The phone's
 `loquax-android/android/res/values*/colors.xml` holds the same colours
 name for name, and `the_phone_draws_the_same_colours` refuses a drift.
+The chrome's rows of the table (`background`, `text`, `text_secondary`,
+`accent`, `bar`, `panel`, `failed_mark_on_panel`, `selected_row`,
+`badge`, `badge_text`) are the suite's, `leviculum_ui::pixel`, which
+lnomad's window draws in too (#475).
 Every text keeps 4.5:1 on its ground, a mark or a control 3:1; the
 numbers per pair are the comments in `colors.xml`.
 
@@ -763,7 +768,7 @@ that the user was away.
 ### Micron in messages
 
 If `FIELD_RENDERER` says micron (`reference/LXMF/LXMF/LXMF.py:100`), render
-it with `leviculum-micron` (`leviculum-micron/src/lib.rs:25-27`) and
+it with `leviculum-micron` (`leviculum-micron/src/lib.rs:33-35`) and
 `lnomad`'s renderer. If it says markdown, we already depend on
 `pulldown-cmark` at workspace level (`Cargo.toml:82`). This is a capability
 the workspace has and nobody has spent, and it costs a match statement.

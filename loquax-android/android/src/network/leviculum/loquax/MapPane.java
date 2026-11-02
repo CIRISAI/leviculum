@@ -10,6 +10,7 @@ import android.location.Location;
 import android.net.Uri;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -366,6 +367,13 @@ final class MapPane implements MapView.Listener {
             people.put(own, ours);
         }
         map.people(people, carded);
+        // The pins drawn, and how many are nodes nearby (1302): the device
+        // walk counts them here, the canvas has no nodes to dump.
+        int nearby = 0;
+        for (Map<String, Object> row : friends) {
+            nearby += Core.bool(row, "nearby") ? 1 : 0;
+        }
+        Log.i(PhotoView.TAG, "map pins=" + friends.size() + " nearby=" + nearby);
         if (carded != null && people.containsKey(carded)) {
             fillCard(people.get(carded));
         }
@@ -394,15 +402,16 @@ final class MapPane implements MapView.Listener {
     }
 
     /**
-     * The chip of the map's state, when no event's chip is up: loading,
-     * offline, no map here; none when all is well.
+     * The chip of the map's state, when no event's chip is up: loading
+     * for the area on screen (1292; a load for an area the view left says
+     * nothing), offline, no map here; none when all is well.
      */
     private void state(Map<String, Object> shown) {
         if (shown == null) {
             return;
         }
         int words;
-        if (Core.bool(shown, "loading")) {
+        if (Core.bool(shown, "loading_here")) {
             words = R.string.map_loading;
         } else if (Core.bool(shown, "offline")) {
             words = R.string.map_offline;
@@ -472,9 +481,27 @@ final class MapPane implements MapView.Listener {
         final String peer = Core.str(row, "peer");
         ((AvatarView) activity.findViewById(R.id.card_avatar)).show(peer, row);
         ((TextView) activity.findViewById(R.id.card_name)).setText(Core.str(row, "name"));
-        ((TextView) activity.findViewById(R.id.card_line)).setText(cardLine(row));
+        // A node nearby that is no contact (1302): the card says so under
+        // its announced name, and Add stands in place of Chat and Share.
+        final boolean nearby = Core.bool(row, "nearby");
+        ((TextView) activity.findViewById(R.id.card_line)).setText(nearby
+                ? activity.getString(R.string.nearby_card) + " · " + cardLine(row)
+                : cardLine(row));
+        View add = activity.findViewById(R.id.card_add);
+        add.setVisibility(nearby ? View.VISIBLE : View.GONE);
+        add.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String why = Core.addContact(peer, Core.str(row, "announced"));
+                if (why != null && !why.isEmpty()) {
+                    say(why);
+                    return;
+                }
+                host.chat(peer);
+            }
+        });
         View chat = activity.findViewById(R.id.card_chat);
-        chat.setVisibility(peer.equals(own) ? View.GONE : View.VISIBLE);
+        chat.setVisibility(peer.equals(own) || nearby ? View.GONE : View.VISIBLE);
         chat.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -482,7 +509,7 @@ final class MapPane implements MapView.Listener {
             }
         });
         View share = activity.findViewById(R.id.card_share);
-        share.setVisibility(peer.equals(own) ? View.GONE : View.VISIBLE);
+        share.setVisibility(peer.equals(own) || nearby ? View.GONE : View.VISIBLE);
         share.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -722,7 +749,7 @@ final class MapPane implements MapView.Listener {
 
     /** A line from the session the map shows as a chip; null leaves the chip. */
     void event(String line) {
-        if (line != null) {
+        if (line != null && !line.isEmpty()) {
             say(line);
         }
     }

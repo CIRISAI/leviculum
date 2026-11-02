@@ -117,6 +117,9 @@ pub struct Shot {
     pub rest_zoom: u8,
     /// Tiles it needed and did not draw: ask again.
     pub missing: usize,
+    /// Tiles drawn while a region in them was still arriving (1291): ask
+    /// again as the region gains tiles.
+    pub filling: usize,
     /// A name is fading in or out ([`FADE_MS`]): ask again.
     pub fading: bool,
     /// The credit of the regions drawn, the outline's when none.
@@ -135,6 +138,7 @@ impl Shot {
             tile_zoom: framed.tile_zoom,
             rest_zoom: framed.rest_zoom,
             missing: framed.missing,
+            filling: framed.filling,
             fading: framed.fading,
             attribution: framed.attribution,
             epoch: framed.epoch,
@@ -149,6 +153,7 @@ impl Shot {
             tile_zoom: self.tile_zoom,
             rest_zoom: self.rest_zoom,
             missing: self.missing,
+            filling: self.filling,
             fading: self.fading,
             attribution: self.attribution,
             epoch: self.epoch,
@@ -166,6 +171,7 @@ pub struct Framed {
     pub tile_zoom: u8,
     pub rest_zoom: u8,
     pub missing: usize,
+    pub filling: usize,
     pub fading: bool,
     pub attribution: String,
     pub epoch: u64,
@@ -480,6 +486,13 @@ impl Frames {
         self.motion.asked(now_ms);
     }
 
+    /// The way the view last moved, screen pixels a second, while it
+    /// still moves: what the autoload orders the cells next to the screen
+    /// by (1292).
+    pub fn heading(&self, now_ms: u64) -> Option<(f64, f64)> {
+        self.motion.heading(now_ms)
+    }
+
     /// The motion a frontend kept itself, where a pan cannot wait for
     /// the frame being drawn (the window's worker holds the frames).
     pub fn set_motion(&mut self, motion: Motion) {
@@ -710,6 +723,7 @@ impl Frames {
             tile_zoom,
             rest_zoom,
             missing,
+            filling: self.tiles.filling(),
             fading: self.fading,
             attribution,
             epoch: self.painter.epoch(),

@@ -34,7 +34,7 @@ use leviculum_mapfill::render::{Clock, Look, Pass, Placement, RenderStats, Work}
 use leviculum_mapfill::style::{Class, Profile, Style, AREAS};
 
 use crate::buildings::{Bbox, Buildings, BUILDING_ZOOM};
-use crate::region::{check_tile, Region, RegionError, Storage, TileId};
+use crate::region::{check_tile, Entry, Region, RegionError, Slot, Storage, TileId};
 use crate::viewport::{ViewTile, Viewport};
 
 /// The view zoom buildings are drawn from. At z15 they are 3 to 8 px long
@@ -357,12 +357,53 @@ impl<S: Storage> Region<S> {
     }
 }
 
-impl<'a> Region<&'a [u8]> {
-    /// The tiles `view` needs that this region holds, borrowed in place.
-    pub fn view(&self, view: &Viewport) -> Result<Vec<DrawTile<'a>>, RegionError> {
-        let mut out = Vec::new();
+impl<S: Storage> Region<S> {
+    /// The blobs `view` needs that this region holds, each placed, and how
+    /// many of the view's tiles have not arrived (a version 4 file still
+    /// arriving, 1291). A tile not arrived is stood in for by the nearest
+    /// coarser one that has ([`Region::stand_in`]), placed over it and
+    /// listed once however many tiles it stands in for.
+    pub fn view_entries(
+        &self,
+        view: &Viewport,
+    ) -> Result<(Vec<(ViewTile, Entry)>, usize), RegionError> {
+        let mut out: Vec<(ViewTile, Entry)> = Vec::new();
+        let mut pending = 0;
+        let mut ups: Vec<(ViewTile, Entry)> = Vec::new();
         for tile in view.tiles(self.zooms()) {
-            if let Some(fixture) = self.fixture(tile.id)? {
+            match self.find_slot(tile.id)? {
+                Slot::Here(e) => out.push((tile, e)),
+                Slot::Empty => {}
+                Slot::Pending => {
+                    pending += 1;
+                    let Some((e, dz)) = self.stand_in(tile.id)? else {
+                        continue;
+                    };
+                    let Some(up) = tile.up(dz) else {
+                        continue;
+                    };
+                    if !ups.iter().any(|(t, _)| t.id == up.id) {
+                        ups.push((up, e));
+                    }
+                }
+            }
+        }
+        // The stand-ins first: the tiles that are there draw over them in
+        // each class.
+        ups.extend(out);
+        Ok((ups, pending))
+    }
+}
+
+impl<'a> Region<&'a [u8]> {
+    /// The tiles `view` needs that this region holds, borrowed in place;
+    /// a tile not arrived yet stood in for as [`Region::view_entries`]
+    /// says.
+    pub fn view(&self, view: &Viewport) -> Result<Vec<DrawTile<'a>>, RegionError> {
+        let (entries, _) = self.view_entries(view)?;
+        let mut out = Vec::new();
+        for (tile, e) in entries {
+            if let Some(fixture) = self.fixture_of(&e)? {
                 out.push(DrawTile {
                     fixture,
                     tile,
@@ -378,21 +419,22 @@ impl<S: Storage> Region<S> {
     /// Read the tiles `view` needs that this region holds into `out`, one
     /// buffer each, for storage that is not addressable memory: a file, a
     /// card. `out` is cleared first; its buffers are reused across calls.
-    /// [`draw_tiles`] then borrows them for [`draw`].
+    /// [`draw_tiles`] then borrows them for [`draw`]. How many of the
+    /// view's tiles have not arrived yet, each stood in for as
+    /// [`Region::view_entries`] says: 0 for a whole file.
     pub fn read_view(
         &self,
         view: &Viewport,
         out: &mut Vec<(ViewTile, Vec<u8>)>,
-    ) -> Result<(), RegionError> {
+    ) -> Result<usize, RegionError> {
         let mut spare: Vec<Vec<u8>> = out.drain(..).map(|(_, b)| b).collect();
-        for tile in view.tiles(self.zooms()) {
-            if let Some(e) = self.find(tile.id)? {
-                let mut buf = spare.pop().unwrap_or_default();
-                self.read_tile(&e, &mut buf)?;
-                out.push((tile, buf));
-            }
+        let (entries, pending) = self.view_entries(view)?;
+        for (tile, e) in entries {
+            let mut buf = spare.pop().unwrap_or_default();
+            self.read_tile(&e, &mut buf)?;
+            out.push((tile, buf));
         }
-        Ok(())
+        Ok(pending)
     }
 }
 

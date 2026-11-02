@@ -228,6 +228,53 @@ class MapsPage(unittest.TestCase):
         _, problems = walk.maps_page_problems(maps_page()[1:])
         self.assertEqual(problems, ["no automatic download switch"])
 
+    def test_delete_all_row_as_built_and_after(self):
+        """1290: the row below the regions with the storage line's total;
+        after the yes no region, 0 B and the row off."""
+        row = at("maps_delete_all", "Delete all downloaded maps (1.4 MB)", 600)
+        total, problems = walk.delete_all_row_problems(maps_page() + [row])
+        self.assertEqual((total, problems), ("1.4 MB", []))
+        off = walk.Node(text="Delete all downloaded maps (0 B)", desc="",
+                        rid=row.rid, cls="", bounds=row.bounds, enabled=False)
+        empty = maps_page(used="Storage used: 0 B", rows=()) + [off]
+        self.assertEqual(walk.delete_all_row_problems(empty), ("0 B", []))
+
+    def test_delete_all_row_problems(self):
+        self.assertEqual(walk.delete_all_row_problems(maps_page()), ("?", ["no Delete all row"]))
+        wrong = at("maps_delete_all", "Delete all downloaded maps (2.8 MB)", 300)
+        off = walk.Node(text=wrong.text, desc="", rid=wrong.rid, cls="", bounds=wrong.bounds,
+                        enabled=False)
+        _, problems = walk.delete_all_row_problems(maps_page() + [off])
+        self.assertEqual(problems, [
+            "the row's total '2.8 MB' is not the storage line's 'Storage used: 1.4 MB'",
+            "the row is not below every region",
+            "the row is off with 1 regions",
+        ])
+        _, problems = walk.delete_all_row_problems(
+            maps_page(rows=()) + [at("maps_delete_all", "Delete all", 600)])
+        self.assertEqual(problems, ["the row says 'Delete all'", "the row is on with 0 regions"])
+
+    def test_delete_all_question(self):
+        ask = node("", "Delete all 1 maps? Areas you visit will be downloaded again when you "
+                       "look at them.")
+        yes = node("", walk.DELETE_ALL_YES)
+        self.assertEqual(walk.delete_all_ask_problems([ask, yes], 1), [])
+        german = node("", "Alle 3 Karten löschen? Gebiete, die du besuchst, werden wieder "
+                          "geladen, wenn du sie anschaust.")
+        self.assertEqual(walk.delete_all_ask_problems([german, yes], 3), [])
+        self.assertEqual(walk.delete_all_ask_problems([ask], 2), [
+            "the question counts 1 maps, the page listed 2",
+            "no 'Delete all' button",
+        ])
+        manual = node("", "Delete all 1 maps? They come back only when you load an area again.")
+        self.assertTrue(walk.delete_all_ask_problems([manual, yes], 1)[0].startswith("no question"))
+
+    def test_the_dump_reads_a_buttons_enabled(self):
+        xml = ('<hierarchy rotation="0"><node index="0" text="x" resource-id="x:id/maps_delete_all" '
+               'class="android.widget.Button" enabled="false" bounds="[0,0][1,1]" /></hierarchy>')
+        self.assertFalse(walk.parse_dump(xml)[0].enabled)
+        self.assertTrue(walk.parse_dump(xml.replace('enabled="false" ', ""))[0].enabled)
+
     def test_the_dump_reads_a_switchs_state(self):
         xml = ('<hierarchy rotation="0"><node index="0" text="" resource-id="x:id/maps_auto" '
                'class="android.widget.Switch" checked="true" bounds="[0,0][1,1]" /></hierarchy>')
@@ -425,6 +472,64 @@ class Code(unittest.TestCase):
         self.assertIsNone(walk.parse_code("loquax: no mailbox here"))
 
 
+class ContactInfo(unittest.TestCase):
+    """The chat menu and the contact screen's Advanced fold (1283)."""
+
+    CLOSED = [
+        node("title", "Walk Friend"),
+        node(text="Nickname"),
+        node(text="None; the name they chose"),
+        node("contact_advanced", "Advanced  \u25be"),
+        node(text="Block"),
+    ]
+    OPENED = [
+        node("contact_advanced", "Advanced  \u25b4"),
+        node("contact_advanced_body"),
+        node(text="Identity"),
+        node(text="Network"),
+    ]
+
+    def test_the_menu_as_built_has_contact_info_and_no_refresh(self):
+        self.assertEqual(walk.chat_menu_problems(["Contact info", "Search", "Map", "Rename"]), [])
+
+    def test_a_menu_with_refresh_or_without_contact_info(self):
+        self.assertEqual(walk.chat_menu_problems(["Contact info", "Refresh"]),
+                         ["the menu still offers 'Refresh'"])
+        self.assertEqual(walk.chat_menu_problems(["Search"]), ["no Contact info in the menu"])
+
+    def test_the_fold_as_built_has_no_problem(self):
+        self.assertEqual(walk.contact_fold_problems(self.CLOSED, self.OPENED), [])
+
+    def test_the_identity_and_the_network_on_the_main_rows(self):
+        closed = self.CLOSED + [node(text="Identity"), node(text="Network"),
+                                node(text="The address is a hash of the identity's public key")]
+        self.assertEqual(walk.contact_fold_problems(closed, self.OPENED), [
+            "Identity on the main rows",
+            "Network on the main rows",
+            "a main row says 'hash': \"The address is a hash of the identity's public key\"",
+        ])
+
+    def test_the_old_nickname_line_is_found(self):
+        closed = self.CLOSED + [node(text="None; the name it announces")]
+        self.assertEqual(walk.contact_fold_problems(closed, self.OPENED),
+                         ["a main row says 'the name it announces': 'None; the name it announces'"])
+
+    def test_no_header_an_open_fold_and_a_fold_that_does_not_open(self):
+        self.assertEqual(walk.contact_fold_problems(self.CLOSED[:3], []), [
+            "no Advanced", "Advanced did not open", "no Identity under Advanced",
+            "no Network under Advanced",
+        ])
+        closed = self.CLOSED + [node("contact_advanced_body")]
+        self.assertEqual(walk.contact_fold_problems(closed, self.OPENED),
+                         ["Advanced is open before the tap"])
+
+    def test_the_step_runs_after_info_in_the_chat(self):
+        self.assertEqual(walk.STEPS.index("contact_info"), walk.STEPS.index("info") + 1)
+
+    def test_the_dialogs_tap_not_now_before_allow(self):
+        self.assertLess(walk.DIALOG_BUTTONS.index("Not now"), walk.DIALOG_BUTTONS.index("Allow"))
+
+
 class LinkDevice(unittest.TestCase):
     """The sheet of "Link a device" (1264)."""
 
@@ -447,8 +552,8 @@ class LinkDevice(unittest.TestCase):
         problems = walk.link_code_problems(self.CODE, [], "192.168.240.1:4242")
         self.assertIn("holds 0 codes", problems[0])
 
-    def test_the_step_is_last_before_the_teardown(self):
-        self.assertEqual(walk.STEPS[-2:], ["link_device", "teardown"])
+    def test_the_step_comes_before_the_move(self):
+        self.assertEqual(walk.STEPS[-3:], ["link_device", "move_phone", "teardown"])
 
 
 class Screencap(unittest.TestCase):
@@ -570,6 +675,157 @@ class Buildings(unittest.TestCase):
         )
 
 
+class PanIntoEmpty(unittest.TestCase):
+    """The pan_into_empty step's reading (1292)."""
+
+    LOADING = walk.MAP_LOADING + "\u2026"
+
+    def test_the_chip_is_read_by_its_id(self):
+        self.assertEqual(walk.map_chip([node("chip", self.LOADING)]), self.LOADING)
+        self.assertEqual(walk.map_chip([node("map")]), "")
+
+    def test_a_load_on_time_with_its_chip_passes(self):
+        self.assertEqual(walk.pan_into_empty_problems("", self.LOADING, 1, [650], 820), [])
+        late = 820 + walk.PAN_LOAD_SLACK_MS
+        self.assertEqual(walk.pan_into_empty_problems("", self.LOADING, 0, [late], 820), [])
+
+    def test_no_load_a_late_one_and_a_wrong_chip_fail(self):
+        self.assertEqual(
+            walk.pan_into_empty_problems("", "No map here yet", 2, [], 820),
+            [
+                "no load reached the source after the pan (2 before it)",
+                f"the chip says 'No map here yet' after the pan, want {walk.MAP_LOADING!r}",
+            ],
+        )
+        late = 820 + walk.PAN_LOAD_SLACK_MS + 1
+        self.assertEqual(
+            walk.pan_into_empty_problems("", self.LOADING, 0, [late, late + 5], 820),
+            [
+                f"the first load reached the source {late} ms after the pan began, "
+                f"later than 820 + {walk.PAN_LOAD_SLACK_MS}"
+            ],
+        )
+
+    def test_a_loading_chip_over_the_held_view_fails(self):
+        problems = walk.pan_into_empty_problems(self.LOADING, self.LOADING, 0, [300], 820)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("before the pan", problems[0])
+
+    def test_the_source_counts_its_connections_and_never_answers(self):
+        source = walk.StallingSource("127.0.0.1")
+        try:
+            with walk.socket.create_connection(("127.0.0.1", source.port), timeout=2) as conn:
+                conn.sendall(b"GET /planet.pmtiles HTTP/1.1\r\n\r\n")
+                conn.settimeout(0.3)
+                with self.assertRaises(walk.socket.timeout):
+                    conn.recv(1)
+            deadline = walk.time.monotonic() + 2
+            while not source.times and walk.time.monotonic() < deadline:
+                walk.time.sleep(0.01)
+            self.assertEqual(len(source.times), 1)
+        finally:
+            source.close()
+
+    def test_the_step_runs_after_the_buildings_and_before_the_phone_is_cleared(self):
+        steps = walk.STEPS
+        self.assertGreater(steps.index("pan_into_empty"), steps.index("buildings"))
+        self.assertLess(steps.index("pan_into_empty"), steps.index("first_start_name"))
+
+
+class RegionFillsIn(unittest.TestCase):
+    """The region_fills_in step's reading (1291)."""
+
+    def test_a_new_picture_is_one_that_differs_enough(self):
+        a = [(0, 0, 0)] * 100
+        b = [(255, 255, 255)] * 3 + [(0, 0, 0)] * 97
+        c = [(255, 255, 255)] * 1 + [(0, 0, 0)] * 99
+        # b differs from a in 3 % of its samples, c from b in 2 %: not new.
+        self.assertEqual(walk.fill_states([(1.0, a), (2.0, a), (3.0, b), (4.0, c)]), [1.0, 3.0])
+        self.assertEqual(walk.fill_states([]), [])
+
+    def test_the_verdict(self):
+        least = walk.FILL_STATES_LEAST
+        self.assertEqual(walk.region_fills_problems([1.0, 2.0, 3.0, 9.0], 10, 10, 5.0), [])
+        self.assertEqual(
+            walk.region_fills_problems([1.0, 2.0, 9.0], 10, 10, 5.0),
+            [f"2 distinct pictures before the region was whole, want at least {least}"],
+        )
+        self.assertEqual(
+            walk.region_fills_problems([1.0], 4, 10, None), ["the source sent 4 of 10 bytes"]
+        )
+
+    def test_the_source_answers_ranges_at_its_rate(self):
+        data = bytes(range(256)) * 80
+        source = walk.ThrottledSource("127.0.0.1", data, 100_000)
+        try:
+            began = walk.time.monotonic()
+            with walk.socket.create_connection(("127.0.0.1", source.port), timeout=5) as conn:
+                conn.sendall(b"GET /a.pmtiles HTTP/1.1\r\nRange: bytes=100-20579\r\n\r\n")
+                got = b""
+                while True:
+                    part = conn.recv(65536)
+                    if not part:
+                        break
+                    got += part
+            took = walk.time.monotonic() - began
+            head, body = got.split(b"\r\n\r\n", 1)
+            self.assertIn(b"206", head.split(b"\r\n")[0])
+            self.assertIn(b"Content-Range: bytes 100-20479/20480", head)
+            self.assertEqual(body, data[100:20480])
+            # 20,380 bytes at 100 kB/s: at least about a fifth of a second.
+            self.assertGreater(took, 0.15)
+            self.assertIsNone(source.last_byte, "the first 100 bytes never went")
+            with walk.socket.create_connection(("127.0.0.1", source.port), timeout=5) as conn:
+                conn.sendall(b"GET /a.pmtiles HTTP/1.1\r\nRange: bytes=0-99\r\n\r\n")
+                while conn.recv(65536):
+                    pass
+            self.assertIsNotNone(source.last_byte)
+            self.assertEqual(source.served, 20480)
+        finally:
+            source.close()
+
+    def test_the_archive_is_there_and_the_step_runs_after_the_pan(self):
+        self.assertTrue(walk.GRUNEWALD_ARCHIVE.is_file())
+        steps = walk.STEPS
+        self.assertGreater(steps.index("region_fills_in"), steps.index("pan_into_empty"))
+        self.assertLess(steps.index("region_fills_in"), steps.index("first_start_name"))
+
+
+class OffgridPositions(unittest.TestCase):
+    """The offgrid_positions step's reading (1302)."""
+
+    def test_the_newest_pins_line_counts(self):
+        log = (
+            "11-02 01:00:00.000 I/loquax: map pins=3 nearby=0\n"
+            "11-02 01:00:05.000 I/loquax: network wifi\n"
+            "11-02 01:00:09.000 I/loquax: map pins=5 nearby=2\n"
+        )
+        self.assertEqual(walk.map_pins(log), (5, 2))
+        self.assertIsNone(walk.map_pins("I/loquax: network wifi"))
+
+    def test_the_verdict(self):
+        wanted = ["Walk Nearby A1", "Walk Nearby B1"]
+        names = ["Walk Nearby B1 \u00b74f2a", "bob \u00b7abab", "Walk Nearby A1 \u00b70c1d"]
+        self.assertEqual(walk.offgrid_problems((5, 2), (3, 0), names, wanted), [])
+        self.assertEqual(
+            walk.offgrid_problems((4, 1), (3, 0), names[:2], wanted),
+            [
+                "pins 3 -> 4, want 2 more",
+                "nearby pins 0 -> 1, want 2 more",
+                "not in the Friends sheet: ['Walk Nearby A1']; the sheet has "
+                + repr(names[:2]),
+            ],
+        )
+        self.assertEqual(
+            walk.offgrid_problems(None, None, names, wanted), ["no 'map pins=' line in the logcat"]
+        )
+
+    def test_the_step_runs_after_the_friends_sheet_it_would_disturb(self):
+        steps = walk.STEPS
+        self.assertEqual(steps.index("offgrid_positions"), steps.index("friends") + 1)
+        self.assertLess(steps.index("offgrid_positions"), steps.index("first_start_name"))
+
+
 class Lines(unittest.TestCase):
     def test_a_step_line_round_trips(self):
         line = walk.walk_line("list", True, 1234.7, "rows=18 of 18\n named=12")
@@ -605,6 +861,23 @@ class InputText(unittest.TestCase):
     def test_ascii_only(self):
         with self.assertRaises(ValueError):
             walk.input_text_arg("Grüße")
+
+
+class GroupHosted(unittest.TestCase):
+    """1307: the mailbox's line for a hosted group, by its name."""
+
+    LOG = (
+        "2026-11-02T06:00:00Z WARN GROUP hosted name=Familie address=00112233445566778899aabbccddeeff\n"
+        "2026-11-02T06:00:01Z WARN GROUP hosted name=Walk Group 123 address=ffeeddccbbaa99887766554433221100\n"
+    )
+
+    def test_the_named_groups_address(self):
+        self.assertEqual(
+            walk.group_hosted(self.LOG, "Walk Group 123"), "ffeeddccbbaa99887766554433221100"
+        )
+
+    def test_another_name_is_none(self):
+        self.assertIsNone(walk.group_hosted(self.LOG, "Walk Group 12"))
 
 
 if __name__ == "__main__":
@@ -707,9 +980,37 @@ class FirstStartName(unittest.TestCase):
         steps = walk.STEPS
         self.assertLess(steps.index("first_start"), steps.index("notification_text"))
         self.assertLess(steps.index("pencil_scan"), steps.index("share_in_contact"))
-        self.assertEqual(steps[-3:], ["first_start_name", "link_device", "teardown"])
+        self.assertEqual(
+            steps[-4:], ["first_start_name", "link_device", "move_phone", "teardown"]
+        )
         for step in ("notification_text", "share_in_contact", "first_start_name"):
             self.assertTrue(callable(getattr(walk.Walk, "step_" + step)), step)
+
+
+class MovePhone(unittest.TestCase):
+    """The old phone's first screen after the move (1281, walk finding 24)."""
+
+    def moved_text(self):
+        return walk.Node(text=walk.MOVED_TITLE + "\n\nThis phone has moved. Your mailbox is on your new phone now.",
+                         desc="", rid="network.leviculum.loquax.debug:id/error", cls="", bounds=(0, 0, 1, 1))
+
+    def test_the_moved_page_with_its_button_passes(self):
+        nodes = [self.moved_text(), node(walk.TAKE_BACK_ID, walk.TAKE_BACK)]
+        self.assertEqual(walk.moved_page_problems(nodes), [])
+
+    def test_no_title_another_button_or_a_join_form_is_named(self):
+        self.assertIn(f"no {walk.MOVED_TITLE!r}",
+                      walk.moved_page_problems([node(walk.TAKE_BACK_ID, walk.TAKE_BACK)]))
+        self.assertIn(f"no {walk.TAKE_BACK!r} button",
+                      walk.moved_page_problems([self.moved_text(), node(walk.TAKE_BACK_ID, "Try again")]))
+        self.assertIn("1 fields on the moved page",
+                      walk.moved_page_problems([self.moved_text(), node(walk.TAKE_BACK_ID, walk.TAKE_BACK),
+                                                edit("code", 100)]))
+
+    def test_the_step_is_last_before_the_teardown_and_runs(self):
+        self.assertEqual(walk.STEPS[-2:], ["move_phone", "teardown"])
+        self.assertTrue(callable(getattr(walk.Walk, "step_move_phone")))
+        self.assertEqual(walk.parse_args(["--walk-move", "/x/walk_move"]).walk_move, "/x/walk_move")
 
 
 def boxed(rid, bounds, desc=""):
@@ -1384,3 +1685,78 @@ class JoinErrorWords(unittest.TestCase):
         self.assertLess(steps.index("join_error_words"), steps.index("first_start"))
         self.assertGreater(steps.index("first_start_qr"), steps.index("first_start"))
         self.assertGreater(steps.index("pencil_scan"), steps.index("first_start"))
+
+
+# `dumpsys connectivity` as Android 13 writes it, cut to the lines the
+# parser reads: the default network's id and the agents' transports.
+DUMPSYS_WIFI = """\
+Active default network: 100
+Current network preferences:
+  NetworkAgentInfo{network{100}  handle{430242300429}  ni{WIFI CONNECTED extra: }  \
+Score(Policies : IS_VALIDATED&IS_UNMETERED ; KeepConnected : 0)  nc{[ Transports: WIFI \
+Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED ]}}
+  NetworkAgentInfo{network{101}  handle{434537267725}  ni{MOBILE[LTE] CONNECTED extra: }  \
+nc{[ Transports: CELLULAR Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED ]}}
+"""
+
+
+class NetworkChange(unittest.TestCase):
+    """The three network steps (1298): what the default network is, and
+    the detail line and its table row."""
+
+    def test_the_default_network_is_read_from_its_agent_line(self):
+        self.assertEqual(walk.default_network(DUMPSYS_WIFI), "wifi")
+        mobile = DUMPSYS_WIFI.replace("Active default network: 100", "Active default network: 101")
+        self.assertEqual(walk.default_network(mobile), "mobile")
+        self.assertEqual(
+            walk.default_network("Active default network: none\n"), "none"
+        )
+        self.assertEqual(walk.default_network(""), "none", "no line is no network")
+        # A default network whose agent line is missing is not guessed.
+        self.assertEqual(
+            walk.default_network("Active default network: 102\n" + DUMPSYS_WIFI[27:]),
+            "other",
+        )
+        ethernet = DUMPSYS_WIFI.replace("Transports: WIFI", "Transports: ETHERNET")
+        self.assertEqual(walk.default_network(ethernet), "other")
+
+    def test_the_detail_says_each_line_once_and_both_times(self):
+        detail = walk.network_detail(
+            "wifi_toggle",
+            10,
+            ("wifi", "none", "wifi"),
+            ["", walk.RECONNECTING, walk.RECONNECTING, "", "Checking your mailbox…"],
+            2300,
+            4100,
+        )
+        self.assertEqual(
+            detail,
+            "change=wifi_toggle off_s=10 kinds=wifi>none>wifi "
+            "shown=Reconnecting…|Checking your mailbox… line_gone_ms=2300 bubble_ms=4100",
+        )
+        quiet = walk.network_detail("flight_mode", 120, ("wifi", "none", "wifi"), [], None, 900)
+        self.assertIn("shown=- line_gone_ms=never_shown bubble_ms=900", quiet)
+
+    def test_the_walk_log_gives_the_reports_table(self):
+        detail = walk.network_detail(
+            "mobile_switch", 20, ("wifi", "mobile", "wifi"), [walk.RECONNECTING], 1500, 2600
+        )
+        log = "\n".join(
+            [
+                walk.walk_line("draft", True, 10, "row=x"),
+                walk.walk_line("network_mobile_switch", True, 30000, detail),
+                walk.walk_line("network_mobile_switch", True, 9, "change=mobile_switch skipped=no_mobile_network"),
+            ]
+        )
+        self.assertEqual(
+            walk.network_rows(log),
+            ["| mobile_switch | 20 | wifi>mobile>wifi | Reconnecting… | 1500 | 2600 |"],
+        )
+
+    def test_the_steps_run_after_the_draft_and_before_the_map(self):
+        steps = walk.STEPS
+        for name in ("network_wifi_toggle", "network_mobile_switch", "flight_mode"):
+            self.assertIn(name, steps)
+            self.assertTrue(hasattr(walk.Walk, "step_" + name), name)
+        self.assertLess(steps.index("draft"), steps.index("network_wifi_toggle"))
+        self.assertLess(steps.index("flight_mode"), steps.index("map"))

@@ -1,0 +1,484 @@
+//! What the map's autoload loads for the area on screen (1292): one
+//! scheduler, driven by the frames the frontend asks, that says which
+//! regions the view needs now and which it needs next. The frontend only
+//! downloads, in the order given ([`crate::mapload::Loader::schedule`]).
+//!
+//! - The view is cut into cells, the tiles of a zoom [`CELL_ABOVE`] steps
+//!   above the view's, so a pan asks for the same boxes again and a region
+//!   that landed is never asked for twice.
+//! - A frame whose screen the regions leave uncovered by more than
+//!   [`GAP_SHARE`] asks for the cells under the uncovered part at once,
+//!   during the pan too: one decision every [`DECIDE_MS`] while it moves,
+//!   counted from the last decision, so motion never restarts the wait;
+//!   every frame at rest decides.
+//! - The cells next to the screen, those in the pan's direction first, and
+//!   while the view moves only those, come after the cells on screen.
+//! - A frame that shows the view of the last decision decides nothing
+//!   again: a load that failed for want of internet is tried again by the
+//!   next view the user moves to, not by a frame asked again.
+
+use alloc::vec::Vec;
+
+use leviculum_map::mercator::{lat_of_y, lon_of_x, unproject, World};
+use leviculum_map::region::{Bounds, Header};
+use leviculum_map::viewport::Viewport;
+
+use super::map::{LoadReason, MapWant, DEEPEST_LOAD, PLACE_ZOOMS, VIEW_BELOW};
+
+/// A cell is a tile this many zooms above the view's: eight tiles of the
+/// view across, about a phone screen and a half. No deeper than
+/// [`CELL_DEEPEST`].
+pub const CELL_ABOVE: u8 = 3;
+/// The deepest cell: a z16 view's, about 3 km across in Europe, so a view
+/// deeper than z16 asks for its cell as a z16 view does.
+pub const CELL_DEEPEST: u8 = DEEPEST_LOAD + 1 - CELL_ABOVE;
+/// The share of the screen the regions may leave uncovered before the
+/// cells under it are asked for.
+pub const GAP_SHARE: f64 = 0.10;
+/// While the view moves, one decision this often.
+pub const DECIDE_MS: u64 = 250;
+/// Below this zoom nothing is asked for by itself: a box there is a
+/// country, and the world outline draws.
+pub const MIN_ZOOM: u8 = PLACE_ZOOMS.0;
+/// Below this zoom only the cells on screen are asked for, none next to
+/// them.
+pub const AHEAD_MIN_ZOOM: u8 = 12;
+/// How far past the screen, in view pixels, the cells next to it reach:
+/// the prefetch's two tiles (1135).
+pub const AHEAD_PX: u32 = 512;
+/// Sample points across and down the screen the share is counted on.
+const SAMPLES: u32 = 16;
+
+/// A cell: its zoom and tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Cell {
+    pub z: u8,
+    pub x: u32,
+    pub y: u32,
+}
+
+impl Cell {
+    fn of(at: World, z: u8) -> Self {
+        let shift = 32 - u32::from(z);
+        let cut = |v: u32| v.checked_shr(shift).unwrap_or(0);
+        Self {
+            z,
+            x: cut(at.x),
+            y: cut(at.y),
+        }
+    }
+
+    /// Its corners in world units, west and north in, east and south out.
+    fn span(&self) -> ((u64, u64), (u64, u64)) {
+        let shift = 32 - u32::from(self.z);
+        let edge = |v: u32| u64::from(v) << shift;
+        (
+            (edge(self.x), edge(self.x + 1)),
+            (edge(self.y), edge(self.y + 1)),
+        )
+    }
+
+    /// Its middle.
+    pub fn centre(&self) -> World {
+        let ((x0, x1), (y0, y1)) = self.span();
+        World {
+            x: ((x0 + x1) / 2).min(u64::from(u32::MAX)) as u32,
+            y: ((y0 + y1) / 2).min(u64::from(u32::MAX)) as u32,
+        }
+    }
+
+    /// Its box in degrees.
+    pub fn bounds(&self) -> Bounds {
+        let ((x0, x1), (y0, y1)) = self.span();
+        let at = |v: u64| v.min(u64::from(u32::MAX)) as u32;
+        Bounds {
+            west: lon_of_x(at(x0)),
+            south: lat_of_y(at(y1)),
+            east: lon_of_x(at(x1)),
+            north: lat_of_y(at(y0)),
+        }
+    }
+}
+
+/// The zoom the regions must reach for `view`: its own, no deeper than a
+/// load asks for.
+fn need_zoom(view: &Viewport) -> u8 {
+    view.zoom().min(DEEPEST_LOAD)
+}
+
+/// Whether a region of `regions` holds `at` at `zoom`.
+fn held(regions: &[Header], at: World, zoom: u8) -> bool {
+    let p = unproject(at);
+    regions.iter().any(|h| {
+        let b = &h.bounds;
+        h.min_zoom <= zoom
+            && h.max_zoom >= zoom
+            && (b.west..=b.east).contains(&p.lon_e7)
+            && (b.south..=b.north).contains(&p.lat_e7)
+    })
+}
+
+/// The sample points of `view`: `n` by `n` pixel middles.
+fn samples(view: &Viewport, n: u32) -> impl Iterator<Item = World> + '_ {
+    let (w, h) = view.size();
+    (0..n).flat_map(move |j| {
+        (0..n).map(move |i| {
+            let px = ((2 * i + 1) * w / (2 * n)) as i32;
+            let py = ((2 * j + 1) * h / (2 * n)) as i32;
+            view.to_world(px, py)
+        })
+    })
+}
+
+/// The share of `view`'s screen no region of `regions` holds at its zoom,
+/// from 0 to 1.
+pub fn uncovered(view: &Viewport, regions: &[Header]) -> f64 {
+    let zoom = need_zoom(view);
+    let gaps = samples(view, SAMPLES)
+        .filter(|&at| !held(regions, at, zoom))
+        .count();
+    gaps as f64 / f64::from(SAMPLES * SAMPLES)
+}
+
+/// The cells under the uncovered points of `view`, nearest its centre
+/// first.
+fn gap_cells(view: &Viewport, regions: &[Header], n: u32) -> Vec<Cell> {
+    let zoom = need_zoom(view);
+    let z = view.zoom().saturating_sub(CELL_ABOVE).min(CELL_DEEPEST);
+    let mut cells: Vec<Cell> = Vec::new();
+    for at in samples(view, n) {
+        if held(regions, at, zoom) {
+            continue;
+        }
+        let cell = Cell::of(at, z);
+        if !cells.contains(&cell) {
+            cells.push(cell);
+        }
+    }
+    let centre = view.centre;
+    cells.sort_by(|a, b| {
+        let d = |c: &Cell| along(centre, c.centre(), (0.0, 0.0)).1;
+        d(a).total_cmp(&d(b)).then(a.cmp(b))
+    });
+    cells
+}
+
+/// How far `to` lies from `from` in world units along `heading` (the
+/// first, larger is further ahead) and in all (the second), x the short
+/// way round the world.
+fn along(from: World, to: World, heading: (f64, f64)) -> (f64, f64) {
+    let dx = f64::from(to.x.wrapping_sub(from.x) as i32);
+    let dy = f64::from(to.y) - f64::from(from.y);
+    (dx * heading.0 + dy * heading.1, dx * dx + dy * dy)
+}
+
+/// The load asked for `cell` for a view at `zoom`: the cell's box, from
+/// [`VIEW_BELOW`] zooms above the view's to [`DEEPEST_LOAD`], the deepest
+/// lowered no further than the view's own (as [`super::map::want_view`]).
+fn want(cell: &Cell, zoom: u8) -> MapWant {
+    MapWant {
+        bounds: cell.bounds(),
+        zooms: (zoom.saturating_sub(VIEW_BELOW), DEEPEST_LOAD),
+        floor: zoom,
+        reason: LoadReason::View,
+        centre: cell.centre(),
+    }
+}
+
+/// One decision: what the screen needs, in order, and what it needs next.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewWants {
+    /// The cells under the uncovered part of the screen, nearest its
+    /// centre first; none when the gap is [`GAP_SHARE`] or less.
+    pub here: Vec<MapWant>,
+    /// The uncovered cells next to the screen, ahead of the pan first.
+    pub ahead: Vec<MapWant>,
+    /// The share of the screen uncovered.
+    pub share: f64,
+}
+
+/// What `view` needs from the regions `regions`, the view moving along
+/// `heading` (screen pixels a second, the way the centre goes) or not.
+pub fn wants(
+    view: &Viewport,
+    regions: &[Header],
+    moving: bool,
+    heading: Option<(f64, f64)>,
+) -> ViewWants {
+    let zoom = need_zoom(view);
+    let share = uncovered(view, regions);
+    if view.zoom() < MIN_ZOOM {
+        return ViewWants {
+            share,
+            ..ViewWants::default()
+        };
+    }
+    let here_cells = match share > GAP_SHARE {
+        true => gap_cells(view, regions, SAMPLES),
+        false => Vec::new(),
+    };
+    let mut ahead_cells = Vec::new();
+    if view.zoom() >= AHEAD_MIN_ZOOM {
+        let (w, h) = view.size();
+        let grown = Viewport::new(
+            view.centre,
+            view.zoom(),
+            w.saturating_add(2 * AHEAD_PX),
+            h.saturating_add(2 * AHEAD_PX),
+        );
+        let way = heading.unwrap_or((0.0, 0.0));
+        let mut next: Vec<(Cell, (f64, f64))> = gap_cells(&grown, regions, 2 * SAMPLES)
+            .into_iter()
+            .filter(|c| !here_cells.contains(c))
+            .map(|c| (c, along(view.centre, c.centre(), way)))
+            .filter(|(_, (ahead, _))| !moving || heading.is_some() && *ahead > 0.0)
+            .collect();
+        next.sort_by(|a, b| {
+            b.1 .0
+                .total_cmp(&a.1 .0)
+                .then(a.1 .1.total_cmp(&b.1 .1))
+                .then(a.0.cmp(&b.0))
+        });
+        ahead_cells = next.into_iter().map(|(c, _)| c).collect();
+    }
+    ViewWants {
+        here: here_cells.iter().map(|c| want(c, zoom)).collect(),
+        ahead: ahead_cells.iter().map(|c| want(c, zoom)).collect(),
+        share,
+    }
+}
+
+/// The scheduler of one map: when the last decision was, and for which
+/// view.
+#[derive(Clone, Debug, Default)]
+pub struct ViewLoads {
+    decided_ms: Option<u64>,
+    decided: Option<(World, u8, (u32, u32))>,
+    regions: usize,
+}
+
+impl ViewLoads {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The decision for the frame of `view` at `now_ms`, or none: the
+    /// view moves and the last decision is younger than [`DECIDE_MS`], or
+    /// the view and the regions are those of the last decision.
+    pub fn decide(
+        &mut self,
+        view: &Viewport,
+        regions: &[Header],
+        now_ms: u64,
+        moving: bool,
+        heading: Option<(f64, f64)>,
+    ) -> Option<ViewWants> {
+        let key = (view.centre, view.zoom(), view.size());
+        if self.decided == Some(key) && self.regions == regions.len() {
+            return None;
+        }
+        if moving
+            && self
+                .decided_ms
+                .is_some_and(|at| now_ms.saturating_sub(at) < DECIDE_MS)
+        {
+            return None;
+        }
+        self.decided_ms = Some(now_ms);
+        self.decided = Some(key);
+        self.regions = regions.len();
+        Some(wants(view, regions, moving, heading))
+    }
+
+    /// Forget the last decision: the next frame decides (the regions were
+    /// deleted, the autoload was switched on).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviculum_map::mercator::{project, LatLon};
+
+    /// A region of `bounds` at `zooms`, a header and nothing else.
+    fn region(bounds: Bounds, zooms: (u8, u8)) -> Header {
+        Header {
+            bounds,
+            min_zoom: zooms.0,
+            max_zoom: zooms.1,
+            profile: 1,
+            attribution: (0, 0),
+            notice: (0, 0),
+            tiles: 0,
+            index: 0,
+            len: 0,
+            labels: None,
+            buildings: None,
+            streamed: false,
+        }
+    }
+
+    /// The cell of central Florence at z13 as a region.
+    fn florence() -> (Header, World) {
+        let at = project(LatLon::from_degrees(43.7756, 11.2600));
+        let cell = Cell::of(at, 13);
+        (region(cell.bounds(), (10, 15)), at)
+    }
+
+    #[test]
+    fn a_held_view_wants_nothing() {
+        let (r, at) = florence();
+        let view = Viewport::new(Cell::of(at, 13).centre(), 16, 480, 320);
+        let w = wants(&view, &[r], false, None);
+        assert_eq!(w.share, 0.0);
+        assert!(w.here.is_empty() && w.ahead.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn a_view_past_the_region_wants_the_cell_under_the_gap() {
+        let (r, at) = florence();
+        let mut view = Viewport::new(Cell::of(at, 13).centre(), 16, 480, 320);
+        // Four screens east: nothing held.
+        view.pan(4 * 480, 0);
+        let w = wants(&view, &[r], false, None);
+        assert_eq!(w.share, 1.0);
+        assert!(!w.here.is_empty());
+        let first = w.here[0].bounds;
+        let c = unproject(view.centre);
+        assert!(
+            (first.west..=first.east).contains(&c.lon_e7)
+                && (first.south..=first.north).contains(&c.lat_e7),
+            "the cell under the centre first: {first:?}"
+        );
+        for want in &w.here {
+            assert_eq!(want.zooms, (12, 15));
+            assert_eq!(want.floor, 15);
+        }
+    }
+
+    #[test]
+    fn a_small_gap_waits() {
+        let (r, at) = florence();
+        let cell = Cell::of(at, 13);
+        let ((_, x1), _) = cell.span();
+        // The view's east edge 5 % of the screen past the cell's.
+        let w_px = 480u32;
+        // World units a pixel at z16: 2^32 over 256 · 2^16 pixels.
+        let unit = 1u64 << (32 - 16 - 8);
+        let centre_x = x1 - u64::from(w_px / 2 - w_px / 20) * unit;
+        let view = Viewport::new(
+            World {
+                x: centre_x as u32,
+                y: cell.centre().y,
+            },
+            16,
+            w_px,
+            320,
+        );
+        let w = wants(&view, &[r], false, None);
+        assert!(w.share > 0.0 && w.share <= GAP_SHARE, "{}", w.share);
+        assert!(w.here.is_empty());
+        assert!(!w.ahead.is_empty(), "the cell east is next");
+    }
+
+    #[test]
+    fn ahead_goes_the_way_of_the_pan_and_moving_only_that_way() {
+        let (r, at) = florence();
+        let cell = Cell::of(at, 13);
+        let ((_, x1), (y0, _)) = cell.span();
+        // World units a pixel at z16: 2^32 over 256 · 2^16 pixels.
+        let unit = 1u64 << (32 - 16 - 8);
+        // Held, 400 pixels from the cell's east edge and 300 from its
+        // north: the cells east, north-east and north are next.
+        let view = Viewport::new(
+            World {
+                x: (x1 - 400 * unit) as u32,
+                y: (y0 + 300 * unit) as u32,
+            },
+            16,
+            480,
+            320,
+        );
+        let east = (1000.0, 0.0);
+        let w = wants(&view, &[r], false, Some(east));
+        assert_eq!(w.share, 0.0);
+        assert!(w.here.is_empty());
+        let cells: Vec<Cell> = w.ahead.iter().map(|m| Cell::of(m.centre, 13)).collect();
+        let (e, ne, n) = (
+            Cell {
+                x: cell.x + 1,
+                ..cell
+            },
+            Cell {
+                x: cell.x + 1,
+                y: cell.y - 1,
+                ..cell
+            },
+            Cell {
+                y: cell.y - 1,
+                ..cell
+            },
+        );
+        assert_eq!(cells, [e, ne, n], "east first, the nearer of a tie first");
+        let moving = wants(&view, &[r], true, Some(east));
+        let cells: Vec<Cell> = moving
+            .ahead
+            .iter()
+            .map(|m| Cell::of(m.centre, 13))
+            .collect();
+        assert_eq!(cells, [e, ne], "moving: only ahead");
+        assert!(wants(&view, &[r], true, None).ahead.is_empty());
+        let north = wants(&view, &[r], false, Some((0.0, -1000.0)));
+        assert_eq!(Cell::of(north.ahead[0].centre, 13), n);
+    }
+
+    #[test]
+    fn below_the_least_zoom_nothing_is_asked() {
+        let view = Viewport::new(project(LatLon::from_degrees(43.0, 11.0)), 9, 480, 320);
+        let w = wants(&view, &[], false, None);
+        assert_eq!(w.share, 1.0);
+        assert!(w.here.is_empty() && w.ahead.is_empty());
+    }
+
+    /// One decision every 250 ms while moving, counted from the last one,
+    /// not restarted by the frames between; every new frame at rest
+    /// decides; the same view again decides nothing.
+    #[test]
+    fn decisions_are_paced_and_not_restarted_by_motion() {
+        let mut loads = ViewLoads::new();
+        let mut view = Viewport::new(project(LatLon::from_degrees(43.0, 11.0)), 16, 480, 320);
+        let mut decided = Vec::new();
+        for i in 0..40u64 {
+            view.pan(10, 0);
+            if loads.decide(&view, &[], i * 16, true, None).is_some() {
+                decided.push(i * 16);
+            }
+        }
+        assert_eq!(decided, [0, 256, 512]);
+        view.pan(10, 0);
+        assert!(loads.decide(&view, &[], 640, false, None).is_some(), "rest");
+        assert!(loads.decide(&view, &[], 700, false, None).is_none(), "same");
+        let (r, _) = florence();
+        assert!(
+            loads.decide(&view, &[r], 710, false, None).is_some(),
+            "a region landed"
+        );
+    }
+
+    #[test]
+    fn a_cells_box_is_its_tile() {
+        let cell = Cell { z: 1, x: 1, y: 0 };
+        let b = cell.bounds();
+        assert_eq!(b.west, 0);
+        assert!(b.east >= 1_799_999_990, "{b:?}");
+        assert!(b.north > 850_000_000 && b.south.abs() < 10);
+        let last = Cell {
+            z: 13,
+            x: 8191,
+            y: 8191,
+        };
+        assert!(last.bounds().east >= 1_799_000_000);
+    }
+}

@@ -12,6 +12,14 @@
 //! /mark  [2, [id: bin32, ...], read_at: uint] -> [status]
 //! /watch [cursor: uint]                       -> [status, newest: uint]
 //! /key   [peer: bin16, public_key: bin64]     -> [status]
+//! /move  [token: bin16, cursor: uint]         -> [status, private_key: bin64, ratchets: bin,
+//!                                                 known: bin, name: str, first: uint, more: bool,
+//!                                                 [[seq, kind, id: bin32, at, packed], ...]]
+//! /moved [token: bin16, cursor: uint]         -> [status]
+//! /group [client_id: bin16, name: str,
+//!         [[address: bin16, name: str], ...]] -> [status, group: bin16]
+//! /groupadd [client_id: bin16, group: bin16,
+//!         [[address: bin16, name: str], ...]] -> [status, group: bin16]
 //!
 //! wake   ["pull", newest: uint]               home node to client, on the
 //!                                             link that asked /watch
@@ -148,6 +156,9 @@ pub enum Status {
     Malformed,
     /// The home node could not answer (its store failed).
     Failed,
+    /// A `/moved` came while the archive held entries after its cursor:
+    /// the new device takes them with `/move` first (1281).
+    Behind,
 }
 
 impl Status {
@@ -159,6 +170,7 @@ impl Status {
             Self::BadToken => 3,
             Self::Malformed => 4,
             Self::Failed => 5,
+            Self::Behind => 6,
         }
     }
 
@@ -170,6 +182,7 @@ impl Status {
             3 => Self::BadToken,
             4 => Self::Malformed,
             5 => Self::Failed,
+            6 => Self::Behind,
             _ => return None,
         })
     }
@@ -184,6 +197,7 @@ impl core::fmt::Display for Status {
             Self::BadToken => "the mailbox does not know this admission code, or it was used",
             Self::Malformed => "the mailbox could not read the request",
             Self::Failed => "the mailbox could not answer",
+            Self::Behind => "the mailbox holds newer entries than the move took",
         })
     }
 }
@@ -531,6 +545,145 @@ pub fn read_key_request(data: &[u8]) -> Result<([u8; 16], [u8; 64]), Malformed> 
     Ok((peer, key))
 }
 
+/// The most members one `/group` names (1307): a family, a team, a
+/// club's board; the home sends each an invitation at once.
+pub const GROUP_MEMBERS_MAX: usize = 64;
+
+/// One `/group` (1307, `docs/drafts/group-chats-study-2026-11.md` 4.1): make
+/// a group hosted by the home, its admin the home's owner, and invite the
+/// members, each under the name the admin gives it. The same `client_id`
+/// handed in again is the same group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupRequest {
+    pub client_id: [u8; 16],
+    pub name: alloc::string::String,
+    pub members: Vec<([u8; 16], alloc::string::String)>,
+}
+
+pub fn group_request(request: &GroupRequest) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 3);
+    msgpack::bin(&mut out, &request.client_id);
+    msgpack::string(&mut out, &request.name);
+    msgpack::array(&mut out, request.members.len());
+    for (address, name) in &request.members {
+        msgpack::array(&mut out, 2);
+        msgpack::bin(&mut out, address);
+        msgpack::string(&mut out, name);
+    }
+    out
+}
+
+/// A `/group` as the home reads it: a group with no name, no member or more
+/// than [`GROUP_MEMBERS_MAX`] is malformed.
+pub fn read_group_request(data: &[u8]) -> Result<GroupRequest, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 3 {
+        return Err(Malformed);
+    }
+    let client_id =
+        <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let name: alloc::string::String = msgpack::read_str(data, &mut p)?.trim().into();
+    let count = msgpack::array_len(data, &mut p)?;
+    if name.is_empty() || count == 0 || count > GROUP_MEMBERS_MAX {
+        return Err(Malformed);
+    }
+    let mut members = Vec::with_capacity(count);
+    for _ in 0..count {
+        if msgpack::array_len(data, &mut p)? != 2 {
+            return Err(Malformed);
+        }
+        let address =
+            <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+        let name = msgpack::read_str(data, &mut p)?.trim().into();
+        members.push((address, name));
+    }
+    Ok(GroupRequest {
+        client_id,
+        name,
+        members,
+    })
+}
+
+/// One `/groupadd` (1307 G2, study 4.5): the admin's home adds `members`
+/// to its group `group`, each invited under the name the admin gives it.
+/// A member already in it is skipped, so the same request again adds
+/// nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupAddRequest {
+    pub client_id: [u8; 16],
+    pub group: [u8; 16],
+    pub members: Vec<([u8; 16], alloc::string::String)>,
+}
+
+pub fn group_add_request(request: &GroupAddRequest) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 3);
+    msgpack::bin(&mut out, &request.client_id);
+    msgpack::bin(&mut out, &request.group);
+    msgpack::array(&mut out, request.members.len());
+    for (address, name) in &request.members {
+        msgpack::array(&mut out, 2);
+        msgpack::bin(&mut out, address);
+        msgpack::string(&mut out, name);
+    }
+    out
+}
+
+/// A `/groupadd` as the home reads it: no member, or more than
+/// [`GROUP_MEMBERS_MAX`], is malformed.
+pub fn read_group_add_request(data: &[u8]) -> Result<GroupAddRequest, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 3 {
+        return Err(Malformed);
+    }
+    let client_id =
+        <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let group = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let count = msgpack::array_len(data, &mut p)?;
+    if count == 0 || count > GROUP_MEMBERS_MAX {
+        return Err(Malformed);
+    }
+    let mut members = Vec::with_capacity(count);
+    for _ in 0..count {
+        if msgpack::array_len(data, &mut p)? != 2 {
+            return Err(Malformed);
+        }
+        let address =
+            <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+        let name = msgpack::read_str(data, &mut p)?.trim().into();
+        members.push((address, name));
+    }
+    Ok(GroupAddRequest {
+        client_id,
+        group,
+        members,
+    })
+}
+
+pub fn group_answer(group: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::uint(&mut out, Status::Ok.code());
+    msgpack::bin(&mut out, group);
+    out
+}
+
+/// A `/group` answer: the group's address, or the status that refused it.
+pub fn read_group_answer(data: &[u8]) -> Result<Result<[u8; 16], Status>, Malformed> {
+    let status = read_status(data)?;
+    if status != Status::Ok {
+        return Ok(Err(status));
+    }
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    msgpack::read_uint(data, &mut p)?;
+    let group = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    Ok(Ok(group))
+}
+
 /// A `/send` answer: the message id, or the status that refused it.
 pub fn read_send_answer(data: &[u8]) -> Result<Result<[u8; 32], Status>, Malformed> {
     let status = read_status(data)?;
@@ -580,6 +733,122 @@ pub fn read_sync_answer(data: &[u8]) -> Result<Result<Page, Status>, Malformed> 
         entries,
         more,
         first,
+    }))
+}
+
+/// A `/move` or `/moved` request (1281): the move token the old device's
+/// owner opened, and the archive sequence the new device holds up to.
+pub fn move_request(token: &[u8; 16], cursor: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, token);
+    msgpack::uint(&mut out, cursor);
+    out
+}
+
+pub fn read_move_request(data: &[u8]) -> Result<([u8; 16], u64), Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    let token = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    Ok((token, msgpack::read_uint(data, &mut p)?))
+}
+
+/// One archive entry as a move carries it: with its id, which the new
+/// mailbox keeps so a message that comes again is still archived once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moving {
+    pub seq: u64,
+    pub kind: u8,
+    pub id: [u8; 32],
+    pub at: i64,
+    pub packed: Vec<u8>,
+}
+
+/// One `/move` page (1281): the identity's private key, the delivery
+/// destination's own ratchets as the node keeps them (signed, empty when
+/// it has none), the identities its node knows as it last kept them (the
+/// contacts' keys; empty when none were kept), the name the mailbox
+/// announces (empty for none), and the archive entries after the
+/// request's cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MovePage {
+    pub private_key: Vec<u8>,
+    pub ratchets: Vec<u8>,
+    pub known: Vec<u8>,
+    pub name: alloc::string::String,
+    pub first: u64,
+    pub more: bool,
+    pub entries: Vec<Moving>,
+}
+
+pub fn move_answer(page: &MovePage) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 8);
+    msgpack::uint(&mut out, Status::Ok.code());
+    msgpack::bin(&mut out, &page.private_key);
+    msgpack::bin(&mut out, &page.ratchets);
+    msgpack::bin(&mut out, &page.known);
+    msgpack::string(&mut out, &page.name);
+    msgpack::uint(&mut out, page.first);
+    msgpack::bool(&mut out, page.more);
+    msgpack::array(&mut out, page.entries.len());
+    for entry in &page.entries {
+        msgpack::array(&mut out, 5);
+        msgpack::uint(&mut out, entry.seq);
+        msgpack::uint(&mut out, u64::from(entry.kind));
+        msgpack::bin(&mut out, &entry.id);
+        msgpack::int(&mut out, entry.at);
+        msgpack::bin(&mut out, &entry.packed);
+    }
+    out
+}
+
+/// A `/move` answer: the page, or the status that refused it.
+pub fn read_move_answer(data: &[u8]) -> Result<Result<MovePage, Status>, Malformed> {
+    let status = read_status(data)?;
+    if status != Status::Ok {
+        return Ok(Err(status));
+    }
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 8 {
+        return Err(Malformed);
+    }
+    msgpack::read_uint(data, &mut p)?;
+    let private_key = msgpack::read_bin(data, &mut p)?.to_vec();
+    let ratchets = msgpack::read_bin(data, &mut p)?.to_vec();
+    let known = msgpack::read_bin(data, &mut p)?.to_vec();
+    let name = alloc::string::String::from(msgpack::read_str(data, &mut p)?);
+    let first = msgpack::read_uint(data, &mut p)?;
+    let more = msgpack::read_bool(data, &mut p)?;
+    let count = msgpack::array_len(data, &mut p)?;
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        if msgpack::array_len(data, &mut p)? != 5 {
+            return Err(Malformed);
+        }
+        let seq = msgpack::read_uint(data, &mut p)?;
+        let kind = u8::try_from(msgpack::read_uint(data, &mut p)?).map_err(|_| Malformed)?;
+        let id = <[u8; 32]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+        let at = msgpack::read_int(data, &mut p)?;
+        let packed = msgpack::read_bin(data, &mut p)?.to_vec();
+        entries.push(Moving {
+            seq,
+            kind,
+            id,
+            at,
+            packed,
+        });
+    }
+    Ok(Ok(MovePage {
+        private_key,
+        ratchets,
+        known,
+        name,
+        first,
+        more,
+        entries,
     }))
 }
 
@@ -685,6 +954,79 @@ mod tests {
         );
     }
 
+    /// 1307: a `/group` and its answer round trip; a group without a name
+    /// or a member, or with one member too many, is malformed.
+    #[test]
+    fn a_group_request_and_its_answer_round_trip() {
+        let request = GroupRequest {
+            client_id: [5; 16],
+            name: "Familie".into(),
+            members: alloc::vec![([1; 16], "Anna".into()), ([2; 16], "Bob".into())],
+        };
+        assert_eq!(
+            read_group_request(&group_request(&request)),
+            Ok(request.clone())
+        );
+        assert_eq!(read_group_answer(&group_answer(&[9; 16])), Ok(Ok([9; 16])));
+        assert_eq!(
+            read_group_answer(&status_answer(Status::NotAdmitted)),
+            Ok(Err(Status::NotAdmitted))
+        );
+        let nameless = GroupRequest {
+            name: "  ".into(),
+            ..request.clone()
+        };
+        assert_eq!(
+            read_group_request(&group_request(&nameless)),
+            Err(Malformed)
+        );
+        let alone = GroupRequest {
+            members: Vec::new(),
+            ..request.clone()
+        };
+        assert_eq!(read_group_request(&group_request(&alone)), Err(Malformed));
+        let crowd = GroupRequest {
+            members: (0..=GROUP_MEMBERS_MAX)
+                .map(|n| ([n as u8; 16], "x".into()))
+                .collect(),
+            ..request.clone()
+        };
+        assert_eq!(read_group_request(&group_request(&crowd)), Err(Malformed));
+        let full = GroupRequest {
+            members: crowd.members[..GROUP_MEMBERS_MAX].to_vec(),
+            ..request
+        };
+        assert_eq!(read_group_request(&group_request(&full)), Ok(full));
+        // `/groupadd` (G2): round trips; none or too many is malformed.
+        let add = GroupAddRequest {
+            client_id: [3; 16],
+            group: [4; 16],
+            members: vec![([5; 16], "Cara".into())],
+        };
+        assert_eq!(
+            read_group_add_request(&group_add_request(&add)),
+            Ok(add.clone())
+        );
+        let none = GroupAddRequest {
+            members: Vec::new(),
+            ..add.clone()
+        };
+        assert_eq!(
+            read_group_add_request(&group_add_request(&none)),
+            Err(Malformed)
+        );
+        let crowd = GroupAddRequest {
+            members: (0..=GROUP_MEMBERS_MAX)
+                .map(|i| ([i as u8; 16], "x".into()))
+                .collect(),
+            ..add
+        };
+        assert_eq!(
+            read_group_add_request(&group_add_request(&crowd)),
+            Err(Malformed)
+        );
+    }
+
     #[test]
     fn a_mark_round_trips_and_an_empty_or_unknown_one_is_malformed() {
         let mark = Mark {
@@ -759,5 +1101,38 @@ mod tests {
     #[test]
     fn a_cursor_round_trips() {
         assert_eq!(read_sync_request(&sync_request(u64::MAX)), Ok(u64::MAX));
+    }
+
+    #[test]
+    fn a_move_page_round_trips_and_a_refusal_is_its_status() {
+        assert_eq!(
+            read_move_request(&move_request(&[3; 16], 77)),
+            Ok(([3; 16], 77))
+        );
+        assert_eq!(read_move_request(&sync_request(1)), Err(Malformed));
+        let page = MovePage {
+            private_key: vec![9; 64],
+            ratchets: Vec::new(),
+            known: vec![1, 2],
+            name: "Anna".into(),
+            first: 2,
+            more: true,
+            entries: vec![Moving {
+                seq: 5,
+                kind: crate::home::KIND_NAME,
+                id: [7; 32],
+                at: -1,
+                packed: vec![0, 1, 2],
+            }],
+        };
+        assert_eq!(read_move_answer(&move_answer(&page)), Ok(Ok(page)));
+        assert_eq!(
+            read_move_answer(&status_answer(Status::Behind)),
+            Ok(Err(Status::Behind))
+        );
+        assert_eq!(
+            read_status(&status_answer(Status::Behind)),
+            Ok(Status::Behind)
+        );
     }
 }

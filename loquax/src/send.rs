@@ -425,6 +425,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::Verified { .. }
                 | OutboxEvent::Announced { .. }
                 | OutboxEvent::NodeAnnounced { .. }
+                | OutboxEvent::MeshPosition { .. }
                 | OutboxEvent::SyncLinked
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. }

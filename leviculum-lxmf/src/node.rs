@@ -1024,8 +1024,9 @@ impl LxmfNode {
     /// archive) proves a message only once it is kept, so a sender is never
     /// told DELIVERED for a message a crash or a full disk then lost.
     ///
-    /// The delivery destination turns to `ProofStrategy::App`, so the core
-    /// asks rather than proves on arrival, and every request comes out as
+    /// The delivery destination and every backchannel link already
+    /// identified turn to `ProofStrategy::App` (a link identified later
+    /// starts so), so the core asks rather than proves on arrival, and every request comes out as
     /// [`LxmfNodeEvent::ProofRequested`]. A single packet's request follows
     /// its `PacketReceived`; a link packet's precedes its
     /// `LinkDataReceived`, as the core emits them. A Resource's proof is
@@ -1045,6 +1046,11 @@ impl LxmfNode {
             .ok_or(LxmfNodeError::InvalidDeliveryDestination)?
             .set_proof_strategy(ProofStrategy::App);
         self.holds_proofs = true;
+        for link_id in &self.identified_links {
+            if let Some(link) = node.link_mut(link_id) {
+                link.set_proof_strategy(ProofStrategy::App);
+            }
+        }
         Ok(())
     }
 
@@ -1610,6 +1616,24 @@ impl LxmfNode {
         if let Ok(follow_up) = node.identify_link(&link_id, &identity) {
             self.identified_links.insert(link_id);
             output.merge(follow_up);
+            // From here the peer delivers to us on this link too, and its
+            // packets must be proven as on a link to our delivery
+            // destination; an initiator's link starts with `None`. Python
+            // gives it `delivery_packet`, which proves every packet
+            // (`reference/LXMF/LXMF/LXMRouter.py:1926-1927,2708-2710`).
+            if let Some(link) = node.link_mut(&link_id) {
+                link.set_proof_strategy(self.delivery_proof_strategy());
+            }
+        }
+    }
+
+    /// How a packet delivered to us is proven: by the core at once, or by
+    /// the caller once it is kept ([`Self::hold_proofs`]).
+    fn delivery_proof_strategy(&self) -> ProofStrategy {
+        if self.holds_proofs {
+            ProofStrategy::App
+        } else {
+            ProofStrategy::All
         }
     }
 }
@@ -2684,6 +2708,118 @@ mod tests {
                     && received.content.len() == 700
         )));
     }
+
+    /// A introduces itself on its own link to B, then B answers over that
+    /// backchannel with a single packet; whether A proves the answer at
+    /// once or holds the proof until it is kept (1312, a home node), B
+    /// learns DELIVERED from that first packet's proof, not from a retry.
+    fn backchannel_packet_is_proven(holds: bool) {
+        let mut a = peer(21);
+        let mut b = peer(111);
+        if holds {
+            a.lxmf.hold_proofs(&mut a.node).expect("hold proofs");
+        }
+        exchange_announces(&mut a, &mut b);
+
+        let mut a_events = Vec::new();
+        let mut b_events = Vec::new();
+        let (_, link_output) = a
+            .lxmf
+            .ensure_direct_link(&mut a.node, b.destination)
+            .expect("establish direct link");
+        pump(
+            &mut a,
+            &mut b,
+            take_packets(link_output.core.actions),
+            &mut a_events,
+            &mut b_events,
+        );
+        let introduction = message(
+            b.destination,
+            &a.signing_identity,
+            a.destination,
+            DeliveryMethod::Direct,
+            12,
+        );
+        let sent = a
+            .lxmf
+            .send(&mut a.node, &introduction)
+            .expect("send introduction");
+        pump(
+            &mut a,
+            &mut b,
+            take_packets(sent.core.actions),
+            &mut a_events,
+            &mut b_events,
+        );
+        let link = a.lxmf.direct_link(&b.destination).expect("a's link");
+        assert_eq!(b.lxmf.direct_link(&a.destination), Some(link));
+
+        let answer = message(
+            a.destination,
+            &b.signing_identity,
+            b.destination,
+            DeliveryMethod::Direct,
+            12,
+        );
+        assert_eq!(
+            LxmfNode::representation(&answer).expect("representation"),
+            DeliveryRepresentation::DirectPacket
+        );
+        let sent = b.lxmf.send(&mut b.node, &answer).expect("send answer");
+        pump(
+            &mut b,
+            &mut a,
+            take_packets(sent.core.actions),
+            &mut b_events,
+            &mut a_events,
+        );
+        assert!(a_events.iter().any(|event| matches!(
+            event,
+            LxmfNodeEvent::MessageReceived(received) if received.message_id == answer.message_id
+        )));
+        let delivered = |events: &[LxmfNodeEvent]| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    LxmfNodeEvent::Delivered { message_id } if *message_id == answer.message_id
+                )
+            })
+        };
+        if holds {
+            assert!(!delivered(&b_events), "proven before it was kept");
+            let proof =
+                a_events
+                    .iter()
+                    .find_map(|event| match event {
+                        LxmfNodeEvent::ProofRequested(
+                            proof @ InboundProof::Link { link_id, .. },
+                        ) if *link_id == link => Some(*proof),
+                        _ => None,
+                    })
+                    .expect("the answer's proof is held");
+            let proven = LxmfNode::prove(&mut a.node, &proof).expect("prove");
+            pump(
+                &mut a,
+                &mut b,
+                take_packets(proven.actions),
+                &mut a_events,
+                &mut b_events,
+            );
+        }
+        assert!(delivered(&b_events), "the backchannel answer is unproven");
+    }
+
+    #[test]
+    fn a_backchannel_packet_is_proven() {
+        backchannel_packet_is_proven(false);
+    }
+
+    #[test]
+    fn a_held_backchannel_packet_is_proven_once_released() {
+        backchannel_packet_is_proven(true);
+    }
+
     /// Reports what each delivery representation costs a caller that holds the
     /// core, so `docs/src/concepts/core-lock-budget.md` can cite the adapter's
     /// numbers instead of assuming them (Codeberg #196).

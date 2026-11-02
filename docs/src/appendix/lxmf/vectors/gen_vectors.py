@@ -402,12 +402,48 @@ def gen_message_vectors():
     gen_lev_vector("VEC-MSG-LEV-RECEIPT", b"",
                    {0x00: 1, 0x01: [LEV_READ_AT, [m.hash]]})
 
+    # VEC-MSG-LEV-GROUP-COPY, -INVITE, -MEMBERS: the group keys of the
+    # namespace (docs/drafts/group-chats-study-2026-11.md, 2.2). A copy a
+    # group's home sends a member that understands groups (capability bit
+    # 1): the writer's address, the writer's timestamp in milliseconds, the
+    # membership epoch. An invitation with the group's address and 64 byte
+    # public key, its name and the admin's. A membership of two, the admin
+    # flagged 2, and the leave a member sends: itself alone, flagged 1.
+    gen_lev_vector("VEC-MSG-LEV-GROUP-COPY",
+                   "Bin gleich da, bringe Brot mit.".encode("utf-8"),
+                   {0x00: 3, 0x02: [LEV_GROUP_SENDER, LEV_GROUP_SENT_MS, 1]})
+    gen_lev_vector("VEC-MSG-LEV-GROUP-INVITE",
+                   "Lew invited you to Familie".encode("utf-8"),
+                   {0x00: 3, 0x04: [LEV_GROUP_ADDRESS, LEV_GROUP_KEY,
+                                    "Familie", "Lew", 1]})
+    gen_lev_vector("VEC-MSG-LEV-GROUP-MEMBERS", b"",
+                   {0x00: 3, 0x05: [1, [[LEV_GROUP_SENDER, "Lew", 2],
+                                        [LEV_GROUP_MEMBER, "Anna", 0]]]})
+    gen_lev_vector("VEC-MSG-LEV-GROUP-LEAVE", b"",
+                   {0x00: 3, 0x05: [1, [[LEV_GROUP_MEMBER, "Anna", 1]]]})
+    # VEC-MSG-LEV-GROUP-DIGEST: the lines a group's home held for a slow
+    # member and sends as one message (study 5.3), each with its writer,
+    # the writer's clock and the text without the name prefix.
+    gen_lev_vector("VEC-MSG-LEV-GROUP-DIGEST",
+                   "Lew: Brot ist da\nAnna: Danke".encode("utf-8"),
+                   {0x00: 3, 0x06: [[LEV_GROUP_SENDER, LEV_GROUP_SENT_MS, "Brot ist da"],
+                                    [LEV_GROUP_MEMBER, LEV_GROUP_SENT_MS + 1000, "Danke"]]})
+
     gen_foreign_writer_vectors(src, dst)
 
 
 # The reader's clock in VEC-MSG-LEV-RECEIPT, unix seconds: a uint32, as
 # the namespace fixes `read_at`.
 LEV_READ_AT = 1700000100
+
+
+# The group vectors' addresses, key and the writer's clock: fixed bytes,
+# not real identities; the codec reads them as bytes.
+LEV_GROUP_SENDER = bytes([0x11] * 16)
+LEV_GROUP_MEMBER = bytes([0x55] * 16)
+LEV_GROUP_ADDRESS = bytes([0x22] * 16)
+LEV_GROUP_KEY = bytes(range(0x80, 0xC0))
+LEV_GROUP_SENT_MS = 1700000000123
 
 
 def gen_lev_vector(vector_id, content, data):
@@ -438,6 +474,25 @@ def gen_lev_vector(vector_id, content, data):
     if 0x01 in read:
         record["recovered_read_at"] = read[0x01][0]
         record["recovered_ids_hex"] = [i.hex() for i in read[0x01][1]]
+    if 0x02 in read:
+        record["recovered_sender_hex"] = read[0x02][0].hex()
+        record["recovered_sent_ms"] = read[0x02][1]
+        record["recovered_epoch"] = read[0x02][2]
+    if 0x04 in read:
+        record["recovered_group_hex"] = read[0x04][0].hex()
+        record["recovered_group_key_hex"] = read[0x04][1].hex()
+        record["recovered_group_name"] = read[0x04][2]
+        record["recovered_admin_name"] = read[0x04][3]
+        record["recovered_epoch"] = read[0x04][4]
+    if 0x06 in read:
+        record["recovered_digest"] = [
+            [a.hex(), ms, text] for a, ms, text in read[0x06]
+        ]
+    if 0x05 in read:
+        record["recovered_epoch"] = read[0x05][0]
+        record["recovered_members"] = [
+            [a.hex(), name, flags] for a, name, flags in read[0x05][1]
+        ]
     add(record)
 
 

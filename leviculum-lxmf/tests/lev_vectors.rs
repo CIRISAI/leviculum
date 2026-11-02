@@ -1,6 +1,7 @@
 //! The `lev` namespace against the reference (`VEC-MSG-LEV-MARK`,
-//! `VEC-MSG-LEV-RECEIPT` in `docs/src/appendix/lxmf/vectors/vectors.json`,
-//! written by `gen_vectors.py` importing `reference/LXMF`).
+//! `VEC-MSG-LEV-RECEIPT` and the group keys `VEC-MSG-LEV-GROUP-*` in
+//! `docs/src/appendix/lxmf/vectors/vectors.json`, written by
+//! `gen_vectors.py` importing `reference/LXMF`).
 //!
 //! Both directions, as for reactions and replies: the message the reference
 //! built is read by our codec with the mark and the receipt it holds, and
@@ -13,10 +14,32 @@ mod common;
 
 use leviculum_core::Identity;
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
-use leviculum_lxmf::lev::{Lev, Receipt};
+use leviculum_lxmf::lev::{
+    DigestLine, GroupCopy, Invite, Lev, Member, Members, Receipt, CAP_GROUPS, CAP_READ_RECEIPTS,
+    MEMBER_ADMIN, MEMBER_LEFT,
+};
 use leviculum_lxmf::{DeliveryMethod, Message, Verification};
 
-const IDS: [&str; 2] = ["VEC-MSG-LEV-MARK", "VEC-MSG-LEV-RECEIPT"];
+const IDS: [&str; 7] = [
+    "VEC-MSG-LEV-MARK",
+    "VEC-MSG-LEV-RECEIPT",
+    "VEC-MSG-LEV-GROUP-COPY",
+    "VEC-MSG-LEV-GROUP-INVITE",
+    "VEC-MSG-LEV-GROUP-MEMBERS",
+    "VEC-MSG-LEV-GROUP-LEAVE",
+    "VEC-MSG-LEV-GROUP-DIGEST",
+];
+
+const SENDER: [u8; 16] = [0x11; 16];
+const MEMBER: [u8; 16] = [0x55; 16];
+
+/// What a Loquax that understands groups says: bits 0 and 1.
+fn groups(lev: Lev) -> Lev {
+    Lev {
+        capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+        ..lev
+    }
+}
 
 fn hex(id: &str, field: &str) -> Vec<u8> {
     hex::decode(common::fixture(id, field)).unwrap()
@@ -27,6 +50,68 @@ fn expected(id: &str) -> Lev {
         "VEC-MSG-LEV-RECEIPT" => Lev::mark_with(Receipt {
             read_at: common::fixture(id, "recovered_read_at").parse().unwrap(),
             ids: vec![hex("VEC-MSG-1", "message_id_hex").try_into().unwrap()],
+        }),
+        "VEC-MSG-LEV-GROUP-COPY" => groups(Lev {
+            group_copy: Some(GroupCopy {
+                sender: SENDER,
+                sent_ms: 1_700_000_000_123,
+                epoch: 1,
+            }),
+            ..Lev::default()
+        }),
+        "VEC-MSG-LEV-GROUP-INVITE" => groups(Lev {
+            invite: Some(Invite {
+                group: [0x22; 16],
+                public_key: std::array::from_fn(|i| 0x80 + i as u8),
+                name: "Familie".into(),
+                admin_name: "Lew".into(),
+                epoch: 1,
+            }),
+            ..Lev::default()
+        }),
+        "VEC-MSG-LEV-GROUP-MEMBERS" => groups(Lev {
+            members: Some(Members {
+                epoch: 1,
+                members: vec![
+                    Member {
+                        address: SENDER,
+                        name: "Lew".into(),
+                        flags: MEMBER_ADMIN,
+                    },
+                    Member {
+                        address: MEMBER,
+                        name: "Anna".into(),
+                        flags: 0,
+                    },
+                ],
+            }),
+            ..Lev::default()
+        }),
+        "VEC-MSG-LEV-GROUP-LEAVE" => groups(Lev {
+            members: Some(Members {
+                epoch: 1,
+                members: vec![Member {
+                    address: MEMBER,
+                    name: "Anna".into(),
+                    flags: MEMBER_LEFT,
+                }],
+            }),
+            ..Lev::default()
+        }),
+        "VEC-MSG-LEV-GROUP-DIGEST" => groups(Lev {
+            digest: Some(vec![
+                DigestLine {
+                    sender: SENDER,
+                    sent_ms: 1_700_000_000_123,
+                    text: "Brot ist da".into(),
+                },
+                DigestLine {
+                    sender: MEMBER,
+                    sent_ms: 1_700_000_001_123,
+                    text: "Danke".into(),
+                },
+            ]),
+            ..Lev::default()
         }),
         _ => Lev::mark(),
     }
@@ -62,7 +147,8 @@ fn our_fields_are_the_references_bytes_and_survive_its_unpack() {
         // What the reference read out of the message, packed again.
         assert_eq!(fields[1].1, hex(id, "recovered_fc_msgpack_hex"), "{id}");
         assert_eq!(hex(id, "recovered_type_hex"), b"lev", "{id}");
-        assert_eq!(common::fixture(id, "recovered_capabilities"), "1", "{id}");
+        let caps = expected(id).capabilities.unwrap_or_default().to_string();
+        assert_eq!(common::fixture(id, "recovered_capabilities"), caps, "{id}");
         let ours = Message::create(
             packed[0..16].try_into().unwrap(),
             packed[16..32].try_into().unwrap(),
@@ -76,5 +162,45 @@ fn our_fields_are_the_references_bytes_and_survive_its_unpack() {
         .unwrap();
         assert_eq!(ours.pack(), packed, "{id}: packed");
         assert_eq!(common::fixture(id, "signature_validated"), "true");
+    }
+}
+
+/// What the reference read out of the group keys is what our codec wrote:
+/// the writer, its clock and the epoch; the group, its key and names; each
+/// member with its flags.
+#[test]
+fn the_reference_reads_the_group_keys_as_we_mean_them() {
+    let id = "VEC-MSG-LEV-GROUP-COPY";
+    assert_eq!(
+        common::fixture(id, "recovered_sender_hex"),
+        hex::encode(SENDER)
+    );
+    assert_eq!(common::fixture(id, "recovered_sent_ms"), "1700000000123");
+    assert_eq!(common::fixture(id, "recovered_epoch"), "1");
+    let id = "VEC-MSG-LEV-GROUP-INVITE";
+    let invite = expected(id).invite.unwrap();
+    assert_eq!(
+        common::fixture(id, "recovered_group_hex"),
+        hex::encode(invite.group)
+    );
+    assert_eq!(
+        common::fixture(id, "recovered_group_key_hex"),
+        hex::encode(invite.public_key)
+    );
+    assert_eq!(common::fixture(id, "recovered_group_name"), "Familie");
+    assert_eq!(common::fixture(id, "recovered_admin_name"), "Lew");
+    assert!(expected("VEC-MSG-LEV-GROUP-COPY").supports_groups());
+    // The digest (1307 G2): each line's writer, clock and text.
+    let all = include_str!("../../docs/src/appendix/lxmf/vectors/vectors.json");
+    let at = all
+        .find("\"id\": \"VEC-MSG-LEV-GROUP-DIGEST\"")
+        .expect("the digest vector");
+    let record = &all[at..];
+    let start = record.find("\"recovered_digest\"").expect("its digest");
+    let digest = &record[start..start + record[start..].find(']').expect("a line") + 300];
+    for line in expected("VEC-MSG-LEV-GROUP-DIGEST").digest.unwrap() {
+        assert!(digest.contains(&hex::encode(line.sender)), "{digest}");
+        assert!(digest.contains(&line.sent_ms.to_string()), "{digest}");
+        assert!(digest.contains(&line.text), "{digest}");
     }
 }

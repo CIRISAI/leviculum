@@ -724,6 +724,7 @@ impl Canvas {
         let Drawn {
             mut fb,
             attribution,
+            ..
         } = self.painter.draw(view, self.ink(), ask.style, 100);
         let picture = match self.graphics {
             Graphics::Kitty | Graphics::Sixel => self.encode(&mut fb, w, h, ask.cells),
@@ -1374,6 +1375,11 @@ fn labels_of(shown: &MapView, muted: Style) -> Vec<Label> {
     let mut labels = Vec::new();
     for pin in &shown.pins {
         let mut style = Style::default();
+        // A node nearby that is no contact (1302): a neutral pin, in the
+        // muted grey, its announced name beside it.
+        if pin.nearby {
+            style = style.patch(muted);
+        }
         if pin.stale {
             style = style.patch(muted).add_modifier(Modifier::DIM);
         }
@@ -1926,6 +1932,7 @@ mod tests {
                 text: "● bob · 4 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: true,
             }],
         }
@@ -2064,6 +2071,7 @@ mod tests {
                 text: "● bob · 4 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: false,
             }],
         };
@@ -2093,6 +2101,62 @@ mod tests {
         assert_eq!(cell.bg, Color::Rgb(0xff, 0xff, 0xff), "the halo");
         assert_eq!(cell.fg, Color::Rgb(0x2e, 0x6b, 0x2e), "a park's green");
         assert_eq!(frame, PINNED_NAMES, "{frame}");
+    }
+
+    /// 1302: a node the mesh shows that is no contact is drawn beside a
+    /// friend's pin in the muted grey, its announced name beside it, the
+    /// friend's in the plain text colour; the frame pinned as text.
+    #[test]
+    fn a_node_nearby_is_drawn_grey_beside_a_friends_pin() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = MapPainter::new(Maps::new(Some(dir)), Graphics::Braille, None);
+        painter.set_tier(Tier::Truecolor);
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (60u16, 20u16);
+        let area = leviculum_ui::Rect::new(0, 0, cols, rows);
+        let at = project(LatLon::from_degrees(43.7755, 11.2672));
+        let pin = |peer: u8, row: u16, text: &str, nearby: bool| PinCell {
+            peer: [peer; 16],
+            col: 2,
+            row,
+            text: text.to_string(),
+            apart: None,
+            stale: false,
+            nearby,
+            selected: false,
+        };
+        let shown = MapView {
+            area,
+            viewport: Viewport::new(
+                at,
+                15,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            pins: vec![
+                pin(1, 1, "● bob · 4 min", false),
+                pin(2, 4, "● Wanderer ·353e · 2 min", true),
+            ],
+        };
+        let grey = Color::Rgb(0x80, 0x80, 0x80);
+        let muted = Style::default().fg(grey);
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &shown, muted));
+        let buffer = terminal.backend().buffer().clone();
+        let line = |y: u16, from: u16, len: u16| -> String {
+            (from..from + len)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()).to_string())
+                .collect()
+        };
+        assert_eq!(line(1, 2, 13), "● bob · 4 min");
+        assert_eq!(line(4, 2, 24), "● Wanderer ·353e · 2 min");
+        let fg = |x: u16, y: u16| buffer.cell((x, y)).expect("cell").fg;
+        assert_ne!(fg(4, 1), grey, "a friend's name is no grey");
+        for x in 2..26 {
+            assert_eq!(fg(x, 4), grey, "the node nearby is grey at column {x}");
+        }
     }
 
     const PINNED_NAMES: &str = "\n  ● bob · 4 min  Giardino del Borgo\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                           Piazza D'Azeglio\n";
@@ -2128,6 +2192,7 @@ mod tests {
                 text: "● bob · 4 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: false,
             }],
         };
@@ -2882,6 +2947,7 @@ mod tests {
                 text: "● Lew Mobile · 1 min".to_string(),
                 apart: None,
                 stale: false,
+                nearby: false,
                 selected: false,
             }],
         }

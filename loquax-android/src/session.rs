@@ -129,6 +129,8 @@ impl InputBuffer for Line {
 enum Finished {
     Send(UiEvent),
     Pull(runner::PullEnd),
+    /// Another runner's answer, the event the model folds (1307).
+    Event(UiEvent),
 }
 
 /// Everything the lock guards.
@@ -182,6 +184,10 @@ struct Inner {
     /// What the recorder is to do (1276, `UiEffect::Recording`), by peer,
     /// until [`schema::Query::Recording`] hands it out.
     recorder: Vec<([u8; 16], Effect)>,
+    /// The platform's word on the network (1298), and whether the line
+    /// says "Reconnecting…" now.
+    network: loquax::home::rendezvous::Network,
+    reconnecting: bool,
 }
 
 /// A running session.
@@ -195,6 +201,8 @@ pub struct Session {
     here: Mutex<Option<mailbox::Here>>,
     /// The device "Link a device" waits for (1264), when one was asked.
     linking: Mutex<Option<mailbox::Linking>>,
+    /// The new phone "Move to a new phone" waits for (1281).
+    moving: Mutex<Option<mailbox::Linking>>,
     address: [u8; 16],
     server: String,
     /// The list the leaf dials one at a time, [`Session::server`] first.
@@ -213,8 +221,24 @@ impl Session {
             .enable_all()
             .build()
             .map_err(|error| StartError::other(format!("no runtime: {error}")))?;
+        if mailbox::has_moved(&home) {
+            // Walk finding 24 (1281): the mailbox went to the new phone,
+            // and this one sends nothing until its owner says otherwise.
+            if !start.take_back {
+                return Err(StartError::said(
+                    Some("moved"),
+                    StrId::MovedAway,
+                    Lang::of_tag(start.lang.as_deref().unwrap_or_default()),
+                    None,
+                ));
+            }
+            mailbox::take_back(&home).map_err(StartError::other)?;
+        }
+        // The platform's word on the network (1298), heard by the leaf's
+        // rotation and the phone's own mailbox's alike.
+        let network = loquax::home::rendezvous::Network::new();
         let (start, here) = if start.here || mailbox::is_here(&home) {
-            let (start, here) = Self::start_here(start, &home, runtime.handle())?;
+            let (start, here) = Self::start_here(start, &home, runtime.handle(), &network)?;
             (start, Some(here))
         } else {
             (start.clone(), None)
@@ -299,6 +323,12 @@ impl Session {
                 display_name: Vec::new(),
                 notices: loquax::effects::Terminal::new(home.clone()),
                 tcp,
+                // The phone's own mailbox is on the loopback address, which
+                // no network change touches: its rotation hears none.
+                network: match here {
+                    Some(_) => loquax::home::rendezvous::Network::new(),
+                    None => network.clone(),
+                },
             },
             Role::Client { address },
         ));
@@ -370,6 +400,8 @@ impl Session {
         let (heard_tx, heard_rx) = tokio::sync::mpsc::unbounded_channel();
         runtime.spawn(watch::run(watching, heard_tx));
         runtime.spawn(relay_watch(heard_rx, watch_tx, Arc::clone(&wake)));
+        let mut inner = inner;
+        inner.network = network;
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
@@ -396,6 +428,7 @@ impl Session {
             runtime: Mutex::new(Some(runtime)),
             here: Mutex::new(here),
             linking: Mutex::new(None),
+            moving: Mutex::new(None),
             address,
             server,
             servers,
@@ -412,15 +445,55 @@ impl Session {
         start: &schema::Start,
         home: &Path,
         runtime: &tokio::runtime::Handle,
+        network: &loquax::home::rendezvous::Network,
     ) -> Result<(schema::Start, mailbox::Here), StartError> {
+        let lang = Lang::of_tag(start.lang.as_deref().unwrap_or_default());
+        if let Some(text) = start.moving.as_deref() {
+            let name = start.name.as_deref().unwrap_or("phone");
+            mailbox::move_in(home, text, name, runtime).map_err(|failed| match failed {
+                mailbox::MoveFailed::Code(details) => {
+                    StartError::said(Some("code"), StrId::JoinNotMailbox, lang, Some(details))
+                }
+                mailbox::MoveFailed::HasAddress => {
+                    StartError::said(None, StrId::MoveHasAddress, lang, None)
+                }
+                mailbox::MoveFailed::Move(error) => {
+                    let need = match error {
+                        loquax::home::client::HomeError::Refused(_) => Some("code"),
+                        _ => None,
+                    };
+                    StartError::said(need, StrId::MoveFailed, lang, Some(error.to_string()))
+                }
+                mailbox::MoveFailed::Here(details) => StartError::other(details),
+            })?;
+        }
         if let Some(line) = start.restore.as_deref() {
-            mailbox::restore(home, line, start.passphrase.as_deref().unwrap_or_default()).map_err(
-                |text| StartError {
+            let passphrase = start.passphrase.as_deref().unwrap_or_default();
+            // The guard (1281): a fresh restore of an address that answers
+            // on another device right now warns first, since two live
+            // copies lose messages on both.
+            if !start.anyway && !home.join(mailbox::DIR).join("identity").exists() {
+                let key = mailbox::backup_key(line, passphrase).map_err(|text| StartError {
                     need: Some("passphrase"),
                     text,
                     details: None,
-                },
-            )?;
+                })?;
+                if mailbox::answers_elsewhere(home, &key, mailbox::PROBE_BUDGET, runtime)
+                    .map_err(StartError::other)?
+                {
+                    return Err(StartError::said(
+                        Some("live"),
+                        StrId::RestoreLive,
+                        lang,
+                        None,
+                    ));
+                }
+            }
+            mailbox::restore(home, line, passphrase).map_err(|text| StartError {
+                need: Some("passphrase"),
+                text,
+                details: None,
+            })?;
         }
         let joined = loquax::home::client::load_client(home).map_err(StartError::other)?;
         if joined.is_some() && !mailbox::is_here(home) {
@@ -445,7 +518,8 @@ impl Session {
                     .encode(),
             ),
         };
-        let here = mailbox::Here::start(home, runtime).map_err(StartError::other)?;
+        let here =
+            mailbox::Here::start(home, runtime, network.clone()).map_err(StartError::other)?;
         let start = schema::Start {
             server: Some(here.server()),
             code,
@@ -666,6 +740,59 @@ impl Session {
         })
     }
 
+    /// "Move to a new phone" (1281, [`schema::Query::MovePhone`]): a code
+    /// for the new phone, kept as the one [`Session::moving_state`]
+    /// watches.
+    fn move_phone(&self) -> Result<schema::LinkCode, String> {
+        if !self.is_here() {
+            let lang = self.lock().lang;
+            return Err(StrId::MoveOnComputer.text(lang).to_string());
+        }
+        let home = self.lock().home.clone();
+        let (admission, linking) = mailbox::move_code(&home)?;
+        let code = admission.text();
+        let (qr_size, modules) = loquax::home::qr::modules(&code)?;
+        let hours = linking.expires_at.saturating_sub(admission.issued_at) / 3600;
+        let expires_at = linking.expires_at;
+        *self.moving_code() = Some(linking);
+        Ok(schema::LinkCode {
+            v: VERSION,
+            code,
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            hours: u32::try_from(hours).unwrap_or(u32::MAX),
+            expires_at,
+        })
+    }
+
+    /// Where the newest move code stands ([`schema::Query::Moving`]).
+    fn moving_state(&self) -> Result<schema::Linked, String> {
+        let Some(linking) = self.moving_code().clone() else {
+            return Ok(schema::Linked {
+                v: VERSION,
+                state: "none".to_string(),
+                name: String::new(),
+            });
+        };
+        let home = self.lock().home.clone();
+        let (state, name) = match mailbox::moving(&home, &linking)? {
+            mailbox::Moving::Waiting => ("waiting", String::new()),
+            mailbox::Moving::Moved(name) => ("moved", name),
+            mailbox::Moving::Over => ("over", String::new()),
+        };
+        Ok(schema::Linked {
+            v: VERSION,
+            state: state.to_string(),
+            name,
+        })
+    }
+
+    fn moving_code(&self) -> MutexGuard<'_, Option<mailbox::Linking>> {
+        self.moving
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn linking(&self) -> MutexGuard<'_, Option<mailbox::Linking>> {
         self.linking
             .lock()
@@ -876,6 +1003,12 @@ impl Session {
                 inner.apply(UiEvent::Run(PaletteCommand::Fetch));
                 return Ok(());
             }
+            Intent::Network { kind, changed } => {
+                self.lock().apply(UiEvent::Network { kind, changed });
+                // The pump looks at the rotations soon and says the line.
+                self.wake.notify_one();
+                return Ok(());
+            }
             Intent::Front(front) => {
                 let mut inner = self.lock();
                 inner.front = front;
@@ -885,6 +1018,8 @@ impl Session {
             Intent::Viewport { peer, keys } => UiEvent::Viewport { peer, keys },
             Intent::Name(name) => return self.rename(&name),
             Intent::AddContact { lxma, name } => return self.add_contact(&lxma, name.as_deref()),
+            // The group verbs (1307) are the model's own.
+            Intent::Group(verb) => UiEvent::Group(verb),
             Intent::Rename {
                 peer: Target::Peer(peer),
                 name: Some(name),
@@ -981,6 +1116,12 @@ impl Session {
                 peer,
                 input: Input::Verb(verb),
             },
+            // The maps are the renderer's, not the model's (1290): off the
+            // session's lock, as the Maps page's queries are.
+            Intent::DeleteAllRegions { confirmed: true } => {
+                let home = self.lock().home.clone();
+                return crate::map::delete_all_regions(&home).map(|_| ());
+            }
             other => return Err(format!("not a request of the facade: {other:?}")),
         };
         self.lock().apply(event);
@@ -1041,6 +1182,8 @@ impl Session {
             schema::Query::Profile => return self.profile().map(|p| schema::encode(&p)),
             schema::Query::LinkDevice => return self.link_device().map(|c| schema::encode(&c)),
             schema::Query::Linked => return self.linked().map(|l| schema::encode(&l)),
+            schema::Query::MovePhone => return self.move_phone().map(|c| schema::encode(&c)),
+            schema::Query::Moving => return self.moving_state().map(|l| schema::encode(&l)),
             schema::Query::Backup { passphrase } => {
                 return self
                     .backup(&passphrase)
@@ -1234,6 +1377,7 @@ impl Session {
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
             schema::Query::Bar { peer } => schema::encode(&inner.bar(parse_peer(&peer)?)),
             schema::Query::Shares => schema::encode(&inner.shares()),
+            schema::Query::Group => schema::encode(&inner.group_screen()),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
                 let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
@@ -1299,6 +1443,8 @@ impl Session {
             | schema::Query::Profile
             | schema::Query::LinkDevice
             | schema::Query::Linked
+            | schema::Query::MovePhone
+            | schema::Query::Moving
             | schema::Query::Backup { .. }
             | schema::Query::MapRegions { .. }
             | schema::Query::MapTheme { .. }
@@ -1420,6 +1566,7 @@ impl Inner {
         let store = Store::open_in(home, address).map_err(|error| error.to_string())?;
         let config = loquax::config::load(home).map_err(|error| error.to_string())?;
         let mut model = known(home, &store)?;
+        model.lang = lang;
         model.home_client = true;
         model.list_apart = true;
         model.reading.on = config.read_receipts.unwrap_or(true);
@@ -1489,6 +1636,8 @@ impl Inner {
             just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
             recorder: Vec::new(),
+            network: loquax::home::rendezvous::Network::new(),
+            reconnecting: false,
         })
     }
 
@@ -1539,9 +1688,11 @@ impl Inner {
                     self.apply(event);
                 }
                 Finished::Pull(end) => self.pulled(end),
+                Finished::Event(event) => self.apply(event),
             }
         }
         self.look_at_link();
+        self.look_at_network();
         let elapsed = self.elapsed_ms();
         if let Some(say) = self.pull_line.tick(elapsed) {
             self.say(say);
@@ -1568,6 +1719,8 @@ impl Inner {
             || self.pull_owed
             || !self.sends.is_empty()
             || self.link.is_none()
+            || self.reconnecting
+            || self.network.reconnecting()
             || self.dirty;
         if busy {
             return PUMP;
@@ -1636,6 +1789,25 @@ impl Inner {
         }
     }
 
+    /// After a network change (1298): the line says "Reconnecting…" while
+    /// a rotation that dropped its connection for it is not up again, and
+    /// is gone once every one is.
+    fn look_at_network(&mut self) {
+        let now = self.network.reconnecting();
+        if now != self.reconnecting {
+            self.reconnecting = now;
+            let state = match now {
+                true => "reconnecting",
+                false => "back",
+            };
+            tracing::info!("NETWORK {state}");
+            let _ = self.events.send(Event::Network {
+                v: VERSION,
+                state: state.to_string(),
+            });
+        }
+    }
+
     /// The interface came back: ask for the home destination's path. The
     /// home node never announces that destination, so a transport node that
     /// restarted (the box rebooted) knows no path to it until someone asks,
@@ -1700,17 +1872,7 @@ impl Inner {
             event,
             UiEvent::FetchDone(_) | UiEvent::Run(PaletteCommand::Fetch)
         );
-        let shown = matches!(
-            event,
-            UiEvent::Engine(_)
-                | UiEvent::SendDone(_)
-                | UiEvent::SendUnproven(_)
-                | UiEvent::FetchDone(_)
-                | UiEvent::Open { .. }
-                | UiEvent::Close
-                | UiEvent::Write { .. }
-                | UiEvent::React { .. }
-        );
+        let shown = redraws(&event);
         let toasts = self.model.toasts.len();
         let effects = update(&mut self.model, event);
         for toast in self
@@ -1731,6 +1893,8 @@ impl Inner {
             match effect {
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
+                // Every rotation of the session hears it (1298).
+                UiEffect::Network { kind, changed } => self.network.say(kind, changed),
                 UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
                 // A petname set here or pulled (1139): the contacts file
                 // in the app's directory, which the next start reads.
@@ -1758,6 +1922,28 @@ impl Inner {
                 // The recorder's work (1276), for Java's next
                 // `Query::Recording`.
                 UiEffect::Recording { peer, effect } => self.recorder.push((peer, effect)),
+                // A group (1307): the home makes it, through the runner the
+                // terminal runs.
+                UiEffect::CreateGroup { name, members } => {
+                    let client = self.client.clone();
+                    let done = self.finished_tx.clone();
+                    let wake = Arc::clone(&self.wake);
+                    self.runtime.spawn(async move {
+                        let event = runner::create_group(client, name, members, BUDGET).await;
+                        let _ = done.send(Finished::Event(event));
+                        wake.notify_one();
+                    });
+                }
+                UiEffect::AddMembers { group, members } => {
+                    let client = self.client.clone();
+                    let done = self.finished_tx.clone();
+                    let wake = Arc::clone(&self.wake);
+                    self.runtime.spawn(async move {
+                        let event = runner::add_members(client, group, members, BUDGET).await;
+                        let _ = done.send(Finished::Event(event));
+                        wake.notify_one();
+                    });
+                }
                 // What the terminal does with its screen and its maps has
                 // no place here yet.
                 _ => {}
@@ -1990,6 +2176,7 @@ impl Inner {
             .map(|draft| draft.resolve(self.lang))
             .unwrap_or_default();
         let sharing = row.sharing;
+        let group = row.group.clone();
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
@@ -2019,6 +2206,103 @@ impl Inner {
             pin_label,
             draft,
             sharing,
+            group_members: group
+                .as_ref()
+                .map_or(0, |g| u32::try_from(g.members).unwrap_or(u32::MAX)),
+            group_words: group
+                .as_ref()
+                .map(|g| g.words.resolve(self.lang))
+                .unwrap_or_default(),
+            group_invited: group
+                .is_some_and(|g| g.standing == loquax::ui::groups::Standing::Invited),
+        }
+    }
+
+    /// "New group" or the open member sheet (1307), as the scene has them,
+    /// in the phone's language.
+    fn group_screen(&self) -> schema::GroupScreen {
+        let lang = self.lang;
+        let scene = self.model.scene(scene::LayoutClass::Compact);
+        if let Some(new) = scene.new_group {
+            let naming = new.step == loquax::ui::groups::Step::Name;
+            let go = if naming { &new.create } else { &new.next };
+            return schema::GroupScreen {
+                v: VERSION,
+                screen: "new".into(),
+                title: new.title.resolve(lang),
+                step: if naming { "name" } else { "pick" }.into(),
+                line: new.picked.resolve(lang),
+                rows: new
+                    .rows
+                    .iter()
+                    .map(|r| schema::GroupRow {
+                        peer: loquax::address::to_hex(&r.peer),
+                        name: r.name.clone(),
+                        picked: r.picked,
+                        ..schema::GroupRow::default()
+                    })
+                    .collect(),
+                hint: new.hint.resolve(lang),
+                name: new.name.clone(),
+                trust: new.trust.resolve(lang),
+                go: go.label_key.text(lang).to_string(),
+                go_enabled: go.enabled,
+                ..schema::GroupScreen::default()
+            };
+        }
+        let Some(sheet) = scene.members else {
+            return schema::GroupScreen {
+                v: VERSION,
+                ..schema::GroupScreen::default()
+            };
+        };
+        schema::GroupScreen {
+            v: VERSION,
+            screen: "members".into(),
+            title: sheet.title.resolve(lang),
+            line: sheet.count.resolve(lang),
+            rows: sheet
+                .rows
+                .iter()
+                .map(|r| schema::GroupRow {
+                    peer: loquax::address::to_hex(&r.address),
+                    name: r.name.resolve(lang),
+                    state: r.state.resolve(lang),
+                    you: r.you,
+                    remove: r
+                        .remove
+                        .as_ref()
+                        .map(|a| a.label_key.text(lang).to_string())
+                        .unwrap_or_default(),
+                    ..schema::GroupRow::default()
+                })
+                .collect(),
+            leave: sheet
+                .leave
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
+            add: sheet
+                .add
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
+            ask: sheet
+                .ask
+                .as_ref()
+                .map(|a| a.words.resolve(lang))
+                .unwrap_or_default(),
+            yes: sheet
+                .ask
+                .as_ref()
+                .map(|_| StrId::GroupYes.text(lang).to_string())
+                .unwrap_or_default(),
+            no: sheet
+                .ask
+                .as_ref()
+                .map(|_| StrId::GroupNo.text(lang).to_string())
+                .unwrap_or_default(),
+            ..schema::GroupScreen::default()
         }
     }
 
@@ -2147,6 +2431,12 @@ impl Inner {
         // The field opens with the scene's compose (1219).
         let compose = index.map(|c| scene::compose(&self.model, c));
         let bar = self.bar(peer);
+        // A group's chat (1307): the count, and the card while invited.
+        let badge = loquax::ui::group_scene::badge(&self.model, &peer);
+        let invite = badge
+            .as_ref()
+            .filter(|b| b.standing == loquax::ui::groups::Standing::Invited)
+            .and_then(|_| loquax::ui::group_scene::invite(&self.model, &peer, false));
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -2199,6 +2489,14 @@ impl Inner {
                 .unwrap_or_default(),
             share_stop: Text::key(StrId::ShareStop).resolve(self.lang),
             recording: bar.recording,
+            group_members: badge.map_or(0, |b| u32::try_from(b.members).unwrap_or(u32::MAX)),
+            invite_title: invite
+                .as_ref()
+                .map(|i| i.title.resolve(self.lang))
+                .unwrap_or_default(),
+            invite_trust: invite
+                .map(|i| i.trust.resolve(self.lang))
+                .unwrap_or_default(),
         }
     }
 
@@ -2421,7 +2719,22 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                     words: file.words.resolve(lang),
                 })
                 .collect();
+            // A group's writer above the first bubble of its group, and an
+            // invitation's card (1307).
+            let writer = match (group.named, node.place.joins_before) {
+                (true, false) => group.sender.resolve(lang),
+                _ => String::new(),
+            };
+            let invite = node.invite.clone();
             let mut row = row(node.bubble);
+            row.writer = writer;
+            if let Some(invite) = invite {
+                row.invite_group = loquax::address::to_hex(&invite.group);
+                row.invite_title = invite.title.resolve(lang);
+                row.invite_trust = invite.trust.resolve(lang);
+                row.invite_state = invite.state.map(|s| s.resolve(lang)).unwrap_or_default();
+                row.invite_join = invite.join.is_some();
+            }
             // The scene's words (1268): a body of blanks is none, and the
             // app draws no text row under a photo without words.
             row.body = node.text.unwrap_or_default();
@@ -2529,6 +2842,12 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         voice_playable: false,
         voice_playing: false,
         voice_words: String::new(),
+        writer: String::new(),
+        invite_group: String::new(),
+        invite_title: String::new(),
+        invite_trust: String::new(),
+        invite_state: String::new(),
+        invite_join: false,
     }
 }
 
@@ -2721,6 +3040,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         R::Used { emoji } => Intent::Insert(emoji),
         R::Pull => Intent::Pull,
         R::Front { front } => Intent::Front(front),
+        R::Network { kind, changed } => Intent::Network {
+            kind: loquax::home::NetworkKind::from_word(&kind),
+            changed,
+        },
         R::Viewport { peer, keys } => Intent::Viewport {
             peer: parse_peer(&peer)?,
             keys: keys.into_iter().map(schema::model_key).collect(),
@@ -2788,6 +3111,37 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             location: share_location(lat_e6, lon_e6, alt_e2, accuracy_e2, at)?,
         },
         R::AddContact { lxma, name } => Intent::AddContact { lxma, name },
+        R::Group {
+            verb,
+            peer,
+            member,
+            text,
+            confirmed,
+        } => {
+            use loquax::ui::groups::Verb;
+            let group = || parse_peer(&peer).map(Target::Peer);
+            Intent::Group(match verb.as_str() {
+                "new" => Verb::New,
+                "pick" => Verb::Pick(parse_peer(&peer)?),
+                "next" => Verb::Next,
+                "name" => Verb::Name(text),
+                "create" => Verb::Create,
+                "join" => Verb::Join { group: group()? },
+                "members" => Verb::Members { group: group()? },
+                "leave" => Verb::Leave {
+                    group: group()?,
+                    confirmed,
+                },
+                "remove" => Verb::Remove {
+                    group: group()?,
+                    member: Some(parse_peer(&member)?),
+                    confirmed,
+                },
+                "add" => Verb::Add { group: group()? },
+                "close" => Verb::Close,
+                other => return Err(format!("no group verb {other:?}")),
+            })
+        }
         R::Draft { peer, body, reply } => Intent::Draft {
             to: Target::Peer(parse_peer(&peer)?),
             text: body,
@@ -2852,6 +3206,8 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             verb: verb_of(&verb)
                 .ok_or_else(|| format!("{verb:?} is no button of the recording bar"))?,
         },
+        // Java asked its question before it sends this (1290).
+        R::DeleteRegions => Intent::DeleteAllRegions { confirmed: true },
     };
     Ok(Decoded::Intent(intent))
 }
@@ -3033,6 +3389,28 @@ pub fn read_code(
     })
 }
 
+/// Whether folding `event` changes what the screens show though it asks
+/// for nothing: the session says `changed` and Java draws again.
+fn redraws(event: &UiEvent) -> bool {
+    matches!(
+        event,
+        UiEvent::Engine(_)
+            | UiEvent::SendDone(_)
+            | UiEvent::SendUnproven(_)
+            | UiEvent::FetchDone(_)
+            | UiEvent::Open { .. }
+            | UiEvent::Close
+            | UiEvent::Write { .. }
+            | UiEvent::React { .. }
+            // The home's answer lists a new group, or adds members,
+            // with no effect to run (1307 pass five): the list is
+            // drawn again, or the group stays invisible until a copy
+            // arrives.
+            | UiEvent::GroupMade(_)
+            | UiEvent::MembersAdded(_)
+    )
+}
+
 /// A join that failed, in one plain sentence for the join screen (1263,
 /// finding 8): no daemon, no server, no TCP on the main path.
 fn join_words(error: &loquax::home::client::HomeError) -> StrId {
@@ -3181,6 +3559,19 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1307 pass five: the home's answer to Create or Add asks for no
+    /// effect, and without a `changed` the list Java shows never takes the
+    /// new group's row until a copy arrives. Control: a tick changes no
+    /// screen by itself.
+    #[test]
+    fn the_homes_answer_on_a_group_draws_the_list_again() {
+        use loquax::ui::groups::NotMade;
+        assert!(redraws(&UiEvent::GroupMade(Ok([1; 16]))));
+        assert!(redraws(&UiEvent::GroupMade(Err(NotMade::HomeTooOld))));
+        assert!(redraws(&UiEvent::MembersAdded(Ok([1; 16]))));
+        assert!(!redraws(&UiEvent::Tick));
+    }
 
     /// Every join failure is one plain sentence of the catalogue in both
     /// languages (1263, finding 8), and the machinery's words, the server

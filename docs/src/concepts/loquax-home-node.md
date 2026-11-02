@@ -124,11 +124,49 @@ Link requests on `loquax.home`, msgpack on the wire:
 /petname [address: bin16, name: str] -> [status]
 /watch [cursor: uint]              -> [status, newest: uint]
 /key   [address: bin16, public_key: bin64] -> [status]
+/move  [token: bin16, cursor: uint] -> [status, private_key: bin64, ratchets: bin,
+                                       known: bin, name: str, first: uint, more: bool,
+                                       [[seq, kind, id: bin32, at, packed], ...]]
+/moved [token: bin16, cursor: uint] -> [status]
+/group [client_id: bin16, name: str, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
+/groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
 admitted, 3 unknown or used token, 4 malformed request, 5 the home node's
-store failed. A `/sync` answer carries the entries after the cursor, oldest
+store failed, 6 behind (a `/moved` whose cursor is older than the
+archive's newest entry).
+
+`/move` and `/moved` (1281) move the mailbox to another device; see
+[how Loquax reaches its mailbox](loquax-reachability.md), "Moving to a new
+phone". They are answered only to an admitted device whose request
+carries the token of the move the owner opened on the mailbox itself
+(`loquax/src/home/handover.rs`), never to an admitted device alone.
+
+`/group` (1307) makes a group the home hosts, its owner the admin
+(`loquax/src/home/group.rs`, the study
+`docs/drafts/group-chats-study-2026-11.md`): the group's key stays on the
+home, an invitation from the owner to every member goes through the
+outbox, and the group's own engine sends the owner the membership, so
+every device learns the group from its archive. The same client id asked
+again answers the group it made then. A home that archives an invitation
+learns the group's key from it, so a Join from any of its devices goes
+out before the group's announce is heard.
+
+`/groupadd` (1307 G2) adds members to a group the home hosts and its
+owner is admin of: each new one gets an invitation from the owner, the
+epoch moves, and every member that understands groups gets the new
+membership from the group. A member already in it is skipped, so the
+same request again adds nobody. Beside the requests, the home keeps a
+group going on its own (G2): a copy's retries survive a restart (open
+copies are made again from the archived original, byte for byte), each
+group announces every hour on its own clock beside the announce at its
+engine's start, a member whose last three proofs each took more than
+2 s gets its lines held for 60 s and sent as one digest (`lev` key
+`0x06`), and a reaction goes to the members that understand groups with
+its target rewritten to each one's own copy (stock members get none). A `/sync` answer carries the entries after the cursor, oldest
 first, up to 64 KiB of messages (one larger entry still goes, alone), and
 `more` when others follow; the client asks again from the last sequence it
 got, over the same link. An answer too large for one packet goes as a
@@ -254,6 +292,24 @@ then and may sleep.
   recipient is there; the cadence covers an announce the home node missed,
   at one link attempt an hour. The router holds one entry per message id,
   so a message is never on two legs at once.
+- **A direct leg nobody answers is given up within a minute** (1328).
+  The router's stock direct leg against a recipient that does not answer
+  runs five link attempts, each retried twice by the core and followed by
+  a path request: about six minutes on a 2-hop path, and on miauhaus legs
+  ran past the stall bound below. A direct leg whose message has not
+  reached `Sending` after `outgoing::ANSWER_SECS` (60 s; the reference's
+  single link establishment waits 6 s per hop plus the first hop's time)
+  is called off in the router, logged as `HOME outbox direct unanswered`,
+  and counts as a direct failure: the propagation node is offered the copy
+  on the next tick, before any announce restarts the direct leg (that
+  announce is as a rule the path response the router's own request drew
+  from the cache). The announce and hourly retries go on as before.
+- **Every engine selects its own propagation node** (1328). A hosted
+  group's copies go out on the group's engine, which runs no collection:
+  the home's engine selecting a node selects nothing there, so before a
+  copy's propagated leg the group's engine is told the node the home uses
+  unless it reported holding it. A failed leg's log line carries the
+  engine's reason (`reason=unsent: …`, `reason=rejected`, …).
 - **A leg that never ends is given up** (1293). The outbox starts no leg
   for a message already on one, so a leg whose end the router never
   reports (a link that died mid-leg, a transfer that stalled, a message the

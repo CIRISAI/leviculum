@@ -27,9 +27,11 @@ use super::{UiEffect, UiModel};
 /// Chats, off the main path. [`PhotoSize::Phone`] is the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhotoSize {
-    /// Strongly reduced, for slow links: 800 px, JPEG quality 70.
+    /// Strongly reduced, for slow links: 800 px, JPEG quality 70, at
+    /// most `photo::SHOWN_BY_COLUMBA` bytes.
     Small,
-    /// Looks good on a phone: 1600 px, JPEG quality 80.
+    /// Looks good on a phone: 1600 px, JPEG quality 80, at most
+    /// `photo::SHOWN_BY_COLUMBA` bytes (250 000), which Columba shows.
     #[default]
     Phone,
     /// As taken; only its metadata goes.
@@ -121,14 +123,21 @@ pub fn photo_fields(format: &str, data: Vec<u8>) -> Vec<Field> {
     .into_fields()
 }
 
-/// `bytes` as a person reads a size: `312 KB`, `1.4 MB`.
-pub fn size_words(bytes: usize) -> String {
+/// `bytes` as a person reads a size: `312 KB`, `1.4 MB`, and the maps'
+/// `1.2 GB` (1290).
+pub fn size_words(bytes: u64) -> String {
     if bytes < 1000 {
         alloc::format!("{bytes} B")
     } else if bytes < 1_000_000 {
         alloc::format!("{} KB", bytes.div_ceil(1000))
-    } else {
+    } else if bytes < 1_000_000_000 {
         alloc::format!("{}.{} MB", bytes / 1_000_000, (bytes % 1_000_000) / 100_000)
+    } else {
+        alloc::format!(
+            "{}.{} GB",
+            bytes / 1_000_000_000,
+            (bytes % 1_000_000_000) / 100_000_000
+        )
     }
 }
 
@@ -232,5 +241,6 @@ mod tests {
         assert_eq!(size_words(999), "999 B");
         assert_eq!(size_words(312_400), "313 KB");
         assert_eq!(size_words(1_450_000), "1.4 MB");
+        assert_eq!(size_words(1_234_000_000), "1.2 GB");
     }
 }

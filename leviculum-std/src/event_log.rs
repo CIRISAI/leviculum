@@ -843,6 +843,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "HOME_PATH_REQUEST",
         required_keys: &["dst", "via"],
     },
+    // A network change a rendezvous rotation evaluated (1298): the kind the
+    // platform said, whether it was another network, and what the rotation
+    // did (pause, redial, ask).
+    EventSchema {
+        name: "HOME_NETWORK",
+        required_keys: &["kind", "changed", "action", "entry"],
+    },
     EventSchema {
         name: "LNMSG_VIA",
         required_keys: &["method", "reason"],

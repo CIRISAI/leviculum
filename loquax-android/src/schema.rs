@@ -147,6 +147,18 @@
 //! Linking a device (1264) came within version 1 too: [`Query::LinkDevice`]
 //! with its [`LinkCode`] and [`Query::Linked`] with its [`Linked`]. An
 //! older app offers no "Link a device".
+//! Moving to a new phone (1281) came within version 1 too:
+//! [`Query::MovePhone`] answering a [`LinkCode`], [`Query::Moving`]
+//! answering a [`Linked`], and three fields of [`Start`] an older app
+//! never sends: `moving`, `take_back` and `anyway`.
+//! Deleting every map (1290) came within version 1 too:
+//! [`Request::DeleteRegions`]. An older app deletes them one by one.
+//! The chip of a load for the screen (1292) came within version 1 too:
+//! [`MapShown::loading_here`]. An older app reads `loading`, which also
+//! counts loads for areas the view left.
+//! A region filling in while it arrives (1291) came within version 1 too:
+//! [`MapShown::filling`]. An older app asks again every 1.5 s while
+//! `loading`, and sees the map fill in at that pace.
 
 use serde::{Deserialize, Serialize};
 
@@ -193,6 +205,19 @@ pub struct Start {
     pub restore: Option<String>,
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// Restore even though the address answers on another device right
+    /// now (1281): the user saw the warning and chose to.
+    #[serde(default)]
+    pub anyway: bool,
+    /// The code the old phone's "Move to a new phone" shows (1281, walk
+    /// finding 24): this phone takes the mailbox over from it before the
+    /// mailbox here first starts; only with [`Start::here`].
+    #[serde(default)]
+    pub moving: Option<String>,
+    /// "Use this phone again" on a phone whose mailbox moved away (1281):
+    /// it starts here again.
+    #[serde(default)]
+    pub take_back: bool,
     /// The phone has a camera (1270, `FEATURE_CAMERA_ANY`): the compose
     /// bar gets its camera button. An older app sends none, and gets none.
     #[serde(default)]
@@ -207,7 +232,11 @@ pub struct Started {
     /// Why not, in words for the screen.
     pub error: Option<String>,
     /// What the join screen has to ask for when `ok` is false: `code`,
-    /// `server`, or nothing when the error is of another kind.
+    /// `server`, or nothing when the error is of another kind. `moved`
+    /// (1281): this phone's mailbox moved to another phone, and it starts
+    /// only with [`Start::take_back`]; `live`: the backup's address answers
+    /// elsewhere right now, and the restore goes on only with
+    /// [`Start::anyway`].
     pub need: Option<String>,
     /// What went wrong in the mailbox's own words, behind the screen's
     /// Details (1263); `error` is the one plain sentence.
@@ -333,6 +362,16 @@ pub enum Request {
     Front {
         front: bool,
     },
+    /// The phone's network is `kind` now (1298): `none`, `wifi`, `mobile`
+    /// or `other`, as Android's `ConnectivityManager` callbacks say it;
+    /// `changed` when it is another network than the one before. Said
+    /// again with `changed` off once the phone leaves Doze. The library
+    /// re-evaluates its connections and says what it does as a `network`
+    /// event.
+    Network {
+        kind: String,
+        changed: bool,
+    },
     /// These bubbles of `peer`'s chat are on screen, at least half of each,
     /// by their [`MessageRow::key`], on every change (1231): the core
     /// decides from it, and from the front, what was read.
@@ -433,6 +472,21 @@ pub enum Request {
     /// scanned or pasted. `name`, when given, becomes the
     /// reader's name for it; the home node is handed the key, so a message
     /// can go out before any announce was heard; the conversation opens.
+    /// A verb on groups (1307, `loquax::ui::groups::Verb`): `new`, `pick`
+    /// (a friend's `peer`), `next`, `name` (its `text`), `create`, `join`,
+    /// `members`, `leave`, `remove` (the `member` of group `peer`, after
+    /// asking unless `confirmed`), `close`.
+    Group {
+        verb: String,
+        #[serde(default)]
+        peer: String,
+        #[serde(default)]
+        member: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
     #[serde(rename = "addcontact")]
     AddContact {
         lxma: String,
@@ -528,6 +582,10 @@ pub enum Request {
         peer: String,
         verb: String,
     },
+    /// The Maps page's last row, after its question (1290): every
+    /// downloaded region deleted. The page asks [`Query::MapRegions`]
+    /// again for what is left.
+    DeleteRegions,
 }
 
 /// What a contact said when loquax read it.
@@ -662,6 +720,14 @@ pub enum Query {
     LinkDevice,
     /// Whether a device came with the newest [`Query::LinkDevice`] code.
     Linked,
+    /// "Move to a new phone" on the profile (1281): a fresh code for the
+    /// new phone, as [`LinkCode`], that also lets the device joining with
+    /// it take the mailbox over; refused on a phone whose mailbox is on a
+    /// computer. [`Query::Moving`] watches the newest.
+    MovePhone,
+    /// Where the newest [`Query::MovePhone`] stands, as [`Linked`]:
+    /// `waiting`, `moved` (with the new phone's `name`), `over` or `none`.
+    Moving,
     /// Whether `text` is a code, which kind and whose (1187, 1263,
     /// `loquax::code::read`): what the scanner and the new conversation
     /// screen ask before the name. A text that is none is refused in one
@@ -722,6 +788,9 @@ pub enum Query {
     /// The running position shares (1273), Settings, Privacy's list and
     /// the share notification's; answered as [`Shares`].
     Shares,
+    /// "New group" or the open member sheet (1307); answered as
+    /// [`GroupScreen`].
+    Group,
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -1074,6 +1143,15 @@ pub struct FriendRow {
     pub live: String,
     #[serde(default)]
     pub ring: String,
+    /// A node the mesh announced that is no contact (1302): the map draws
+    /// a neutral grey pin without an avatar, and its card says "Nearby,
+    /// not in your contacts" with "Add" in place of Chat.
+    #[serde(default)]
+    pub nearby: bool,
+    /// The name the node announced, without the hash the list adds: what
+    /// "Add" names the new contact.
+    #[serde(default)]
+    pub announced: String,
 }
 
 /// What [`Query::Run`] answers: the run's reports, newest first; one for a
@@ -1501,6 +1579,16 @@ pub struct ConversationRow {
     /// small ⌖ in the accent colour on our side.
     #[serde(default)]
     pub sharing: bool,
+    /// A group's row (1307): how many are in it, the avatar's number (0
+    /// before a membership came); its line in the phone's language,
+    /// `3 members` or `Invitation`; whether the reader is only invited.
+    /// 0, empty and false for any other row.
+    #[serde(default)]
+    pub group_members: u32,
+    #[serde(default)]
+    pub group_words: String,
+    #[serde(default)]
+    pub group_invited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1661,6 +1749,26 @@ pub struct MessageRow {
     pub voice_playing: bool,
     #[serde(default)]
     pub voice_words: String,
+    /// In a group's chat (1307): the writer's name, which the first bubble
+    /// of a group that is not the reader's carries above it; empty
+    /// otherwise.
+    #[serde(default)]
+    pub writer: String,
+    /// The invitation the bubble carries (1307), a card instead of its
+    /// text: the group's address, who invited to what, the trust sentence
+    /// and where the reader stands, in the phone's language; `invite_join`
+    /// while Join may be tapped ([`Request::Group`], verb `join`). Empty
+    /// and false for any other bubble.
+    #[serde(default)]
+    pub invite_group: String,
+    #[serde(default)]
+    pub invite_title: String,
+    #[serde(default)]
+    pub invite_trust: String,
+    #[serde(default)]
+    pub invite_state: String,
+    #[serde(default)]
+    pub invite_join: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1777,6 +1885,79 @@ pub struct Messages {
     /// draws; empty for none.
     #[serde(default)]
     pub recording: String,
+    /// A group's chat (1307): how many are in it, 0 for any other chat;
+    /// the bar's Members opens [`Query::Group`].
+    #[serde(default)]
+    pub group_members: u32,
+    /// A group the reader is only invited to: the card above the compose
+    /// bar, as [`MessageRow`]'s `invite_*`; empty for none.
+    #[serde(default)]
+    pub invite_title: String,
+    #[serde(default)]
+    pub invite_trust: String,
+}
+
+/// What [`Query::Group`] answers (1307): "New group" while it is open,
+/// else a group's member sheet while it is open, in the phone's language;
+/// both empty when neither is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupScreen {
+    pub v: u32,
+    /// `new`, `members` or empty.
+    pub screen: String,
+    pub title: String,
+    /// "New group": `pick` or `name`; the line under the title (`2
+    /// selected`, `3 members`).
+    #[serde(default)]
+    pub step: String,
+    #[serde(default)]
+    pub line: String,
+    /// The rows: a friend to tick, or a member with its state.
+    #[serde(default)]
+    pub rows: Vec<GroupRow>,
+    /// "New group": the name field's hint and text, the trust sentence,
+    /// whether Next or Create may be tapped, and their words.
+    #[serde(default)]
+    pub hint: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub trust: String,
+    #[serde(default)]
+    pub go: String,
+    #[serde(default)]
+    pub go_enabled: bool,
+    /// The member sheet: Leave's words while the reader is in it, and the
+    /// question asked before Leave or Remove with its yes, empty for none.
+    #[serde(default)]
+    pub leave: String,
+    /// The admin's "Add members" words (1307 G2), empty for none.
+    #[serde(default)]
+    pub add: String,
+    #[serde(default)]
+    pub ask: String,
+    #[serde(default)]
+    pub yes: String,
+    #[serde(default)]
+    pub no: String,
+}
+
+/// One row of [`GroupScreen`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupRow {
+    pub peer: String,
+    pub name: String,
+    /// "New group": whether it is ticked. The sheet: its state's words,
+    /// whether it is the reader, and the admin's Remove words when it may
+    /// be removed.
+    #[serde(default)]
+    pub picked: bool,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub you: bool,
+    #[serde(default)]
+    pub remove: String,
 }
 
 /// What [`Query::Shares`] answers (1273): the running shares, by peer,
@@ -1855,6 +2036,10 @@ pub enum Event {
     /// The TCP interface to the home node came up or went down. Once
     /// soon after the start, then on each change.
     Link { v: u32, up: bool },
+    /// After a network change (1298): `reconnecting` while a connection
+    /// it dropped is not up again, `back` once every one is: the line says
+    /// "Reconnecting…" and then is gone.
+    Network { v: u32, state: String },
     /// The session ended; `detail` says why when it was not asked to. One
     /// that ended by itself is gone from the library then: the next
     /// `start` makes a fresh one.
@@ -2118,7 +2303,21 @@ pub struct MapShown {
     pub room_north: u32,
     #[serde(default)]
     pub room_south: u32,
+    /// A region loads for the area on screen (1292): the map's "Loading
+    /// the map of this area" chip. `loading` alone may be a load for an
+    /// area the view left, which the chip does not name.
+    #[serde(default)]
+    pub loading_here: bool,
+    /// The frame shows tiles of a region still arriving (1291): ask again
+    /// in [`FILLING_MS`], when more of it may be there.
+    #[serde(default)]
+    pub filling: bool,
 }
+
+/// How long after a frame that says [`MapShown::filling`] the app asks
+/// again: the loader bumps the maps' progress at most this often
+/// (`loquax::mapload::PROGRESS_EVERY_MS`).
+pub const FILLING_MS: u32 = 250;
 
 /// A map frame as the host's tests and tools read it: the description's
 /// length, the description, the pixels. The app gets its pixels in its
@@ -2198,6 +2397,11 @@ mod tests {
             decode::<Request>(&encode(&Request::Front { front: true })),
             Ok(Request::Front { front: true })
         );
+        let network = Request::Network {
+            kind: "mobile".to_string(),
+            changed: true,
+        };
+        assert_eq!(decode::<Request>(&encode(&network)), Ok(network));
     }
 
     /// A link carries the thumbnail as `bin`, Java's `byte[]`, and decodes

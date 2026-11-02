@@ -99,9 +99,15 @@ fn start() -> impl Strategy<Value = Start> {
         (text(), opt_text(), opt_text(), opt_text()),
         (i32s(), any::<bool>(), opt_text(), opt_text()),
         (opt_text(), any::<bool>()),
+        (any::<bool>(), opt_text(), any::<bool>()),
     )
         .prop_map(
-            |((dir, server, code, name), (offset, here, restore, passphrase), (lang, camera))| {
+            |(
+                (dir, server, code, name),
+                (offset, here, restore, passphrase),
+                (lang, camera),
+                (anyway, moving, take_back),
+            )| {
                 Start {
                     dir,
                     server,
@@ -112,6 +118,9 @@ fn start() -> impl Strategy<Value = Start> {
                     here,
                     restore,
                     passphrase,
+                    anyway,
+                    moving,
+                    take_back,
                     camera,
                 }
             },
@@ -290,6 +299,8 @@ fn query() -> impl Strategy<Value = Query> {
         Just(Query::Profile),
         Just(Query::LinkDevice),
         Just(Query::Linked),
+        Just(Query::MovePhone),
+        Just(Query::Moving),
         (text(), opt_text()).prop_map(|(text, lang)| Query::Lxma { text, lang }),
         (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
             Query::MapRegions {
@@ -357,6 +368,21 @@ fn voice_parts() -> BoxedStrategy<VoiceParts> {
         .boxed()
 }
 
+/// A bubble's group parts (1307): its writer and an invitation's card,
+/// boxed on their own as [`voice_parts`] is.
+type InviteParts = (String, String, String, String, String, bool);
+
+fn invite_parts() -> BoxedStrategy<InviteParts> {
+    (text(), text(), text(), text(), text(), any::<bool>()).boxed()
+}
+
+/// A chat's and a row's group parts (1307), boxed the same way.
+type GroupParts = (u32, String, String, bool);
+
+fn group_parts() -> BoxedStrategy<GroupParts> {
+    (u32s(), text(), text(), any::<bool>()).boxed()
+}
+
 /// The rows are boxed: with the scene's fields (1217) their tuples together
 /// overflow the test thread's stack in [`the_lists_round_trip`].
 fn message_row() -> BoxedStrategy<MessageRow> {
@@ -375,7 +401,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         (text(), u32s()),
         (any::<(bool, bool, bool, bool)>(), text(), text()),
         (text(), u32s(), u32s(), u32s(), text()),
-        prop::collection::vec(file_row(), 0..3),
+        (prop::collection::vec(file_row(), 0..3), invite_parts()),
         voice_parts(),
     )
         .prop_map(
@@ -388,7 +414,10 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (liveness, cadence_s),
                 ((joins_before, joins_after, meta, newest), day, live),
                 (photo, photo_bytes, photo_w, photo_h, photo_words),
-                files,
+                (
+                    files,
+                    (writer, invite_group, invite_title, invite_trust, invite_state, invite_join),
+                ),
                 (
                     voice_mode,
                     voice_ms,
@@ -438,6 +467,12 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 voice_playable,
                 voice_playing,
                 voice_words,
+                writer,
+                invite_group,
+                invite_title,
+                invite_trust,
+                invite_state,
+                invite_join,
             },
         )
         .boxed()
@@ -467,6 +502,8 @@ fn messages() -> BoxedStrategy<Messages> {
         ),
         live(),
         (text(), text(), text()),
+        // The group's count and the invited card (1307).
+        group_parts(),
         bar(),
         share_chip(),
     )
@@ -478,6 +515,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 (announced, petname, others, verified, receipts),
                 (liveness, cadence_s, last_fix_at),
                 (ring, draft, draft_reply),
+                (group_members, invite_title, invite_trust, _),
                 bar,
                 (share, share_stop),
             )| Messages {
@@ -519,6 +557,9 @@ fn messages() -> BoxedStrategy<Messages> {
                 share,
                 share_stop,
                 recording: bar.recording,
+                group_members,
+                invite_title,
+                invite_trust,
             },
         )
         .boxed()
@@ -682,6 +723,8 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
         live(),
         (text(), text(), text(), text(), text()),
         any::<bool>(),
+        // A group's count and words (1307).
+        group_parts(),
     )
         .prop_map(
             |(
@@ -691,6 +734,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (liveness, cadence_s, last_fix_at),
                 (live, ring, pin, pin_label, draft),
                 sharing,
+                (group_members, group_words, _, group_invited),
             )| ConversationRow {
                 peer,
                 name,
@@ -719,6 +763,9 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 pin_label,
                 draft,
                 sharing,
+                group_members,
+                group_words,
+                group_invited,
             },
         )
         .boxed()
@@ -979,17 +1026,27 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
             any::<bool>(),
         )
             .boxed(),
-        (any::<bool>(), u32s(), u32s()).boxed(),
+        (any::<bool>(), u32s(), u32s(), any::<bool>()).boxed(),
+        any::<bool>(),
     )
         .prop_map(
-            |(shown, (own_x, own_y, autoload), (fling, room_north, room_south))| MapShown {
-                own_x,
-                own_y,
-                autoload,
-                fling,
-                room_north,
-                room_south,
-                ..shown
+            |(
+                shown,
+                (own_x, own_y, autoload),
+                (fling, room_north, room_south, loading_here),
+                filling,
+            )| {
+                MapShown {
+                    own_x,
+                    own_y,
+                    autoload,
+                    fling,
+                    room_north,
+                    room_south,
+                    loading_here,
+                    filling,
+                    ..shown
+                }
             },
         )
 }
@@ -1037,6 +1094,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
         (any::<(bool, bool)>(), text()),
         live(),
         (text(), text()),
+        (any::<bool>(), text()),
     )
         .prop_map(
             |(
@@ -1045,6 +1103,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
                 ((recent, stale), geo),
                 (liveness, cadence_s, last_fix_at),
                 (live, ring),
+                (nearby, announced),
             )| FriendRow {
                 peer,
                 name,
@@ -1064,6 +1123,8 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
                 last_fix_at,
                 live,
                 ring,
+                nearby,
+                announced,
             },
         )
         .boxed()

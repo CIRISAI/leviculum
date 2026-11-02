@@ -167,6 +167,7 @@ gui = [
     "dep:tui-input",
     "dep:futures",
     "dep:iced",
+    "dep:leviculum-ui-iced",
     "dep:open",
     "photos",
     "voice",
@@ -233,6 +234,9 @@ iced = { version = "0.14", default-features = false, features = [
     # with the feature, the same on every host for the same reason.
     "fira-sans",
 ], optional = true }
+# The window's widgets shared with lnomad's window (`gui`, #475): the
+# icons, the buttons, the avatar, the bars, the tabs and the list item.
+leviculum-ui-iced = { path = "../leviculum-ui-iced", optional = true }
 # A web or mail link in a message body, clicked, goes to the system's
 # handler as lnomad hands it one (`xdg-open` on Linux).
 open = { version = "5", optional = true }

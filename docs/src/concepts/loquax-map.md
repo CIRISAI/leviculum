@@ -28,13 +28,13 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:478`, `loquax/src/outbox.rs:261`). The core reads
+(`loquax/src/engine.rs:478`, `loquax/src/outbox.rs:269`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
-`loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
+`loquax/src/telemetry.rs:144`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3827`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2557`) and the positions in a table of
-their own (`SCHEMA_V2`, `loquax/src/store.rs:191`). The sender's timestamp
+`loquax/src/ui.rs:4000`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:2799`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:193`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.
@@ -392,8 +392,11 @@ The frontends:
   so a gesture waits one tile at most and drops the plan; a prefetched
   tile no frame used is evicted first, and a prefetch evicts neither a
   tile on screen nor one it drew. Only while the map is in front and
-  the battery saver is off. When the ring reaches past the regions that
-  hold the frame, the autoload is asked for the ring's area. The frame
+  the battery saver is off. Which regions the screen and its ring need
+  is the frames' scheduler's since 1292 ("The screen first", below), no
+  longer the prefetch's: a prefetch answer is no frame, so a load it
+  started showed no chip, and it asked nothing over a frame no region
+  held. The frame
   itself, the names kept, the prefetch's plan and the view held to one
   world are `loquax::mapframe`, which the window calls too (1144); the
   phone's glue keeps its requests, its fit and its autoload. The
@@ -507,8 +510,8 @@ whose module comment is the normative layout). All integers little-endian,
 offsets from the start of the file:
 
 - a header: `LMR1`, the version (1, 2 since 1100 with names, 3 since
-  1191 with buildings), the header length (64, 96 for version 2, 112 for
-  version 3), the bounds in
+  1191 with buildings, 4 since 1291 in arrival order), the header length
+  (64, 96 for version 2, 112 for version 3 and 4), the bounds in
   degrees x 10^7 (west, south, east, north; west greater than east means
   across the antimeridian), the zoom range (at most 16, so x and y fit a
   `u16`), the layer profile id, where the attribution and the notice lie,
@@ -546,7 +549,26 @@ offsets from the start of the file:
   "Buildings" below says why it is so;
 - the index last, 20 bytes per tile ascending by (z, x, y): z, x, y,
   offset, length. Last, so the cut can stream tiles and learn their count
-  at the end.
+  at the end;
+- version 4 (LMR4, 1291) keeps every field and part and changes their
+  order, so a file is usable while it arrives. The tile index comes right
+  after the two texts, one slot for every tile the box lists, the count
+  known before the cut starts. A slot is an entry, or with length 0 either
+  offset 0, "not here yet", or offset `u64::MAX`, "nothing there". The
+  tile blobs follow in index order, which is (z, x, y), so coarse to fine:
+  the outline and the main roads of the shallow zooms in the first few
+  hundred kilobytes, the deepest zoom last. The label sections, the
+  building sections, the string table, the label index and the building
+  index come after every tile, the building index ending the file. The
+  writer fills a slot after its blob is out, its offset before its
+  length, and writes the file length last, after the names' and
+  buildings' fields; the length is 0 until then. So a reader of a file
+  still being cut in place, or of a copy still downloading (its length
+  already set, the file shorter), knows from the slots alone which tiles
+  are whole: a slot with a length whose bytes lie inside what is there.
+  The rest are pending, and the draw stands the nearest coarser tile
+  that is there in for each (`Region::stand_in`); the names and the
+  buildings show once the file is complete.
 
 **Buildings** (1191, the format and the cut; 1192, the draw).
 Protomaps' z15 tiles carry every OSM building. They are not in the
@@ -582,9 +604,12 @@ A version 2 reader refuses a version 3 file with `RegionError::Version(3)`
 before it reads past the version field, as a version 1 reader refuses
 version 2, so the reader has to ship before regions with buildings reach
 it; Loquax cuts its own regions, so in practice only a file copied by hand
-meets an older reader. A cut without buildings (`leviculum-map-tool cut
---buildings false`, or no z15 in its zooms) writes version 2, which every
-version 2 reader reads.
+meets an older reader. Since 1291 every cut writes version 4, with
+buildings or without (a section count of 0), and this reader reads
+versions 1 to 4; a version 3 reader refuses it. No region file is
+published anywhere today: the autoload cuts its regions on the device
+from the Protomaps archive, and the committed fixtures stay version 1 to
+3, which this reader keeps reading.
 
 The cut (`leviculum-mapcut/src/cut.rs`, `footprints`) takes the
 `buildings` layer of each z15 source tile, the same decode as the tile's
@@ -852,19 +877,65 @@ config, #471) says the map works without a step. Decided 2026-10-27
   zoom is lowered, down to the view's own, and an area too large even
   there is refused with "zoom in" instead of a question. An area a region
   holds at the view's zoom loads nothing.
-- *Showing it.* The region is written beside the others under a name no
-  painter reads, checked whole, renamed into the maps directory, and the
-  directory's epoch bumped; each painter reads the directory again before
-  its next paint. Every region that reaches into a view is drawn, each
+- *Showing it.* The region is written in place under its own name as it
+  arrives (1291, Lew 2026-11-01: "watch the map fill in"): version 4,
+  fetched and cut a round at a time, coarse to fine, each zoom of z0 to
+  z12 a round of its own. A painter draws every tile there and stands the
+  nearest coarser tile in for one not there yet; a round bumps the maps'
+  progress (`Maps::arrived`, at most every 250 ms), a painter that sees it
+  reads the directory again, and the tile cache draws again only the
+  tiles it drew with stand-ins. A frame that shows such tiles says
+  `filling`, and the phone asks for the next one in a quarter second.
+  The names and the buildings come with the last round. Once complete
+  the file is checked whole and the directory's epoch bumped; each
+  painter reads the directory again before its next paint. A load that
+  fails removes its file. Measured with `leviculum-mapcut`'s example
+  `arrive` on the 1191 Berlin extract (89 MB, z0 to z15) behind the
+  loopback server throttled to 2 MB/s and 50 ms: the first tile after
+  0.27 s, every z13 tile after 10.7 s, the whole region after 58.2 s,
+  where fetching everything first took 53.6 s with nothing to draw
+  before the end. Every region that reaches into a view is drawn, each
   into its own box (1077's clip), the deepest last, so loaded patches
   join up (this replaces "one region or the outline" of section 7). A
   place's map is fitted again to the region when it lands, unless the
   reader moved it.
-- *Quiet and robust.* One load at a time on a thread of its own; the map
-  title says `loading map`; `tui.log` has `MAPLOAD start`, `done` and
-  `failed` lines with the box, zooms, bytes and `elapsed_ms`; a failure is
-  one toast; a failed box backs off 30 s doubling to an hour; no internet
-  is said once until a load succeeds again.
+- *The screen first* (1292, Lew 2026-11-01: "the area he is looking at
+  loads as fast as possible, always with the highest priority"). On the
+  phone every frame, during a pan, a fling's coast and a pinch too, goes
+  to one scheduler in the core, `loquax::ui::viewload`: the screen is
+  sampled 16 by 16, and when the regions leave more than 10 % of it
+  uncovered at the view's zoom, the cells under the uncovered samples
+  are asked for at once, nearest the screen's centre first. A cell is the
+  tile three zooms above the view's (z13 at most, about 3 km in Europe;
+  above z10 only), so a pan asks for the same boxes again and a landed
+  cell is never asked twice; its load reaches from three zooms above the
+  view's to z15 as the visible area's does. Then the uncovered cells
+  within two tiles of the screen, those in the pan's direction first, and
+  while the view moves only those (from z12). One decision every 250 ms
+  while the view moves, counted from the last decision, so the frames of
+  a pan never restart the wait; every new frame at rest decides; the same
+  view and regions again decide nothing. The loader orders its queue by
+  that decision: a box asked for by hand (a place, the pins, "load this
+  area"), then the screen's, then the ones next to it, then those the
+  view left, of which it keeps the newest eight. A load the view left
+  cannot be paused, the cut reads the archive in one call, so the
+  screen's load starts beside it: two at most. Measured with the facade
+  and a source that never answers (`a_pan_into_the_empty_loads_what_is_on_screen_at_once`,
+  a frame every 16 ms): a pan of a screen and a half that rests, one that
+  goes on slowly, a fling that coasts and a zoom out by two steps each
+  ask within 32 to 112 ms of the first frame more than a tenth uncovered;
+  before 1292 none of them asked at all.
+- *Quiet and robust.* One load at a time on a thread of its own, two
+  when the screen's starts beside a load the view left; the map title
+  says `loading map`; `tui.log` has `MAPLOAD start`, `done` and `failed`
+  lines with the box, zooms, bytes and `elapsed_ms`; a failure is one
+  toast; a failed box backs off 30 s doubling to an hour, but a box that
+  found no internet does not: "Offline" holds until the next load
+  starts, which the next view the user moves to asks for, and no internet
+  is said once until a load succeeds again. The phone's chip says
+  "Loading the map of this area" only for a load for the screen
+  (`loading_here`, 1292); a load for an area the view left says nothing,
+  and "No map here yet" shows over it.
 - *Disk.* Loaded regions are named `auto-<box>-z<min>-<max>.lmr` and are a
   cache of `map_cache_mb` megabytes (500 by default, a hundred or more city
   places), the least recently viewed evicted first, viewed meaning drawn,
@@ -1206,6 +1277,71 @@ No share survives an uninstall: the store goes with the app. Android 14
 refuses a location service started from the background; a share
 restored before any screen then runs on the fixes a screen brings until
 one starts the service.
+
+### Positions the mesh announces (1302)
+
+Lew, 2026-11-01: the map shows every position the mesh announces,
+mailbox or not. A node announces a second destination, `lev.position`
+(SINGLE, of its identity), beside its delivery destination; its app data
+is the fix (the mailbox for friends study of order 1296, section 4.3,
+on master). The codec is the board side's, `leviculum_lxmf::lev_position`
+(order 1301): a msgpack map with the coordinates, the fix's age and the
+node's name, either plain or sealed to the owner's identity
+(`mesh_position::read`, 1313).
+
+**Who sees what.** A plain position is read by everyone: a board set to
+share with everyone nearby, and `loquax announce`. A sealed one opens only
+with the identity it was sealed to, so the owner's own boards show on the
+owner's Loquax, which holds the home identity. A stranger's sealed
+announce is recognised (`AppData::parse` says `Sealed`) and shown
+nowhere. A client of a home node holds no private key and shows the
+plain ones only. Privacy over visibility: plain is the board's opt-in.
+
+**The event.** The engine sees every announce its core hears
+(`engine.rs`, `on_event`), a client of a home node too, since the check
+needs no router: a `lev.position` announce whose app data decodes
+becomes `OutboxEvent::MeshPosition { identity, location, name }`, the
+identity hash the announce proved, the fix timed by when the node heard
+it less the fix's age, and the announced name. The model takes it as
+`UiEvent::MeshPosition { identity, fix, name, age }` (the engine's
+event folds the same way, with its name and age 0); a shell that holds an
+announce itself hands its name and how long ago it heard it.
+
+**The merge rule.** The peer is the identity's `lxmf.delivery` address
+(`mesh_position::delivery_of`, the same hash a delivery announce of that
+identity proves), so an announced fix joins the peer's telemetry
+positions in `UiModel::positions`: the newest fix wins by
+`Fix::newer_than` whichever way it came, and `Fix::source` remembers
+which (`Telemetry` or `Mesh`). It is a state: the store keeps no
+announced fix, since the node announces again at its cadence and a
+stranger leaves no trace once gone. An announced fix newer than every
+report is the row's newest fix (`UiModel::liveness`), so the list's ⌖
+(1224), the ring and the Friends sheet show it unchanged.
+
+**The pin and the card.** A peer whose shown position came from the mesh
+and who is none of the reader's people (`UiModel::is_contact`: ourselves,
+a conversation, a petname or an address book link) is **nearby**
+(`UiModel::is_nearby`, `MapPin::nearby`, `FriendRow::nearby`). A peer
+known from a collector's stream keeps the pin it had. Nearby is drawn as
+a neutral grey pin with the announced name and no avatar: the phone's
+`AvatarView` draws a grey circle without letters or photo, the window a
+grey marker, the terminal the muted colour. Its card says "Nearby, not in
+your contacts" with **Add** in place of Chat and Share; Add opens its
+conversation and makes the announced name the reader's name for it
+(`UiModel::add_nearby`; on the phone the `addcontact` request of the
+code reader, 1263, with the bare address). In the terminal the map's
+title is the card while the pin is selected (`map · Nearby, not in your
+contacts · Enter adds`) and Enter adds it; the window's pin list carries
+the line and an Add button. No setting: nearby nodes are a fact of the
+mesh; hiding them is a later option if someone asks.
+
+**Seeding one.** `loquax announce --position LAT,LON [--from NAME]`
+attaches as `send` does and announces the position once, plain and
+named, as a manual one (`mesh_position::manual`,
+`Command::AnnouncePosition`, which registers the `lev.position`
+destination of our identity on first use). The device walk's
+`offgrid_positions` uses it with the mailbox stopped
+([device walk](loquax-device-walk.md)).
 
 ## 7. Decided
 

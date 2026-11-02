@@ -123,6 +123,34 @@ reference packs the fields, unpacks the message with
 same bytes. `leviculum-lxmf/tests/lev_vectors.rs` holds both directions;
 the codec is `leviculum-lxmf/src/lev.rs`.
 
+### The group keys
+
+Group chats (`docs/drafts/group-chats-study-2026-11.md`, built from 1307)
+add capability bit 1, "I understand groups", and four keys; a reader
+that knows only the keys above skips them. A copy a group's home sends a
+member that understands groups, writer `11…11`, its clock
+1700000000123 ms, epoch 1 (`VEC-MSG-LEV-GROUP-COPY`, 33 bytes of map):
+
+```
+cc fc 82 00 03 02 93 c4 10 <16-byte writer> cf 00 00 01 8b cf e5 68 7b 01
+```
+
+`0x04` is the invitation `[bin16 group, bin64 public key, str name,
+str admin's name, uint epoch]` (`VEC-MSG-LEV-GROUP-INVITE`); the study
+wrote `bin32` for the key, but an identity's public key is 64 bytes, as
+the `lxma://` code carries it. `0x05` is the membership `[uint epoch,
+[[bin16 address, str name, uint flags], ...]]`, flags bit 0 left, bit 1
+admin, bit 2 joined (`VEC-MSG-LEV-GROUP-MEMBERS`); a member that leaves
+sends itself alone, flagged left (`VEC-MSG-LEV-GROUP-LEAVE`), and the
+admin removes a member by sending the group that member alone, flagged
+left. Every Loquax client sets bit 1 on every message it sends, with
+read receipts off too (`{0x00: 2}`). `0x06` is the digest
+`[[bin16 writer, uint64 ms, str text], ...]` a group's home sends a slow
+member in place of one copy a line (`VEC-MSG-LEV-GROUP-DIGEST`); its text
+is the same lines as `"Name: text"`, one a line, which is all a stock
+member gets. Key `0x03` (group status) is the study's and not written
+yet.
+
 ### What other clients do with it
 
 | | Sideband 2.0.1 | Columba main | NomadNet | Ratspeak | Python LXMF |

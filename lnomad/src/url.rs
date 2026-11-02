@@ -25,6 +25,10 @@
 //! node at all and is rejected — by the reference exactly as here. See
 //! `reference_rejects_the_same_urls_we_do` for the measured comparison.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 /// The default path when a URL names only a destination or an empty path,
 /// matching `Browser.DEFAULT_PATH`.
 pub const DEFAULT_PATH: &str = "/page/index.mu";
@@ -32,6 +36,8 @@ pub const DEFAULT_PATH: &str = "/page/index.mu";
 /// Length in hex characters of a Reticulum truncated destination hash
 /// (`RNS.Reticulum.TRUNCATED_HASHLENGTH // 8 * 2` = 16 bytes = 32 chars).
 pub use leviculum_ui::link::TRUNCATED_HASH_HEX_LEN;
+
+use crate::render::RenderedLink;
 
 /// A parsed page request target: where to link, what to ask for, and the query
 /// fields to carry.
@@ -257,6 +263,47 @@ fn hex_nibble(c: u8) -> Result<u8, UrlError> {
         b'A'..=b'F' => Ok(c - b'A' + 10),
         _ => Err(UrlError::Malformed),
     }
+}
+
+/// Split a `#anchor` suffix off a link target, returning the base target and the
+/// anchor name (if any, and non-empty).
+fn split_anchor(target: &str) -> (&str, Option<String>) {
+    match target.split_once('#') {
+        Some((base, anchor)) if !anchor.is_empty() => (base, Some(anchor.to_string())),
+        _ => (target, None),
+    }
+}
+
+/// The preset (`key=value`) field components of a link, reconstructed into the
+/// backtick blob [`parse_url`] understands. Valueless components are form-field
+/// placeholders (interactive input, a v1 stub) and are dropped here.
+fn preset_field_blob(link: &RenderedLink) -> String {
+    link.fields
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Resolve a followed link into a fetch [`Target`] and any `#anchor`.
+///
+/// The link target is resolved against `current_dest` (for `:/page/x.mu`
+/// same-destination links) and its preset fields are carried through
+/// [`parse_url`], keeping URL grammar in one place.
+pub fn resolve_link(
+    link: &RenderedLink,
+    current_dest: Option<[u8; 16]>,
+) -> Result<(Target, Option<String>), UrlError> {
+    let (base, anchor) = split_anchor(&link.target);
+    let blob = preset_field_blob(link);
+    let url = if blob.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}`{blob}")
+    };
+    let target = parse_url(&url, current_dest)?;
+    Ok((target, anchor))
 }
 
 #[cfg(test)]

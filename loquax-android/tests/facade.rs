@@ -1704,6 +1704,7 @@ impl HomeNode {
                 fetch_budget: Duration::from_secs(10),
                 wake: true,
                 stop: Some(stopped),
+                network: Default::default(),
             },
         ));
         Self {
@@ -1972,6 +1973,94 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     .await
     .expect("the session after the engine died");
 
+    node.kill().await;
+}
+
+/// A network change through the facade (1298): Java's `Core.network` with
+/// another network drops the session's connection to the mailbox and dials
+/// it at once; the line says "Reconnecting…" (`Event::Network`
+/// `reconnecting`), then it is gone (`back`), the link is up again and a
+/// send reaches the mailbox, with no restart and no user action. A burst of
+/// three words is one reconnect; the same network with the link up is none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_network_change_reconnects_the_phone_without_a_restart() {
+    let _facade = FACADE.lock().await;
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = loquax::address::to_hex(&[0x6e; 16]);
+    tokio::task::spawn_blocking(move || {
+        let answer = started(&loquax_android::start(&schema::encode(&first)));
+        assert!(answer.ok, "{answer:?}");
+        link_event(true, 30);
+        facade_home_link(true, 30);
+        let network = |kind: &str, changed: bool| {
+            let done: schema::Done =
+                rmp_serde::from_slice(&loquax_android::command(&schema::encode(
+                    &Request::Network {
+                        kind: kind.to_string(),
+                        changed,
+                    },
+                )))
+                .expect("a Done");
+            assert!(done.ok, "{done:?}");
+        };
+        let state = |want: &'static str| {
+            move |event: &Event| matches!(event, Event::Network { state, .. } if state == want)
+        };
+
+        // WLAN to mobile data, as the platform says it: lost, available,
+        // its capabilities.
+        network("none", true);
+        network("mobile", true);
+        network("mobile", false);
+        let began = std::time::Instant::now();
+        facade_event(10, "reconnecting", state("reconnecting"));
+        facade_event(20, "back", state("back"));
+        let took = began.elapsed();
+        link_event(true, 10);
+        facade_home_link(true, 60);
+        send_through_facade(&peer, "nach dem Netzwechsel", 60);
+        // One reconnect for the burst: no second line within the settle.
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            if let Some(bytes) = loquax_android::next_event(Duration::from_millis(200)) {
+                let event: Event = rmp_serde::from_slice(&bytes).expect("an Event");
+                assert!(
+                    !matches!(event, Event::Network { .. }),
+                    "a second reconnect for one burst: {event:?}"
+                );
+            }
+        }
+        // Asleep and back on the same network, the link up: kept.
+        network("mobile", false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            if let Some(bytes) = loquax_android::next_event(Duration::from_millis(200)) {
+                let event: Event = rmp_serde::from_slice(&bytes).expect("an Event");
+                assert!(
+                    !matches!(event, Event::Network { .. } | Event::Link { up: false, .. }),
+                    "the same network dropped an up link: {event:?}"
+                );
+            }
+        }
+        eprintln!("NETWORK change to back: {} ms", took.as_millis());
+        loquax_android::stop();
+    })
+    .await
+    .expect("the session");
     node.kill().await;
 }
 
@@ -3425,6 +3514,74 @@ async fn the_settings_pages_ask_the_renderer_in_javas_bytes() {
     node.stop().await;
 }
 
+/// 1290: the Maps page's "Delete all downloaded maps", in Java's bytes as
+/// `Core.deleteRegions` sends it after its question, against a phone with
+/// three regions, a hand placed one among them: before, the page lists
+/// three and their sum; after, none, zero bytes, and no region file left,
+/// the stray file beside them untouched and the automatic download as it
+/// was. A second press with nothing left deletes nothing and is no error.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_all_maps_empties_the_maps_page() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let maps = phone.path().join("maps");
+    std::fs::create_dir_all(&maps).expect("maps dir");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr");
+    let names = ["firenze.lmr", "auto-a.lmr", "auto-b.lmr"];
+    for name in names {
+        std::fs::copy(&fixture, maps.join(name)).expect("a region");
+    }
+    std::fs::write(maps.join("notes.txt"), "not a region").expect("a stray file");
+    let len = std::fs::metadata(&fixture).expect("its size").len();
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let page: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the Maps page");
+        assert!(page.ok && page.autoload, "{page:?}");
+        assert_eq!(page.regions.len(), 3, "{page:?}");
+        assert_eq!(page.region_bytes, 3 * len);
+
+        let delete = || {
+            session.request(schema::decode(&java_map(&[(
+                "t",
+                Java::Str("deleteregions"),
+            )]))?)
+        };
+        delete().expect("every map deleted");
+        let empty: schema::MapRegions =
+            java_query(&session, &[("t", Java::Str("mapregions"))]).expect("the page again");
+        assert!(
+            empty.ok && empty.regions.is_empty() && empty.region_bytes == 0,
+            "{empty:?}"
+        );
+        assert!(empty.autoload, "the automatic download stays on");
+        for name in names {
+            assert!(!maps.join(name).exists(), "{name} is gone");
+        }
+        assert!(maps.join("notes.txt").is_file(), "only regions go");
+        delete().expect("nothing left is no error");
+        session.stop();
+    })
+    .await
+    .expect("the session");
+    node.stop().await;
+}
+
 /// One answer of `session` to `query`.
 fn asked<T: serde::de::DeserializeOwned>(session: &Session, query: schema::Query) -> T {
     rmp_serde::from_slice(&session.query(query).expect("a query")).expect("decode")
@@ -3703,7 +3860,7 @@ async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
             staged.staged,
             format!(
                 "Photo to send, {}",
-                loquax::ui::photos::size_words(gallery.data.len())
+                loquax::ui::photos::size_words(gallery.data.len() as u64)
             )
         );
         assert_eq!(staged.round, "send", "a staged photo is something to send");
@@ -5489,4 +5646,611 @@ async fn a_second_phone_links_to_the_mailbox_on_the_first_and_gets_its_history()
     .await
     .expect("stopped");
     transport.stop().await.expect("stop the transport node");
+}
+
+/// A transport node standing in for the rendezvous, and a phone directory
+/// whose mailbox dials it ([`loquax_android::mailbox::SERVERS_FILE`]).
+async fn rendezvous() -> (tempfile::TempDir, String, ReticulumNode) {
+    let rns = tempfile::tempdir().expect("rns dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let entry = format!("127.0.0.1:{}", listener.local_addr().expect("addr").port());
+    let mut transport = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .add_tcp_server_listener(listener)
+        .storage_path(rns.path().join("storage"))
+        .build_sync()
+        .expect("the transport node");
+    transport.start().await.expect("start it");
+    (rns, entry, transport)
+}
+
+fn phone_dialling(entry: &str) -> tempfile::TempDir {
+    let phone = tempfile::tempdir().expect("a phone");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("{entry}\n"),
+    )
+    .expect("servers file");
+    phone
+}
+
+/// Walk finding 24 (1281): the old phone's "Move to a new phone" code,
+/// scanned at the new phone's first start, carries the mailbox over: the
+/// identity, its name, the contacts' names, blocks and the whole ugly
+/// archive travel over the rendezvous, the new phone is the mailbox, and
+/// the old one says the move took, stops, and does not start again until
+/// its owner takes it back. Negative: the used code moves nothing to a
+/// third phone, which keeps no identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_phone_takes_the_mailbox_over_and_the_old_one_stops() {
+    let (_rns, entry, mut transport) = rendezvous().await;
+    let old = phone_dialling(&entry);
+    let mailbox = old.path().join(loquax_android::mailbox::DIR);
+    ugly_store::fill_archive(&mailbox);
+    loquax_android::mailbox::set_name(old.path(), "Anna").expect("a name");
+    let start = Start {
+        dir: old.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let (a, code) = tokio::task::spawn_blocking(move || {
+        let a = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        let moving: schema::Linked = asked(&a, schema::Query::Moving);
+        assert_eq!(moving.state, "none");
+        let code: schema::LinkCode = asked(&a, schema::Query::MovePhone);
+        let scanned = read_qr(code.qr_size, &code.qr.0);
+        assert_eq!(scanned.len(), 1, "{scanned:?}");
+        let moving: schema::Linked = asked(&a, schema::Query::Moving);
+        assert_eq!(moving.state, "waiting");
+        (a, scanned.into_iter().next().unwrap_or_default())
+    })
+    .await
+    .expect("the old phone");
+    let key = loquax_android::mailbox::identity(old.path())
+        .expect("the old identity")
+        .public_key_bytes();
+
+    let new = phone_dialling(&entry);
+    let start = Start {
+        dir: new.path().display().to_string(),
+        here: true,
+        moving: Some(code.clone()),
+        name: Some("Pixel 9".to_string()),
+        ..Start::default()
+    };
+    let b = tokio::task::spawn_blocking(move || {
+        let b = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(b.is_here());
+        ugly_in(&b);
+        b
+    })
+    .await
+    .expect("the new phone");
+    assert_eq!(b.address(), a.address());
+    assert_eq!(
+        loquax_android::mailbox::identity(new.path())
+            .expect("the moved identity")
+            .public_key_bytes(),
+        key
+    );
+    assert_eq!(loquax_android::mailbox::name(new.path()), "Anna");
+    assert!(!new
+        .path()
+        .join(loquax_android::mailbox::MOVING_DIR)
+        .exists());
+
+    let a = tokio::task::spawn_blocking(move || {
+        let moving: schema::Linked =
+            wait_for(&a, schema::Query::Moving, 10, |l: &schema::Linked| {
+                l.state == "moved"
+            });
+        assert_eq!(moving.name, "Pixel 9");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !a.is_over() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the old mailbox runs on"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        a.stop();
+    })
+    .await;
+    a.expect("the old phone stopped");
+    assert!(loquax_android::mailbox::has_moved(old.path()));
+
+    // The old phone does not start again by itself, and starts when its
+    // owner says so.
+    let again = Start {
+        dir: old.path().display().to_string(),
+        ..Start::default()
+    };
+    let refused = tokio::task::spawn_blocking(move || Session::start(&again).err())
+        .await
+        .expect("a start")
+        .expect("a moved phone does not start");
+    assert_eq!(refused.need, Some("moved"), "{refused:?}");
+    assert_eq!(
+        refused.text,
+        loquax::ui::strings::StrId::MovedAway.text(Lang::En)
+    );
+
+    let third = phone_dialling(&entry);
+    let start = Start {
+        dir: third.path().display().to_string(),
+        here: true,
+        moving: Some(code),
+        name: Some("Fairphone".to_string()),
+        ..Start::default()
+    };
+    let refused = tokio::task::spawn_blocking(move || Session::start(&start).err())
+        .await
+        .expect("the third phone")
+        .expect("a used move code moves nothing");
+    assert_eq!(refused.need, Some("code"), "{refused:?}");
+    assert!(!third
+        .path()
+        .join(loquax_android::mailbox::DIR)
+        .join("identity")
+        .exists());
+
+    let start = Start {
+        dir: old.path().display().to_string(),
+        take_back: true,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let a = Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(a.is_here());
+        a.stop();
+        b.stop();
+    })
+    .await
+    .expect("taken back");
+    assert!(!loquax_android::mailbox::has_moved(old.path()));
+    transport.stop().await.expect("stop the transport node");
+}
+
+/// The restore's guard (1281, walk finding 24): a backup of an address
+/// whose mailbox answers on another phone right now is refused with
+/// `live` and the warning, and restores when the user chooses to anyway.
+/// Positive control: with that mailbox stopped the same restore goes
+/// through without a word.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_of_an_address_live_elsewhere_warns_first() {
+    let (_rns, entry, mut transport) = rendezvous().await;
+    let live = phone_dialling(&entry);
+    let start = Start {
+        dir: live.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let a = tokio::task::spawn_blocking(move || {
+        Session::start(&start).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the live phone");
+    let line = loquax_android::mailbox::backup(live.path(), "Kastanienallee 7").expect("a backup");
+
+    let second = phone_dialling(&entry);
+    let restore = |dir: &Path, anyway: bool| Start {
+        dir: dir.display().to_string(),
+        here: true,
+        restore: Some(line.clone()),
+        passphrase: Some("Kastanienallee 7".to_string()),
+        anyway,
+        ..Start::default()
+    };
+    let warned = restore(second.path(), false);
+    let refused = tokio::task::spawn_blocking(move || Session::start(&warned).err())
+        .await
+        .expect("a start")
+        .expect("a live address warns");
+    assert_eq!(refused.need, Some("live"), "{refused:?}");
+    assert_eq!(
+        refused.text,
+        loquax::ui::strings::StrId::RestoreLive.text(Lang::En)
+    );
+    assert!(!second
+        .path()
+        .join(loquax_android::mailbox::DIR)
+        .join("identity")
+        .exists());
+    let anyway = restore(second.path(), true);
+    let address = a.address();
+    tokio::task::spawn_blocking(move || {
+        let b = Session::start(&anyway).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(b.address(), address);
+        b.stop();
+        a.stop();
+    })
+    .await
+    .expect("restored anyway");
+
+    let third = phone_dialling(&entry);
+    let quiet = restore(third.path(), false);
+    tokio::task::spawn_blocking(move || {
+        let c = Session::start(&quiet).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(c.address(), address);
+        c.stop();
+    })
+    .await
+    .expect("restored with nobody live");
+    transport.stop().await.expect("stop the transport node");
+}
+
+/// 1307 pass two: the phone gets the group screens through the scene's
+/// export and asks its verbs in Java's bytes. A row of a group carries its
+/// count and words, an invited one `Invitation`; a copy's first bubble of
+/// a run carries its writer and the text without the home's prefix; the
+/// invitation's bubble is a card with Join; each verb Java writes decodes
+/// to the core's. Control: a verb the core has no word for is refused.
+#[test]
+fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
+    use leviculum_lxmf::lev::{GroupCopy, Invite, Lev, Member, Members};
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::groups::Verb;
+    use loquax::ui::intent::{Intent, Target};
+    use loquax::ui::{update, UiEvent};
+    use loquax_android::session::{self, Decoded};
+
+    const ME: [u8; 16] = [0x30; 16];
+    const LEW: [u8; 16] = [0x41; 16];
+    const ANNA: [u8; 16] = [0x42; 16];
+    const GROUP: [u8; 16] = [0x51; 16];
+    let lev = |lev: Lev| {
+        let mut fields = Vec::new();
+        lev.put_into(&mut fields);
+        fields
+    };
+    let mut model = loquax::ui::UiModel::<loquax_android::session::Line>::new(&[]);
+    model.address = Some(ME);
+    model.names.remember(LEW, "Lew");
+    // One minute for all of it: the bubbles of one writer join.
+    update(
+        &mut model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs: 1_800_000_000,
+            offset_secs: 0,
+        }),
+    );
+    let arrive = |model: &mut loquax::ui::UiModel<session::Line>, from, id: u8, body: &str, l| {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: [id; 32],
+                source: from,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: lev(l),
+                verified: true,
+            }),
+        );
+    };
+    arrive(
+        &mut model,
+        LEW,
+        1,
+        "Lew invited you to Familie",
+        Lev {
+            invite: Some(Invite {
+                group: GROUP,
+                public_key: [7; 64],
+                name: "Familie".into(),
+                admin_name: "Lew".into(),
+                epoch: 1,
+            }),
+            ..Lev::default()
+        },
+    );
+    let lew = model
+        .conversations
+        .iter()
+        .position(|c| c.peer == LEW)
+        .expect("Lew");
+    let card = &session::rows(&model, lew, Lang::En)[0];
+    assert_eq!(card.invite_group, hex(&GROUP));
+    assert_eq!(card.invite_title, "Lew invited you to Familie");
+    assert!(card.invite_join);
+    assert!(card.invite_trust.contains("Lew could read"));
+
+    update(
+        &mut model,
+        UiEvent::Group(Verb::Join {
+            group: Target::Peer(GROUP),
+        }),
+    );
+    arrive(
+        &mut model,
+        GROUP,
+        2,
+        "",
+        Lev {
+            members: Some(Members {
+                epoch: 1,
+                members: vec![
+                    Member {
+                        address: LEW,
+                        name: "Lew".into(),
+                        flags: 2 | 4,
+                    },
+                    Member {
+                        address: ME,
+                        name: "Me".into(),
+                        flags: 4,
+                    },
+                    Member {
+                        address: ANNA,
+                        name: "Anna".into(),
+                        flags: 4,
+                    },
+                ],
+            }),
+            ..Lev::default()
+        },
+    );
+    for (id, writer, body) in [
+        (3, LEW, "Lew: Brot"),
+        (4, LEW, "Lew: ist da"),
+        (5, ANNA, "Anna: Danke"),
+    ] {
+        arrive(
+            &mut model,
+            GROUP,
+            id,
+            body,
+            Lev {
+                group_copy: Some(GroupCopy {
+                    sender: writer,
+                    sent_ms: 1,
+                    epoch: 1,
+                }),
+                ..Lev::default()
+            },
+        );
+    }
+    let g = model
+        .conversations
+        .iter()
+        .position(|c| c.peer == GROUP)
+        .expect("group");
+    let rows: Vec<_> = session::rows(&model, g, Lang::En)
+        .into_iter()
+        .map(|r| (r.writer, r.body))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("Lew".to_string(), "Brot".to_string()),
+            (String::new(), "ist da".to_string()),
+            ("Anna".to_string(), "Danke".to_string()),
+        ],
+        "a writer once per run, the text without the prefix"
+    );
+    let row = loquax::ui::scene::row(&model, &GROUP);
+    assert_eq!(row.avatar.initials, "3");
+
+    let decoded = |bytes: Vec<u8>| -> Result<Intent, String> {
+        let request: schema::Request = schema::decode(&bytes)?;
+        match session::decode(request)? {
+            Decoded::Intent(intent) => Ok(intent),
+            Decoded::Platform(_) => Err("platform".into()),
+        }
+    };
+    let group = hex(&GROUP);
+    let anna = hex(&ANNA);
+    let cases: Vec<(Vec<u8>, Verb)> = vec![
+        (
+            java_map(&[("t", Java::Str("group")), ("verb", Java::Str("new"))]),
+            Verb::New,
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("pick")),
+                ("peer", Java::Str(&anna)),
+            ]),
+            Verb::Pick(ANNA),
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("name")),
+                ("text", Java::Str("Familie")),
+            ]),
+            Verb::Name("Familie".into()),
+        ),
+        (
+            java_map(&[("t", Java::Str("group")), ("verb", Java::Str("create"))]),
+            Verb::Create,
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("join")),
+                ("peer", Java::Str(&group)),
+            ]),
+            Verb::Join {
+                group: Target::Peer(GROUP),
+            },
+        ),
+        // The admin's Add members (1307 G2).
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("add")),
+                ("peer", Java::Str(&group)),
+            ]),
+            Verb::Add {
+                group: Target::Peer(GROUP),
+            },
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("remove")),
+                ("peer", Java::Str(&group)),
+                ("member", Java::Str(&anna)),
+                ("confirmed", Java::Bool(true)),
+            ]),
+            Verb::Remove {
+                group: Target::Peer(GROUP),
+                member: Some(ANNA),
+                confirmed: true,
+            },
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("leave")),
+                ("peer", Java::Str(&group)),
+                ("confirmed", Java::Bool(false)),
+            ]),
+            Verb::Leave {
+                group: Target::Peer(GROUP),
+                confirmed: false,
+            },
+        ),
+    ];
+    for (bytes, verb) in cases {
+        assert_eq!(decoded(bytes).expect("decodes"), Intent::Group(verb));
+    }
+    let unknown = java_map(&[("t", Java::Str("group")), ("verb", Java::Str("invite"))]);
+    assert!(decoded(unknown).is_err());
+}
+
+/// 1307 pass five, Lew's phone 2026-11-02: "I can create a group, but I do
+/// not see it". On a home that hosts groups, the home's answer to Create
+/// says `changed`, and the list Java reads then has the group's row, on
+/// top of every unpinned chat, under its name and with its members, before
+/// anyone wrote in it. A restart lists it again from the store. Control:
+/// the list read right after Create, before the home answered, has no
+/// such row, so the row comes from the answer and nothing pretends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_made_on_the_phone_is_in_the_list_at_once_and_after_a_restart() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    ugly(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let anna = ugly_store::peer_hex(1);
+    let group = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        ugly_in(&session);
+        let verb = |verb: &str, peer: &str, text: &str| {
+            session
+                .request(Request::Group {
+                    verb: verb.to_string(),
+                    peer: peer.to_string(),
+                    member: String::new(),
+                    text: text.to_string(),
+                    confirmed: false,
+                })
+                .unwrap_or_else(|error| panic!("{verb}: {error}"));
+        };
+        verb("new", "", "");
+        verb("pick", &anna, "");
+        verb("next", "", "");
+        verb("name", "", "Familie");
+        // Drain what came before, so the next `changed` is the answer's.
+        while session.next_event(Duration::from_millis(300)).is_some() {}
+        verb("create", "", "");
+        let list = |session: &Session| -> schema::Conversations {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Conversations { search: None })
+                    .expect("the list"),
+            )
+            .expect("decode")
+        };
+        let before = list(&session);
+        assert!(
+            before
+                .conversations
+                .iter()
+                .all(|row| !row.name.starts_with("Familie")),
+            "control: no row before the home answered"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let shown = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no changed with the group"
+            );
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Notice { text, .. }) => panic!("the home refused: {text}"),
+                Some(Event::Changed { .. }) => {
+                    let shown = list(&session);
+                    if shown
+                        .conversations
+                        .iter()
+                        .any(|row| row.name.starts_with("Familie"))
+                    {
+                        break shown;
+                    }
+                }
+                _ => {}
+            }
+        };
+        let at = shown
+            .conversations
+            .iter()
+            .position(|row| row.name.starts_with("Familie"))
+            .expect("the row");
+        let row = &shown.conversations[at];
+        assert!(row.group_members >= 2, "{row:?}");
+        assert!(
+            shown.conversations[..at].iter().all(|row| row.pinned),
+            "on top of the unpinned chats: {:?}",
+            shown.conversations[..at]
+                .iter()
+                .map(|r| &r.name)
+                .collect::<Vec<_>>()
+        );
+        let group = row.peer.clone();
+        session.stop();
+        group
+    })
+    .await
+    .expect("the first session");
+
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        let listed: schema::Conversations = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Conversations { search: None })
+                .expect("the list"),
+        )
+        .expect("decode");
+        let row = listed
+            .conversations
+            .iter()
+            .find(|row| row.peer == group)
+            .unwrap_or_else(|| panic!("the group after a restart: {listed:?}"));
+        assert!(row.name.starts_with("Familie"), "{row:?}");
+        assert!(row.group_members >= 2, "{row:?}");
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
 }

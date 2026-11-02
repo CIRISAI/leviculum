@@ -41,6 +41,7 @@
 //! | `Message::ToggleEmoji` | `Emoji` |
 //! | `Request::Pull`, `Command::Fetch` | `Pull` |
 //! | `Request::Front` | `Front` |
+//! | `Request::Network`, `UiEvent::Network` (1298) | `Network` |
 //! | `Request::Viewport` (1231) | `Viewport` |
 //! | `Request::Name` | `Name` |
 //! | `Request::Rename`, `UiEvent::Rename`, `Command::Rename` | `Rename` |
@@ -76,6 +77,7 @@
 //! | `Command::Import` | `Import` |
 //! | `Command::MyCode` | `MyCode` |
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
+//! | the Maps page's last row (1290), `Request::DeleteRegions` | `DeleteAllRegions` (`confirmed` tells the asked from the asking) |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
 //! | `keys::Action::Newline`, `ClearDraft` | the same names |
@@ -85,6 +87,7 @@
 //! | (new) a tap or click on a node | `Activate` |
 //! | (new) a sheet or menu closed | `Dismiss` |
 //! | (new) a tab | `Tab` |
+//! | (new) "New group", a tick, Next, Create, Join, the member sheet, Leave, Remove (1307), `Command::{NewGroup,JoinGroup,Members,LeaveGroup,RemoveMember}` | `Group` |
 //!
 //! Not intents: the facade's `Link`, `Unlink`, `NotNow` and `Relink` (the
 //! phone's address book, platform glue), and the window's arms that are
@@ -98,6 +101,7 @@ use leviculum_lxmf::telemetry::Location;
 use leviculum_ui::commands::Command;
 use leviculum_ui::keymap::ScrollCmd;
 
+use super::groups::Verb;
 use super::scene::{NodeId, TabId};
 use super::strings::StrId;
 use crate::keys::{self, MapCmd};
@@ -405,6 +409,10 @@ pub enum Intent {
         lxma: String,
         name: Option<String>,
     },
+    /// A verb on groups (1307): "New group" and its picker, Join on an
+    /// invitation, the member sheet, Leave, Remove. A frontend hands it to
+    /// the model as [`super::UiEvent::Group`].
+    Group(Verb),
     NewConversation,
     /// Show our own contact code and its QR (1279).
     MyCode,
@@ -439,6 +447,12 @@ pub enum Intent {
     Pull,
     /// The app came to the front, or left it.
     Front(bool),
+    /// The platform's network changed (1298): a fact the platform says,
+    /// never a button.
+    Network {
+        kind: crate::home::NetworkKind,
+        changed: bool,
+    },
     /// These bubbles of `peer`'s chat are on screen, at least half of
     /// each (1231): the core decides from it what was read.
     Viewport {
@@ -452,6 +466,11 @@ pub enum Intent {
     /// The switch "Send read receipts" (1233): set, or toggled.
     ReadReceipts {
         on: Switch,
+    },
+    /// The Maps page's last row (1290): delete every downloaded region,
+    /// after asking unless `confirmed`. The autoload stays as it is.
+    DeleteAllRegions {
+        confirmed: bool,
     },
 }
 
@@ -572,6 +591,17 @@ impl Intent {
             Intent::Rename { .. } => StrId::Rename,
             Intent::Forget { .. } => StrId::Forget,
             Intent::AddContact { .. } => StrId::AddContact,
+            Intent::Group(verb) => match verb {
+                Verb::New | Verb::Pick(_) | Verb::Name(_) => StrId::NewGroup,
+                Verb::Next => StrId::GroupNext,
+                Verb::Create => StrId::GroupCreate,
+                Verb::Join { .. } => StrId::GroupJoin,
+                Verb::Members { .. } => StrId::GroupMembers,
+                Verb::Leave { .. } => StrId::GroupLeave,
+                Verb::Remove { .. } => StrId::GroupRemove,
+                Verb::Add { .. } => StrId::GroupAdd,
+                Verb::Close => StrId::Close,
+            },
             Intent::NewConversation => StrId::NewConversation,
             Intent::MyCode => StrId::MyCode,
             Intent::Name(_) => StrId::Name,
@@ -604,6 +634,8 @@ impl Intent {
             Intent::MapDrawing => StrId::MapDrawing,
             Intent::Pull => StrId::Pull,
             Intent::Front(_) => StrId::Front,
+            // A fact of the platform as the front is, never a button.
+            Intent::Network { .. } => StrId::Front,
             // A fact of the screen as the front is, never a button.
             Intent::Viewport { .. } => StrId::Front,
             Intent::Theme => StrId::Theme,
@@ -611,6 +643,7 @@ impl Intent {
             Intent::Mouse => StrId::Mouse,
             Intent::Import => StrId::Import,
             Intent::ReadReceipts { .. } => StrId::ReadReceipts,
+            Intent::DeleteAllRegions { .. } => StrId::DeleteAllRegionsYes,
         }
     }
 }
@@ -697,6 +730,25 @@ impl From<Command> for Intent {
                 lxma: String::new(),
                 name: None,
             },
+            Command::NewGroup => Intent::Group(Verb::New),
+            Command::JoinGroup => Intent::Group(Verb::Join {
+                group: Target::Open,
+            }),
+            Command::Members => Intent::Group(Verb::Members {
+                group: Target::Open,
+            }),
+            Command::LeaveGroup => Intent::Group(Verb::Leave {
+                group: Target::Open,
+                confirmed: false,
+            }),
+            Command::RemoveMember => Intent::Group(Verb::Remove {
+                group: Target::Open,
+                member: None,
+                confirmed: false,
+            }),
+            Command::AddMembers => Intent::Group(Verb::Add {
+                group: Target::Open,
+            }),
         }
     }
 }

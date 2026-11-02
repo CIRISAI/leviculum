@@ -11,6 +11,10 @@
     <item name="state_ticks_read" type="id" />
     <item name="state_failed" type="id" />
     <item name="friends_sheet" type="id" />
+    <!-- The contact screen's Advanced fold (1283), which the walk opens. -->
+    <item name="contact_scroll" type="id" />
+    <item name="contact_advanced" type="id" />
+    <item name="contact_advanced_body" type="id" />
     <!-- The recording bar (1276), by the scene's ids (NodeId::resource and
          recording::Verb::word); rec_dot is the pulsing dot, selected while
          it pulses, rec_held the microphone under the finger. -->
@@ -52,6 +56,7 @@
     <item name="maps_region" type="id" />
     <item name="maps_region_name" type="id" />
     <item name="maps_region_line" type="id" />
+    <item name="maps_delete_all" type="id" />
     <item name="maps_used" type="id" />
     <item name="privacy_receipts" type="id" />
     <item name="photo_full" type="id" />
@@ -83,6 +88,14 @@
     <item name="link_status" type="id" />
     <item name="link_share" type="id" />
     <item name="where_join" type="id" />
+    <item name="profile_move_phone" type="id" />
+    <item name="move_qr" type="id" />
+    <item name="move_code" type="id" />
+    <item name="move_status" type="id" />
+    <item name="where_move" type="id" />
+    <item name="move_paste" type="id" />
+    <item name="move_go" type="id" />
+    <item name="take_back" type="id" />
     <item name="profile_advanced" type="id" />
     <item name="profile_advanced_body" type="id" />
 </resources>

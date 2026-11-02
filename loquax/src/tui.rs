@@ -596,6 +596,10 @@ enum Until {
     MapIdle,
     /// This many fetches (on a client, pulls from the home node) ended.
     Synced(usize),
+    /// This many groups the reader is in, joined or its admin (1307).
+    Groups(usize),
+    /// This many invitations wait for a Join (1307).
+    Invited(usize),
 }
 
 impl Until {
@@ -623,6 +627,22 @@ impl Until {
             Self::Named(count) => model.names.heard_count() >= *count,
             Self::MapIdle => model.map_loading.is_none(),
             Self::Synced(count) => model.fetches_done >= *count,
+            Self::Groups(count) => {
+                model
+                    .groups
+                    .values()
+                    .filter(|g| g.standing == loquax::ui::groups::Standing::Joined)
+                    .count()
+                    >= *count
+            }
+            Self::Invited(count) => {
+                model
+                    .groups
+                    .values()
+                    .filter(|g| g.standing == loquax::ui::groups::Standing::Invited)
+                    .count()
+                    >= *count
+            }
             Self::Verified(count) => {
                 model
                     .conversations
@@ -844,6 +864,8 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// until verified <n> [secs]      n received messages have a verified signature
 /// until map [secs]               no map region load runs or waits
 /// until synced <n> [secs]        n fetches (pulls on a client) have ended
+/// until groups <n> [secs]        the reader is in n groups (1307)
+/// until invited <n> [secs]       n invitations wait for a Join (1307)
 /// until leg <direct|propagated> [secs]
 ///                                the runner is on that leg for the newest
 ///                                sent message
@@ -967,6 +989,20 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                         Until::Received(
                             n.parse()
                                 .map_err(|_| at(format!("bad message count {n:?}")))?,
+                        ),
+                        secs(tail.first().copied()).map_err(at)?,
+                    ),
+                    ["groups", n, tail @ ..] => Step::Until(
+                        Until::Groups(
+                            n.parse()
+                                .map_err(|_| at(format!("bad group count {n:?}")))?,
+                        ),
+                        secs(tail.first().copied()).map_err(at)?,
+                    ),
+                    ["invited", n, tail @ ..] => Step::Until(
+                        Until::Invited(
+                            n.parse()
+                                .map_err(|_| at(format!("bad invitation count {n:?}")))?,
                         ),
                         secs(tail.first().copied()).map_err(at)?,
                     ),

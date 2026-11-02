@@ -17,6 +17,14 @@
 //! let doc = parse(">> Title\n\nSome `!bold`! text.");
 //! assert!(matches!(doc.blocks[0], Block::Heading { depth: 2, .. }));
 //! ```
+//!
+//! The crate is `no_std` plus `alloc`: a parser has no use for files or
+//! clocks, and a browser core built for a board (lnomad's, `just
+//! lnomad-core-no-std`) parses the same pages the terminal does.
+
+#![no_std]
+
+extern crate alloc;
 
 mod color;
 mod model;

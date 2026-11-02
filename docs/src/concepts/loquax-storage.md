@@ -130,7 +130,7 @@ the whole argument.
 
 Nothing in this program may use `fs::write` on a file it cannot afford to
 lose, and nothing may treat a corrupt load as an empty load
-(`lnomad/src/bookmarks.rs:116-130`). Bookmarks can be silently forgotten.
+(`lnomad/src/bookmarks.rs:121-136`). Bookmarks can be silently forgotten.
 Mail cannot.
 
 ## Built 2026-10-27 (leviculum 1049)

@@ -199,6 +199,21 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 last = Last::Separator;
             }
         }
+        // A group's membership that changed somebody's standing (1307 G2):
+        // a line of its own, as a note is.
+        if let Some(text) = super::groups::membership_note(&conversation.messages, index, None) {
+            if last == Last::Block {
+                laid.push(RLine::default());
+            }
+            laid.push(note_line(&text, width, draw.tokens));
+            laid.spans.push(Span {
+                start,
+                end: laid.rows.len(),
+                mark: None,
+            });
+            last = Last::Separator;
+            continue;
+        }
         let from = skipped.take().unwrap_or(index);
         let here = |at: usize| (from..=index).contains(&at);
         for note in conversation.notes.iter().filter(|n| here(n.before)) {
@@ -262,7 +277,8 @@ pub fn folded(conversation: &Conversation, index: usize) -> bool {
     conversation
         .messages
         .get(index)
-        .is_some_and(Message::is_reaction)
+        .is_some_and(Message::is_aside)
+        && super::groups::membership_note(&conversation.messages, index, None).is_none()
         || conversation.report_folded(index)
 }
 
@@ -470,14 +486,14 @@ fn block(
     if let Some(photo) = super::photos::photo_of(&message.fields) {
         media.push(format!(
             "{photo_glyph} photo {dot} {}",
-            super::photos::size_words(photo.bytes)
+            super::photos::size_words(photo.bytes as u64)
         ));
     }
     for file in super::files::files_of(&message.fields) {
         media.push(format!(
             "{file_glyph} {} {dot} {}",
             super::files::safe_name(&file.name),
-            super::photos::size_words(file.bytes)
+            super::photos::size_words(file.bytes as u64)
         ));
     }
     if let Some(voice) = super::voice::voice_of(&message.fields) {
@@ -708,7 +724,11 @@ fn entry(
     open: bool,
 ) -> [RLine; 2] {
     let room = width.saturating_sub(2);
-    let last = conversation.messages.last();
+    let last = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|m| !m.is_group_state());
     let time = match (last.and_then(|m| m.at), now) {
         (Some(at), Some(now)) => list_time(&at, &now),
         _ => String::new(),

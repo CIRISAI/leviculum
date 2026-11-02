@@ -933,7 +933,16 @@ final class MapView extends View {
                 // fading in or out: draw the next frame now.
                 ask();
             }
-            if (Core.bool(shown, "loading")) {
+            if (Core.bool(shown, "filling")) {
+                // A region on screen is still arriving (1291): ask again
+                // when more of it may be there, four times a second.
+                postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        ask();
+                    }
+                }, 250);
+            } else if (Core.bool(shown, "loading")) {
                 postDelayed(new Runnable() {
                     @Override
                     public void run() {

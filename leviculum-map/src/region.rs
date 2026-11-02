@@ -3,14 +3,17 @@
 //! "Region file"), from version 2 (LMR2) the names on it: one string
 //! table and a label section per tile ([`crate::labels`]), and from
 //! version 3 (LMR3) the buildings: a building section per z15 tile
-//! ([`crate::buildings`]).
+//! ([`crate::buildings`]), and from version 4 (LMR4, 1291) the same
+//! sections in an order a reader can use while the file still arrives:
+//! the tile index first, then the tiles coarse to fine, the names and
+//! buildings last.
 //!
 //! All integers little-endian. Offsets are from the start of the file.
 //!
 //! ```text
-//! header  64 bytes (version 1), 96 (version 2), 112 (version 3)
+//! header  64 bytes (version 1), 96 (version 2), 112 (version 3 and 4)
 //!   0  "LMR1"
-//!   4  u16 version (1 to 3)     6  u16 header length (64, 96 or 112)
+//!   4  u16 version (1 to 4)     6  u16 header length (64, 96 or 112)
 //!   8  i32 west, south, east, north, degrees x 10^7 (west > east: the
 //!      region crosses the antimeridian)
 //!  24  u8 min zoom  25 u8 max zoom (<= 16)  26 u8 layer profile  27 u8 0
@@ -22,7 +25,7 @@
 //!  64  u64 label index offset   72 u32 label section count
 //!  76  u32 string count         80 u64 string table offset
 //!  88  u64 string table length
-//!   version 3 only:
+//!   version 3 and 4:
 //!  96  u64 building index offset  104 u32 building section count
 //! 108  u32 0
 //! text    the attribution (one line, shown on the map) and the notice
@@ -42,8 +45,31 @@
 //!         u8 z  u8 0  u16 x  u16 y  u16 0  u64 offset  u32 length
 //! ```
 //!
-//! A tile with nothing in it under the profile has no entry; a reader
-//! draws the background there. Two entries may share one blob (the cut
+//! Version 4 keeps every field and moves the parts (1291):
+//!
+//! ```text
+//! header  112 bytes; file length 0 while the file is being written, and
+//!         the names' and buildings' fields 0 until it is complete
+//! text    the attribution and the notice
+//! index   one slot per tile the box lists, ascending by (z, x, y), the
+//!         tile count the slots': a slot is an entry, or with length 0
+//!         offset 0 "not here yet" or offset u64::MAX "nothing there"
+//! tiles   in index order, so coarse to fine: z0, z1, ... the deepest last
+//! labels, buildings, strings, label index, building index
+//!         as in version 3, after every tile, the building index last
+//! ```
+//!
+//! A slot is filled after its blob is written, its offset before its
+//! length, and the file length is written last, after the names' and
+//! buildings' fields. So a reader of a file still arriving, by a cut
+//! writing it in place or a download, knows from the slots alone which
+//! tiles are complete: a slot with a length whose bytes lie inside what
+//! has arrived. Everything else is [`Slot::Pending`], drawn from the
+//! nearest coarser tile that is there ([`Region::stand_in`]). The names
+//! and the buildings show once the whole file is there.
+//!
+//! A tile with nothing in it under the profile has no entry (version 4:
+//! a slot saying so); a reader draws the background there. Two entries may share one blob (the cut
 //! stores identical small tiles once). The index sits last so the writer
 //! can stream tiles and learn their count at the end, and it is searched
 //! in place, 20 bytes per probe: a whole country's index is megabytes,
@@ -70,8 +96,11 @@ use crate::labels::{LabelError, Section};
 /// The file's first four bytes.
 pub const MAGIC: [u8; 4] = *b"LMR1";
 /// The format version the writer writes, the newest this reader reads:
-/// names and buildings.
-pub const VERSION: u16 = 3;
+/// the index first and the tiles coarse to fine (1291).
+pub const VERSION: u16 = 4;
+/// The version with names and buildings after the tiles and the index
+/// last, which this reader reads too.
+pub const VERSION_3: u16 = 3;
 /// The version with names and without buildings, which a cut without
 /// buildings writes and this reader reads too.
 pub const VERSION_2: u16 = 2;
@@ -82,8 +111,13 @@ pub const VERSION_1: u16 = 1;
 pub const HEADER_LEN: usize = 64;
 /// Header length in bytes of a version 2 file.
 pub const HEADER_LEN_2: usize = 96;
-/// Header length in bytes of a version 3 file.
+/// Header length in bytes of a version 3 or 4 file.
 pub const HEADER_LEN_3: usize = 112;
+/// A version 4 slot's offset where the tile has nothing in it.
+pub const EMPTY_SLOT: u64 = u64::MAX;
+/// Where the header keeps the file length, which a version 4 writer
+/// writes last.
+pub const LEN_AT: u64 = 56;
 /// Index entry length in bytes.
 pub const ENTRY_LEN: usize = 20;
 /// The highest zoom a region may hold: x and y are `u16`.
@@ -119,6 +153,9 @@ pub enum RegionError {
     Labels(TileId, LabelError),
     /// A tile's building section is not one.
     Buildings(TileId, BuildingError),
+    /// A version 4 file is not all there: a slot still waits for its
+    /// tile. What [`Region::verify`] says of a file still arriving.
+    Pending(TileId),
 }
 
 /// A tile address.
@@ -165,6 +202,9 @@ pub struct Header {
     /// names too; [`Header::encode`] writes empty ones where they are
     /// `None`.
     pub buildings: Option<BuildingTables>,
+    /// Version 4 (1291): the index first, its slots filled as the tiles
+    /// are written coarse to fine, `len` 0 until the file is complete.
+    pub streamed: bool,
 }
 
 /// Where a version 3 file keeps its buildings.
@@ -210,26 +250,29 @@ impl Header {
         match version {
             VERSION_1 => Some(HEADER_LEN),
             VERSION_2 => Some(HEADER_LEN_2),
-            VERSION => Some(HEADER_LEN_3),
+            VERSION_3 | VERSION => Some(HEADER_LEN_3),
             _ => None,
         }
     }
 
-    /// The version this header encodes as: 3 with buildings, 2 with names
-    /// alone, 1 with neither.
+    /// The version this header encodes as: 4 streamed, 3 with buildings,
+    /// 2 with names alone, 1 with neither.
     pub fn version_of(&self) -> u16 {
+        if self.streamed {
+            return VERSION;
+        }
         match (self.buildings, self.labels) {
-            (Some(_), _) => VERSION,
+            (Some(_), _) => VERSION_3,
             (None, Some(_)) => VERSION_2,
             (None, None) => VERSION_1,
         }
     }
 
-    /// This header's length: 112 bytes with buildings, 96 with names
-    /// alone, 64 with neither.
+    /// This header's length: 112 bytes streamed or with buildings, 96
+    /// with names alone, 64 with neither.
     pub fn header_len(&self) -> usize {
         match self.version_of() {
-            VERSION => HEADER_LEN_3,
+            VERSION | VERSION_3 => HEADER_LEN_3,
             VERSION_2 => HEADER_LEN_2,
             _ => HEADER_LEN,
         }
@@ -259,7 +302,7 @@ impl Header {
 
     /// Decode and check the fields that need nothing but the header: the
     /// first 64 bytes, for version 2 the 32 after them, and for version 3
-    /// the 16 after those. The checks
+    /// and 4 the 16 after those. The checks
     /// against the file's length are [`Region::open`]'s.
     pub fn parse(b: &[u8]) -> Result<Self, RegionError> {
         let head: &[u8; HEADER_LEN] = b
@@ -296,7 +339,7 @@ impl Header {
         if min_zoom > max_zoom || max_zoom > MAX_ZOOM {
             return Err(RegionError::Header("zoom"));
         }
-        if b[27] != 0 || (version == VERSION && u32_at(b, 108) != 0) {
+        if b[27] != 0 || (version >= VERSION_3 && u32_at(b, 108) != 0) {
             return Err(RegionError::Header("reserved"));
         }
         Ok(Self {
@@ -316,15 +359,17 @@ impl Header {
                 table: u64_at(b, 80),
                 table_len: u64_at(b, 88),
             }),
-            buildings: (version == VERSION).then(|| BuildingTables {
+            buildings: (version >= VERSION_3).then(|| BuildingTables {
                 index: u64_at(b, 96),
                 sections: u32_at(b, 104),
             }),
+            streamed: version == VERSION,
         })
     }
 
-    /// The header bytes: version 3 with buildings, 2 with names alone, 1
-    /// with neither ([`Header::version_of`]); the writer's half, kept
+    /// The header bytes: version 4 streamed, 3 with buildings, 2 with
+    /// names alone, 1 with neither ([`Header::version_of`]); the writer's
+    /// half, kept
     /// beside the reader.
     pub fn encode(&self) -> Vec<u8> {
         let mut b = vec![0u8; self.header_len()];
@@ -438,6 +483,17 @@ impl Storage for std::fs::File {
     }
 }
 
+/// What a tile's index entry says: its blob, nothing there, or (in a
+/// version 4 file still arriving) not here yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Here(Entry),
+    /// The region holds nothing there: draw the background.
+    Empty,
+    /// The tile has not arrived: draw a stand-in ([`Region::stand_in`]).
+    Pending,
+}
+
 /// An opened region: the header checked against the storage, the two
 /// texts read, the index left where it is.
 pub struct Region<S> {
@@ -445,8 +501,15 @@ pub struct Region<S> {
     header: Header,
     attribution: String,
     notice: String,
-    /// Where the blobs may lie: after the header, before the index.
+    /// Where the blobs may lie: after the header (version 4: after the
+    /// index) ...
+    data_start: u64,
+    /// ... and before the index (version 4: before the names, or the
+    /// bytes there when the file is not complete).
     data_end: u64,
+    /// Whether every byte the header promises is there; only a version 4
+    /// file may be opened without.
+    complete: bool,
 }
 
 impl<S: Storage> Region<S> {
@@ -475,22 +538,59 @@ impl<S: Storage> Region<S> {
         }
         storage.read_at(0, &mut hb[..header_len])?;
         let header = Header::parse(&hb[..header_len])?;
-        if header.len != storage.size() {
-            return Err(RegionError::Truncated);
-        }
+        let size = storage.size();
         let first = header_len as u64;
         let index_len = u64::from(header.tiles) * ENTRY_LEN as u64;
-        if header.index < first || header.index.checked_add(index_len) != Some(header.len) {
+        let index_end = header
+            .index
+            .checked_add(index_len)
+            .ok_or(RegionError::Header("index"))?;
+        if header.index < first {
             return Err(RegionError::Header("index"));
         }
-        // Blobs lie after the header and before the string table, which
-        // lies before the label index, which ends where the building index
-        // starts, which ends where the index starts.
-        let mut data_end = header.index;
-        let mut labels_end = header.index;
+        let (header, complete) = if header.streamed {
+            // Length 0 while the writer writes, longer than the storage
+            // while a copy arrives; the slots must all be there.
+            if (header.len != 0 && header.len < size) || index_end > size {
+                return Err(RegionError::Truncated);
+            }
+            if header.len == size {
+                (header, true)
+            } else {
+                // The names and the buildings come last and count once the
+                // file is complete.
+                let header = Header {
+                    labels: None,
+                    buildings: None,
+                    ..header
+                };
+                (header, false)
+            }
+        } else {
+            if header.len != size {
+                return Err(RegionError::Truncated);
+            }
+            if index_end != header.len {
+                return Err(RegionError::Header("index"));
+            }
+            (header, true)
+        };
+        // Blobs lie after the header (version 4: after the index) and
+        // before the string table, which lies before the label index,
+        // which ends where the building index starts, which ends where the
+        // index starts (version 4: at the end of the file).
+        let (data_start, tail) = match header.streamed {
+            true => (index_end, header.len),
+            false => (first, header.index),
+        };
+        let mut data_end = match complete {
+            true => tail,
+            false => size,
+        };
+        let mut labels_end = tail;
         if let Some(bt) = header.buildings {
             let len = u64::from(bt.sections) * ENTRY_LEN as u64;
-            if bt.index.checked_add(len) != Some(header.index) || bt.index < first {
+            if bt.index.checked_add(len) != Some(tail) || bt.index < data_start {
                 return Err(RegionError::Header("building index"));
             }
             labels_end = bt.index;
@@ -498,11 +598,11 @@ impl<S: Storage> Region<S> {
         }
         if let Some(l) = header.labels {
             let label_index_len = u64::from(l.sections) * ENTRY_LEN as u64;
-            if l.index.checked_add(label_index_len) != Some(labels_end) || l.index < first {
+            if l.index.checked_add(label_index_len) != Some(labels_end) || l.index < data_start {
                 return Err(RegionError::Header("label index"));
             }
             let offsets = (u64::from(l.strings) + 1) * 4;
-            if l.table < first
+            if l.table < data_start
                 || l.table.checked_add(l.table_len) != Some(l.index)
                 || l.table_len < offsets
             {
@@ -520,7 +620,11 @@ impl<S: Storage> Region<S> {
                 return Err(RegionError::Text);
             }
             let end = u64::from(off) + u64::from(len);
-            if u64::from(off) < first || end > data_end {
+            let before = match header.streamed {
+                true => header.index,
+                false => data_end,
+            };
+            if u64::from(off) < first || end > before {
                 return Err(RegionError::Header("text"));
             }
             let mut b = vec![0u8; len as usize];
@@ -530,12 +634,21 @@ impl<S: Storage> Region<S> {
         let attribution = text(header.attribution)?;
         let notice = text(header.notice)?;
         Ok(Self {
+            data_start,
             data_end,
+            complete,
             storage,
             header,
             attribution,
             notice,
         })
+    }
+
+    /// Whether the whole file is there: always but for a version 4 file
+    /// still being written or downloaded, whose tiles that arrived draw
+    /// and whose names and buildings wait for the rest.
+    pub fn is_complete(&self) -> bool {
+        self.complete
     }
 
     pub fn header(&self) -> &Header {
@@ -558,13 +671,33 @@ impl<S: Storage> Region<S> {
     }
 
     /// Index entry `n`, checked: a valid tile in the region's zooms and a
-    /// blob inside the data area.
+    /// blob inside the data area. A version 4 slot that holds no blob is
+    /// [`RegionError::Pending`] or, for nothing there, an
+    /// [`RegionError::Entry`]; [`Region::slot`] tells them apart.
     pub fn entry(&self, n: u32) -> Result<Entry, RegionError> {
         self.entry_in(self.header.index, self.header.tiles, n)
     }
 
-    /// Entry `n` of the index at `index` holding `count` entries.
+    /// Index slot `n`: its tile and what it holds.
+    pub fn slot(&self, n: u32) -> Result<(TileId, Slot), RegionError> {
+        let e = self.raw_entry(self.header.index, self.header.tiles, n)?;
+        Ok((e.id, self.slot_of(e, n)?))
+    }
+
+    /// Entry `n` of the index at `index` holding `count` entries, holding
+    /// a blob.
     fn entry_in(&self, index: u64, count: u32, n: u32) -> Result<Entry, RegionError> {
+        let e = self.raw_entry(index, count, n)?;
+        match self.slot_of(e, n)? {
+            Slot::Here(e) => Ok(e),
+            Slot::Pending => Err(RegionError::Pending(e.id)),
+            Slot::Empty => Err(RegionError::Entry(n)),
+        }
+    }
+
+    /// Entry `n` as it is written, its tile checked: valid and in the
+    /// region's zooms.
+    fn raw_entry(&self, index: u64, count: u32, n: u32) -> Result<Entry, RegionError> {
         if n >= count {
             return Err(RegionError::Entry(n));
         }
@@ -572,30 +705,105 @@ impl<S: Storage> Region<S> {
         self.storage
             .read_at(index + u64::from(n) * ENTRY_LEN as u64, &mut b)?;
         let e = Entry::parse(&b).ok_or(RegionError::Entry(n))?;
-        let in_data = e.offset >= self.header.header_len() as u64
-            && e.len > 0
-            && e.offset
-                .checked_add(u64::from(e.len))
-                .is_some_and(|end| end <= self.data_end);
-        if !e.id.is_valid() || !self.zooms().contains(&e.id.z) || !in_data {
+        if !e.id.is_valid() || !self.zooms().contains(&e.id.z) {
             return Err(RegionError::Entry(n));
         }
         Ok(e)
     }
 
+    /// What entry `e` (number `n`) holds: a blob inside the data area, or
+    /// in version 4 nothing there, or not yet.
+    fn slot_of(&self, e: Entry, n: u32) -> Result<Slot, RegionError> {
+        if self.header.streamed && e.len == 0 {
+            // The writer writes a slot's offset before its length, so a
+            // slot without a length is waiting, whatever its offset says
+            // so far, unless the whole file is there.
+            return match e.offset {
+                EMPTY_SLOT => Ok(Slot::Empty),
+                0 => Ok(Slot::Pending),
+                _ if !self.complete => Ok(Slot::Pending),
+                _ => Err(RegionError::Entry(n)),
+            };
+        }
+        if e.len == 0 || e.offset < self.data_start {
+            return Err(RegionError::Entry(n));
+        }
+        match e.offset.checked_add(u64::from(e.len)) {
+            Some(end) if end <= self.data_end => Ok(Slot::Here(e)),
+            // A blob past the bytes there arrives later.
+            Some(_) if !self.complete => Ok(Slot::Pending),
+            _ => Err(RegionError::Entry(n)),
+        }
+    }
+
     /// The entry of `id`, by binary search over the index in place;
-    /// `None` when the region has nothing there.
+    /// `None` when the region has nothing there, or (version 4) not yet.
     pub fn find(&self, id: TileId) -> Result<Option<Entry>, RegionError> {
-        self.find_in(self.header.index, self.header.tiles, id)
+        match self.find_slot(id)? {
+            Slot::Here(e) => Ok(Some(e)),
+            Slot::Empty | Slot::Pending => Ok(None),
+        }
+    }
+
+    /// What the region holds of `id`: [`Slot::Empty`] where the index has
+    /// no entry.
+    pub fn find_slot(&self, id: TileId) -> Result<Slot, RegionError> {
+        match self.search(self.header.index, self.header.tiles, id)? {
+            Some(n) => Ok(self.slot(n)?.1),
+            None => Ok(Slot::Empty),
+        }
+    }
+
+    /// The nearest coarser tile that stands in for `id` while `id` has
+    /// not arrived, and how many zooms coarser it is; `None` where no
+    /// coarser one has arrived either, or one says nothing is there.
+    pub fn stand_in(&self, id: TileId) -> Result<Option<(Entry, u8)>, RegionError> {
+        let lo = self.header.min_zoom;
+        for dz in 1..=id.z.saturating_sub(lo) {
+            let up = TileId {
+                z: id.z - dz,
+                x: id.x >> dz,
+                y: id.y >> dz,
+            };
+            match self.find_slot(up)? {
+                Slot::Here(e) => return Ok(Some((e, dz))),
+                Slot::Empty => return Ok(None),
+                Slot::Pending => {}
+            }
+        }
+        Ok(None)
+    }
+
+    /// How many of the index's slots hold their tile, and how many there
+    /// are: what a frontend shows of a file still arriving. A whole file
+    /// counts every slot; it reads every slot, so it is for a log or a
+    /// test, not for every frame.
+    pub fn arrived(&self) -> Result<(u32, u32), RegionError> {
+        let mut here = 0;
+        for n in 0..self.header.tiles {
+            if !matches!(self.slot(n)?.1, Slot::Pending) {
+                here += 1;
+            }
+        }
+        Ok((here, self.header.tiles))
     }
 
     fn find_in(&self, index: u64, count: u32, id: TileId) -> Result<Option<Entry>, RegionError> {
+        match self.search(index, count, id)? {
+            Some(n) => self.entry_in(index, count, n).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The number of `id`'s entry in the index at `index`, by binary
+    /// search over the entries' tiles alone.
+    fn search(&self, index: u64, count: u32, id: TileId) -> Result<Option<u32>, RegionError> {
         let (mut lo, mut hi) = (0u32, count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let e = self.entry_in(index, count, mid)?;
+            let e = self.raw_entry(index, count, mid)?;
             match e.id.cmp(&id) {
-                core::cmp::Ordering::Equal => return Ok(Some(e)),
+                core::cmp::Ordering::Equal => return Ok(Some(mid)),
                 core::cmp::Ordering::Less => lo = mid + 1,
                 core::cmp::Ordering::Greater => hi = mid,
             }
@@ -698,9 +906,11 @@ impl<S: Storage> Region<S> {
 
     /// Walk the whole index: every entry in range, strictly ascending, and
     /// every blob a one-tile fixture; from version 2 the string table and
-    /// every label section too, in version 3 every building section and
+    /// every label section too, from version 3 every building section and
     /// every record in it. What the cut runs on its own output and a
-    /// frontend may run once on a file it did not make.
+    /// frontend may run once on a file it did not make. A version 4 file
+    /// still arriving is [`RegionError::Pending`] at its first tile not
+    /// there.
     pub fn verify(&self) -> Result<(), RegionError> {
         self.verify_tiles_and_labels()?;
         let mut prev: Option<TileId> = None;
@@ -723,13 +933,19 @@ impl<S: Storage> Region<S> {
         let mut prev: Option<TileId> = None;
         let mut buf = Vec::new();
         for n in 0..self.header.tiles {
-            let e = self.entry(n)?;
-            if prev.is_some_and(|p| p >= e.id) {
+            let (id, slot) = self.slot(n)?;
+            if prev.is_some_and(|p| p >= id) {
                 return Err(RegionError::Entry(n));
             }
-            prev = Some(e.id);
-            self.read_tile(&e, &mut buf)?;
-            check_tile(e.id, &buf)?;
+            prev = Some(id);
+            match slot {
+                Slot::Here(e) => {
+                    self.read_tile(&e, &mut buf)?;
+                    check_tile(e.id, &buf)?;
+                }
+                Slot::Empty => {}
+                Slot::Pending => return Err(RegionError::Pending(id)),
+            }
         }
         let Some(l) = self.header.labels else {
             return Ok(());
@@ -845,18 +1061,23 @@ impl<'a> Region<&'a [u8]> {
     }
 
     /// The fixture of `id`, borrowed from the region; `None` when the
-    /// region has nothing there.
+    /// region has nothing there, or (version 4) not yet.
     pub fn fixture(&self, id: TileId) -> Result<Option<Fixture<'a>>, RegionError> {
         let Some(e) = self.find(id)? else {
             return Ok(None);
         };
+        self.fixture_of(&e)
+    }
+
+    /// The fixture of entry `e`, borrowed from the region.
+    pub fn fixture_of(&self, e: &Entry) -> Result<Option<Fixture<'a>>, RegionError> {
         // `entry` checked the range against the data area.
         let start = e.offset as usize;
         let blob = self
             .storage
             .get(start..start + e.len as usize)
             .ok_or(RegionError::Truncated)?;
-        check_tile(id, blob).map(Some)
+        check_tile(e.id, blob).map(Some)
     }
 
     /// Tile `id`'s label section, borrowed from the region; `None` when it

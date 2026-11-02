@@ -82,8 +82,9 @@
 //! `unverified`, schema 4 the home node's three tables, schema 5 its
 //! outbox, schema 6 the two provenance columns of imported messages, schema 7
 //! a conversation's mute, archive and verification, schema 8 the drafts,
-//! schema 9 the two read-receipt columns, and schema 10 the shares, nothing
-//! else, so
+//! schema 9 the two read-receipt columns, schema 10 the shares, schema 11
+//! the groups a home hosts and schema 12 a copy's digest and the groups a
+//! device knows, nothing else, so
 //! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
@@ -114,6 +115,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::home::outgoing::Change;
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
+use crate::ui::groups::{GroupInfo, Standing};
 use crate::ui::history::{Draft, Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
 use crate::ui::share::{Report, Share, Span};
 use crate::ui::{LedgerEntry, Message, Signature};
@@ -124,7 +126,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 12;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -317,6 +319,66 @@ CREATE TABLE shares(
     PRIMARY KEY (identity, peer));
 ";
 
+/// What schema 11 adds to schema 10: the groups this home hosts (1307,
+/// `docs/drafts/group-chats-study-2026-11.md` 5.4), their members and the
+/// fan-out's bookkeeping, one row a copy of a member's message to another
+/// member. The group's private key is not here: it is a file beside the
+/// identity's ([`crate::home::group`]). See [`groups`] for the columns.
+const SCHEMA_V11: &str = "
+CREATE TABLE groups(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admin BLOB NOT NULL,
+    epoch INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, address));
+CREATE TABLE group_members(
+    identity BLOB NOT NULL,
+    grp BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    flags INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL,
+    left_at INTEGER,
+    PRIMARY KEY (identity, grp, address));
+CREATE TABLE group_fanout(
+    identity BLOB NOT NULL,
+    grp BLOB NOT NULL,
+    original BLOB NOT NULL,
+    member BLOB NOT NULL,
+    copy BLOB NOT NULL,
+    state INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    proven_at INTEGER,
+    read_at INTEGER,
+    PRIMARY KEY (identity, grp, original, member));
+CREATE UNIQUE INDEX group_fanout_by_copy ON group_fanout(identity, copy);
+";
+
+/// What schema 12 adds to schema 11 (1307 G2): the digest a held copy went
+/// out in (`group_fanout.digest`, null for a copy sent alone), and the
+/// groups a device knows (`client_groups`), kept as the messages taught
+/// them, so a restart lists every group before any of its messages is
+/// loaded. `members` is the `lev` key `0x05` as the wire carries it.
+const SCHEMA_V12: &str = "
+ALTER TABLE group_fanout ADD COLUMN digest BLOB;
+CREATE INDEX group_fanout_by_digest ON group_fanout(identity, digest);
+CREATE TABLE client_groups(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admin_name TEXT NOT NULL,
+    inviter BLOB,
+    ours INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    standing INTEGER NOT NULL,
+    members BLOB NOT NULL,
+    PRIMARY KEY (identity, address));
+";
+
+pub mod groups;
+
 /// The model's key of the row at seq 0. The model counts keys unsigned
 /// ([`Message::activity`]) and imported history sits below seq 0, so a key is
 /// the seq with its sign bit flipped: the same order, and every row of an
@@ -359,6 +421,12 @@ const TABLES_V8: [&str; 1] = ["drafts"];
 
 /// The table schema 10 adds.
 const TABLES_V10: [&str; 1] = ["shares"];
+
+/// The tables schema 11 adds.
+const TABLES_V11: [&str; 3] = ["groups", "group_members", "group_fanout"];
+
+/// The table schema 12 adds.
+const TABLES_V12: [&str; 1] = ["client_groups"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -486,8 +554,8 @@ impl Store {
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
-             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} \
-             PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
+             {SCHEMA_V12} PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -569,6 +637,16 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 11 {
+            if let Some(missing) = missing(&TABLES_V11) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 12 {
+            if let Some(missing) = missing(&TABLES_V12) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate();
         }
@@ -610,7 +688,13 @@ impl Store {
                 if version < 9 {
                     batch.push_str(SCHEMA_V9);
                 }
-                batch.push_str(SCHEMA_V10);
+                if version < 10 {
+                    batch.push_str(SCHEMA_V10);
+                }
+                if version < 11 {
+                    batch.push_str(SCHEMA_V11);
+                }
+                batch.push_str(SCHEMA_V12);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -671,11 +755,13 @@ impl Store {
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|e| self.failed(e))?;
+        let mut groups = self.client_groups()?;
         let mut out = Vec::new();
         for (peer, pinned, unread, flags) in rows {
             let peer = self.address(&peer)?;
             let (messages, earlier) = self.page(peer, u64::MAX, None)?;
             let draft = self.draft(peer)?;
+            let group = groups.remove(&peer);
             out.push(Restored {
                 peer,
                 pinned,
@@ -684,7 +770,79 @@ impl Store {
                 messages,
                 earlier,
                 draft,
+                group,
             });
+        }
+        // A group with no conversation row yet (only its state came) is
+        // listed too, after the others.
+        for (peer, group) in groups {
+            out.push(Restored {
+                peer,
+                pinned: false,
+                flags: Flags::default(),
+                unread: 0,
+                messages: Vec::new(),
+                earlier: 0,
+                draft: Draft::default(),
+                group: Some(group),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The groups the device knows (1307 G2), by address, as the model
+    /// last wrote them. A row whose members are no membership is damage.
+    pub fn client_groups(&self) -> Result<BTreeMap<[u8; 16], GroupInfo>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT address, name, admin_name, inviter, ours, epoch, standing, members \
+                 FROM client_groups WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut out = BTreeMap::new();
+        for (address, name, admin_name, inviter, ours, epoch, standing, members) in rows {
+            let address = self.address(&address)?;
+            let corrupt = |what: &str| StoreError::Corrupt {
+                path: self.path.clone(),
+                detail: format!("a group's {what}"),
+            };
+            let (_, members) =
+                GroupInfo::members_from(&members).ok_or_else(|| corrupt("members"))?;
+            let standing = match standing {
+                0 => Standing::Invited,
+                1 => Standing::Joined,
+                2 => Standing::Left,
+                _ => return Err(corrupt("standing")),
+            };
+            out.insert(
+                address,
+                GroupInfo {
+                    address,
+                    name,
+                    admin_name,
+                    inviter: inviter.map(|i| self.address(&i)).transpose()?,
+                    ours,
+                    epoch: u64::try_from(epoch).map_err(|_| corrupt("epoch"))?,
+                    members,
+                    standing,
+                },
+            );
         }
         Ok(out)
     }
@@ -946,6 +1104,7 @@ impl Store {
                     received_at,
                     location,
                     telemetry,
+                    source: crate::telemetry::Source::Telemetry,
                 })
             })
             .collect()
@@ -1730,6 +1889,89 @@ impl Store {
                 id,
                 bytes,
                 *at,
+                cap_bytes,
+            )
+            .map_err(|e| failed(&path, e))?;
+            added += usize::from(seq.is_some());
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(added)
+    }
+
+    /// The archive after `cursor` as a move carries it (1281): each entry
+    /// with its id, oldest first, a page of about `max_bytes` but at least
+    /// one entry, and whether more follow, beside the oldest sequence held.
+    pub fn archive_moving(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+    ) -> Result<(Vec<crate::home::wire::Moving>, bool, u64), StoreError> {
+        let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, kind, id, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+                 ORDER BY seq",
+            )
+            .map_err(|e| self.failed(e))?;
+        let mut rows = statement
+            .query(params![&self.identity[..], cursor])
+            .map_err(|e| self.failed(e))?;
+        let mut entries = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
+        while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            let packed: Vec<u8> = row.get(4).map_err(|e| self.failed(e))?;
+            if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(packed.len());
+            let seq: i64 = row.get(0).map_err(|e| self.failed(e))?;
+            let kind: i64 = row.get(1).map_err(|e| self.failed(e))?;
+            let id: Vec<u8> = row.get(2).map_err(|e| self.failed(e))?;
+            entries.push(crate::home::wire::Moving {
+                seq: seq as u64,
+                kind: u8::try_from(kind).unwrap_or(u8::MAX),
+                id: <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
+                at: row.get(3).map_err(|e| self.failed(e))?,
+                packed,
+            });
+        }
+        let first: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok((entries, more, first.map_or(0, |seq| seq as u64)))
+    }
+
+    /// Append the entries a move brought (1281), in their order, each of
+    /// its own kind, id and time, all or none, under the cap: how many were
+    /// new to this archive.
+    pub fn archive_moved_in(
+        &mut self,
+        entries: &[crate::home::wire::Moving],
+        cap_bytes: u64,
+    ) -> Result<usize, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let mut added = 0;
+        for entry in entries {
+            let seq = append_in(
+                &tx,
+                &identity,
+                entry.kind,
+                &entry.id,
+                &entry.packed,
+                entry.at,
                 cap_bytes,
             )
             .map_err(|e| failed(&path, e))?;
@@ -2631,6 +2873,35 @@ fn apply(
                 "DELETE FROM positions WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
             )?;
+            tx.execute(
+                "DELETE FROM client_groups WHERE identity = ?1 AND address = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Group(group) => {
+            tx.execute(
+                "INSERT INTO client_groups(identity, address, name, admin_name, inviter, ours, \
+                 epoch, standing, members) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(identity, address) DO UPDATE SET name = excluded.name, \
+                 admin_name = excluded.admin_name, inviter = excluded.inviter, \
+                 ours = excluded.ours, epoch = excluded.epoch, standing = excluded.standing, \
+                 members = excluded.members",
+                params![
+                    &identity[..],
+                    &group.address[..],
+                    group.name,
+                    group.admin_name,
+                    group.inviter.as_ref().map(|i| &i[..]),
+                    group.ours,
+                    i64::try_from(group.epoch).unwrap_or(i64::MAX),
+                    match group.standing {
+                        Standing::Invited => 0,
+                        Standing::Joined => 1,
+                        Standing::Left => 2,
+                    },
+                    group.members_bytes()
+                ],
+            )?;
         }
         StoreWrite::Draft { peer, draft } if draft.is_empty() => {
             tx.execute(
@@ -3383,6 +3654,7 @@ mod tests {
                 last_update: fix_time,
             },
             telemetry: vec![0x81, 0x01, 0x05],
+            source: crate::telemetry::Source::Telemetry,
         }
     }
 
@@ -3783,6 +4055,72 @@ mod tests {
         drop(conn);
         let text = refused(home.path());
         assert!(text.contains("table shares is missing"), "{text}");
+    }
+
+    /// 1307 G2, item 2: a group the model wrote comes back with every
+    /// field, and with no conversation row of its own (only its state
+    /// came) it is listed still; written again it is replaced; it goes
+    /// with its conversation, and another identity sees none.
+    #[test]
+    fn a_group_the_device_knows_comes_back_without_its_messages() {
+        use crate::ui::groups::{GroupInfo, GroupMember, Standing};
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let group = GroupInfo {
+            address: [0x22; 16],
+            name: "Familie".into(),
+            admin_name: "Lew".into(),
+            inviter: Some(BOB),
+            ours: false,
+            epoch: 3,
+            members: vec![
+                GroupMember {
+                    address: BOB,
+                    name: "Lew".into(),
+                    admin: true,
+                    joined: true,
+                    left: false,
+                },
+                GroupMember {
+                    address: US,
+                    name: "Me".into(),
+                    admin: false,
+                    joined: true,
+                    left: false,
+                },
+                GroupMember {
+                    address: [0x55; 16],
+                    name: "Anna".into(),
+                    admin: false,
+                    joined: false,
+                    left: true,
+                },
+            ],
+            standing: Standing::Joined,
+        };
+        store
+            .write(&[StoreWrite::Group(GroupInfo {
+                epoch: 2,
+                ..group.clone()
+            })])
+            .expect("write");
+        store
+            .write(&[StoreWrite::Group(group.clone())])
+            .expect("again");
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].peer, group.address);
+        assert!(restored[0].messages.is_empty());
+        assert_eq!(restored[0].group.as_ref(), Some(&group));
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert!(other.restore().expect("restore").is_empty());
+        drop(other);
+        store
+            .write(&[StoreWrite::ForgetConversation {
+                peer: group.address,
+            }])
+            .expect("forget");
+        assert!(store.restore().expect("restore").is_empty());
     }
 
     /// 1219: a draft is kept beside its conversation, comes back at start

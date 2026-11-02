@@ -76,6 +76,10 @@ leviculum_ui::catalogue! {
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
     NoPosition = "no_position", "No position from this friend yet", "Noch keine Position von diesem Freund";
+    // A node the mesh shows on the map that is no contact (1302).
+    NearbyCard = "nearby_card", "Nearby, not in your contacts", "In der Nähe, nicht in deinen Kontakten";
+    NearbyAdd = "nearby_add", "Add", "Hinzufügen";
+    NearbyEnterAdds = "nearby_enter_adds", "Enter adds", "Enter fügt hinzu";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";
@@ -145,6 +149,37 @@ leviculum_ui::catalogue! {
     Forget = "scene_forget", "Delete conversation", "Unterhaltung löschen";
     NewConversation = "scene_new_conversation", "New conversation", "Neue Unterhaltung";
     AddContact = "scene_add_contact", "Add contact", "Kontakt hinzufügen";
+    // Group chats (1307, the study's sections 3.0 and 4).
+    NewGroup = "group_new", "New group", "Neue Gruppe";
+    GroupNext = "group_next", "Next", "Weiter";
+    GroupCreate = "group_create", "Create", "Erstellen";
+    GroupNameHint = "group_name_hint", "Group name", "Name der Gruppe";
+    GroupPickTitle = "group_pick_title", "Add members", "Mitglieder hinzufügen";
+    GroupPicked = "group_picked", "%1$d selected", "%1$d ausgewählt";
+    GroupTrustCreate = "group_trust_create", "%1$s is kept on your mailbox. Messages in the group can be read there.", "%1$s liegt auf deinem Postfach. Dort sind die Nachrichten der Gruppe lesbar.";
+    GroupTrustJoin = "group_trust_join", "%1$s is kept on %2$s's mailbox. %2$s could read the group's messages.", "%1$s liegt auf dem Postfach von %2$s. %2$s könnte die Nachrichten der Gruppe lesen.";
+    GroupInvited = "group_invited", "%1$s invited you to %2$s", "%1$s hat dich zu %2$s eingeladen";
+    GroupYouInvited = "group_you_invited", "You invited them to %1$s", "Du hast eingeladen zu %1$s";
+    GroupJoin = "group_join", "Join", "Beitreten";
+    GroupJoined = "group_joined_card", "You joined %1$s", "Du bist %1$s beigetreten";
+    GroupInvitation = "group_invitation", "Invitation", "Einladung";
+    GroupMembers = "group_members", "Members", "Mitglieder";
+    GroupMemberCount = "group_member_count", "%1$d members", "%1$d Mitglieder";
+    GroupLeave = "group_leave", "Leave group", "Gruppe verlassen";
+    GroupLeaveAsk = "group_leave_ask", "Leave %1$s?", "%1$s verlassen?";
+    GroupRemove = "group_remove", "Remove", "Entfernen";
+    GroupAdd = "group_add", "Add members", "Mitglieder hinzufügen";
+    GroupAddConfirm = "group_add_confirm", "Add", "Hinzufügen";
+    GroupRemoveAsk = "group_remove_ask", "Remove %1$s from %2$s?", "%1$s aus %2$s entfernen?";
+    GroupYes = "group_yes", "Yes", "Ja";
+    GroupNo = "group_no", "No", "Nein";
+    GroupYou = "group_you", "You", "Du";
+    GroupAdmin = "group_admin", "admin", "Admin";
+    GroupStateJoined = "group_state_joined", "joined", "beigetreten";
+    GroupStateInvited = "group_state_invited", "invited", "eingeladen";
+    GroupStateLeft = "group_state_left", "left", "ausgetreten";
+    GroupHomeTooOld = "group_home_too_old", "Your home cannot host groups yet. Update it.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.";
+    GroupYouLeft = "group_you_left", "You left %1$s", "Du hast %1$s verlassen";
     MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";
@@ -156,6 +191,16 @@ leviculum_ui::catalogue! {
     // The privacy page's switch (1233, loquax-read-receipts.md, section 4).
     ReadReceipts = "read_receipts", "Send read receipts", "Lesebestätigungen senden";
     ReadReceiptsText = "read_receipts_text", "Others see when you have read their messages. Off, you do not see it from others either.", "Andere sehen, wann du ihre Nachrichten gelesen hast. Ausgeschaltet siehst du es auch bei anderen nicht.";
+    // The Maps page (1201, 1290): its title, the storage line, and the
+    // row at the list's foot that deletes every region, with its one
+    // question, which says whether the autoload brings them back.
+    SettingsMaps = "settings_maps", "Maps", "Karten";
+    MapsUsed = "maps_used", "Storage used: %1$s", "Belegter Speicher: %1$s";
+    DeleteAllRegions = "maps_delete_all", "Delete all downloaded maps (%1$s)", "Alle geladenen Karten löschen (%1$s)";
+    DeleteAllRegionsAsk = "maps_delete_all_ask", "Delete all %1$d maps? Areas you visit will be downloaded again when you look at them.", "Alle %1$d Karten löschen? Gebiete, die du besuchst, werden wieder geladen, wenn du sie anschaust.";
+    DeleteAllRegionsAskManual = "maps_delete_all_ask_manual", "Delete all %1$d maps? They come back only when you load an area again.", "Alle %1$d Karten löschen? Sie kommen erst wieder, wenn du ein Gebiet neu lädst.";
+    DeleteAllRegionsYes = "maps_delete_all_yes", "Delete all", "Alle löschen";
+    Cancel = "scene_cancel", "Cancel", "Abbrechen";
     // Photos (1220): the bubble's words, the paperclip's entry, the
     // setting under Settings › Chats with its one line.
     Photo = "scene_photo", "Photo, %1$s", "Foto, %1$s";
@@ -257,6 +302,12 @@ leviculum_ui::catalogue! {
     JoinOtherMailbox = "join_other_mailbox", "This phone already reads another mailbox.", "Dieses Handy liest schon ein anderes Postfach.";
     // Linking a device (1264): the phone holds no mailbox to link to.
     LinkOnComputer = "link_on_computer", "Your mailbox is on a computer. Link the other device there.", "Dein Postfach ist auf einem Computer. Verbinde das andere Gerät dort.";
+    // Moving to a new phone (1281, walk finding 24).
+    MoveOnComputer = "move_on_computer", "Your mailbox is on a computer. Your new phone joins it there.", "Dein Postfach ist auf einem Computer. Dein neues Handy verbindest du dort.";
+    MoveFailed = "move_failed", "The move did not work. Your old phone still has everything.", "Der Umzug hat nicht geklappt. Dein altes Handy hat noch alles.";
+    MoveHasAddress = "move_has_address", "This phone already has an address. Only a new phone can take one over.", "Dieses Handy hat schon eine Adresse. Nur ein neues Handy kann eine übernehmen.";
+    MovedAway = "moved_away", "This phone has moved. Your mailbox is on your new phone now, and this phone sends nothing.", "Dieses Handy ist umgezogen. Dein Postfach ist jetzt auf deinem neuen Handy, und dieses Handy sendet nichts mehr.";
+    RestoreLive = "restore_live", "This address is in use on another device right now. Restored here too, both lose messages. Move from the old phone instead, or stop Loquax there first.", "Diese Adresse ist gerade auf einem anderen Gerät in Betrieb. Hier auch wiederhergestellt, verlieren beide Nachrichten. Zieh lieber vom alten Handy um, oder beende Loquax dort zuerst.";
     Details = "details", "Details", "Details";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";

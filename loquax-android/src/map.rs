@@ -36,14 +36,21 @@
 //! is owed, and each such call draws one batch of [`loquax::tiles::plan`]'s
 //! tiles, one a worker, ordered by the pan's direction ([`Motion`](loquax::tiles::Motion)), up
 //! to the plan's budget. Any frame drops the plan; the next frame at rest
-//! makes a new one. When the ring reaches past the regions that hold the
-//! frame, the autoload is asked for the area the ring covers.
+//! makes a new one.
 //!
 //! The autoload (1089) is the terminal's and the window's: the places of
 //! the first pins when they first fit, a report's place when it opens the
-//! map, the view on "load this area", one load at a time into the maps
-//! directory under the config's `map_source` and `map_cache_mb`. A frame
-//! says when a load runs, and Java asks again until it landed.
+//! map, the view on "load this area", into the maps directory under the
+//! config's `map_source` and `map_cache_mb`. And every frame, during a pan
+//! too, is shown to the core's scheduler ([`ViewLoads`], 1292): a screen
+//! uncovered by more than a tenth asks at once for the regions under it,
+//! then for those next to it in the pan's direction, and the loader puts
+//! what is on screen now first. A frame says when a load runs, and when
+//! it runs for the screen (`loading_here`, the chip's), and Java asks
+//! again until it landed. A region writes itself into the maps directory
+//! as it arrives (1291), and a frame showing tiles of it says `filling`:
+//! Java asks again in a quarter second, so the map fills in under the
+//! user's eyes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -57,8 +64,9 @@ use loquax::mapframe::{frame_size, hold, Ask, DrawnName, Framed, Frames, PlaceCo
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
-use loquax::tiles::{Frame as TileFrame, Stats, TILE};
+use loquax::tiles::Stats;
 use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
+use loquax::ui::viewload::ViewLoads;
 use loquax::when::WallTime;
 
 use crate::friends;
@@ -93,6 +101,9 @@ pub struct Renderer {
     maps: Maps,
     frames: Frames,
     loader: Loader,
+    /// What the screen needs from the loader, decided frame by frame
+    /// (1292).
+    loads: ViewLoads,
     autoload: bool,
     /// The config's `map_fling` (1188).
     fling: bool,
@@ -106,8 +117,6 @@ pub struct Renderer {
     fitted_at: Option<(World, u32)>,
     /// Whether a fit with pins asked for their places already.
     pins_asked: bool,
-    /// A line a prefetch's region load left for the next frame.
-    notice_owed: Option<String>,
 }
 
 impl Renderer {
@@ -121,8 +130,8 @@ impl Renderer {
             dir: dir.to_path_buf(),
             maps: maps.clone(),
             frames: Frames::new(maps.clone()),
-            notice_owed: None,
             loader: Loader::new(maps, source, cache),
+            loads: ViewLoads::new(),
             autoload: config.map_autoload.unwrap_or(true),
             fling: config.map_fling.unwrap_or(true),
             theme: config.map_theme,
@@ -269,6 +278,7 @@ impl Renderer {
             loquax::config::save(&self.dir, "map_autoload", word)
                 .map_err(|error| format!("map: the choice was not stored: {error}"))?;
             self.autoload = on;
+            self.loads.reset();
         }
         let maps = self
             .maps
@@ -288,6 +298,7 @@ impl Renderer {
             self.maps.changed();
             self.frames.refresh();
             self.fitted_at = None;
+            self.loads.reset();
         }
         let (installed, _) = loquax::picture::load(&maps);
         let regions: Vec<RegionRow> = loquax::picture::newest_first(&installed)
@@ -320,6 +331,16 @@ impl Renderer {
             regions,
             autoload: self.autoload,
         })
+    }
+
+    /// Delete every region of the directory (1290), told to the frames
+    /// and the loader as one deleted alone is; how many went.
+    pub fn delete_all(&mut self) -> Result<usize, String> {
+        let gone = self.maps.delete_all();
+        self.frames.refresh();
+        self.fitted_at = None;
+        self.loads.reset();
+        gone
     }
 
     /// One frame for `request` over `pins`, in a buffer of its own.
@@ -360,7 +381,7 @@ impl Renderer {
         draw: impl FnOnce(&mut Frames, &Ask<'_>) -> Result<Framed, String>,
     ) -> MapShown {
         let started = Instant::now();
-        let mut notice = self.notice_owed.take();
+        let mut notice = None;
         let now = self.now_ms();
         let polled = self.loader.poll(now);
         let landed = self.steps(polled, &mut notice);
@@ -476,6 +497,29 @@ impl Renderer {
                 None => notice = Some(LOADED_ALREADY.to_string()),
             }
         }
+        // The screen the frame shows, moving or not (1292).
+        if self.autoload {
+            let heading = self.frames.heading(now);
+            let decided = self.loads.decide(
+                &view.at_zoom(rest_zoom),
+                &setup.regions,
+                now,
+                request.moving,
+                heading,
+            );
+            if let Some(wants) = decided {
+                if !wants.here.is_empty() {
+                    tracing::info!(
+                        "MAPLOAD view share={:.2} here={} ahead={}",
+                        wants.share,
+                        wants.here.len(),
+                        wants.ahead.len()
+                    );
+                }
+                let steps = self.loader.schedule(wants.here, wants.ahead, now);
+                self.steps(steps, &mut notice);
+            }
+        }
         let screen = match request.dark {
             true => Theme::Dark,
             false => Theme::Light,
@@ -508,8 +552,8 @@ impl Renderer {
             true => marks(pins, &shot.shows, (mx, my), scale, ceiling.max(floor)),
             false => Vec::new(),
         };
-        let no_map =
-            !self.loader.busy() && !any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
+        let no_map = !self.loader.loading_here()
+            && !any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
         let own = match (request.own_lat_e6, request.own_lon_e6) {
             (Some(lat), Some(lon)) => {
@@ -545,6 +589,8 @@ impl Renderer {
             tapped: tapped.map(|p| loquax::address::to_hex(&p)),
             tapped_name: tapped.and_then(name),
             loading: self.loader.busy(),
+            loading_here: self.loader.loading_here(),
+            filling: shot.filling > 0,
             notice,
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
@@ -572,9 +618,11 @@ impl Renderer {
     }
 
     /// One batch of the prefetch around the last frame at rest (1135):
-    /// on the first call the plan, ordered by the pan's direction now, and
-    /// the region past the frame's asked for; then a tile a worker. The
-    /// answer has no pixels; `prefetching` says whether more is to draw.
+    /// on the first call the plan, ordered by the pan's direction now;
+    /// then a tile a worker. The answer has no pixels; `prefetching` says
+    /// whether more is to draw. The regions past the frame are the
+    /// frame's scheduler's (1292), not the prefetch's: a prefetch answer
+    /// is no frame, and a load it started showed no chip.
     pub fn prefetch(&mut self) -> MapShown {
         let started = Instant::now();
         if !self.frames.at_rest() {
@@ -586,41 +634,15 @@ impl Renderer {
         }
         let now = self.now_ms();
         let done = self.frames.prefetch(now);
-        if let Some(frame) = done.planned {
-            self.ask_past(&frame);
-        }
         MapShown {
             v: VERSION,
             ok: true,
             prefetching: done.more,
             prefetched: u32::try_from(done.drawn).unwrap_or(u32::MAX),
             loading: self.loader.busy(),
+            loading_here: self.loader.loading_here(),
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             ..MapShown::default()
-        }
-    }
-
-    /// When the regions hold `frame` and not the ring around it, ask the
-    /// autoload for the ring's area: it caps the size and backs off as for
-    /// any view. A frame the regions do not hold loads nothing unasked.
-    fn ask_past(&mut self, frame: &TileFrame) {
-        let setup = screenmap::setup(self.frames.painter());
-        if want_view(&frame.view.at_zoom(frame.zoom), &setup.regions).is_some() {
-            return;
-        }
-        let mut grown = frame.view;
-        let (w, h) = grown.size();
-        let ring = (2.0 * f64::from(TILE) * frame.view.scale_at(frame.zoom)).ceil() as u32;
-        grown.resize(
-            w.saturating_add(ring.saturating_mul(2)),
-            h.saturating_add(ring.saturating_mul(2)),
-        );
-        if let Some(want) = want_view(&grown.at_zoom(frame.zoom), &setup.regions) {
-            let mut notice = None;
-            self.ask(want, &mut notice);
-            if notice.is_some() {
-                self.notice_owed = notice;
-            }
         }
     }
 
@@ -784,6 +806,12 @@ pub fn regions(
     set_autoload: Option<bool>,
 ) -> Result<MapRegions, String> {
     with_dir(dir, |renderer| renderer.regions(delete, set_autoload))
+}
+
+/// The Maps page's "Delete all downloaded maps" (1290) for the app's
+/// directory `dir`: how many regions went.
+pub fn delete_all_regions(dir: &Path) -> Result<usize, String> {
+    with_dir(dir, Renderer::delete_all)
 }
 
 /// `f` with the renderer of the request's directory, made on its first

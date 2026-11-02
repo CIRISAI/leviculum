@@ -47,6 +47,8 @@ public class MainActivity extends Activity {
     private String imto;
     /** A friend's code from outside (walk finding 12), added once started. */
     private String contact;
+    /** This phone's mailbox moved to a new phone (1281): the retry button takes it back. */
+    private boolean moved;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,7 +76,11 @@ public class MainActivity extends Activity {
         retry.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                start(true);
+                if (moved) {
+                    askTakeBack();
+                } else {
+                    start(true);
+                }
             }
         });
         detailsToggle.setOnClickListener(new View.OnClickListener() {
@@ -240,6 +246,44 @@ public class MainActivity extends Activity {
         }, "loquax-start").start();
     }
 
+    /**
+     * "Use this phone again" (1281): the mailbox runs on the new phone, so the warning names the
+     * risk of two live copies before the old phone starts it again.
+     */
+    private void askTakeBack() {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(R.string.take_back)
+                .setMessage(R.string.take_back_warning)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.take_back, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface shown, int which) {
+                        takeBack();
+                    }
+                })
+                .show();
+    }
+
+    private void takeBack() {
+        moved = false;
+        retry.setVisibility(View.GONE);
+        error.setText(getString(R.string.starting));
+        final String home = home();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Core.sense(getApplicationContext());
+                final Map<String, Object> answer = Core.takeBack(home);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        started(answer, false);
+                    }
+                });
+            }
+        }, "loquax-take-back").start();
+    }
+
     /** The mailbox's own words under Details, open or folded. */
     private void showDetails(boolean open) {
         detailsToggle.setText(getString(R.string.details) + (open ? "  ▴" : "  ▾"));
@@ -274,6 +318,19 @@ public class MainActivity extends Activity {
             finish();
             return;
         }
+        String need = Core.str(started, "need");
+        moved = "moved".equals(need);
+        if (moved) {
+            // Walk finding 24 (1281): this phone sends nothing until its
+            // owner takes the mailbox back.
+            form.setVisibility(View.GONE);
+            error.setText(getString(R.string.moved_title) + "\n\n" + Core.str(started, "error"));
+            retry.setText(R.string.take_back);
+            retry.setVisibility(View.VISIBLE);
+            detailsToggle.setVisibility(View.GONE);
+            return;
+        }
+        retry.setText(R.string.try_again);
         form.setVisibility(View.VISIBLE);
         error.setText(Core.str(started, "error"));
         retry.setVisibility(View.VISIBLE);
@@ -281,7 +338,6 @@ public class MainActivity extends Activity {
         details.setText(said);
         detailsToggle.setVisibility(said.isEmpty() ? View.GONE : View.VISIBLE);
         showDetails(false);
-        String need = Core.str(started, "need");
         if ("server".equals(need)) {
             server.requestFocus();
         } else if ("code".equals(need)) {

@@ -16,6 +16,7 @@ use leviculum_lxmf::constants::FIELD_ICON_APPEARANCE;
 use leviculum_lxmf::msgpack;
 use leviculum_lxmf::Field;
 use leviculum_ui::delivery::DeliveryState;
+use leviculum_ui::pixel;
 
 use super::liveness::Liveness;
 use super::reactions;
@@ -117,32 +118,10 @@ impl Mark {
     }
 }
 
-/// The square the marks are drawn on, in units; a screen scales it to the
-/// mark's size (16 dp in a bubble and in the list).
-pub const GRID: f32 = 24.0;
-
-/// A circle on the [`GRID`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Circle {
-    pub x: f32,
-    pub y: f32,
-    pub r: f32,
-}
-
-/// A mark as lines on the [`GRID`], drawn in this order: the disc filled in
-/// the failed ground, the ring and the lines stroked in `width` with round
-/// caps and joins, the dot filled. The ring, the lines and the dot are in
-/// the mark's colour, the failed mark's sign for [`Mark::Failed`]. The
-/// phone's `Glyph.java` draws the same numbers, which a test of the facade
-/// reads out of it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Shape {
-    pub disc: Option<Circle>,
-    pub ring: Option<Circle>,
-    pub lines: &'static [&'static [(f32, f32)]],
-    pub width: f32,
-    pub dot: Option<Circle>,
-}
+// The grid, the circle and the shape a mark is drawn as are the shared
+// glyph vocabulary (`leviculum_ui::glyph`), which the window's widgets in
+// leviculum-ui-iced draw without knowing a mark.
+pub use leviculum_ui::glyph::{Circle, Shape, GRID};
 
 /// The clock: a ring and its hands.
 pub const CLOCK: Shape = Shape {
@@ -408,7 +387,8 @@ pub fn rows<B>(model: &UiModel<B>, order: Vec<usize>) -> Vec<ListRow> {
 pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
     let conversation = model.conversations.iter().find(|c| c.peer == *peer);
     let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
-    let last = messages.last();
+    // A group's state (1307) is no line of the list.
+    let last = messages.iter().rev().find(|m| !m.is_group_state());
     // A run of reports is one line, and it says whether the position is
     // alive (1209), not how many came.
     let updates = conversation
@@ -525,6 +505,16 @@ pub struct Bubble {
     /// The voice message it carries (1222): the bubble draws its play
     /// button, length and level bar.
     pub voice: Option<super::voice::VoiceRef>,
+    /// In a group's chat (1307), a copy's writer and the name the bubble
+    /// carries above it; its body is then the text without the home's
+    /// `"Name: "` prefix.
+    pub writer: Option<([u8; 16], String)>,
+    /// The invitation it carries (`lev 0x04`, 1307): the bubble is a card.
+    pub invite: Option<[u8; 16]>,
+    /// A group's line of its own (1307 G2): the body says who joined, left
+    /// or was added ([`super::groups::membership_note`]); a screen draws
+    /// it centred, as no one's bubble.
+    pub note: bool,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -537,27 +527,57 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let chips = reactions::gather(conversation);
     let newest_report = conversation.newest_fix_report();
     let liveness = newest_report.map(|_| model.liveness(&conversation.peer));
+    let group = model.group(&conversation.peer).is_some();
     conversation
         .messages
         .iter()
         .enumerate()
-        .filter(|(m, message)| !message.is_reaction() && !conversation.report_folded(*m))
         .map(|(m, message)| {
+            let note = group
+                .then(|| super::groups::membership_note(&conversation.messages, m, model.address))
+                .flatten();
+            (m, message, note)
+        })
+        .filter(|(m, message, note)| {
+            (!message.is_aside() || note.is_some()) && !conversation.report_folded(*m)
+        })
+        .map(|(m, message, note)| {
             let fix = model.message_fix(c, m);
             let run = conversation.run(m);
             let (updates, since) = match run.len() {
                 1 => (0, None),
                 n => (n, run.first().and_then(|&f| conversation.messages[f].at)),
             };
+            let copy = super::groups::copy_of(&message.body, &message.fields)
+                .filter(|_| group && !message.outbound);
+            // The reader's own word for the writer, else the admin's
+            // (1307); the bare name, as a group's sender line has it.
+            let writer = copy.map(|(address, name, _)| {
+                let shown = match model.names.shown(&address) {
+                    Some(shown) => shown.to_string(),
+                    None if !name.is_empty() => name.to_string(),
+                    None => model.names.label(&address),
+                };
+                (address, shown)
+            });
+            let invite = leviculum_lxmf::lev::Lev::from_fields(&message.fields)
+                .and_then(|lev| lev.invite)
+                .map(|invite| invite.group)
+                .filter(|group| model.group(group).is_some());
             Bubble {
                 key: message.activity,
                 id: message.id,
                 ours: message.outbound,
-                body: match (message.is_report(), &fix) {
-                    (true, Some(_)) => String::new(),
-                    (true, None) => "position report".to_string(),
-                    (false, _) => message.body.clone(),
+                note: note.is_some(),
+                body: match (message.is_report(), &fix, copy) {
+                    _ if note.is_some() => note.clone().unwrap_or_default(),
+                    (true, Some(_), _) => String::new(),
+                    (true, None, _) => "position report".to_string(),
+                    (false, _, Some((_, _, text))) => text.to_string(),
+                    (false, _, None) => message.body.clone(),
                 },
+                writer,
+                invite,
                 mark: message
                     .outbound
                     .then(|| Mark::of(shown(message.delivery, model))),
@@ -630,6 +650,9 @@ pub fn joins(a: &Bubble, b: &Bubble) -> bool {
     match (a.at, b.at) {
         (Some(at), Some(bt)) => {
             a.ours == b.ours
+                && !a.note
+                && !b.note
+                && a.writer.as_ref().map(|w| w.0) == b.writer.as_ref().map(|w| w.0)
                 && (bt.unix_secs - at.unix_secs).abs() <= GROUP_SECS
                 && at.day() == bt.day()
         }
@@ -678,7 +701,9 @@ pub fn placements(bubbles: &[Bubble]) -> Vec<Placement> {
 
 /// The colours of a pixel screen, `0xaarrggbb`, by the names of the
 /// phone's `colors.xml` (loquax-ui.md, "Pixel screens"). Every pair of
-/// text and its ground keeps 4.5:1 or more, a mark or a control 3:1.
+/// text and its ground keeps 4.5:1 or more, a mark or a control 3:1. The
+/// chrome's roles are the suite's ([`leviculum_ui::pixel`]), which
+/// lnomad's window draws in too; the bubbles and marks are Loquax's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Colours {
     pub background: u32,
@@ -759,11 +784,11 @@ impl Colours {
 
 /// The light theme.
 pub const LIGHT: Colours = Colours {
-    background: 0xffffffff,
-    text: 0xff1b1b1d,
-    text_secondary: 0xff5c5f66,
-    accent: 0xff3a7d44,
-    bar: 0xfff1f2f4,
+    background: pixel::LIGHT.background,
+    text: pixel::LIGHT.text,
+    text_secondary: pixel::LIGHT.text_secondary,
+    accent: pixel::LIGHT.accent,
+    bar: pixel::LIGHT.bar,
     bubble_ours: 0xff2e6b38,
     bubble_ours_text: 0xffffffff,
     bubble_ours_meta: 0xffd6eadb,
@@ -775,15 +800,15 @@ pub const LIGHT: Colours = Colours {
     read_mark: 0xffb2ff59,
     send: 0xff2e6b38,
     on_send: 0xffffffff,
-    badge: 0xff2e6b38,
-    badge_text: 0xffffffff,
+    badge: pixel::LIGHT.badge,
+    badge_text: pixel::LIGHT.badge_text,
     list_failed_ground: 0xff93000a,
     list_failed_mark: 0xffffffff,
     dim: 0x99000000,
-    panel: 0xffffffff,
-    failed_mark_on_panel: 0xffba1a1a,
+    panel: pixel::LIGHT.panel,
+    failed_mark_on_panel: pixel::LIGHT.failed_on_panel,
     reaction_ours: 0xff5f9a69,
-    selected_row: 0x403a7d44,
+    selected_row: pixel::LIGHT.selected_row,
     status_up: 0xff2e7d32,
     status_down: 0xff80848c,
     rec_red: 0xffc62828,
@@ -792,11 +817,11 @@ pub const LIGHT: Colours = Colours {
 
 /// The dark theme.
 pub const DARK: Colours = Colours {
-    background: 0xff17181b,
-    text: 0xffececec,
-    text_secondary: 0xffa9abb0,
-    accent: 0xff81c784,
-    bar: 0xff26272b,
+    background: pixel::DARK.background,
+    text: pixel::DARK.text,
+    text_secondary: pixel::DARK.text_secondary,
+    accent: pixel::DARK.accent,
+    bar: pixel::DARK.bar,
     bubble_ours: 0xff3b6b45,
     bubble_ours_text: 0xffffffff,
     bubble_ours_meta: 0xffdbeadd,
@@ -808,15 +833,15 @@ pub const DARK: Colours = Colours {
     read_mark: 0xffb2ff59,
     send: 0xff4f8f5b,
     on_send: 0xffffffff,
-    badge: 0xff3b6b45,
-    badge_text: 0xffffffff,
+    badge: pixel::DARK.badge,
+    badge_text: pixel::DARK.badge_text,
     list_failed_ground: 0xffffdad6,
     list_failed_mark: 0xff93000a,
     dim: 0xb3000000,
-    panel: 0xff2c2d31,
-    failed_mark_on_panel: 0xffffb4ab,
+    panel: pixel::DARK.panel,
+    failed_mark_on_panel: pixel::DARK.failed_on_panel,
     reaction_ours: 0xff4f8f5b,
-    selected_row: 0x4081c784,
+    selected_row: pixel::DARK.selected_row,
     status_up: 0xff81c784,
     status_down: 0xff7d8087,
     rec_red: 0xffee6464,
@@ -997,6 +1022,9 @@ mod tests {
             photo: None,
             files: Vec::new(),
             voice: None,
+            writer: None,
+            invite: None,
+            note: false,
         }
     }
 
@@ -1222,6 +1250,40 @@ mod tests {
                 "state_failed"
             ]
         );
+    }
+
+    /// The chrome of both themes is the suite's, the colours lnomad's
+    /// window draws in ([`leviculum_ui::pixel`]).
+    #[test]
+    fn the_chrome_is_the_suites() {
+        for (ours, suite) in [(LIGHT, pixel::LIGHT), (DARK, pixel::DARK)] {
+            assert_eq!(
+                [
+                    ours.background,
+                    ours.text,
+                    ours.text_secondary,
+                    ours.accent,
+                    ours.bar,
+                    ours.panel,
+                    ours.failed_mark_on_panel,
+                    ours.selected_row,
+                    ours.badge,
+                    ours.badge_text,
+                ],
+                [
+                    suite.background,
+                    suite.text,
+                    suite.text_secondary,
+                    suite.accent,
+                    suite.bar,
+                    suite.panel,
+                    suite.failed_on_panel,
+                    suite.selected_row,
+                    suite.badge,
+                    suite.badge_text,
+                ]
+            );
+        }
     }
 
     /// The phone's `colors.xml` holds the same table, name for name, so

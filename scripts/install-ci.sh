@@ -89,6 +89,13 @@ if ! command -v zbarimg >/dev/null 2>&1; then
     echo "[install-ci] Hint: sudo apt install zbar-tools (the device walk's QR step)"
 fi
 
+# Icon dependency: resvg renders the Loquax icon's SVGs to PNG (1289,
+# loquax-android/icon/render-previews.py); only that script needs it.
+if ! command -v resvg >/dev/null 2>&1; then
+    echo "[install-ci] Note: icon dependency 'resvg' not found"
+    echo "[install-ci] Hint: sudo apt install resvg (renders the Loquax icon)"
+fi
+
 # Optional test dependency: lintian is the Debian-policy authority
 # scripts/verify-deb-packaging.sh defers to. `just verify-deb` presupposes a
 # build-deb run and is not part of any tier, so warn rather than fail — but a

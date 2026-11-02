@@ -23,25 +23,27 @@
 //! list with the tabs at the bottom, or the open chat alone with a back in
 //! its bar, as the phone stacks them.
 
-use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, stack, text, text_editor, text_input,
-    toggler, tooltip, Space,
+    button, column, container, mouse_area, row, scrollable, text, text_editor, toggler, tooltip,
+    Space,
 };
-use iced::{
-    border, mouse, Alignment, Background, Border, Color, Element, Length, Point, Rectangle,
-    Renderer, Theme,
-};
+use iced::{border, mouse, Alignment, Background, Border, Color, Element, Length, Theme};
+use leviculum_ui_iced::chrome;
+pub use leviculum_ui_iced::chrome::RAIL;
+use leviculum_ui_iced::{avatar as face, control, drawing, Palette};
+pub use leviculum_ui_iced::{colour, rgb, Icon};
 
 use loquax::ui::chat::{self, size, Colours, Mark};
 use loquax::ui::compose::Button as BarButton;
+use loquax::ui::group_scene::InviteNode;
+use loquax::ui::groups::{Step as GroupStep, Verb as GroupVerb};
 use loquax::ui::intent::{Intent, Switch};
 use loquax::ui::reactions::SIGNAL_QUICK;
 use loquax::ui::recording::Verb;
 use loquax::ui::scene::{
     self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, RecordingBar, Row, Tab, TabId,
 };
-use loquax::ui::strings::{Lang, StrId};
+use loquax::ui::strings::{Arg, Lang, StrId, Text};
 use loquax::when::{list_time, WallTime};
 
 use super::{App, Message};
@@ -49,31 +51,37 @@ use super::{App, Message};
 /// The list's width, in logical pixels.
 pub const LIST_WIDTH: f32 = 340.0;
 
-/// The tab rail's width in the Wide class, in logical pixels.
-pub const RAIL: f32 = 72.0;
-
 /// The search field's id: the top bar's search focuses it.
 pub const SEARCH_FIELD: &str = "search";
-
-/// The liveness ring's width around an avatar (1209): thin.
-const RING: f32 = 2.0;
-
-/// A token, `0xaarrggbb`, as iced's colour.
-pub fn colour(argb: u32) -> Color {
-    let [a, r, g, b] = argb.to_be_bytes();
-    Color::from_rgba8(r, g, b, f32::from(a) / 255.0)
-}
-
-/// An `0xrrggbb` as an opaque colour.
-fn rgb(value: u32) -> Color {
-    colour(0xff00_0000 | value)
-}
 
 /// The tokens of the theme the window is in.
 pub fn tokens(dark: bool) -> Colours {
     match dark {
         true => chat::DARK,
         false => chat::LIGHT,
+    }
+}
+
+/// The roles the shared widgets paint with, from the tokens.
+pub fn palette(t: Colours) -> Palette {
+    Palette {
+        background: colour(t.background),
+        bar: colour(t.bar),
+        panel: colour(t.panel),
+        text: colour(t.text),
+        text_secondary: colour(t.text_secondary),
+        accent: colour(t.accent),
+        selected_row: colour(t.selected_row),
+        badge: colour(t.badge),
+        badge_text: colour(t.badge_text),
+    }
+}
+
+/// A delivery mark as the shared glyph icon.
+fn mark_icon(mark: Mark) -> Icon {
+    Icon::Glyph {
+        shape: mark.shape(),
+        failed: mark == Mark::Failed,
     }
 }
 
@@ -88,430 +96,53 @@ fn avatar_with_dot<'a>(
     let Some(up) = link else {
         return avatar(a, diameter, t);
     };
-    let dot = diameter * 0.3;
     let ink = colour(match up {
         true => t.status_up,
         false => t.status_down,
     });
-    let dot =
-        container(Space::new().width(dot).height(dot)).style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(ink)),
-            border: border::rounded(dot / 2.0).width(2.0).color(colour(t.bar)),
-            ..container::Style::default()
-        });
-    stack![
-        avatar(a, diameter, t),
-        container(dot)
-            .width(diameter)
-            .height(diameter)
-            .align_right(diameter)
-            .align_bottom(diameter),
-    ]
-    .into()
+    face::with_dot(avatar(a, diameter, t), diameter, ink, colour(t.bar))
 }
 
 /// A scene's avatar: a circle of `diameter` with its initials in its
 /// colours, ringed by the liveness of the peer's position (1209).
 fn avatar<'a>(a: &scene::Avatar, diameter: f32, t: Colours) -> Element<'a, Message> {
-    let (fg, bg) = (rgb(a.fg), rgb(a.bg));
     let ring = a.ring.map(|ring| colour(ring.colour(&t)));
-    container(text(a.initials.clone()).size(diameter * 0.4).color(fg))
-        .width(diameter)
-        .height(diameter)
-        .center_x(diameter)
-        .center_y(diameter)
-        .style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(bg)),
-            border: match ring {
-                Some(ink) => border::rounded(diameter / 2.0).width(RING).color(ink),
-                None => border::rounded(diameter / 2.0),
-            },
-            ..container::Style::default()
+    face::avatar(a.initials.clone(), rgb(a.fg), rgb(a.bg), ring, diameter)
+}
+
+/// A bare button over `content`: the colours are the content's.
+fn flat<'a>(content: impl Into<Element<'a, Message>>, on: Message) -> button::Button<'a, Message> {
+    control::flat(content, on)
+}
+
+/// A word on the bars, as a link in the accent.
+/// A filled button in the accent, ours' bubble ink on it (1307: Join,
+/// Next, Create); without `on` it is dimmed and takes no press.
+fn filled<'a>(words: &str, on: Option<Message>, t: Colours) -> Element<'a, Message> {
+    let ground = colour(t.accent);
+    let ink = colour(t.bubble_ours_text);
+    let dim = on.is_none();
+    button(text(words.to_string()).size(15).color(ink))
+        .on_press_maybe(on)
+        .padding([6, 18])
+        .style(move |_: &Theme, _| button::Style {
+            background: Some(Background::Color(match dim {
+                true => ground.scale_alpha(0.4),
+                false => ground,
+            })),
+            text_color: ink,
+            border: border::rounded(size::COMPOSE_CORNER),
+            ..button::Style::default()
         })
         .into()
 }
 
-/// The small drawings: the delivery marks, the send arrow, the emoji
-/// button's face. Drawn, not set, so they need no font that has them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Icon {
-    Mark(Mark),
-    Send,
-    Face,
-    /// A bar's back: a chevron to the left.
-    Back,
-    /// The search: a lens.
-    Search,
-    /// A new conversation: a pencil.
-    Pencil,
-    /// The theme's toggle: a disc half filled.
-    Theme,
-    /// The chats' tab: a speech bubble.
-    Chats,
-    /// The map's tab: a pin.
-    Map,
-    /// The settings: a gear.
-    Settings,
-    /// The compose bar's buttons beyond the emoji and Send (1270): the
-    /// plus, the position button's crosshair, the camera, the microphone.
-    Plus,
-    Locate,
-    Camera,
-    Mic,
-    /// The recording bar's (1276): the bin, pause, play, stop listening,
-    /// and the lock chip, open with its up chevron or closed.
-    Bin,
-    Pause,
-    Play,
-    Stop,
-    Lock {
-        closed: bool,
-    },
+fn link<'a>(words: &str, on: Message, t: Colours) -> Element<'a, Message> {
+    control::link(words, on, colour(t.accent))
 }
 
-struct Drawing {
-    icon: Icon,
-    ink: Color,
-    /// The failed mark's circle and sign.
-    failed: (Color, Color),
-}
-
-impl canvas::Program<Message> for Drawing {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let s = bounds.width.min(bounds.height);
-        let p = |x: f32, y: f32| Point::new(x * s, y * s);
-        let line = Stroke::default().with_color(self.ink).with_width(s / 10.0);
-        match self.icon {
-            // The ladder (1232) from the shape the phone draws too.
-            Icon::Mark(mark) => {
-                let shape = mark.shape();
-                let u = s / chat::GRID;
-                let at = |(x, y): (f32, f32)| Point::new(x * u, y * u);
-                let sign = match mark {
-                    Mark::Failed => self.failed.1,
-                    _ => self.ink,
-                };
-                if let Some(disc) = shape.disc {
-                    let path = Path::circle(at((disc.x, disc.y)), disc.r * u);
-                    frame.fill(&path, self.failed.0);
-                }
-                let pen = Stroke::default()
-                    .with_color(sign)
-                    .with_width(shape.width * u)
-                    .with_line_cap(canvas::LineCap::Round)
-                    .with_line_join(canvas::LineJoin::Round);
-                if let Some(ring) = shape.ring {
-                    frame.stroke(&Path::circle(at((ring.x, ring.y)), ring.r * u), pen);
-                }
-                for line in shape.lines {
-                    let path = Path::new(|b| {
-                        if let Some((&first, rest)) = line.split_first() {
-                            b.move_to(at(first));
-                            for &point in rest {
-                                b.line_to(at(point));
-                            }
-                        }
-                    });
-                    frame.stroke(&path, pen);
-                }
-                if let Some(dot) = shape.dot {
-                    frame.fill(&Path::circle(at((dot.x, dot.y)), dot.r * u), sign);
-                }
-            }
-            Icon::Send => {
-                let arrow = Path::new(|b| {
-                    b.move_to(p(0.3, 0.25));
-                    b.line_to(p(0.78, 0.5));
-                    b.line_to(p(0.3, 0.75));
-                    b.line_to(p(0.38, 0.5));
-                    b.close();
-                });
-                frame.fill(&arrow, self.ink);
-            }
-            Icon::Back => {
-                let chevron = Path::new(|b| {
-                    b.move_to(p(0.62, 0.2));
-                    b.line_to(p(0.32, 0.5));
-                    b.line_to(p(0.62, 0.8));
-                });
-                frame.stroke(&chevron, line);
-            }
-            Icon::Search => {
-                frame.stroke(&Path::circle(p(0.43, 0.43), s * 0.25), line);
-                frame.stroke(&Path::line(p(0.61, 0.61), p(0.85, 0.85)), line);
-            }
-            Icon::Pencil => {
-                let body = Path::new(|b| {
-                    b.move_to(p(0.2, 0.8));
-                    b.line_to(p(0.25, 0.6));
-                    b.line_to(p(0.68, 0.17));
-                    b.line_to(p(0.83, 0.32));
-                    b.line_to(p(0.4, 0.75));
-                    b.close();
-                });
-                frame.stroke(&body, line);
-            }
-            Icon::Theme => {
-                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.33), line);
-                let half = Path::new(|b| {
-                    b.arc(canvas::path::Arc {
-                        center: p(0.5, 0.5),
-                        radius: s * 0.33,
-                        start_angle: iced::Radians(-std::f32::consts::FRAC_PI_2),
-                        end_angle: iced::Radians(std::f32::consts::FRAC_PI_2),
-                    });
-                    b.close();
-                });
-                frame.fill(&half, self.ink);
-            }
-            Icon::Chats => {
-                let bubble = Path::new(|b| {
-                    b.move_to(p(0.2, 0.25));
-                    b.line_to(p(0.8, 0.25));
-                    b.line_to(p(0.8, 0.65));
-                    b.line_to(p(0.45, 0.65));
-                    b.line_to(p(0.28, 0.8));
-                    b.line_to(p(0.3, 0.65));
-                    b.line_to(p(0.2, 0.65));
-                    b.close();
-                });
-                frame.stroke(&bubble, line);
-            }
-            Icon::Map => {
-                let pin = Path::new(|b| {
-                    b.move_to(p(0.3, 0.5));
-                    b.line_to(p(0.5, 0.86));
-                    b.line_to(p(0.7, 0.5));
-                });
-                frame.stroke(&pin, line);
-                frame.stroke(&Path::circle(p(0.5, 0.38), s * 0.22), line);
-                frame.fill(&Path::circle(p(0.5, 0.38), s * 0.07), self.ink);
-            }
-            Icon::Settings => {
-                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.2), line);
-                for i in 0..6 {
-                    let a = i as f32 * std::f32::consts::FRAC_PI_3;
-                    let (sin, cos) = a.sin_cos();
-                    frame.stroke(
-                        &Path::line(
-                            p(0.5 + 0.2 * cos, 0.5 + 0.2 * sin),
-                            p(0.5 + 0.36 * cos, 0.5 + 0.36 * sin),
-                        ),
-                        line,
-                    );
-                }
-            }
-            Icon::Plus => {
-                frame.stroke(&Path::line(p(0.5, 0.22), p(0.5, 0.78)), line);
-                frame.stroke(&Path::line(p(0.22, 0.5), p(0.78, 0.5)), line);
-            }
-            Icon::Locate => {
-                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.27), line);
-                frame.fill(&Path::circle(p(0.5, 0.5), s * 0.09), self.ink);
-                for (a, b) in [
-                    ((0.5, 0.08), (0.5, 0.23)),
-                    ((0.5, 0.77), (0.5, 0.92)),
-                    ((0.08, 0.5), (0.23, 0.5)),
-                    ((0.77, 0.5), (0.92, 0.5)),
-                ] {
-                    frame.stroke(&Path::line(p(a.0, a.1), p(b.0, b.1)), line);
-                }
-            }
-            Icon::Camera => {
-                let body = Path::new(|b| {
-                    b.move_to(p(0.12, 0.33));
-                    b.line_to(p(0.31, 0.33));
-                    b.line_to(p(0.38, 0.23));
-                    b.line_to(p(0.62, 0.23));
-                    b.line_to(p(0.69, 0.33));
-                    b.line_to(p(0.88, 0.33));
-                    b.line_to(p(0.88, 0.79));
-                    b.line_to(p(0.12, 0.79));
-                    b.close();
-                });
-                frame.stroke(&body, line);
-                frame.stroke(&Path::circle(p(0.5, 0.54), s * 0.15), line);
-            }
-            Icon::Mic => {
-                frame.fill(
-                    &Path::rounded_rectangle(
-                        p(0.38, 0.12),
-                        iced::Size::new(s * 0.24, s * 0.5),
-                        (s * 0.12).into(),
-                    ),
-                    self.ink,
-                );
-                let cup = Path::new(|b| {
-                    b.arc(canvas::path::Arc {
-                        center: p(0.5, 0.46),
-                        radius: s * 0.25,
-                        start_angle: iced::Radians(0.0),
-                        end_angle: iced::Radians(std::f32::consts::PI),
-                    });
-                });
-                frame.stroke(&cup, line);
-                frame.stroke(&Path::line(p(0.5, 0.71), p(0.5, 0.88)), line);
-            }
-            Icon::Bin => {
-                let can = Path::new(|b| {
-                    b.move_to(p(0.28, 0.3));
-                    b.line_to(p(0.34, 0.85));
-                    b.line_to(p(0.66, 0.85));
-                    b.line_to(p(0.72, 0.3));
-                });
-                frame.stroke(&can, line);
-                frame.stroke(&Path::line(p(0.2, 0.28), p(0.8, 0.28)), line);
-                frame.stroke(&Path::line(p(0.42, 0.18), p(0.58, 0.18)), line);
-                frame.stroke(&Path::line(p(0.45, 0.42), p(0.46, 0.72)), line);
-                frame.stroke(&Path::line(p(0.55, 0.42), p(0.54, 0.72)), line);
-            }
-            Icon::Pause => {
-                for x in [0.32, 0.56] {
-                    frame.fill(
-                        &Path::rectangle(p(x, 0.24), iced::Size::new(s * 0.12, s * 0.52)),
-                        self.ink,
-                    );
-                }
-            }
-            Icon::Play => {
-                let wedge = Path::new(|b| {
-                    b.move_to(p(0.32, 0.22));
-                    b.line_to(p(0.78, 0.5));
-                    b.line_to(p(0.32, 0.78));
-                    b.close();
-                });
-                frame.fill(&wedge, self.ink);
-            }
-            Icon::Stop => {
-                frame.fill(
-                    &Path::rectangle(p(0.28, 0.28), iced::Size::new(s * 0.44, s * 0.44)),
-                    self.ink,
-                );
-            }
-            Icon::Lock { closed } => {
-                frame.fill(
-                    &Path::rounded_rectangle(
-                        p(0.26, 0.46),
-                        iced::Size::new(s * 0.48, s * 0.36),
-                        (s * 0.06).into(),
-                    ),
-                    self.ink,
-                );
-                // The shackle: shut, or lifted on the left.
-                let shackle = Path::new(|b| {
-                    b.move_to(p(0.36, 0.46));
-                    b.line_to(p(0.36, 0.32));
-                    b.arc(canvas::path::Arc {
-                        center: p(0.5, 0.32),
-                        radius: s * 0.14,
-                        start_angle: iced::Radians(std::f32::consts::PI),
-                        end_angle: iced::Radians(2.0 * std::f32::consts::PI),
-                    });
-                    match closed {
-                        true => b.line_to(p(0.64, 0.46)),
-                        false => b.line_to(p(0.64, 0.36)),
-                    }
-                });
-                frame.stroke(&shackle, line);
-                if !closed {
-                    let chevron = Path::new(|b| {
-                        b.move_to(p(0.38, 0.14));
-                        b.line_to(p(0.5, 0.04));
-                        b.line_to(p(0.62, 0.14));
-                    });
-                    frame.stroke(&chevron, line);
-                }
-            }
-            Icon::Face => {
-                frame.stroke(&Path::circle(p(0.5, 0.5), s * 0.38), line);
-                frame.fill(&Path::circle(p(0.38, 0.42), s * 0.05), self.ink);
-                frame.fill(&Path::circle(p(0.62, 0.42), s * 0.05), self.ink);
-                let smile = Path::new(|b| {
-                    b.arc(canvas::path::Arc {
-                        center: p(0.5, 0.52),
-                        radius: s * 0.2,
-                        start_angle: iced::Radians(0.4),
-                        end_angle: iced::Radians(std::f32::consts::PI - 0.4),
-                    });
-                });
-                frame.stroke(&smile, line);
-            }
-        }
-        vec![frame.into_geometry()]
-    }
-}
-
-/// A waveform (1276): the levels, 0 to 100, as rounded bars side by side,
-/// loud is tall, the quietest a dot; the live bar's newest at the right.
-struct Wave {
-    levels: Vec<u8>,
-    ink: Color,
-    /// How many bars the width is cut into: fewer levels stand at the
-    /// right, as the live bar scrolls in from there.
-    slots: usize,
-    /// It records: on a narrow canvas the newest are kept; standing, the
-    /// whole is folded by the one resampler.
-    moving: bool,
-}
-
-/// The narrowest a bar's pitch gets before the waveform keeps fewer.
-const WAVE_PITCH: f32 = 4.0;
-
-impl canvas::Program<Message> for Wave {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let room = ((bounds.width / WAVE_PITCH) as usize).max(1);
-        let folded;
-        let levels = match (self.levels.len() > room, self.moving) {
-            (false, _) => self.levels.as_slice(),
-            (true, true) => &self.levels[self.levels.len() - room..],
-            (true, false) => {
-                folded = loquax::ui::recording::LevelTrack::of(self.levels.clone())
-                    .bars(room, loquax::ui::recording::Fold::Peak);
-                folded.as_slice()
-            }
-        };
-        let slots = self.slots.min(room).max(levels.len()).max(1);
-        let pitch = bounds.width / slots as f32;
-        let bar = (pitch * 0.6).max(1.0);
-        let first = slots - levels.len();
-        for (i, &level) in levels.iter().enumerate() {
-            let h = (bounds.height * f32::from(level.min(100)) / 100.0).max(bar);
-            let x = (first + i) as f32 * pitch + (pitch - bar) / 2.0;
-            let y = (bounds.height - h) / 2.0;
-            frame.fill(
-                &Path::rounded_rectangle(
-                    Point::new(x, y),
-                    iced::Size::new(bar, h),
-                    (bar / 2.0).into(),
-                ),
-                self.ink,
-            );
-        }
-        vec![frame.into_geometry()]
-    }
-}
-
-/// `levels` as a waveform `slots` bars wide, `width` by `height`.
+/// `levels` as a waveform `slots` bars wide, `width` by `height`, a
+/// standing one folded by the recording's resampler.
 fn wave<'a>(
     levels: &[u8],
     slots: usize,
@@ -520,37 +151,18 @@ fn wave<'a>(
     width: Length,
     height: f32,
 ) -> Element<'a, Message> {
-    Canvas::new(Wave {
-        levels: levels.to_vec(),
-        ink,
+    leviculum_ui_iced::wave::wave(
+        levels,
+        |levels, room| {
+            loquax::ui::recording::LevelTrack::of(levels)
+                .bars(room, loquax::ui::recording::Fold::Peak)
+        },
         slots,
         moving,
-    })
-    .width(width)
-    .height(height)
-    .into()
-}
-
-fn drawing<'a>(icon: Icon, ink: Color, failed: (Color, Color), side: f32) -> Element<'a, Message> {
-    Canvas::new(Drawing { icon, ink, failed })
-        .width(side)
-        .height(side)
-        .into()
-}
-
-/// A bare button over `content`: the colours are the content's.
-fn flat<'a>(content: impl Into<Element<'a, Message>>, on: Message) -> button::Button<'a, Message> {
-    button(content)
-        .on_press(on)
-        .padding(0)
-        .style(|_: &Theme, _| button::Style::default())
-}
-
-/// A word on the bars, as a link in the accent.
-fn link<'a>(words: &str, on: Message, t: Colours) -> Element<'a, Message> {
-    flat(text(words.to_string()).size(15).color(colour(t.accent)), on)
-        .padding([4, 8])
-        .into()
+        ink,
+        width,
+        height,
+    )
 }
 
 impl App {
@@ -593,24 +205,7 @@ impl App {
         on: Message,
         t: Colours,
     ) -> Element<'a, Message> {
-        let face = drawing(
-            icon,
-            colour(t.accent),
-            (Color::TRANSPARENT, Color::TRANSPARENT),
-            24.0,
-        );
-        tooltip(
-            flat(face, on).padding(8),
-            container(text(label.to_string()).size(13).color(colour(t.text)))
-                .padding([2, 6])
-                .style(move |_: &Theme| container::Style {
-                    background: Some(Background::Color(colour(t.panel))),
-                    border: border::rounded(4),
-                    ..container::Style::default()
-                }),
-            tooltip::Position::Bottom,
-        )
-        .into()
+        control::icon_action(icon, label, on, palette(t))
     }
 
     /// The scene's top bar over the list: the reader's avatar with the
@@ -618,103 +213,64 @@ impl App {
     /// theme toggle.
     fn top_bar<'a>(&'a self, t: Colours) -> Element<'a, Message> {
         let top = &self.scene.top;
-        let mut line = row![].spacing(12).align_y(Alignment::Center);
-        if let Lead::Me { avatar, link } = &top.lead {
-            line = line.push(avatar_with_dot(avatar, size::BAR_AVATAR, *link, t));
-        }
-        line = line.push(
-            text(top.title.resolve(self.lang))
-                .size(22)
-                .color(colour(t.text))
-                .width(Length::Fill),
-        );
-        let mut actions = row![].align_y(Alignment::Center);
+        let lead = match &top.lead {
+            Lead::Me { avatar, link } => Some(avatar_with_dot(avatar, size::BAR_AVATAR, *link, t)),
+            Lead::Back { .. } => None,
+        };
+        let mut actions = Vec::new();
         for action in top.actions.iter().filter(|a| a.enabled) {
             let icon = match action.intent {
                 Intent::Search => Icon::Search,
                 Intent::NewConversation => Icon::Pencil,
                 _ => continue,
             };
-            actions = actions.push(self.icon_action(
+            actions.push(self.icon_action(
                 icon,
                 self.word(action.label_key),
                 Message::Intent(action.intent.clone()),
                 t,
             ));
         }
-        actions = actions.push(self.icon_action(
+        actions.push(self.icon_action(
             Icon::Theme,
             self.word(Intent::Theme.label()),
             Message::Intent(Intent::Theme),
             t,
         ));
-        actions = actions.push(self.icon_action(
+        actions.push(self.icon_action(
             Icon::Settings,
             self.word(StrId::Settings),
             Message::Settings,
             t,
         ));
-        container(line.push(actions))
-            .height(size::BAR)
-            .padding([0, 12])
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-            .into()
+        chrome::top_bar(
+            lead,
+            top.title.resolve(self.lang),
+            actions,
+            size::BAR,
+            palette(t),
+        )
     }
 
     /// One tab: its icon over its label, the unread count beside the
     /// icon, the active one in the accent on the selected row's ground.
     fn tab<'a>(&self, tab: &'a Tab, active: bool, t: Colours) -> Element<'a, Message> {
-        let ink = match active {
-            true => colour(t.accent),
-            false => colour(t.text_secondary),
-        };
+        let p = palette(t);
         let icon = match tab.id {
             TabId::Chats => Icon::Chats,
             TabId::Map => Icon::Map,
         };
-        let mut top = row![drawing(
+        let badge = tab.badge.map(|count| {
+            chrome::badge(count, size::BADGE_TEXT - 2.0, size::BADGE_CORNER, p).padding([0, 5])
+        });
+        chrome::tab(
             icon,
-            ink,
-            (Color::TRANSPARENT, Color::TRANSPARENT),
-            26.0
-        )]
-        .spacing(2)
-        .align_y(Alignment::Center);
-        if let Some(count) = tab.badge {
-            top = top.push(
-                container(
-                    text(count.to_string())
-                        .size(size::BADGE_TEXT - 2.0)
-                        .color(colour(t.badge_text)),
-                )
-                .padding([0, 5])
-                .style(move |_: &Theme| container::Style {
-                    background: Some(Background::Color(colour(t.badge))),
-                    border: border::rounded(size::BADGE_CORNER),
-                    ..container::Style::default()
-                }),
-            );
-        }
-        let item = column![top, text(tab.label.resolve(self.lang)).size(12).color(ink)]
-            .spacing(2)
-            .align_x(Alignment::Center);
-        let ground = match active {
-            true => colour(t.selected_row),
-            false => Color::TRANSPARENT,
-        };
-        button(container(item).center_x(Length::Fill).padding([8, 0]))
-            .on_press(Message::Intent(Intent::Activate(scene::NodeId::Tab(
-                tab.id,
-            ))))
-            .padding(0)
-            .width(Length::Fill)
-            .style(move |_: &Theme, _| button::Style {
-                background: Some(Background::Color(ground)),
-                border: border::rounded(12),
-                ..button::Style::default()
-            })
-            .into()
+            tab.label.resolve(self.lang),
+            badge,
+            active,
+            Message::Intent(Intent::Activate(scene::NodeId::Tab(tab.id))),
+            p,
+        )
     }
 
     /// The tabs, the active one the window's screen: a rail at the left
@@ -731,21 +287,8 @@ impl App {
             .items
             .iter()
             .map(|tab| self.tab(tab, tab.id == active, t));
-        let ground = move |_: &Theme| container::Style {
-            background: Some(Background::Color(colour(t.bar))),
-            ..container::Style::default()
-        };
-        Some(match self.class() {
-            LayoutClass::Wide => container(column(items).spacing(8).padding([12, 6]))
-                .width(RAIL)
-                .height(Length::Fill)
-                .style(ground)
-                .into(),
-            LayoutClass::Compact => container(row(items).spacing(8).padding([6, 12]))
-                .width(Length::Fill)
-                .style(ground)
-                .into(),
-        })
+        let rail = self.class() == LayoutClass::Wide;
+        Some(chrome::tabs(items, rail, palette(t)))
     }
 
     /// The settings page (1233): a bar with its back, and the row the
@@ -802,7 +345,8 @@ impl App {
                     .height(size::BAR)
                     .padding([0, 12])
                     .align_y(Alignment::Center),
-                receipts
+                receipts,
+                self.maps_rows(t),
             ]
             .width(Length::Fill),
         )
@@ -815,23 +359,70 @@ impl App {
         .into()
     }
 
+    /// The phone's Maps page in the window (1290): its title, the storage
+    /// the regions take, and "Delete all downloaded maps (1.2 GB)", off
+    /// without maps; a press asks once, in the words that say whether the
+    /// autoload brings them back, with "Delete all" and "Cancel".
+    fn maps_rows(&self, t: Colours) -> Element<'_, Message> {
+        let (count, bytes) = self.maps_usage;
+        let size = Arg::Str(loquax::ui::photos::size_words(bytes));
+        let say = |id: StrId, arg: Arg| Text::Key(id, vec![arg]).resolve(self.lang);
+        let title = text(self.word(StrId::SettingsMaps))
+            .size(16)
+            .color(colour(t.text));
+        let used = text(say(StrId::MapsUsed, size.clone()))
+            .size(14)
+            .color(colour(t.text_secondary));
+        let ink = match count {
+            0 => t.text_secondary,
+            _ => t.failed_mark_on_panel,
+        };
+        let all = button(
+            text(say(StrId::DeleteAllRegions, size))
+                .size(15)
+                .color(colour(ink)),
+        )
+        .on_press_maybe(
+            (count > 0).then_some(Message::Intent(Intent::DeleteAllRegions {
+                confirmed: false,
+            })),
+        )
+        .padding([4, 0])
+        .style(|_: &Theme, _| button::Style::default());
+        let mut rows = column![title, used, all].spacing(4).padding([12, 16]);
+        if self.maps_asked {
+            let ask = match self.seen.autoload {
+                true => StrId::DeleteAllRegionsAsk,
+                false => StrId::DeleteAllRegionsAskManual,
+            };
+            let count = i64::try_from(count).unwrap_or(i64::MAX);
+            let yes = flat(
+                text(self.word(StrId::DeleteAllRegionsYes))
+                    .size(15)
+                    .color(colour(t.failed_mark_on_panel)),
+                Message::Intent(Intent::DeleteAllRegions { confirmed: true }),
+            )
+            .padding([4, 8]);
+            rows = rows.push(
+                text(say(ask, Arg::Int(count)))
+                    .size(14)
+                    .color(colour(t.text)),
+            );
+            rows = rows.push(row![
+                yes,
+                link(self.word(StrId::Cancel), Message::Intent(Intent::Back), t)
+            ]);
+        }
+        rows.into()
+    }
+
     /// The list pane: the scene's top bar, the search, the new
     /// conversation's field when asked for, and the rows.
     pub(super) fn list_pane(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let bar = self.top_bar(t);
         let field = |value: &str, hint: &str| {
-            text_input(hint, value)
-                .size(15)
-                .padding([8, 14])
-                .style(move |_: &Theme, _| text_input::Style {
-                    background: Background::Color(colour(t.bar)),
-                    border: border::rounded(size::COMPOSE_CORNER),
-                    icon: colour(t.text_secondary),
-                    placeholder: colour(t.text_secondary),
-                    value: colour(t.text),
-                    selection: colour(t.selected_row),
-                })
+            chrome::search_field(hint, value, size::COMPOSE_CORNER, palette(t))
         };
         let search = field(&self.search, self.word(StrId::Search))
             .id(SEARCH_FIELD)
@@ -842,6 +433,15 @@ impl App {
                 .on_input(Message::NewAddress)
                 .on_submit(Message::NewGo);
             pane = pane.push(container(new).padding([0, 12]));
+            // "New group" at the top of the new chat (1307, study 4.1).
+            pane = pane.push(
+                container(link(
+                    self.word(StrId::NewGroup),
+                    Message::Intent(Intent::Group(GroupVerb::New)),
+                    t,
+                ))
+                .padding([0, 12]),
+            );
         }
         let empty = (self.scene.list.as_ref()).is_none_or(|list| list.rows.is_empty());
         let rows = self.listed().into_iter().fold(column![], |rows, r| {
@@ -887,10 +487,206 @@ impl App {
         };
         let bar = self.chat_bar(open, t);
         let messages = self.groups(open, t);
-        column![bar, messages, self.compose_bar(open, t)]
+        let mut pane = column![bar, messages];
+        // A group the reader is only invited to: its card above the
+        // compose bar (1307).
+        if let Some(invite) = &open.invite {
+            pane = pane.push(container(self.invite_card(invite, false, t)).padding([8, 12]));
+        }
+        pane.push(self.compose_bar(open, t))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    /// Whether a group's screen is open (1307): "New group" or a member
+    /// sheet.
+    pub(super) fn group_screen(&self) -> bool {
+        self.scene.new_group.is_some() || self.scene.members.is_some()
+    }
+
+    /// "New group" or the member sheet, as the scene has them.
+    pub(super) fn group_pane(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let mut pane = column![].spacing(10).padding([16, 16]);
+        if let Some(new) = &self.scene.new_group {
+            let head = row![
+                text(new.title.resolve(self.lang))
+                    .size(size::BAR_NAME)
+                    .color(ink)
+                    .width(Length::Fill),
+                link(
+                    self.word(new.close.label_key),
+                    Message::Intent(new.close.intent.clone()),
+                    t
+                ),
+            ]
+            .align_y(Alignment::Center);
+            pane = pane.push(head);
+            if new.step == GroupStep::Name {
+                let field = chrome::search_field(
+                    &new.hint.resolve(self.lang),
+                    &new.name,
+                    size::COMPOSE_CORNER,
+                    palette(t),
+                )
+                .on_input(Message::GroupName)
+                .on_submit(Message::Intent(new.create.intent.clone()));
+                pane = pane.push(field);
+                pane = pane.push(text(new.trust.resolve(self.lang)).size(14).color(quiet));
+            } else {
+                pane = pane.push(text(new.picked.resolve(self.lang)).size(14).color(quiet));
+            }
+            let mut rows = column![].spacing(2);
+            for r in &new.rows {
+                let tick = if r.picked { "☑" } else { "☐" };
+                let line = row![
+                    text(tick).size(18).color(ink),
+                    avatar(&r.avatar, size::ROW_AVATAR, t),
+                    text(r.name.clone()).size(size::ROW_NAME).color(ink),
+                ]
+                .spacing(size::ROW_GAP)
+                .align_y(Alignment::Center);
+                rows = rows.push(match new.step {
+                    GroupStep::Pick => chrome::list_item(
+                        line,
+                        r.picked,
+                        Message::Intent(r.toggle.intent.clone()),
+                        palette(t),
+                    ),
+                    GroupStep::Name => line.into(),
+                });
+            }
+            pane = pane.push(scrollable(rows).height(Length::Fill));
+            let go = match new.step {
+                GroupStep::Pick => &new.next,
+                GroupStep::Name => &new.create,
+            };
+            pane = pane.push(filled(
+                self.word(go.label_key),
+                go.enabled.then(|| Message::Intent(go.intent.clone())),
+                t,
+            ));
+        } else if let Some(sheet) = &self.scene.members {
+            let head = row![
+                column![
+                    text(sheet.title.resolve(self.lang))
+                        .size(size::BAR_NAME)
+                        .color(ink),
+                    text(sheet.count.resolve(self.lang)).size(14).color(quiet),
+                ]
+                .width(Length::Fill),
+                link(
+                    self.word(sheet.close.label_key),
+                    Message::Intent(sheet.close.intent.clone()),
+                    t
+                ),
+            ]
+            .align_y(Alignment::Center);
+            pane = pane.push(head);
+            let mut rows = column![].spacing(6);
+            for r in &sheet.rows {
+                let mut line = row![
+                    text(r.name.resolve(self.lang))
+                        .size(size::ROW_NAME)
+                        .color(ink)
+                        .width(Length::Fill),
+                    text(r.state.resolve(self.lang)).size(14).color(quiet),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center);
+                if let Some(remove) = &r.remove {
+                    line = line.push(link(
+                        self.word(remove.label_key),
+                        Message::Intent(remove.intent.clone()),
+                        t,
+                    ));
+                }
+                rows = rows.push(line);
+            }
+            pane = pane.push(scrollable(rows).height(Length::Fill));
+            if let Some(ask) = &sheet.ask {
+                pane = pane.push(text(ask.words.resolve(self.lang)).size(15).color(ink));
+                pane = pane.push(row![
+                    flat(
+                        text(self.word(StrId::GroupYes))
+                            .size(15)
+                            .color(colour(t.failed_mark_on_panel)),
+                        Message::Intent(ask.yes.intent.clone()),
+                    )
+                    .padding([4, 8]),
+                    link(
+                        self.word(StrId::GroupNo),
+                        Message::Intent(ask.no.intent.clone()),
+                        t
+                    ),
+                ]);
+            } else {
+                // The admin's Add members (1307 G2), above Leave.
+                if let Some(add) = &sheet.add {
+                    pane = pane.push(link(
+                        self.word(add.label_key),
+                        Message::Intent(add.intent.clone()),
+                        t,
+                    ));
+                }
+                if let Some(leave) = &sheet.leave {
+                    pane = pane.push(flat(
+                        text(self.word(leave.label_key))
+                            .size(15)
+                            .color(colour(t.failed_mark_on_panel)),
+                        Message::Intent(leave.intent.clone()),
+                    ));
+                }
+            }
+        }
+        container(pane)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// An invitation's card (1307): who invited to what, the trust
+    /// sentence, and Join or where the reader stands.
+    fn invite_card<'a>(
+        &self,
+        invite: &'a InviteNode,
+        in_bubble: bool,
+        t: Colours,
+    ) -> Element<'a, Message> {
+        let ink = colour(if in_bubble {
+            t.bubble_theirs_text
+        } else {
+            t.text
+        });
+        let quiet = colour(if in_bubble {
+            t.bubble_theirs_meta
+        } else {
+            t.text_secondary
+        });
+        let mut card = column![
+            text(invite.title.resolve(self.lang))
+                .size(size::BODY)
+                .color(ink),
+            text(invite.trust.resolve(self.lang)).size(13).color(quiet),
+        ]
+        .spacing(4);
+        if let Some(join) = &invite.join {
+            card = card.push(filled(
+                self.word(join.label_key),
+                Some(Message::Intent(join.intent.clone())),
+                t,
+            ));
+        } else if let Some(state) = &invite.state {
+            card = card.push(text(state.resolve(self.lang)).size(13).color(quiet));
+        }
+        card.into()
     }
 
     /// The chat's top bar: the peer's avatar, the name, the bar's actions.
@@ -988,7 +784,33 @@ impl App {
                 .padding(iced::Padding::ZERO.top(16).bottom(8)),
             );
         }
+        // A group's chat names the writer above a group of bubbles that
+        // is not the reader's (1307).
+        if group.named {
+            list = list.push(
+                container(
+                    text(group.sender.resolve(self.lang))
+                        .size(13)
+                        .color(colour(t.accent)),
+                )
+                .padding(iced::Padding::ZERO.top(size::GAP).left(12)),
+            );
+        }
         for node in &group.bubbles {
+            // A group's own line, "Anna joined." (1307 G2): centred, as
+            // the day line, no one's bubble.
+            if node.bubble.note {
+                list = list.push(
+                    container(
+                        text(node.bubble.body.clone())
+                            .size(size::DAY)
+                            .color(colour(t.text_secondary)),
+                    )
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding::ZERO.top(8).bottom(4)),
+                );
+                continue;
+            }
             let place = &node.place;
             let gap = match place.joins_before {
                 true => size::GAP_GROUPED,
@@ -1093,9 +915,11 @@ impl App {
                 ));
             }
         }
-        // The words under the media, none where the scene has none
-        // (1268): a photo alone is the photo and its time.
-        if let Some(words) = &node.text {
+        // An invitation is a card (1307): its words, the trust sentence and
+        // Join, in place of the text a stock client reads.
+        if let Some(invite) = &node.invite {
+            inside = inside.push(self.invite_card(invite, !ours, t));
+        } else if let Some(words) = &node.text {
             inside = inside.push(text(words.clone()).size(size::BODY).color(ink));
         }
         if let Some(fix) = &bubble.fix {
@@ -1139,7 +963,7 @@ impl App {
             if let Some(mark) = &node.mark {
                 let failed = (colour(t.failed_ground), colour(t.failed_mark));
                 let ink = colour(chat::bubble_ink(mark.mark, &t));
-                let face = drawing(Icon::Mark(mark.mark), ink, failed, 16.0);
+                let face = drawing(mark_icon(mark.mark), ink, failed, 16.0);
                 // A failed one sends again on a press (1232).
                 line = match mark.activate.is_some() {
                     true => line.push(flat(
@@ -1679,24 +1503,20 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
     }
     if unread {
         under = under.push(
-            container(
-                text(content.unread.to_string())
-                    .size(size::BADGE_TEXT)
-                    .color(colour(t.badge_text)),
+            chrome::badge(
+                content.unread,
+                size::BADGE_TEXT,
+                size::BADGE_CORNER,
+                palette(t),
             )
             .height(size::BADGE)
             .padding([0, 7])
-            .center_y(size::BADGE)
-            .style(move |_: &Theme| container::Style {
-                background: Some(Background::Color(colour(t.badge))),
-                border: border::rounded(size::BADGE_CORNER),
-                ..container::Style::default()
-            }),
+            .center_y(size::BADGE),
         );
     } else if let Some(mark) = content.mark {
         let failed = (colour(t.list_failed_ground), colour(t.list_failed_mark));
         under = under.push(drawing(
-            Icon::Mark(mark),
+            mark_icon(mark),
             colour(chat::list_ink(mark, &t)),
             failed,
             18.0,
@@ -1706,8 +1526,17 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
     // A report's line is the scene's words after the pin, as the phone
     // sets it; a text of ours is said as ours.
     // A message typed and not sent stands in for it, in italics (1219).
+    let invited = r
+        .group
+        .as_ref()
+        .filter(|g| content.last.is_empty() || g.standing == loquax::ui::groups::Standing::Invited);
     let last = match (&r.draft, &r.live, content.ours && content.kind == "text") {
         (Some(draft), _, _) => draft.resolve(lang),
+        // A group's row says it is an invitation, or how many are in it
+        // while nothing was written yet (1307).
+        (None, None, _) if invited.is_some() => {
+            invited.map(|g| g.words.resolve(lang)).unwrap_or_default()
+        }
         (None, Some(live), _) => format!("{} {}", chat::PIN, live.resolve(lang)),
         (None, None, true) => format!("{}: {}", StrId::QuoteYou.text(lang), content.last),
         (None, None, false) => content.last.clone(),
@@ -1736,27 +1565,12 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
     let line = row![avatar(&r.avatar, size::ROW_AVATAR, t), words, side]
         .spacing(size::ROW_GAP)
         .align_y(Alignment::Center);
-    let ground = match open {
-        true => colour(t.selected_row),
-        false => Color::TRANSPARENT,
-    };
-    button(
-        container(line)
-            .height(Length::Shrink)
-            .padding([12, 16])
-            .width(Length::Fill),
+    chrome::list_item(
+        line,
+        open,
+        Message::Intent(Intent::Activate(r.id)),
+        palette(t),
     )
-    .on_press(Message::Intent(Intent::Activate(r.id)))
-    .padding(0)
-    .width(Length::Fill)
-    .style(move |_: &Theme, status| button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered if !open => colour(t.bar),
-            _ => ground,
-        })),
-        ..button::Style::default()
-    })
-    .into()
 }
 
 /// A reaction under a bubble: its emoji, a count above one, ours in our

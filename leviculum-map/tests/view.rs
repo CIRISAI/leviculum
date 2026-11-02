@@ -10,7 +10,7 @@ use leviculum_map::draw::{draw, Ink};
 use leviculum_map::mercator::{project, unproject, LatLon, World};
 use leviculum_map::outline::{self, OutlineStats, BORDERS_50M, WORLD_50M};
 use leviculum_map::pins::{order, Pin};
-use leviculum_map::region::{Bounds, Header, Region};
+use leviculum_map::region::{Bounds, Header, Region, TileId};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
@@ -514,6 +514,7 @@ fn every_region_in_a_view_is_drawn_the_deepest_last() {
         len: 0,
         labels: None,
         buildings: None,
+        streamed: false,
     };
     let regions = [
         ("a.lmr", header(86_000_000, 86_800_000, 15)),
@@ -534,4 +535,31 @@ fn every_region_in_a_view_is_drawn_the_deepest_last() {
         [1, 0],
         "b (z14) under a (z15); far, and deep from z14 on, left out"
     );
+}
+
+/// A tile not arrived yet is stood in for by a coarser one, placed so that
+/// its part over the tile lands where the tile would (1291).
+#[test]
+fn a_coarser_tile_stands_in_where_the_tile_goes() {
+    use leviculum_map::viewport::{ViewTile, MAX_OVERZOOM};
+    let tile = ViewTile {
+        id: TileId { z: 15, x: 5, y: 7 },
+        overzoom: 1,
+        origin: Point::new(100, 200),
+    };
+    let up = tile.up(1).expect("one up");
+    assert_eq!(up.id, TileId { z: 14, x: 2, y: 3 });
+    assert_eq!(up.overzoom, 2);
+    // The child is the lower right quarter: its parent starts one child
+    // (8192 sub-pixels at overzoom 1) up and left.
+    assert_eq!(up.origin, Point::new(100 - 8192, 200 - 8192));
+    let two = tile.up(2).expect("two up");
+    assert_eq!(two.id, TileId { z: 13, x: 1, y: 1 });
+    assert_eq!(two.origin, Point::new(100 - 8192, 200 - 3 * 8192));
+    assert_eq!(
+        tile.up(MAX_OVERZOOM),
+        None,
+        "past the overzoom the filler takes"
+    );
+    assert_eq!(tile.up(16), None, "above z0");
 }

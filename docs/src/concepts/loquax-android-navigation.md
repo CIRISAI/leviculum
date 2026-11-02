@@ -225,7 +225,7 @@ Settings
   Privacy         read receipts (1233, first), blocked contacts, positions shared
   Maps            regions with sizes, delete, automatic download on/off
   Backup          back up the mailbox, restore
-  Advanced        propagation node, the map's fling, stop the service, logs
+  Advanced        Relay (the propagation node), the map's fling, stop the service, logs
 ```
 
 "Load area" becomes the Maps entry: management, not an action on the
@@ -256,9 +256,13 @@ Your profile
   Scan a contact's code   the scanner: lxma:// adds a contact, lqxh1 joins
   Mailbox: on this phone | on <host>, since <date>
   Use another mailbox     the join form
-  Advanced ▾       identity hash, home node, propagation node (or
-                   "Chosen by your mailbox"), backup, app version
+  Advanced ▾       identity hash, home node, Relay: the propagation node
+                   (or "Chosen by your mailbox"), backup, app version
 ```
+
+The word on the screen is "Relay" wherever the phone names the
+propagation node (1283, walk finding 30), as the onboarding draft's
+section 1 asked; the rest of Advanced keeps its words.
 
 The contact code is the one Columba and Sideband read (in Columba's
 checkout: `encodeToQrString` of `IdentityQrCodeUtils`, and
@@ -392,6 +396,18 @@ a friend already on screen is one tap away from the map (the pin).
   N, 13.40° E"), since the region files carry no place name; Delete asks
   first. Privacy got the list of the positions shared, to whom and when,
   read from our own messages.
+  1290 (Lew) put one row at the foot of the region list, "Delete all
+  downloaded maps (1.2 GB)", the total in its label and off while the
+  list is empty. A tap asks once ("Delete all 7 maps? Areas you visit
+  will be downloaded again when you look at them.", or with the
+  automatic download off "They come back only when you load an area
+  again."), then deletes every region file, the hand placed ones too, and
+  the storage line says 0 B. The automatic download stays as it was. The
+  action is the core's `Intent::DeleteAllRegions` (the phone sends it as
+  `deleteregions`, `loquax::picture::Maps::delete_all` does it), and the
+  window's settings page shows the same rows: the Maps title, the
+  storage line, the row and its question with Delete all and Cancel. The
+  terminal has no Maps page.
 
 ## Not decided (for Lew)
 

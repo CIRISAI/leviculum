@@ -13,6 +13,7 @@
 //! |---|---|
 //! | Enter in the address editor | `Go { url: None }` |
 //! | `:`, a click on the address | `Activate(NodeId::Address)` |
+//! | `Esc`, `Ctrl-g` while a page loads | `Cancel` |
 //! | `Alt-←`, the footer's back | `Back` |
 //! | `Alt-→`, the footer's forward | `Forward` |
 //! | `R`, `Ctrl-R`, `F5`, the footer's reload | `Reload` |
@@ -23,31 +24,45 @@
 //! | `Tab`, `Shift-Tab` | `FocusNext`, `FocusPrev` |
 //! | `f` | `Hint` |
 //! | Space on a checkbox or radio | `Toggle(n)` |
+//! | `/` | `Find` |
 //! | Enter in the search editor | `Search { query: None }` |
 //! | `n`, `N` | `Match { next }` |
 //! | a name typed into the address (1227) | `FindName { query }` |
 //! | Enter in the name results | `Activate(NodeId::Name(row))` |
+//! | `y` to the pin question, any other key | `Answer { yes }` |
 //! | the scroll rows, the wheel | `Scroll(cmd)` |
 //! | `d` | `Places` |
 //! | Enter in the places panel | `Activate(NodeId::Place(row))` |
 //! | `x`, `Delete`, the row's `×` | `Forget(row)` |
 //! | `u` in the places panel | `Undo` |
 //! | `y` | `Copy` |
-//! | `?` | `Help` |
-//! | `Esc` over a panel | `Dismiss` |
-//! | `q` | `Quit` |
+//! | `o` | `OpenImage` |
+//! | `t` | `Theme` |
+//! | `Ctrl-l` | `Redraw` |
+//! | `?`, `F1` | `Help` |
+//! | `Esc` over a panel, in an editor or a field | `Dismiss` |
+//! | `q`, `Ctrl-c` | `Quit` |
 //!
-//! Slice 1b turns the keys into a table that resolves to these; until
-//! then the keys keep their `match`es and these are what the scene's
-//! actions and a host raise.
+//! Since slice 1b the keys are a table ([`super::keys`]) whose
+//! [`super::keys::Action`]s become these through [`Intent::of_key`],
+//! and the key handler folds them with [`apply`] as a tap does.
+
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 use leviculum_ui::keymap::ScrollCmd;
 use leviculum_ui::scene::Labelled;
 
+use crate::names::PinMark;
+
+use super::chrome::help_scroll_geometry;
 use super::event::*;
+use super::input::InputBuffer;
+use super::keys::Action;
 use super::model::*;
 use super::scene::NodeId;
-use super::strings::StrId;
+use super::strings::{StrId, Text};
 
 /// What the reader asks of the browser.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,8 +79,11 @@ pub enum Intent {
     /// A tap or a click on a node: the link is followed, the field takes
     /// the focus, the place or the name opens, the address is edited.
     Activate(NodeId),
-    /// The open panel, the hints or the help closes.
+    /// The topmost of what is open closes: the help, the name list, the
+    /// places panel, the hints, the search, the address editor, the field.
     Dismiss,
+    /// The fetch or the download in flight stops.
+    Cancel,
 
     // The page.
     FocusNext,
@@ -75,6 +93,8 @@ pub enum Intent {
     /// A checkbox or a radio, by its 1-based field index.
     Toggle(usize),
     Scroll(ScrollCmd),
+    /// The in-page search field opens, empty.
+    Find,
     /// Search the page for `query`, or what the search field holds.
     Search {
         query: Option<String>,
@@ -103,10 +123,69 @@ pub enum Intent {
     Forget(usize),
     /// The last bookmark removed comes back.
     Undo,
+    /// The answer to the name list's question whether to open, and pin, a
+    /// name pinned to another key.
+    Answer {
+        yes: bool,
+    },
     /// The focused link's URL or the page's to the clipboard.
     Copy,
+    /// The focused picture in the system viewer.
+    OpenImage,
+    /// Light or dark.
+    Theme,
+    /// The page laid out again.
+    Redraw,
     Help,
     Quit,
+}
+
+impl Intent {
+    /// The intent a key's [`Action`] raises now: what the focused link, the
+    /// selected place or the state of the page make of it. `None` where it
+    /// acts on nothing (`Enter` with no link focused, `Space` with no field)
+    /// and for a footer sentence.
+    pub fn of_key(action: Action, model: &Model) -> Option<Intent> {
+        Some(match action {
+            Action::Quit => Intent::Quit,
+            Action::Cancel => Intent::Cancel,
+            Action::Redraw => Intent::Redraw,
+            Action::Address => Intent::Activate(NodeId::Address),
+            Action::Hint => Intent::Hint,
+            Action::Find => Intent::Find,
+            Action::Match(next) => Intent::Match { next },
+            Action::Theme => Intent::Theme,
+            Action::Places => Intent::Places,
+            Action::Mark => Intent::Bookmark {
+                on: !current_url(model).is_some_and(|url| model.bookmarks.contains(&url)),
+            },
+            Action::OpenImage => Intent::OpenImage,
+            Action::Copy => Intent::Copy,
+            Action::Identify => Intent::Identify {
+                on: !model.identifying,
+            },
+            Action::FocusNext => Intent::FocusNext,
+            Action::FocusPrev => Intent::FocusPrev,
+            Action::Follow => Intent::Activate(NodeId::Link(model.focus?)),
+            Action::Help => Intent::Help,
+            Action::Reload => Intent::Reload,
+            Action::Back => Intent::Back,
+            Action::Forward => Intent::Forward,
+            Action::Scroll(cmd) => Intent::Scroll(cmd),
+            Action::Dismiss => Intent::Dismiss,
+            Action::Go => Intent::Go { url: None },
+            Action::Search => Intent::Search { query: None },
+            Action::Toggle => Intent::Toggle(model.field_focus?),
+            Action::Open => match &model.names {
+                Some(results) => Intent::Activate(NodeId::Name(results.sel)),
+                None => Intent::Activate(NodeId::Place(model.places_sel)),
+            },
+            Action::Forget => Intent::Forget(model.places_sel),
+            Action::Undo => Intent::Undo,
+            Action::Answer(yes) => Intent::Answer { yes },
+            Action::Sentence => return None,
+        })
+    }
 }
 
 impl Labelled for Intent {
@@ -122,6 +201,8 @@ impl Labelled for Intent {
             Intent::Activate(NodeId::Field(_)) => StrId::Edit,
             Intent::Activate(_) => StrId::Open,
             Intent::Dismiss => StrId::Dismiss,
+            Intent::Cancel => StrId::Cancel,
+            Intent::Find => StrId::Search,
             Intent::FocusNext => StrId::NextField,
             Intent::FocusPrev => StrId::PrevField,
             Intent::Hint => StrId::HintMode,
@@ -138,7 +219,12 @@ impl Labelled for Intent {
             Intent::Places => StrId::Places,
             Intent::Forget(_) => StrId::Remove,
             Intent::Undo => StrId::Undo,
+            Intent::Answer { yes: true } => StrId::Open,
+            Intent::Answer { yes: false } => StrId::Cancel,
             Intent::Copy => StrId::Copy,
+            Intent::OpenImage => StrId::Open,
+            Intent::Theme => StrId::HelpTheme,
+            Intent::Redraw => StrId::HelpRedraw,
             Intent::Help => StrId::Help,
             Intent::Quit => StrId::Quit,
         }
@@ -151,7 +237,7 @@ impl Labelled for Intent {
 pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
     match intent {
         Intent::Go { url } => {
-            let raw = url.unwrap_or_else(|| model.input.value().to_string());
+            let raw = url.unwrap_or_else(|| InputBuffer::value(&model.input).to_string());
             go_to(model, raw.trim())
         }
         Intent::Back => go_back(model),
@@ -160,6 +246,19 @@ pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
         Intent::Activate(node) => activate(model, node),
         Intent::Dismiss => {
             dismiss(model);
+            Vec::new()
+        }
+        Intent::Cancel => {
+            if !model.is_loading() {
+                return Vec::new();
+            }
+            model.pending = None;
+            model.download = None;
+            model.say(ToastKind::Info, Text::key(StrId::Cancelled));
+            vec![Effect::Cancel]
+        }
+        Intent::Find => {
+            enter_search(model);
             Vec::new()
         }
         Intent::FocusNext => {
@@ -176,17 +275,17 @@ pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
         }
         Intent::Toggle(field) => {
             if (1..=model.field_state.len()).contains(&field) {
-                activate_field(model, field);
+                toggle_field(model, field);
             }
             Vec::new()
         }
         Intent::Scroll(cmd) => {
-            let vp = model.viewport();
-            model.apply_scroll(cmd, vp);
+            scroll(model, cmd);
             Vec::new()
         }
         Intent::Search { query } => {
-            let query = query.unwrap_or_else(|| model.search_input.value().to_string());
+            let query =
+                query.unwrap_or_else(|| InputBuffer::value(&model.search_input).to_string());
             model.mode = Mode::Browse;
             commit_search(model, &query);
             Vec::new()
@@ -214,7 +313,37 @@ pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
             _ => Vec::new(),
         },
         Intent::Undo => undo_delete_bookmark(model),
+        Intent::Answer { yes: true } => match model.names.as_ref().is_some_and(|r| r.confirm) {
+            true => open_name_hit(model, true),
+            false => Vec::new(),
+        },
+        Intent::Answer { yes: false } => {
+            if let Some(results) = model.names.as_mut() {
+                results.confirm = false;
+            }
+            Vec::new()
+        }
         Intent::Copy => yank_url(model),
+        Intent::OpenImage => match model
+            .focus
+            .and_then(|index| saved_image_effect(model, index, true))
+        {
+            Some(effect) => {
+                model.dismiss_toast();
+                vec![effect]
+            }
+            None => Vec::new(),
+        },
+        Intent::Theme => {
+            model.toggle_theme();
+            Vec::new()
+        }
+        Intent::Redraw => {
+            let (w, vp) = (model.width, model.viewport());
+            model.relayout(w);
+            model.clamp_scroll(vp);
+            Vec::new()
+        }
         Intent::Help => {
             model.show_help = true;
             model.help_scroll = 0;
@@ -241,13 +370,40 @@ fn activate(model: &mut Model, node: NodeId) -> Vec<Effect> {
         }
         NodeId::Place(row) if row < places(model).len() => activate_place(model, row),
         NodeId::Name(row) => {
-            match model.names.as_mut() {
-                Some(results) if row < results.hits.len() => results.sel = row,
-                _ => return Vec::new(),
+            let Some(results) = model.names.as_mut() else {
+                return Vec::new();
+            };
+            match results.hits.get(row) {
+                // A name pinned to another key asks before it opens.
+                Some(hit) if hit.mark == PinMark::Conflict && !results.confirm => {
+                    results.sel = row;
+                    results.confirm = true;
+                    return Vec::new();
+                }
+                Some(_) => results.sel = row,
+                // An empty list closes, as Enter on it always did.
+                None if results.hits.is_empty() => {}
+                None => return Vec::new(),
             }
             open_name_hit(model, false)
         }
         _ => Vec::new(),
+    }
+}
+
+/// Scroll what is in front: the help, the places panel's selection, the
+/// name list's, else the page. The keys reach the same one.
+fn scroll(model: &mut Model, cmd: ScrollCmd) {
+    if model.show_help {
+        let (viewport, max) = help_scroll_geometry(model);
+        model.help_scroll = leviculum_ui::keymap::scrolled(model.help_scroll, cmd, viewport, max);
+    } else if model.show_places {
+        apply_places_scroll(model, cmd);
+    } else if model.names.is_some() {
+        move_name_sel(model, cmd);
+    } else {
+        let vp = model.viewport();
+        model.apply_scroll(cmd, vp);
     }
 }
 
@@ -263,6 +419,13 @@ fn dismiss(model: &mut Model) {
         exit_hint(model);
     } else if model.mode == Mode::Search {
         exit_search(model);
+    } else if model.mode == Mode::Address {
+        model.mode = Mode::Browse;
+        model.input.set_value("");
+        model.dismiss_toast();
+    } else if model.mode == Mode::Field {
+        model.field_focus = None;
+        model.mode = Mode::Browse;
     }
 }
 
@@ -316,6 +479,9 @@ mod tests {
         effects
     }
 
+    /// A key and the modifiers held.
+    type Chord = (KeyCode, KeyModifiers);
+
     fn plain(c: char) -> (KeyCode, KeyModifiers) {
         (KeyCode::Char(c), KeyModifiers::NONE)
     }
@@ -343,7 +509,21 @@ mod tests {
             (Intent::Places, vec![plain('d')]),
             (Intent::Copy, vec![plain('y')]),
             (Intent::Help, vec![plain('?')]),
+            (Intent::Help, vec![(KeyCode::F(1), none)]),
             (Intent::Quit, vec![plain('q')]),
+            (
+                Intent::Quit,
+                vec![(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+            ),
+            (Intent::Find, vec![plain('/')]),
+            (Intent::Match { next: true }, vec![plain('n')]),
+            (Intent::Theme, vec![plain('t')]),
+            (
+                Intent::Redraw,
+                vec![(KeyCode::Char('l'), KeyModifiers::CONTROL)],
+            ),
+            (Intent::Forward, vec![(KeyCode::Right, KeyModifiers::ALT)]),
+            (Intent::Scroll(ScrollCmd::Bottom), vec![plain('G')]),
             (
                 Intent::Go {
                     url: Some(URL.to_string()),
@@ -377,6 +557,64 @@ mod tests {
             );
             assert_eq!(a, b, "{intent:?}: effects");
             assert_eq!(by_intent.scene(), by_key.scene(), "{intent:?}: scene");
+        }
+    }
+
+    /// In a panel or an editor a key's intent is the panel's: after the
+    /// same opening keys, the key and its intent leave the same effects and
+    /// the same scene. `Dismiss` leaves the address editor, `Scroll` moves
+    /// the places panel's selection, `Places` closes it.
+    #[test]
+    fn a_key_in_a_panel_is_the_panels_intent() {
+        let none = KeyModifiers::NONE;
+        let cases: Vec<(Vec<Chord>, Chord, Intent)> = vec![
+            (
+                vec![plain(':'), plain('x')],
+                (KeyCode::Esc, none),
+                Intent::Dismiss,
+            ),
+            (
+                vec![plain('/'), plain('S')],
+                (KeyCode::Esc, none),
+                Intent::Dismiss,
+            ),
+            (vec![plain('f')], (KeyCode::Esc, none), Intent::Dismiss),
+            (vec![plain('?')], (KeyCode::Esc, none), Intent::Dismiss),
+            (
+                vec![plain('?')],
+                plain('j'),
+                Intent::Scroll(ScrollCmd::LineDown),
+            ),
+            (
+                vec![plain('m'), plain('d')],
+                plain('j'),
+                Intent::Scroll(ScrollCmd::LineDown),
+            ),
+            (vec![plain('d')], plain('d'), Intent::Places),
+            (vec![plain('m'), plain('d')], plain('x'), Intent::Forget(0)),
+            (
+                vec![plain('/'), plain('S')],
+                (KeyCode::Enter, none),
+                Intent::Search { query: None },
+            ),
+        ];
+        for (opening, key, intent) in cases {
+            let mut by_key = model();
+            keys(&mut by_key, &opening);
+            let mut by_intent = by_key.clone();
+            let b = keys(&mut by_key, &[key]);
+            by_intent.dismiss_toast();
+            let a = apply(&mut by_intent, intent.clone());
+            assert_eq!(a, b, "{intent:?} after {opening:?}: effects");
+            assert_eq!(
+                by_intent.scene(),
+                by_key.scene(),
+                "{intent:?} after {opening:?}: scene"
+            );
+            assert_eq!(by_intent.mode, by_key.mode, "{intent:?}: mode");
+            assert_eq!(by_intent.show_places, by_key.show_places, "{intent:?}");
+            assert_eq!(by_intent.show_help, by_key.show_help, "{intent:?}");
+            assert_eq!(by_intent.help_scroll, by_key.help_scroll, "{intent:?}");
         }
     }
 

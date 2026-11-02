@@ -53,7 +53,7 @@ use tokio::sync::oneshot;
 use leviculum_map::mercator::World;
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::Style;
-use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+use leviculum_ui::input::KeyCode;
 use leviculum_ui::keymap::Ctx;
 use loquax::keys::{self, MapCmd};
 use loquax::mapframe::{hold, onto, Ask, Frames};
@@ -62,7 +62,7 @@ use loquax::tiles::Motion;
 use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
 use loquax::ui::scene::{LayoutClass, NodeId, Scene, TabId};
-use loquax::ui::strings::Lang;
+use loquax::ui::strings::{Lang, StrId};
 use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY};
 use loquax::when::WallTime;
 
@@ -299,6 +299,8 @@ pub enum Message {
     Search(String),
     /// The new conversation's field: what is typed, `Enter`.
     NewAddress(String),
+    /// What the new group's name field holds now (1307).
+    GroupName(String),
     NewGo,
     Compose(text_editor::Action),
     /// What the user asks (1218): a press on a scene node raises the
@@ -319,6 +321,8 @@ pub enum Message {
     RecRelease,
     /// The pointer went onto the lock chip, or off it, while held.
     RecOverLock(bool),
+    /// The map list's "Add" on a node nearby that is no contact (1302).
+    AddNearby([u8; 16]),
 }
 
 impl Message {
@@ -340,6 +344,7 @@ impl Message {
                 | Message::Settings
                 | Message::Viewer(_)
                 | Message::ViewerClose
+                | Message::AddNearby(_)
         )
     }
 }
@@ -528,6 +533,11 @@ struct App {
     /// delete was asked once.
     menu: Option<NodeId>,
     deleting: Option<NodeId>,
+    /// The settings' Maps rows (1290): how many regions and their bytes,
+    /// read as the page opens and after a delete, and whether "Delete
+    /// all downloaded maps" was asked once.
+    maps_usage: (usize, u64),
+    maps_asked: bool,
     /// The language the scene's words are said in: the desktop's locale.
     lang: Lang,
     /// The scene of [`Seen`] in the window's class: what is drawn.
@@ -557,7 +567,7 @@ impl App {
             Some(seen) => Task::run(seen, |seen| Message::Seen(Box::new(seen))),
             None => Task::none(),
         };
-        let theme = iced::system::theme().map(Message::SystemTheme);
+        let theme = leviculum_ui_iced::desktop::theme().map(Message::SystemTheme);
         (app, Task::batch([scale, seen, theme]))
     }
 
@@ -608,6 +618,8 @@ impl App {
             emoji: false,
             menu: None,
             deleting: None,
+            maps_usage: (0, 0),
+            maps_asked: false,
             lang: Lang::En,
             scene: empty,
             viewer: None,
@@ -694,6 +706,9 @@ impl App {
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
             Message::Search(query) => self.search = query,
             Message::NewAddress(typed) => self.new_address = Some(typed),
+            Message::GroupName(typed) => {
+                self.tell(UiEvent::Group(loquax::ui::groups::Verb::Name(typed)));
+            }
             Message::NewGo => {
                 let typed = self.new_address.clone().unwrap_or_default();
                 // The one reader every frontend asks (1263): a contact
@@ -817,6 +832,7 @@ impl App {
                     self.menu = None;
                     self.deleting = None;
                 }
+                (None, Screen::Settings) if self.maps_asked => self.maps_asked = false,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
                 // A stacked chat goes back to the list, as its bar's back
                 // does; beside the list Back has nothing to leave.
@@ -828,8 +844,30 @@ impl App {
                 }
             },
             Intent::Theme => self.flipped = !self.flipped,
+            // The group verbs (1307) are the model's own; the window draws
+            // the picker and the sheet from the scene.
+            Intent::Group(verb) => {
+                // "New group" is reached from the new chat's field.
+                if verb == loquax::ui::groups::Verb::New {
+                    self.new_address = None;
+                }
+                self.tell(UiEvent::Group(verb));
+            }
             Intent::ReadReceipts { on } => {
                 self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
+            }
+            Intent::DeleteAllRegions { confirmed: false } => {
+                self.maps_usage = self.maps().usage();
+                self.maps_asked = self.maps_usage.0 > 0;
+            }
+            Intent::DeleteAllRegions { confirmed: true } => {
+                self.maps_asked = false;
+                if let Err(why) = self.maps().delete_all() {
+                    self.seen.notice = Some(why);
+                }
+                self.regions_changed();
+                self.maps_usage = self.maps().usage();
+                return self.paint();
             }
             Intent::Search => {
                 self.screen = Screen::Chats;
@@ -1039,7 +1077,12 @@ impl App {
             MapCmd::Open => {
                 if let Some(peer) = self.selected {
                     self.screen = Screen::Chats;
-                    self.tell(UiEvent::Open { peer });
+                    // A node nearby is added, which opens its chat (1302).
+                    let nearby = self.seen.pins.iter().any(|p| p.peer == peer && p.nearby);
+                    self.tell(match nearby {
+                        true => UiEvent::AddNearby { peer },
+                        false => UiEvent::Open { peer },
+                    });
                 }
             }
             MapCmd::Close => self.screen = Screen::Chats,
@@ -1052,7 +1095,7 @@ impl App {
     /// the map's, on a stacked chat the messages' (`Escape` is Back), on
     /// the chats the list's.
     fn key(&self, event: &keyboard::Event) -> Option<Intent> {
-        let key = chord(event)?;
+        let key = leviculum_ui_iced::key::chord(event)?;
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
@@ -1065,7 +1108,7 @@ impl App {
         let mut all = vec![
             window::events().map(|(_, event)| Message::Window(event)),
             keyboard::listen().map(Message::Key),
-            iced::system::theme_changes().map(Message::SystemTheme),
+            leviculum_ui_iced::desktop::theme_changes().map(Message::SystemTheme),
         ];
         // The pointer anywhere in the window while the microphone is held
         // (1276): it may leave the button, and the release counts
@@ -1106,7 +1149,9 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         // The viewer is over everything: a key is its Esc or nothing.
         if let (Some(viewer), Message::Key(event)) = (&mut self.viewer, &message) {
-            if chord(event).is_some_and(|k| k.code == KeyCode::Esc) && viewer.back() {
+            if leviculum_ui_iced::key::chord(event).is_some_and(|k| k.code == KeyCode::Esc)
+                && viewer.back()
+            {
                 self.viewer = None;
             }
             return Task::none();
@@ -1122,10 +1167,17 @@ impl App {
                 self.viewer = None;
                 return Task::none();
             }
+            Message::AddNearby(peer) => {
+                self.screen = Screen::Chats;
+                self.tell(UiEvent::AddNearby { peer });
+                return Task::none();
+            }
             Message::Intent(intent) => return self.intent(intent),
             Message::Settings => {
                 self.screen = Screen::Settings;
                 self.menu = None;
+                self.maps_asked = false;
+                self.maps_usage = self.maps().usage();
                 return Task::none();
             }
             Message::Key(event) => {
@@ -1320,6 +1372,13 @@ impl App {
     /// A region landed or left: the regions read again, the setup with
     /// them, and the fit again when the reader has not moved since it.
     /// The tiles drop themselves on the new epoch.
+    /// The maps directory the window draws from, as the shell's autoload
+    /// shares it.
+    fn maps(&self) -> loquax::picture::Maps {
+        let frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        frames.painter().maps().clone()
+    }
+
     fn regions_changed(&mut self) {
         {
             let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1426,6 +1485,12 @@ impl App {
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
             (Screen::Settings, _, _) => self.settings_pane(),
+            // A group's screens (1307) take the chat's place, or the
+            // whole stack's on a narrow window.
+            (Screen::Chats, LayoutClass::Wide, _) if self.group_screen() => {
+                row![self.list_pane(), self.group_pane()].into()
+            }
+            (Screen::Chats, LayoutClass::Compact, _) if self.group_screen() => self.group_pane(),
             (Screen::Chats, LayoutClass::Wide, _) => {
                 row![self.list_pane(), self.chat_pane()].into()
             }
@@ -1447,7 +1512,18 @@ impl App {
             .fold(column![].spacing(2), |list, pin| {
                 let alpha = if pin.stale { 0.5 } else { 1.0 };
                 let age = pin.age.clone().unwrap_or_default();
-                let entry = column![text(pin.label.clone()).size(15), text(age).size(12),];
+                let mut entry = column![text(pin.label.clone()).size(15), text(age).size(12),];
+                // A node nearby that is no contact (1302): its card says
+                // so and offers to add it.
+                if pin.nearby {
+                    entry = entry
+                        .push(text(StrId::NearbyCard.text(Lang::En)).size(12))
+                        .push(
+                            button(text(StrId::NearbyAdd.text(Lang::En)).size(12))
+                                .on_press(Message::AddNearby(pin.peer))
+                                .padding([0, 6]),
+                        );
+                }
                 let style = match Some(pin.peer) == self.selected {
                     true => button::primary,
                     false => button::text,
@@ -1642,10 +1718,13 @@ impl canvas::Program<Message> for MapCanvas<'_> {
             )
         };
         for pin in &shown.placed {
-            let ink = match (pin.selected, pin.stale) {
-                (true, _) => Color::from_rgb8(0xd0, 0x30, 0x30),
-                (false, false) => Color::from_rgb8(0x20, 0x50, 0xc0),
-                (false, true) => Color::from_rgba8(0x20, 0x50, 0xc0, 0.45),
+            let ink = match (pin.selected, pin.nearby, pin.stale) {
+                (true, ..) => Color::from_rgb8(0xd0, 0x30, 0x30),
+                // A node nearby that is no contact (1302): a neutral grey.
+                (false, true, false) => Color::from_rgb8(0x80, 0x80, 0x80),
+                (false, true, true) => Color::from_rgba8(0x80, 0x80, 0x80, 0.45),
+                (false, false, false) => Color::from_rgb8(0x20, 0x50, 0xc0),
+                (false, false, true) => Color::from_rgba8(0x20, 0x50, 0xc0, 0.45),
             };
             let centre = to(pin.x, pin.y);
             let radius = map::MARKER / 2.0;
@@ -1714,74 +1793,6 @@ fn held_pointer(
 /// it.
 fn locale() -> Lang {
     loquax::engine::locale()
-}
-
-/// A key iced reports as the keymap's key (1218): the named keys the
-/// chords use, a character as itself, the modifiers held. None for a
-/// release or a key no chord names.
-fn chord(event: &keyboard::Event) -> Option<KeyEvent> {
-    use keyboard::key::Named;
-    let keyboard::Event::KeyPressed {
-        modified_key,
-        modifiers,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    let shift = modifiers.shift();
-    let code = match modified_key.as_ref() {
-        keyboard::Key::Named(named) => match named {
-            Named::Escape => KeyCode::Esc,
-            Named::Enter => KeyCode::Enter,
-            Named::Tab if shift => KeyCode::BackTab,
-            Named::Tab => KeyCode::Tab,
-            Named::Backspace => KeyCode::Backspace,
-            Named::Delete => KeyCode::Delete,
-            Named::Insert => KeyCode::Insert,
-            Named::ArrowLeft => KeyCode::Left,
-            Named::ArrowRight => KeyCode::Right,
-            Named::ArrowUp => KeyCode::Up,
-            Named::ArrowDown => KeyCode::Down,
-            Named::Home => KeyCode::Home,
-            Named::End => KeyCode::End,
-            Named::PageUp => KeyCode::PageUp,
-            Named::PageDown => KeyCode::PageDown,
-            Named::Space => KeyCode::Char(' '),
-            Named::F1 => KeyCode::F(1),
-            Named::F2 => KeyCode::F(2),
-            Named::F3 => KeyCode::F(3),
-            Named::F4 => KeyCode::F(4),
-            Named::F5 => KeyCode::F(5),
-            Named::F6 => KeyCode::F(6),
-            Named::F7 => KeyCode::F(7),
-            Named::F8 => KeyCode::F(8),
-            Named::F9 => KeyCode::F(9),
-            Named::F10 => KeyCode::F(10),
-            Named::F11 => KeyCode::F(11),
-            Named::F12 => KeyCode::F(12),
-            _ => return None,
-        },
-        keyboard::Key::Character(c) => {
-            let mut chars = c.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => KeyCode::Char(c),
-                _ => return None,
-            }
-        }
-        keyboard::Key::Unidentified => return None,
-    };
-    let mut held = KeyModifiers::NONE;
-    if shift {
-        held |= KeyModifiers::SHIFT;
-    }
-    if modifiers.control() {
-        held |= KeyModifiers::CONTROL;
-    }
-    if modifiers.alt() {
-        held |= KeyModifiers::ALT;
-    }
-    Some(KeyEvent::new(code, held))
 }
 
 #[cfg(test)]
@@ -2445,43 +2456,15 @@ mod tests {
     /// The window's view drawn off screen by iced's own software renderer,
     /// `w` x `h` at a density of one, as RGB.
     fn shoot(app: &App, w: u32, h: u32) -> Vec<u8> {
-        use iced::advanced::renderer::{self, Headless, Renderer as _};
-        use iced::advanced::widget::Tree;
-        use iced::advanced::{layout, Layout};
-        let mut renderer = futures::executor::block_on(<Renderer as Headless>::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.0),
-            None,
-        ))
-        .expect("the software renderer");
-        let size = Size::new(w as f32, h as f32);
-        let mut element = app.view();
-        let mut tree = Tree::new(&element);
-        let node = element.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &layout::Limits::new(Size::ZERO, size),
-        );
-        let viewport = Rectangle::with_size(size);
-        renderer.reset(viewport);
-        let theme = app.theme();
-        element.as_widget().draw(
-            &tree,
-            &mut renderer,
-            &theme,
-            &renderer::Style {
-                text_color: chat::colour(app.tokens().text),
-            },
-            Layout::new(&node),
-            mouse::Cursor::Unavailable,
-            &viewport,
-        );
-        let background = chat::colour(app.tokens().background);
-        renderer
-            .screenshot(iced::Size::new(w, h), 1.0, background)
-            .chunks(4)
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect()
+        leviculum_ui_iced::headless::render(
+            app.view(),
+            &app.theme(),
+            chat::colour(app.tokens().text),
+            chat::colour(app.tokens().background),
+            w,
+            h,
+        )
+        .expect("the software renderer")
     }
 
     /// The chat pane in each theme (1145), pixel for pixel the goldens:
@@ -2584,6 +2567,171 @@ mod tests {
         let (w, h) = (900, 560);
         app.window = Size::new(w as f32, h as f32);
         map::tests::same_as("gui-chat-media.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// 1307 pass two: the four group screens in the window, pixel for
+    /// pixel the goldens, light: the group's chat with the writers' names
+    /// above their bubbles and the member count as the avatar, Anna's chat
+    /// holding the invitation's card with Join, the member sheet, and "New
+    /// group" at its name step with the trust sentence. Each press on a
+    /// node is the scene's verb.
+    #[test]
+    fn the_group_screens_are_the_goldens() {
+        use leviculum_lxmf::lev::{GroupCopy, Invite, Lev, Member, Members};
+        use loquax::ui::groups::Verb;
+        use loquax::ui::intent::Target;
+        const FAMILIE: [u8; 16] = [0x51; 16];
+        const VEREIN: [u8; 16] = [0x52; 16];
+        let lev_of = |lev: Lev| {
+            let mut fields = Vec::new();
+            lev.put_into(&mut fields);
+            fields
+        };
+        let arrive = |model: &mut crate::shell::Model, from, id: u8, body: &str, lev: Lev| {
+            update(
+                model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [id; 32],
+                    source: from,
+                    title: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                    fields: lev_of(lev),
+                    verified: true,
+                }),
+            );
+        };
+        let invite = |group, name: &str| Lev {
+            capabilities: Some(3),
+            invite: Some(Invite {
+                group,
+                public_key: [7; 64],
+                name: name.into(),
+                admin_name: "Anna".into(),
+                epoch: 1,
+            }),
+            ..Lev::default()
+        };
+        let copy = |writer| Lev {
+            capabilities: Some(2),
+            group_copy: Some(GroupCopy {
+                sender: writer,
+                sent_ms: 1,
+                epoch: 2,
+            }),
+            ..Lev::default()
+        };
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        model.names.remember(OWN, "Mia Sander");
+        model.names.remember(ANNA, "Anna Schulz");
+        model.names.remember(BERT, "Bert");
+        update(&mut model, UiEvent::Clock(at(30, 9, 0)));
+        received(&mut model, BERT, 9, "The relay on the hill is up again");
+        arrive(
+            &mut model,
+            ANNA,
+            1,
+            "Anna invited you to Familie: lxma://…",
+            invite(FAMILIE, "Familie"),
+        );
+        update(
+            &mut model,
+            UiEvent::Group(Verb::Join {
+                group: Target::Peer(FAMILIE),
+            }),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 5)));
+        arrive(
+            &mut model,
+            FAMILIE,
+            2,
+            "",
+            Lev {
+                capabilities: Some(3),
+                members: Some(Members {
+                    epoch: 2,
+                    members: vec![
+                        Member {
+                            address: ANNA,
+                            name: "Anna".into(),
+                            flags: 2 | 4,
+                        },
+                        Member {
+                            address: OWN,
+                            name: "Mia".into(),
+                            flags: 4,
+                        },
+                        Member {
+                            address: BERT,
+                            name: "Bert".into(),
+                            flags: 0,
+                        },
+                    ],
+                }),
+                ..Lev::default()
+            },
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 10)));
+        arrive(
+            &mut model,
+            FAMILIE,
+            3,
+            "Anna Schulz: Bread is here",
+            copy(ANNA),
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 11)));
+        arrive(&mut model, FAMILIE, 4, "Bert: Thanks!", copy(BERT));
+        update(&mut model, UiEvent::Clock(at(30, 9, 12)));
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer: FAMILIE,
+                body: "On my way".into(),
+            },
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 20)));
+        arrive(
+            &mut model,
+            ANNA,
+            5,
+            "Anna invited you to Verein: lxma://…",
+            invite(VEREIN, "Verein"),
+        );
+        let (w, h) = (900, 560);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let mut shot = |model: &mut crate::shell::Model, name: &str| {
+            app.apply(Message::Seen(Box::new(seen_of(model))));
+            map::tests::same_as(name, &shoot(&app, w, h), w, h);
+        };
+        update(&mut model, UiEvent::Open { peer: FAMILIE });
+        shot(&mut model, "gui-group-chat.png");
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        shot(&mut model, "gui-group-invitation.png");
+        update(&mut model, UiEvent::Open { peer: FAMILIE });
+        update(
+            &mut model,
+            UiEvent::Group(Verb::Members {
+                group: Target::Open,
+            }),
+        );
+        shot(&mut model, "gui-group-members.png");
+        update(&mut model, UiEvent::Group(Verb::Close));
+        update(&mut model, UiEvent::Group(Verb::New));
+        update(&mut model, UiEvent::Group(Verb::Pick(BERT)));
+        update(&mut model, UiEvent::Group(Verb::Next));
+        update(&mut model, UiEvent::Group(Verb::Name("Market".into())));
+        shot(&mut model, "gui-group-new.png");
+        // A press on the scene's Create asks the model.
+        let create = app
+            .scene
+            .new_group
+            .as_ref()
+            .map(|n| n.create.clone())
+            .expect("Create");
+        assert!(create.enabled);
+        assert_eq!(create.intent, Intent::Group(Verb::Create));
     }
 
     /// `pcm` as the microphone's levels for Anna's recording, a window
@@ -2804,6 +2952,57 @@ mod tests {
         assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(true)]);
         let _ = app.update(Message::Intent(Intent::Back));
         assert_eq!(app.screen, Screen::Chats);
+    }
+
+    /// 1290: the settings page's Maps rows delete every region after
+    /// asking once: the label's total is the three regions', Back takes
+    /// the question away and keeps the page, a yes deletes the files,
+    /// which the painter no longer draws, and an empty list asks nothing.
+    #[test]
+    fn the_settings_page_deletes_all_maps_after_asking_once() {
+        let dir = tempfile::tempdir().expect("maps dir");
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../leviculum-map/fixtures/firenze.lmr");
+        for name in ["firenze.lmr", "auto-a.lmr", "auto-b.lmr"] {
+            std::fs::copy(&fixture, dir.path().join(name)).expect("a region");
+        }
+        let len = std::fs::metadata(&fixture).expect("its size").len();
+        let maps = loquax::picture::Maps::new(Some(dir.path().to_path_buf()));
+        let mut app = App::new(Frames::new(maps), None);
+        app.seen.autoload = true;
+        assert_eq!(app.setup.regions.len(), 3);
+        let _ = app.update(Message::Settings);
+        assert_eq!(app.maps_usage, (3, 3 * len));
+        assert!(!app.maps_asked);
+
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: false,
+        }));
+        assert!(app.maps_asked);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert!(!app.maps_asked, "Back takes the question away");
+        assert_eq!(app.screen, Screen::Settings, "and keeps the page");
+        assert!(dir.path().join("firenze.lmr").is_file());
+
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: false,
+        }));
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: true,
+        }));
+        assert!(!app.maps_asked);
+        assert_eq!(app.maps_usage, (0, 0));
+        assert!(std::fs::read_dir(dir.path())
+            .expect("the dir")
+            .next()
+            .is_none());
+        assert!(app.setup.regions.is_empty(), "the painter drew them last");
+        assert_eq!(app.screen, Screen::Settings);
+
+        let _ = app.update(Message::Intent(Intent::DeleteAllRegions {
+            confirmed: false,
+        }));
+        assert!(!app.maps_asked, "nothing to ask about");
     }
 
     /// The desktop's dark setting turns the window dark, and the toggle

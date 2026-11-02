@@ -674,6 +674,9 @@ impl Engine {
                     }
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::AnnouncePosition { position } => {
+                    self.announce_position(ready, core, &position, out)
+                }
                 // A client's commands: a messenger learns its states from its
                 // own router.
                 Command::HomeAccepted { .. }
@@ -715,6 +718,34 @@ impl Engine {
             Via::Propagated => DeliveryMethod::Propagated,
             Via::Direct | Via::Link => DeliveryMethod::Direct,
         };
+        // A recipient whose key this node does not hold (a group's engine
+        // started again after a kill, 1307 G2, keeps no known identities):
+        // ask its path, as a stock app does before it writes to an address
+        // it holds no key for. The answer is an announce and brings the key;
+        // the router only asks for a path it lacks, and a client of a shared
+        // instance has the path without the key.
+        let destination = DestinationHash::new(message.destination_hash);
+        if message.method == DeliveryMethod::Direct
+            && core
+                .storage()
+                .get_identity(destination.as_bytes())
+                .is_none()
+        {
+            tracing::info!(
+                "ENGINE no key for {}: asking its path",
+                crate::address::to_hex(&message.destination_hash)
+            );
+            let output = core.request_path_unthrottled(&destination);
+            self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            );
+        }
         if message.method == DeliveryMethod::Propagated
             && ready.router.outbound_propagation_node().is_none()
         {
@@ -889,7 +920,10 @@ impl Engine {
                     detail: "a client of a Loquax Mailbox has no propagation node of its own"
                         .to_string(),
                 }),
-                Command::Resolve { .. } | Command::Cancel { .. } | Command::Announce => {}
+                Command::Resolve { .. }
+                | Command::Cancel { .. }
+                | Command::Announce
+                | Command::AnnouncePosition { .. } => {}
             }
         }
         for source in self.unheard_due(core, now_ms) {
@@ -1269,6 +1303,60 @@ impl Engine {
     /// staying repliable; rate-limiting it against a stored last-announced
     /// timestamp belongs with the sync policy of a later slice, not here,
     /// where it would be a guess with no reader to justify it.
+    /// Announce `position` on our `lev.position` destination (1302),
+    /// registered beside the delivery destination, of the same identity, on
+    /// first use. A failure is said in the log and nothing else: a position
+    /// announce is a courtesy to the mesh, never a message's fate.
+    fn announce_position<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        position: &leviculum_lxmf::lev_position::Position,
+        out: &mut TickOutput,
+    ) {
+        let Some(identity) = core
+            .destination(&DestinationHash::new(ready.address))
+            .and_then(|d| d.identity())
+            .and_then(|identity| identity.private_key_bytes().ok())
+            .and_then(|bytes| Identity::from_private_key_bytes(&bytes).ok())
+        else {
+            tracing::warn!("loquax: no identity to announce a position with");
+            return;
+        };
+        let hash = leviculum_core::Destination::compute_destination_hash(
+            &crate::mesh_position::name_hash(),
+            identity.hash(),
+        );
+        if core.destination(&hash).is_none() {
+            match leviculum_core::Destination::new(
+                Some(identity),
+                leviculum_core::Direction::In,
+                leviculum_core::DestinationType::Single,
+                crate::mesh_position::APP_NAME,
+                &[crate::mesh_position::ASPECT],
+            ) {
+                Ok(destination) => core.register_destination(destination),
+                Err(e) => {
+                    tracing::warn!("loquax: lev.position destination: {e:?}");
+                    return;
+                }
+            }
+        }
+        let app_data = position.encode();
+        match core.announce_destination(&hash, Some(&app_data)) {
+            Ok(output) => self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            ),
+            Err(e) => tracing::warn!("loquax: could not announce our position: {e:?}"),
+        }
+    }
+
     fn announce<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
@@ -1635,6 +1723,24 @@ fn is_propagation_node(name_hash: &[u8]) -> bool {
         )
 }
 
+impl Engine {
+    /// The identity whose private key this engine holds, the home
+    /// identity a board seals its position to; `None` on a client of a
+    /// home node, which never holds it.
+    fn own_identity<'a, R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &'a self,
+        core: &'a NodeCore<R, C, S>,
+    ) -> Option<&'a Identity> {
+        match &self.state {
+            State::Unregistered(identity) => Some(identity),
+            State::Ready(ready) => core
+                .destination(&DestinationHash::new(ready.address))
+                .and_then(|destination| destination.identity()),
+            State::Failed | State::Client(_) => None,
+        }
+    }
+}
+
 /// The two hooks, in the shape of the driver's `CoreProcessor` and with the
 /// same contract: both run with the core lock held, and neither blocks.
 impl Engine {
@@ -1645,6 +1751,30 @@ impl Engine {
         event: &NodeEvent,
     ) -> TickOutput {
         let mut out = TickOutput::empty();
+        // A position the mesh announces needs no router and no
+        // destination of ours (1302): a client of a home node shows it as
+        // the home node does.
+        // Plain ones always; a sealed one only when it is sealed to our
+        // identity (1313): our own boards, never a stranger's.
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if crate::mesh_position::is_position(announce.name_hash()) {
+                let position =
+                    crate::mesh_position::read(announce.app_data(), self.own_identity(core));
+                match position {
+                    Some(position) => {
+                        let heard_at = i64::try_from(core.emission_secs()).unwrap_or(i64::MAX);
+                        self.emit(OutboxEvent::MeshPosition {
+                            identity: announce.computed_identity_hash(),
+                            location: position.location(heard_at),
+                            name: position.name,
+                        });
+                    }
+                    None => tracing::debug!(
+                        "loquax: a lev.position announce we cannot read (sealed to another)"
+                    ),
+                }
+            }
+        }
         if matches!(self.state, State::Client(_)) {
             return out;
         }
@@ -1951,6 +2081,297 @@ mod tests {
                 .ratchet_count(),
             2
         );
+    }
+
+    /// A signed announce of `identity`'s `app.aspects` destination carrying
+    /// `app_data`, as the bytes an interface hands the core.
+    fn announce_bytes(
+        identity: &Identity,
+        app: &str,
+        aspects: &[&str],
+        app_data: &[u8],
+    ) -> Vec<u8> {
+        let copy = Identity::from_private_key_bytes(&identity.private_key_bytes().expect("key"))
+            .expect("copy");
+        let mut destination = leviculum_core::Destination::new(
+            Some(copy),
+            leviculum_core::Direction::In,
+            leviculum_core::DestinationType::Single,
+            app,
+            aspects,
+        )
+        .expect("destination");
+        let packet = destination
+            .announce(Some(app_data), &mut rand_core::OsRng, 1_000, 1)
+            .expect("announce");
+        let mut bytes = [0u8; 512];
+        let len = packet.pack(&mut bytes).expect("pack");
+        bytes[..len].to_vec()
+    }
+
+    /// 1302: a `lev.position` announce the core heard reaches the screen's
+    /// seam as the announcing identity's position, the identity whose
+    /// delivery address the core keys it by; the same node's delivery
+    /// announce is no position, nor is a position announce in a layout
+    /// the codec does not read. A client of a home node hears it too.
+    #[test]
+    fn a_position_announce_reaches_the_seam_as_the_identitys_position() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let anna = leviculum_std::generate_identity();
+        let location = leviculum_lxmf::telemetry::Location {
+            latitude_e6: 43_773_100,
+            longitude_e6: 11_256_000,
+            altitude_e2: 5_000,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 0,
+            last_update: 1_793_500_000,
+        };
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let fixture = crate::mesh_position::manual(&location, Some("Anna".into())).encode();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&anna, "lev", &["position"], &fixture),
+        );
+        assert_eq!(
+            mesh_fix(&events, anna.hash()),
+            Some((
+                location.latitude_e6,
+                location.longitude_e6,
+                Some("Anna".into())
+            )),
+            "{events:?}"
+        );
+        assert_eq!(
+            crate::mesh_position::delivery_of(anna.hash()),
+            delivery_address(&anna).expect("address"),
+            "the position is keyed by the peer's delivery address"
+        );
+
+        // The delivery announce of the same node is a name, not a place.
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&anna, "lxmf", &["delivery"], &fixture),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboxEvent::MeshPosition { .. })),
+            "{events:?}"
+        );
+        // 1302's stand-in layout is no position.
+        let bob = leviculum_std::generate_identity();
+        let mut stand_in = [0u8; 18];
+        stand_in[0] = 1;
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&bob, "lev", &["position"], &stand_in),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OutboxEvent::MeshPosition { .. })),
+            "{events:?}"
+        );
+
+        // `loquax announce`'s command: an engine announces its own position
+        // on `lev.position` beside its delivery destination, and the engine
+        // of another core hears it as that identity's.
+        let sender_dir = tempfile::tempdir().expect("tempdir");
+        let mut sender_core = self::core(sender_dir.path());
+        let dave = leviculum_std::generate_identity();
+        let dave_hash = *dave.hash();
+        let mut sender = Engine::new(dave, b"dave".to_vec());
+        let now_ms = sender_core.now_ms();
+        let _ = sender.on_tick(&mut sender_core, now_ms);
+        sender.submit(Command::AnnouncePosition {
+            position: crate::mesh_position::manual(&location, Some("Dave".into())),
+        });
+        let mut out = sender.on_tick(&mut sender_core, now_ms);
+        out.merge(sender.on_tick(&mut sender_core, now_ms));
+        let sent: Vec<Vec<u8>> = out
+            .actions
+            .iter()
+            .map(|action| match action {
+                leviculum_core::Action::SendPacket { data, .. }
+                | leviculum_core::Action::Broadcast { data, .. } => data.clone(),
+            })
+            .collect();
+        assert!(!sent.is_empty(), "the position announce went out");
+        // A fresh listener: the one above heard four unknown announces on
+        // one interface, and the core's ingress burst limit holds a fifth
+        // (`leviculum-core/src/transport.rs`, `handle_announce_inner`).
+        let listener_dir = tempfile::tempdir().expect("tempdir");
+        let mut listener_core = self::core(listener_dir.path());
+        let mut listener = engine_named(b"listener");
+        let now_ms = listener_core.now_ms();
+        let _ = listener.on_tick(&mut listener_core, now_ms);
+        let _ = drain(&mut listener);
+        for bytes in &sent {
+            let out = listener_core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = listener.on_event(&mut listener_core, event);
+            }
+        }
+        let heard = drain(&mut listener);
+        assert_eq!(
+            mesh_fix(&heard, &dave_hash),
+            Some((
+                location.latitude_e6,
+                location.longitude_e6,
+                Some("Dave".into())
+            )),
+            "{heard:?}"
+        );
+
+        // A client of a home node shows it as the home node would.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_, _, mut client, mut client_core) = client_setup(dir.path());
+        let carol = leviculum_std::generate_identity();
+        let out = client_core.handle_packet(
+            InterfaceId(0),
+            &announce_bytes(&carol, "lev", &["position"], &fixture),
+        );
+        for event in &out.events {
+            let _ = client.on_event(&mut client_core, event);
+        }
+        let heard = drain(&mut client);
+        assert_eq!(
+            mesh_fix(&heard, carol.hash()),
+            Some((
+                location.latitude_e6,
+                location.longitude_e6,
+                Some("Anna".into())
+            )),
+            "{heard:?}"
+        );
+    }
+
+    /// The coordinates and name of the first [`OutboxEvent::MeshPosition`]
+    /// for `identity` among `events`, if one is there.
+    fn mesh_fix(events: &[OutboxEvent], identity: &[u8; 16]) -> Option<(i32, i32, Option<String>)> {
+        events.iter().find_map(|event| match event {
+            OutboxEvent::MeshPosition {
+                identity: heard,
+                location,
+                name,
+            } if heard == identity => {
+                Some((location.latitude_e6, location.longitude_e6, name.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    /// 1313: a board's position sealed to another identity is no pin on our
+    /// map, though the announce is a valid `lev.position` one; the positive
+    /// control seals the same position to our home identity, and that one
+    /// is a pin. A client of the home holds no key, so it shows neither.
+    #[test]
+    fn a_position_sealed_to_another_identity_is_no_pin_and_ours_is() {
+        use crate::ui::tests::Field;
+        use crate::ui::{update, UiEvent, UiModel};
+        use leviculum_core::transport::InterfaceId;
+        use leviculum_lxmf::lev_position::AppData;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let home = leviculum_std::generate_identity();
+        let home_copy =
+            Identity::from_private_key_bytes(&home.private_key_bytes().expect("a private key"))
+                .expect("identity");
+        let mut engine = Engine::new(home, b"home".to_vec());
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut model = UiModel::<Field>::new(&[]);
+        let hear = |engine: &mut Engine,
+                    core: &mut StdNodeCore,
+                    model: &mut UiModel<Field>,
+                    bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(core, event);
+            }
+            let events = drain(engine);
+            for event in &events {
+                if matches!(event, OutboxEvent::MeshPosition { .. }) {
+                    let _ = update(model, UiEvent::Engine(event.clone()));
+                }
+            }
+            events
+        };
+        let position = crate::mesh_position::manual(
+            &leviculum_lxmf::telemetry::Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 0,
+                last_update: 1_793_500_000,
+            },
+            None,
+        );
+
+        // A stranger's board, sealed to its own owner.
+        let board = leviculum_std::generate_identity();
+        let owner = leviculum_std::generate_identity();
+        let theirs = position.seal(&owner, &mut rand_core::OsRng).expect("seal");
+        assert!(matches!(AppData::parse(&theirs), Some(AppData::Sealed(_))));
+        let events = hear(
+            &mut engine,
+            &mut core,
+            &mut model,
+            &announce_bytes(&board, "lev", &["position"], &theirs),
+        );
+        assert_eq!(mesh_fix(&events, board.hash()), None, "{events:?}");
+        let board_peer = crate::mesh_position::delivery_of(board.hash());
+        assert!(
+            model.map_pins().iter().all(|pin| pin.peer != board_peer),
+            "a stranger's sealed position is no pin"
+        );
+
+        // Positive control: our own board, sealed to our home identity.
+        let ours_board = leviculum_std::generate_identity();
+        let ours = position
+            .seal(&home_copy, &mut rand_core::OsRng)
+            .expect("seal");
+        let ours_bytes = announce_bytes(&ours_board, "lev", &["position"], &ours);
+        let events = hear(&mut engine, &mut core, &mut model, &ours_bytes);
+        assert_eq!(
+            mesh_fix(&events, ours_board.hash()),
+            Some((43_773_100, 11_256_000, None)),
+            "{events:?}"
+        );
+        let ours_peer = crate::mesh_position::delivery_of(ours_board.hash());
+        assert!(
+            model.map_pins().iter().any(|pin| pin.peer == ours_peer),
+            "our own board is a pin: {:?}",
+            model.map_pins()
+        );
+
+        // A client of the home holds no key: our board's sealed announce
+        // is no position there.
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let (_, _, mut client, mut client_core) = client_setup(client_dir.path());
+        let out = client_core.handle_packet(InterfaceId(0), &ours_bytes);
+        for event in &out.events {
+            let _ = client.on_event(&mut client_core, event);
+        }
+        let heard = drain(&mut client);
+        assert_eq!(mesh_fix(&heard, ours_board.hash()), None, "{heard:?}");
     }
 
     /// 1185: a packet to our delivery destination that did not decrypt is

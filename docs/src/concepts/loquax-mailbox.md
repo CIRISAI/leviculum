@@ -289,7 +289,7 @@ default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
 consequence spelled out, not a config-file default nobody reads. Loquax
 does not expose it yet: it enables the client with
-`PropagationClientConfig::default()` (`loquax/src/engine.rs:1623`).
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1711`).
 
 Set to `true`, our client keeps every message on the node. That is a
 deviation from the reference client, whose flag only keeps messages it
@@ -470,6 +470,6 @@ relay auto-selection, and three states cover that: only **known** contacts
 qualify.
 
 The identity file itself must not behave like `lnomad`'s
-(`load_or_create`, `lnomad/src/identity.rs:39-53`, silently regenerating on
+(`load_or_create`, `lnomad/src/identity.rs:48-62`, silently regenerating on
 a decode failure). A corrupt identity is a refusal to start with a clear
 message, because minting a new one silently changes the user's address.

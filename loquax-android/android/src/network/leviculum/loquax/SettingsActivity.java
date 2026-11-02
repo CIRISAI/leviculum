@@ -33,7 +33,7 @@ import java.util.Map;
  * Privacy holds the blocked contacts (1146), each with its avatar, name
  * and an "Unblock" that brings its conversation back on every device of
  * the home. Backup is the mailbox's backup when the mailbox is on this
- * phone (1152). Advanced names the Propagation Node, the only place the
+ * phone (1152). Advanced names the relay (the propagation node), the only place the
  * app does, and ends the service.
  *
  * Chats holds the photo size (1220): small, phone (the default) or the
@@ -45,7 +45,8 @@ import java.util.Map;
  *
  * Maps (1201) is the management "Load area" was an action for: the
  * switch for the automatic download, the storage the regions take, and
- * each region with its size and date and a delete. Privacy lists the
+ * each region with its size and date and a delete, and at the list's
+ * foot one row that deletes them all (1290). Privacy lists the
  * positions the user shared, to whom and when, under the blocked
  * contacts.
  */
@@ -465,6 +466,62 @@ public class SettingsActivity extends Activity implements Events.Listener {
         for (Map<String, Object> region : regions) {
             body.addView(region(region));
         }
+        body.addView(deleteAll(regions.size(), Core.num(answer, "region_bytes"),
+                Core.bool(answer, "autoload")));
+    }
+
+    /**
+     * The list's last row (1290): "Delete all downloaded maps (1.2 GB)",
+     * off without maps; a tap asks once, in words that say whether the
+     * automatic download brings them back, then deletes and shows the
+     * page again.
+     */
+    private View deleteAll(final int count, long bytes, final boolean autoload) {
+        Button all = new Button(this);
+        all.setId(R.id.maps_delete_all);
+        all.setText(getString(R.string.maps_delete_all, Formatter.formatShortFileSize(this, bytes)));
+        all.setEnabled(count > 0);
+        all.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                int ask = autoload ? R.string.maps_delete_all_ask : R.string.maps_delete_all_ask_manual;
+                new AlertDialog.Builder(SettingsActivity.this)
+                        .setMessage(getString(ask, count))
+                        .setPositiveButton(R.string.maps_delete_all_yes, new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                deleteAllRegions();
+                            }
+                        })
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show();
+            }
+        });
+        LinearLayout row = new LinearLayout(this);
+        row.setPadding(dp(16), dp(16), dp(16), dp(16));
+        row.addView(all, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return row;
+    }
+
+    /** Delete every region off the UI thread, say a refusal, then ask the page again. */
+    private void deleteAllRegions() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String error = Core.deleteRegions();
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (error != null && !isFinishing()) {
+                            android.widget.Toast.makeText(SettingsActivity.this, error,
+                                    android.widget.Toast.LENGTH_LONG).show();
+                        }
+                        maps(null, null);
+                    }
+                });
+            }
+        }, "loquax-regions-all").start();
     }
 
     /** One region: where it is, its size, date and zooms, and Delete with a question first. */
@@ -603,7 +660,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    /** The Propagation Node, the map's fling, and the service's end. */
+    /** The relay (the propagation node), the map's fling, and the service's end. */
     private void advanced() {
         mapFling(null);
         TextView node = text(getString(R.string.propagation_node), 16, R.color.text);

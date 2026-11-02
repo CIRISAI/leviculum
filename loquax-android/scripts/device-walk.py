@@ -47,9 +47,11 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PACKAGE = "network.leviculum.loquax.debug"
@@ -66,6 +68,7 @@ STEPS = [
     "notification_text",
     "open_imported",
     "info",
+    "contact_info",
     "marks",
     "reply_send",
     "compose_bar",
@@ -85,9 +88,16 @@ STEPS = [
     "receive_report",
     "position_pin",
     "draft",
+    "group_create",
+    "group_join",
+    "group_message",
+    "network_wifi_toggle",
+    "network_mobile_switch",
+    "flight_mode",
     "map",
     "fling",
     "friends",
+    "offgrid_positions",
     "settings",
     "receipts",
     "profile",
@@ -95,8 +105,11 @@ STEPS = [
     "pencil_scan",
     "share_in_contact",
     "buildings",
+    "pan_into_empty",
+    "region_fills_in",
     "first_start_name",
     "link_device",
+    "move_phone",
     "teardown",
 ]
 
@@ -117,6 +130,17 @@ LINK_STATUS = "link_status"
 LINKED = "Device linked: {}"
 LINKED_NAME = "walk laptop"
 JOIN_CODE_PREFIX = "lqxh1"
+# Moving to a new phone (1281, walk finding 24): the profile's row, the
+# sheet's ids, its line once the new phone (the host's walk_move) took the
+# mailbox, and the first screen of the old phone afterwards.
+MOVE_ROW = "profile_move_phone"
+MOVE_QR = "move_qr"
+MOVE_CODE = "move_code"
+MOVED = "Moved to {}. This phone has stopped."
+MOVED_NAME = "walk new phone"
+MOVED_TITLE = "This phone has moved"
+TAKE_BACK = "Use this phone again"
+TAKE_BACK_ID = "join_retry"
 # The first start's name (walk finding 9): the address page's one field,
 # and the name the walk types into it on a phone mailbox.
 WELCOME_NAME = "welcome_name"
@@ -139,6 +163,17 @@ JOIN = "Join"
 ACTION_INFO = "Info"
 ACTION_REPLY = "Reply"
 INFO_TITLE = "Message details"
+# The chat menu and the contact screen (1283, walk findings 28 and 29):
+# Refresh left the menu; the identity and the network sit under a closed
+# Advanced, whose header and body have their ids (ids.xml).
+CONTACT_INFO = "Contact info"
+CHAT_MENU_GONE = ["Refresh"]
+CONTACT_SCROLL = "contact_scroll"
+CONTACT_ADVANCED = "contact_advanced"
+CONTACT_ADVANCED_BODY = "contact_advanced_body"
+CONTACT_FOLDED = ["Identity", "Network"]
+# Words the contact screen's main rows no longer say (finding 29).
+CONTACT_MAIN_WORDS = ["hash", "the name it announces"]
 MAP = "Map"
 MORE = "More"
 SEND = "Send"
@@ -264,6 +299,16 @@ REC_LINE = re.compile(
 # the start of every contact code its QR and the profile's hold.
 WELCOME_ACTIVITY = "network.leviculum.loquax.WelcomeActivity"
 LXMA_PREFIX = "lxma://"
+# Group chats (1307): the pencil's "New group" row, the picker's Next and
+# the name step's Create (the catalogue's group_next, group_create), the
+# mailbox's line when it hosts a group, and the line a member who joined
+# by writing makes in the group's chat (1307 G2).
+GROUP_NEW = "new_group"
+GROUP_NEXT = "Next"
+GROUP_CREATE = "Create"
+GROUP_JOINED = "{} joined."
+
+
 # The pencil (1263, finding 3): its two rows, top to bottom, the fold
 # that hides the typed address, and the sentence for a text that is no
 # code (the catalogue's code_foreign).
@@ -290,10 +335,24 @@ FIXTURE_REGION = REPO / "leviculum-map" / "fixtures" / "firenze.lmr"
 FIXTURE_REGION_PLACE = re.compile(r"43[.,]\d\d° N, 11[.,]\d\d° E")
 # A size as Formatter.formatShortFileSize writes it: "1.2 MB", "345 kB".
 FILE_SIZE = re.compile(r"\d+(?:[.,]\d+)?\s?(?:B|kB|KB|MB|GB)\b")
+# The Maps page's last row (1290, the core's catalogue): its id, its label
+# with the total, its one question with the count while the automatic
+# download is on, and the question's yes.
+DELETE_ALL = "maps_delete_all"
+DELETE_ALL_LABEL = re.compile(
+    r"(?:Delete all downloaded maps|Alle geladenen Karten löschen) \((.+)\)"
+)
+DELETE_ALL_ASK = re.compile(
+    r"Delete all (\d+) maps\? Areas you visit will be downloaded again when you look at them\."
+    r"|Alle (\d+) Karten löschen\? Gebiete, die du besuchst, werden wieder geladen,"
+    r" wenn du sie anschaust\."
+)
+DELETE_ALL_YES = "Delete all"
 # The buttons of the dialogs a first start may raise: Android's
 # notification question, its battery exemption, the app's own (Asks.java).
-# "Not now" before "Leave it out": the latter opens a second, system dialog.
-DIALOG_BUTTONS = ["Allow", "ALLOW", "Not now"]
+# "Not now" first: the battery question's "Allow" (1283, finding 27) opens a
+# second, system dialog; Android's own questions have no "Not now".
+DIALOG_BUTTONS = ["Not now", "Allow", "ALLOW"]
 # The list's last line for a peer whose position is live (1209, Ui.preview).
 LIVE_LINE = "\U0001f4cd live"
 # A row's last line while a message is typed there and not sent (1219,
@@ -361,6 +420,7 @@ class Node:
     scrollable: bool = False
     checked: bool = False
     selected: bool = False
+    enabled: bool = True
 
     @property
     def center(self) -> tuple[int, int]:
@@ -466,6 +526,18 @@ def accepted_to(log: str, peer: str) -> int:
     )
 
 
+def group_hosted(log: str, name: str) -> str | None:
+    """The address the mailbox hosts the group `name` at (`GROUP hosted
+    name=<name> address=<hex>`, 1307), the newest such line's."""
+    found = None
+    prefix = f"GROUP hosted name={name} address="
+    for line in log.splitlines():
+        at = line.find(prefix)
+        if at >= 0:
+            found = line[at + len(prefix):].split()[0]
+    return found
+
+
 def chip_problems(nodes: list[Node], words) -> list[str]:
     """What is wrong with the share's chip (1273): not there, its words
     not `words` (a string, or a pattern), or a Stop without words for a
@@ -484,6 +556,198 @@ def chip_problems(nodes: list[Node], words) -> list[str]:
     elif not (stop[0].desc or stop[0].text):
         problems.append("the Stop has no words for a screen reader")
     return problems
+
+
+# The map chip's words for a load for the screen (strings.xml map_loading,
+# 1199; since 1292 only for the area on screen).
+MAP_LOADING = "Loading the map of this area"
+# How long after the pan's last swipe ended the load for the screen may
+# reach the source: the scheduler's bound (300 ms from the uncovered
+# frame, 1292) and a frame's draw and the network's way on top.
+PAN_LOAD_SLACK_MS = 700
+
+
+def map_chip(nodes: list[Node]) -> str:
+    """The map chip's words, empty when none shows."""
+    chips = find(nodes, rid="chip")
+    return chips[0].text if chips else ""
+
+
+def pan_into_empty_problems(
+    before_chip: str,
+    after_chip: str,
+    connects_before: int,
+    connect_ms: list[int],
+    pan_end_ms: int,
+) -> list[str]:
+    """What is wrong with a pan from the walk's region into the empty
+    (1292): the chip said a load for the screen before the pan, no load
+    reached the source after it, the first one only later than
+    `PAN_LOAD_SLACK_MS` after the pan ended, or the chip did not say it
+    loads here afterwards. `connect_ms` are the source's connections since
+    the pan began, in milliseconds from it; `connects_before` those before,
+    the loads next to the screen."""
+    problems = []
+    if before_chip.startswith(MAP_LOADING):
+        problems.append(f"the chip said {before_chip!r} before the pan, over a held view")
+    if not connect_ms:
+        problems.append(f"no load reached the source after the pan ({connects_before} before it)")
+    elif connect_ms[0] > pan_end_ms + PAN_LOAD_SLACK_MS:
+        problems.append(
+            f"the first load reached the source {connect_ms[0]} ms after the pan began, "
+            f"later than {pan_end_ms} + {PAN_LOAD_SLACK_MS}"
+        )
+    if not after_chip.startswith(MAP_LOADING):
+        problems.append(f"the chip says {after_chip!r} after the pan, want {MAP_LOADING!r}")
+    return problems
+
+
+class StallingSource:
+    """A map source on the walk's host that takes every connection and
+    never answers (1292): a load that starts stays running, and its
+    connection's time is the load's start as the host sees it."""
+
+    def __init__(self, host: str) -> None:
+        self.server = socket.create_server((host, 0))
+        self.port = self.server.getsockname()[1]
+        self.times: list[float] = []
+        self.held: list[socket.socket] = []
+        self.thread = threading.Thread(target=self.accept, daemon=True)
+        self.thread.start()
+
+    def accept(self) -> None:
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            self.times.append(time.monotonic())
+            self.held.append(conn)
+
+    def close(self) -> None:
+        self.server.close()
+        for conn in self.held:
+            conn.close()
+
+
+# A region arriving over a slow link (1291): the Grunewald archive (z12
+# to z15, leviculum-mapcut/fixtures/README.md) served from this host at
+# FILL_RATE, about ten seconds of it, the map opened over it at z15. The
+# map must show at least FILL_STATES_LEAST distinct pictures before the
+# source sent its last byte: the outline and the coarser zooms standing in
+# for the finer ones as they arrive.
+GRUNEWALD_ARCHIVE = REPO / "leviculum-mapcut" / "fixtures" / "grunewald.pmtiles"
+GRUNEWALD_E6 = (52471500, 13228000)
+FILL_RATE = 8000
+FILL_STATES_LEAST = 3
+# The share of the samples that must differ for a grab to be a new picture.
+FILL_CHANGED = 0.02
+FILL_TIMEOUT_S = 90
+# How long the map must stay the same after the last byte to be at rest.
+FILL_REST_S = 3.0
+
+
+def fill_states(grabs: list[tuple[float, list[tuple[int, int, int]]]]) -> list[float]:
+    """The times of the grabs that start a new picture: the first, and each
+    that differs from the last new one in more than `FILL_CHANGED` of its
+    samples."""
+    times: list[float] = []
+    last = None
+    for at, samples in grabs:
+        if last is None or changed_fraction(samples, last) > FILL_CHANGED:
+            times.append(at)
+            last = samples
+    return times
+
+
+def region_fills_problems(states: list[float], served: int, size: int, last_byte: float | None) -> list[str]:
+    """What is wrong with a region arriving (1291): the source did not send
+    the whole archive, or the map showed fewer than `FILL_STATES_LEAST`
+    distinct pictures up to its last byte. `states` are the new pictures'
+    times, `last_byte` the time the source sent the last byte."""
+    problems = []
+    if served < size or last_byte is None:
+        problems.append(f"the source sent {served} of {size} bytes")
+        return problems
+    before = [t for t in states if t <= last_byte]
+    if len(before) < FILL_STATES_LEAST:
+        problems.append(
+            f"{len(before)} distinct pictures before the region was whole, "
+            f"want at least {FILL_STATES_LEAST}"
+        )
+    return problems
+
+
+class ThrottledSource:
+    """A map source on the walk's host that answers range requests for one
+    archive at `rate` bytes a second over all its connections together
+    (1291): a slow link the region arrives over. `served` counts the
+    bytes sent of the answers' bodies, `last_byte` when the whole archive
+    had gone out."""
+
+    def __init__(self, host: str, data: bytes, rate: int) -> None:
+        self.data = data
+        self.rate = max(1, rate)
+        self.lock = threading.Lock()
+        self.free = 0.0
+        self.sent: set[int] = set()
+        self.served = 0
+        self.last_byte: float | None = None
+        source = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                source.answer(self)
+
+        self.server = ThreadingHTTPServer((host, 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def answer(self, h: BaseHTTPRequestHandler) -> None:
+        size = len(self.data)
+        m = re.fullmatch(r"bytes=(\d+)-(\d*)", h.headers.get("Range", ""))
+        start, end = 0, size - 1
+        if m:
+            start = int(m.group(1))
+            end = min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
+        if start >= size:
+            h.send_response(416)
+            h.send_header("Content-Range", f"bytes */{size}")
+            h.send_header("Content-Length", "0")
+            h.end_headers()
+            return
+        body = self.data[start : end + 1]
+        h.send_response(206 if m else 200)
+        if m:
+            h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        h.send_header("Content-Length", str(len(body)))
+        h.send_header("Connection", "close")
+        h.end_headers()
+        for at in range(0, len(body), 4096):
+            chunk = body[at : at + 4096]
+            with self.lock:
+                now = time.monotonic()
+                begin = max(now, self.free)
+                self.free = begin + len(chunk) / self.rate
+                due = self.free
+            time.sleep(max(0.0, due - time.monotonic()))
+            h.wfile.write(chunk)
+            with self.lock:
+                self.served += len(chunk)
+                self.sent.update(range(start + at, start + at + len(chunk)))
+                if self.last_byte is None and len(self.sent) >= size:
+                    self.last_byte = time.monotonic()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
 
 
 def end_reports(store: Path, peer: str) -> int:
@@ -909,6 +1173,7 @@ def parse_dump(xml_text: str) -> list[Node]:
                 scrollable=el.get("scrollable") == "true",
                 checked=el.get("checked") == "true",
                 selected=el.get("selected") == "true",
+                enabled=el.get("enabled", "true") == "true",
             )
         )
     return nodes
@@ -1001,6 +1266,44 @@ def friends_sheet_problems(nodes: list[Node], allowed: set[str]) -> tuple[list[s
     if twice:
         problems.append(f"listed twice: {twice}")
     return names, problems
+
+
+# The pins the map drew (1302, MapPane.refresh's line): all, and how many
+# are nodes nearby.
+MAP_PINS = re.compile(r"map pins=(?P<pins>\d+) nearby=(?P<nearby>\d+)")
+# The card of a node nearby (strings_scene.xml, nearby_card).
+NEARBY_CARD = "Nearby, not in your contacts"
+# Two places near the Florence fixture, the nodes nearby announce.
+OFFGRID_PLACES = ["43.7741,11.2551", "43.7768,11.2589"]
+
+
+def map_pins(logcat: str) -> tuple[int, int] | None:
+    """The newest `map pins=N nearby=M` line of a logcat; None without one."""
+    found = list(MAP_PINS.finditer(logcat))
+    if not found:
+        return None
+    last = found[-1]
+    return int(last.group("pins")), int(last.group("nearby"))
+
+
+def offgrid_problems(
+    pins: tuple[int, int] | None, before: tuple[int, int] | None, names: list[str], wanted: list[str]
+) -> list[str]:
+    """What is wrong after two nodes announced (1302): fewer than two more
+    pins, not two more nearby ones, a seeded name missing from the sheet."""
+    problems = []
+    if pins is None:
+        problems.append("no 'map pins=' line in the logcat")
+    else:
+        was = before or (0, 0)
+        if pins[0] - was[0] < len(wanted):
+            problems.append(f"pins {was[0]} -> {pins[0]}, want {len(wanted)} more")
+        if pins[1] - was[1] < len(wanted):
+            problems.append(f"nearby pins {was[1]} -> {pins[1]}, want {len(wanted)} more")
+    missing = [w for w in wanted if not any(n.startswith(w) for n in names)]
+    if missing:
+        problems.append(f"not in the Friends sheet: {missing}; the sheet has {names}")
+    return problems
 
 
 def divider_above(nodes: list[Node]) -> bool:
@@ -1102,6 +1405,22 @@ def link_code_problems(shown: str, scanned: list[str], server: str) -> list[str]
     return problems
 
 
+def moved_page_problems(nodes: list[Node]) -> list[str]:
+    """The old phone's first screen after the move (1281): it says the
+    phone moved, offers to take the mailbox back, and shows no join form
+    (no field to type a code into)."""
+    problems = []
+    if not any(MOVED_TITLE in n.text for n in nodes):
+        problems.append(f"no {MOVED_TITLE!r}")
+    button = find(nodes, rid=TAKE_BACK_ID)
+    if not button or button[0].text != TAKE_BACK:
+        problems.append(f"no {TAKE_BACK!r} button")
+    edits = [n for n in nodes if n.cls.endswith("EditText")]
+    if edits:
+        problems.append(f"{len(edits)} fields on the moved page")
+    return problems
+
+
 def first_start_name_problems(nodes: list[Node]) -> list[str]:
     """The address page of a phone mailbox's first start (walk finding 9):
     the name is its one field, above the QR."""
@@ -1179,6 +1498,41 @@ def pencil_problems(nodes: list[Node], camera: bool) -> list[str]:
     return problems + daemon_word_problems(nodes)
 
 
+def chat_menu_problems(menu: list[str]) -> list[str]:
+    """The chat bar's menu (1283, finding 28): Contact info is there,
+    Refresh is gone."""
+    problems = [] if CONTACT_INFO in menu else ["no Contact info in the menu"]
+    return problems + [f"the menu still offers {gone!r}" for gone in CHAT_MENU_GONE if gone in menu]
+
+
+def contact_fold_problems(closed: list[Node], opened: list[Node]) -> list[str]:
+    """The contact screen's Advanced fold (1283, finding 29): `closed` is
+    the screen as it opens, `opened` every node seen after the header's
+    tap, scrolled down. Closed: the header shows, its body does not, and
+    neither do the identity, the network or a word of Reticulum's. Opened:
+    the body shows, and the identity and the network are in it."""
+    problems = []
+    if not find(closed, rid=CONTACT_ADVANCED):
+        problems.append("no Advanced")
+    if find(closed, rid=CONTACT_ADVANCED_BODY):
+        problems.append("Advanced is open before the tap")
+    shown = texts(closed)
+    for header in CONTACT_FOLDED:
+        if header in shown:
+            problems.append(f"{header} on the main rows")
+    for text in shown:
+        for word in CONTACT_MAIN_WORDS:
+            if word in text:
+                problems.append(f"a main row says {word!r}: {text!r}")
+    if not find(opened, rid=CONTACT_ADVANCED_BODY):
+        problems.append("Advanced did not open")
+    seen = texts(opened)
+    for header in CONTACT_FOLDED:
+        if header not in seen:
+            problems.append(f"no {header} under Advanced")
+    return problems + decode_problems(closed + opened)
+
+
 def join_error_problems(nodes: list[Node], said: str) -> list[str]:
     """A failed join (1263, finding 8): the one sentence `said`, Retry,
     the Details fold, no daemon word in the sentence."""
@@ -1231,6 +1585,52 @@ def maps_page_problems(nodes: list[Node]) -> tuple[str, list[str]]:
     problems += decode_problems(nodes)
     state = "none" if not switch else "on" if switch[0].checked else "off"
     return f"auto={state} used={size.group(0) if size else '?'} regions={len(names)}", problems
+
+
+def delete_all_row_problems(nodes: list[Node]) -> tuple[str, list[str]]:
+    """The Maps page's last row (1290): its total, and what is wrong: no
+    row, a label that is not "Delete all downloaded maps (size)", a total
+    other than the storage line's, the row above a region, the row off
+    while regions are listed or on while none are."""
+    row = find(nodes, rid=DELETE_ALL)
+    if not row:
+        return "?", ["no Delete all row"]
+    label = DELETE_ALL_LABEL.fullmatch(row[0].text)
+    regions = find(nodes, rid="maps_region_name")
+    used = find(nodes, rid="maps_used")
+    problems = []
+    total = label.group(1) if label else "?"
+    if label is None:
+        problems.append(f"the row says {row[0].text!r}")
+    else:
+        size = FILE_SIZE.search(used[0].text) if used else None
+        if size is None or size.group(0) != total:
+            problems.append(
+                f"the row's total {total!r} is not the storage line's "
+                f"{used[0].text if used else None!r}"
+            )
+    if any(r.bounds[1] > row[0].bounds[1] for r in regions):
+        problems.append("the row is not below every region")
+    if row[0].enabled != bool(regions):
+        state = "on" if row[0].enabled else "off"
+        problems.append(f"the row is {state} with {len(regions)} regions")
+    return total, problems
+
+
+def delete_all_ask_problems(nodes: list[Node], regions: int) -> list[str]:
+    """The row's question (1290): what is wrong: no question in the
+    automatic download's words, or one with a count other than the
+    regions listed, or no Delete all to say yes with."""
+    asked = [m for t in texts(nodes) if (m := DELETE_ALL_ASK.fullmatch(t))]
+    if not asked:
+        return [f"no question; screen: {texts(nodes)[:8]}"]
+    problems = []
+    count = int(asked[0].group(1) or asked[0].group(2))
+    if count != regions:
+        problems.append(f"the question counts {count} maps, the page listed {regions}")
+    if not find(nodes, text=DELETE_ALL_YES):
+        problems.append(f"no {DELETE_ALL_YES!r} button")
+    return problems
 
 
 def privacy_page_problems(nodes: list[Node]) -> tuple[bool | None, list[str]]:
@@ -1595,6 +1995,85 @@ def input_text_arg(text: str) -> str:
 
 
 # --- The device. ---
+
+
+# A network change (1298): the line the screens show while a connection
+# the change dropped is not back (strings.xml `reconnecting`), and how long
+# the three walk steps keep the network away. The order's flight mode is
+# two minutes; `--flight-secs` shortens it for a quick run.
+RECONNECTING = "Reconnecting\u2026"
+WIFI_OFF_SECS = 10
+MOBILE_SECS = 20
+# How long after the network is back the host's message may take to show.
+BACK_BUDGET_SECS = 90
+
+ACTIVE_DEFAULT = re.compile(r"Active default network:\s*(\S+)")
+
+
+def default_network(dumpsys: str) -> str:
+    """The kind of the default network in `dumpsys connectivity`: `none`,
+    `wifi`, `mobile` or `other`. The agent line of the active network names
+    its transports (`Transports: WIFI`, `CELLULAR`); one that cannot be
+    found is `other`, never a guess at wifi."""
+    m = ACTIVE_DEFAULT.search(dumpsys)
+    if not m or m.group(1) in ("none", "null"):
+        return "none"
+    netid = m.group(1)
+    for line in dumpsys.splitlines():
+        if f"network{{{netid}}}" not in line or "Transports:" not in line:
+            continue
+        transports = line.split("Transports:", 1)[1].split("Capabilities:", 1)[0]
+        if "WIFI" in transports:
+            return "wifi"
+        if "CELLULAR" in transports:
+            return "mobile"
+        return "other"
+    return "other"
+
+
+def network_detail(
+    change: str,
+    off_secs: int,
+    kinds: tuple[str, str, str],
+    shown: list[str],
+    line_gone_ms: int | None,
+    bubble_ms: int,
+) -> str:
+    """One network step's WALK detail: the change, how long the network was
+    away, the kinds before, during and after, the lines the screen showed
+    meanwhile (each once, in order), when the "Reconnecting…" line was
+    gone and when the host's message showed, both counted from the moment
+    the network came back."""
+    seen: list[str] = []
+    for line in shown:
+        if line and line not in seen:
+            seen.append(line)
+    before, during, after = kinds
+    gone = "never_shown" if line_gone_ms is None else str(line_gone_ms)
+    return (
+        f"change={change} off_s={off_secs} kinds={before}>{during}>{after} "
+        f"shown={'|'.join(seen) or '-'} line_gone_ms={gone} bubble_ms={bubble_ms}"
+    )
+
+
+NETWORK_DETAIL = re.compile(
+    r"change=(?P<change>\S+) off_s=(?P<off>\d+) kinds=(?P<kinds>\S+) "
+    r"shown=(?P<shown>.*?) line_gone_ms=(?P<gone>\S+) bubble_ms=(?P<bubble>\d+)"
+)
+
+
+def network_rows(walk_log: str) -> list[str]:
+    """The network steps of a walk.log as the report's table rows:
+    `| change | off s | kinds | shown | line gone ms | message ms |`."""
+    rows = []
+    for line in walk_log.splitlines():
+        m = NETWORK_DETAIL.search(line)
+        if m:
+            rows.append(
+                f"| {m['change']} | {m['off']} | {m['kinds']} | {m['shown']} "
+                f"| {m['gone']} | {m['bubble']} |"
+            )
+    return rows
 
 
 class StepFailed(Exception):
@@ -2191,6 +2670,37 @@ class Walk:
         else:
             dev.key("KEYCODE_BACK")
         return f"sheet={found[0].text!r} lines={len(shown)}"
+
+    def step_contact_info(self) -> str:
+        """The chat menu and the contact screen (1283, findings 28 and 29):
+        the menu has Contact info and no Refresh; the screen opens with
+        Advanced closed and no identity, network or hash on it; a tap opens
+        the fold, and down it the identity and the network show; back to
+        the chat."""
+        dev = self.need_device()
+        dev.tap_node(self.wait_id("menu", 10)[0])
+        self.wait_text(CONTACT_INFO, 10)
+        menu = texts(dev.dump())
+        problems = chat_menu_problems(menu)
+        self.tap_text(CONTACT_INFO)
+        header = self.wait_id(CONTACT_ADVANCED, 10)
+        closed = dev.dump()
+        dev.tap_node(header[0])
+        self.wait_id(CONTACT_ADVANCED_BODY, 10)
+        opened: list[Node] = []
+        for _ in range(6):
+            nodes = dev.dump()
+            opened += nodes
+            if all(h in texts(opened) for h in CONTACT_FOLDED):
+                break
+            self.scroll_list(nodes, CONTACT_SCROLL, up=False)
+        problems += contact_fold_problems(closed, opened)
+        self.note(f"contact info: menu={menu} closed={texts(closed)[:16]}")
+        dev.key("KEYCODE_BACK")
+        self.wait_id("compose", 10)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        return f"menu=no_refresh advanced=closed_then_open folded={CONTACT_FOLDED}"
 
     def step_marks(self) -> str:
         """The imported chat holds one sent message on each rung of the
@@ -2911,22 +3421,30 @@ class Walk:
             self.unseed_voice()
         return f"notice_at={seconds}s dot=steady discarded=ok"
 
+    def host_send(self, body: str) -> list[str]:
+        """The host sender's `loquax send` of `body` to the phone's address,
+        and its environment, for `subprocess`."""
+        fixture = self.need_fixture()
+        return [
+            self.args.loquax,
+            "send",
+            "--config",
+            str(fixture.cfg),
+            "--via",
+            "direct",
+            fixture.manifest["address"],
+            body,
+        ]
+
+    def host_env(self) -> dict:
+        return {**os.environ, "LNMSG_HOME": str(self.need_fixture().sender)}
+
     def step_receive_wake(self) -> str:
         dev = self.need_device()
-        fixture = self.need_fixture()
         body = f"walk wake {self.nonce}"
         send = subprocess.run(
-            [
-                self.args.loquax,
-                "send",
-                "--config",
-                str(fixture.cfg),
-                "--via",
-                "direct",
-                fixture.manifest["address"],
-                body,
-            ],
-            env={**os.environ, "LNMSG_HOME": str(fixture.sender)},
+            self.host_send(body),
+            env=self.host_env(),
             capture_output=True,
             timeout=60,
         )
@@ -3104,6 +3622,239 @@ class Walk:
                 return node
         raise StepFailed(f"no avatar beside {shown!r}")
 
+    def step_group_create(self) -> str:
+        """A group from the phone (1307, study 4.1): the pencil, "New
+        group", the host's sender ticked, Next, the name, Create; 4 + k
+        taps and the name with k = 1. The mailbox makes the group and hosts
+        its engine, and the list shows the group's row; its address stays
+        for the next two steps."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        friend = fixture.manifest["open"]["shown"]
+        name = f"Walk Group {self.nonce}"
+        self.back_to_chats()
+        taps = 0
+        dev.tap_node(self.wait_id("write", 10)[0])
+        taps += 1
+        dev.tap_node(self.wait_id(GROUP_NEW, 10)[0])
+        taps += 1
+        self.tap_text(friend)
+        taps += 1
+        self.tap_text(GROUP_NEXT)
+        taps += 1
+        fields = []
+
+        def field_up():
+            nonlocal fields
+            fields = [n for n in dev.dump() if "EditText" in n.cls]
+            return bool(fields)
+
+        if not wait_for(field_up, 10, every=0.3):
+            raise StepFailed("no name field after Next")
+        dev.tap_node(fields[0])
+        dev.type_text(name)
+        self.tap_text(GROUP_CREATE)
+        taps += 1
+        address = None
+
+        def hosted():
+            nonlocal address
+            address = group_hosted(fixture.mailbox_log(), name)
+            return address is not None
+
+        if not wait_for(hosted, 30, every=0.5):
+            raise StepFailed(f"the mailbox hosts no {name!r}: {fixture.mailbox_log()[-400:]}")
+        self.group = (name, address)
+        self.back_to_chats()
+        self.wait_text(name, 30)
+        if taps != 5:
+            raise StepFailed(f"{taps} taps, not 4 + 1")
+        return f"taps={taps}+name group={address[:8]} row=shown"
+
+    def need_group(self) -> tuple[str, str]:
+        group = getattr(self, "group", None)
+        if group is None:
+            raise StepFailed("no group: run group_create first")
+        return group
+
+    def step_group_join(self) -> str:
+        """A member who joins by writing (1307 G2): the host's sender, a
+        member the phone ticked, writes to the group's address. The group
+        copies the line to the phone as "<name>: <text>" with the writer
+        above the bubble, and tells the phone the new list, which the
+        group's chat shows as the line "<name> joined."."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        name, address = self.need_group()
+        friend = fixture.manifest["open"]["shown"]
+        body = f"walk group hello {self.nonce}"
+        send = subprocess.run(
+            [self.args.loquax, "send", "--config", str(fixture.cfg), "--via", "direct", address, body],
+            env=self.host_env(),
+            capture_output=True,
+            timeout=90,
+        )
+        if send.returncode != 0:
+            raise StepFailed(f"loquax send exit={send.returncode}: {send.stderr.decode()[-300:]}")
+        self.back_to_chats()
+        self.open_conversation(name)
+        start = time.monotonic()
+        self.wait_text(body, 30)
+        line_ms = int((time.monotonic() - start) * 1000)
+        nodes = dev.dump()
+        joined = GROUP_JOINED.format(friend)
+        if not find(nodes, text=joined, contains=True):
+            # The admin's name for the member is the phone's word at
+            # Create time; a phone without one names it by its address.
+            said = [t for t in texts(nodes) if t.endswith(" joined.")]
+            if not said:
+                raise StepFailed(f"no line '... joined.' in the chat: {texts(nodes)[-8:]}")
+            joined = said[0]
+        return f"line_ms={line_ms} note={joined!r}"
+
+    def step_group_message(self) -> str:
+        """The phone writes in its group (1307): the bubble gets its tick
+        from the group's proof, which the mailbox gives once it archived
+        the line ("the group has it"); the mailbox books a copy for the
+        member."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        name, _ = self.need_group()
+        body = f"walk group line {self.nonce}"
+        self.back_to_chats()
+        self.open_conversation(name)
+        dev.tap_node(self.wait_id("compose", 5)[0])
+        dev.type_text(body)
+        sends = find(dev.dump(), rid="send")
+        if not sends:
+            raise StepFailed("no send button")
+        start = time.monotonic()
+        dev.tap_node(sends[0])
+        mark = ""
+
+        def ticked():
+            nonlocal mark
+            nodes = dev.dump()
+            mine = [n for n in by_top(find(nodes, rid="body")) if n.text == body]
+            if not mine:
+                return False
+            y = mine[-1].bounds[1]
+            marks = [n for n in by_top(marks_on(nodes)) if n.bounds[1] >= y]
+            mark = mark_rid(marks[0]) if marks else ""
+            return mark in TICKS
+
+        if not wait_for(ticked, 30, every=0.3):
+            raise StepFailed(f"no tick on {body!r} within 30s; mark={mark!r}")
+        tick_ms = int((time.monotonic() - start) * 1000)
+        return f"tick_ms={tick_ms} mark={mark!r}"
+
+    def network_kind(self) -> str:
+        return default_network(self.need_device().shell("dumpsys connectivity", check=False))
+
+    def network_change(self, change: str, off: list[str], on: list[str], off_secs: int) -> str:
+        """One network change (1298) on the list screen: `off` takes the
+        network away (or swaps it), the screen's line is read every second
+        for `off_secs`, `on` brings it back, and the host sends a message
+        at once. Measured from the moment `on` ran: when the
+        "Reconnecting…" line was gone, and when the message showed in the
+        list. No tap: the app must come back by itself."""
+        dev = self.need_device()
+        for _ in range(3):
+            if find(dev.dump(), rid="write"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        self.wait_id("write", 10)
+        before = self.network_kind()
+        shown: list[str] = []
+
+        def line() -> str:
+            status = find(dev.dump(), rid="status")
+            return status[0].text if status else ""
+
+        for command in off:
+            dev.shell(command, check=False)
+        away_until = time.monotonic() + off_secs
+        # The platform takes a moment to let the network go.
+        during = wait_for(lambda: (k := self.network_kind()) != before and k, 10, every=0.5)
+        during = during or before
+        while time.monotonic() < away_until:
+            shown.append(line())
+            time.sleep(1.0)
+        if during == before:
+            for command in on:
+                dev.shell(command, check=False)
+            raise StepFailed(
+                f"the change did nothing on this device: the default network stayed {before}"
+            )
+        body = f"walk {change} {self.nonce}"
+        for command in on:
+            dev.shell(command, check=False)
+        back = time.monotonic()
+        send = subprocess.Popen(
+            self.host_send(body),
+            env=self.host_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        line_gone_ms: int | None = None
+        bubble_ms: int | None = None
+        try:
+            while time.monotonic() - back < BACK_BUDGET_SECS:
+                nodes = dev.dump()
+                now_ms = int((time.monotonic() - back) * 1000)
+                status = find(nodes, rid="status")
+                text = status[0].text if status and status[0].bounds[3] > status[0].bounds[1] else ""
+                shown.append(text)
+                if RECONNECTING in shown and RECONNECTING not in text and line_gone_ms is None:
+                    line_gone_ms = now_ms
+                if find(nodes, text=body, contains=True):
+                    bubble_ms = now_ms
+                    break
+                time.sleep(0.3)
+        finally:
+            try:
+                send.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                send.kill()
+        after = self.network_kind()
+        if bubble_ms is None:
+            raise StepFailed(
+                f"no {body!r} within {BACK_BUDGET_SECS}s of the network's return "
+                f"(kinds {before}>{during}>{after}, lines {shown[-4:]})"
+            )
+        return network_detail(change, off_secs, (before, during, after), shown, line_gone_ms, bubble_ms)
+
+    def step_network_wifi_toggle(self) -> str:
+        return self.network_change(
+            "wifi_toggle", ["svc wifi disable"], ["svc wifi enable"], WIFI_OFF_SECS
+        )
+
+    def step_network_mobile_switch(self) -> str:
+        """WLAN off with mobile data on, then the WLAN back. A device
+        without mobile data (Waydroid, a phone without a SIM) has none to
+        switch to: the step says so in its detail and measures nothing."""
+        dev = self.need_device()
+        dev.shell("svc data enable", check=False)
+        dev.shell("svc wifi disable", check=False)
+        has_mobile = wait_for(lambda: self.network_kind() == "mobile", 15, every=1.0)
+        dev.shell("svc wifi enable", check=False)
+        if not has_mobile:
+            wait_for(lambda: self.network_kind() != "none", 30, every=1.0)
+            return "change=mobile_switch skipped=no_mobile_network"
+        wait_for(lambda: self.network_kind() == "wifi", 30, every=1.0)
+        return self.network_change(
+            "mobile_switch", ["svc wifi disable"], ["svc wifi enable"], MOBILE_SECS
+        )
+
+    def step_flight_mode(self) -> str:
+        return self.network_change(
+            "flight_mode",
+            ["cmd connectivity airplane-mode enable"],
+            ["cmd connectivity airplane-mode disable"],
+            self.args.flight_secs,
+        )
+
     def step_map(self) -> str:
         dev = self.need_device()
         # Back to the list, then the Map tab (1199).
@@ -3269,6 +4020,88 @@ class Walk:
             f"card=ok navigate={'shown' if navigate else 'hidden (no app takes geo:)'} chat=ok back=card,chats"
         )
 
+    def step_offgrid_positions(self) -> str:
+        """Positions the mesh announces need no mailbox (1302): with the
+        host's mailbox stopped, two nodes announce on `lev.position` over
+        the phone's node; the map draws two more pins, both nearby, and the
+        Friends sheet lists both by their announced names, the card of one
+        saying "Nearby, not in your contacts" with Add and no Chat."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        mailbox = fixture.procs[1] if len(fixture.procs) > 1 else None
+        for _ in range(3):
+            if find(dev.dump(), rid="tab_map"):
+                break
+            dev.key("KEYCODE_BACK")
+            time.sleep(0.6)
+        dev.tap_node(self.wait_id("tab_map", 10)[0])
+        time.sleep(1.0)
+        before = map_pins(dev.shell("logcat -d -s loquax:I", check=False))
+        wanted = [f"Walk Nearby {tag}{self.nonce}" for tag in ("A", "B")]
+        stopped = mailbox is not None and mailbox.poll() is None and not self.on_phone
+        if stopped:
+            mailbox.send_signal(signal.SIGSTOP)
+        try:
+            for name, place in zip(wanted, OFFGRID_PLACES):
+                home = fixture.root / ("nearby-" + name[-7:].replace(" ", "-"))
+                home.mkdir(parents=True, exist_ok=True)
+                said = subprocess.run(
+                    [
+                        self.args.loquax,
+                        "announce",
+                        "--config",
+                        str(fixture.cfg),
+                        "--position",
+                        place,
+                        "--from",
+                        name,
+                    ],
+                    env={**os.environ, "LNMSG_HOME": str(home)},
+                    capture_output=True,
+                    timeout=60,
+                )
+                if said.returncode != 0:
+                    raise StepFailed(
+                        f"loquax announce exit={said.returncode}: {said.stderr.decode()[-300:]}"
+                    )
+            seen = wait_for(
+                lambda: (lambda p: p if p and p[1] - (before or (0, 0))[1] >= 2 else None)(
+                    map_pins(dev.shell("logcat -d -s loquax:I", check=False))
+                ),
+                20,
+                every=1.0,
+            )
+            pins = seen or map_pins(dev.shell("logcat -d -s loquax:I", check=False))
+            dev.tap_node(self.wait_id("friends", 10)[0])
+            self.wait_id("friend_name", 10)
+            names = [n.text for n in by_top(find(dev.dump(), rid="friend_name"))]
+            self.note(f"offgrid: pins {before} -> {pins}, sheet {names}")
+            problems = offgrid_problems(pins, before, names, wanted)
+            if problems:
+                raise StepFailed("; ".join(problems))
+            sheet = dev.dump()
+            named = [n for n in find(sheet, rid="friend_name") if n.text.startswith(wanted[0])]
+            rows = [r for r in by_top(find(sheet, rid="friend_row")) if any(inside(n, r) for n in named)]
+            if not rows:
+                raise StepFailed(f"no row for {wanted[0]!r}")
+            dev.tap_node(rows[0])
+            self.wait_id("card_name", 10)
+            nodes = dev.dump()
+            line = " ".join(n.text for n in find(nodes, rid="card_line"))
+            if NEARBY_CARD not in line:
+                raise StepFailed(f"the card says {line!r}, want {NEARBY_CARD!r}")
+            if not find(nodes, rid="card_add") or find(nodes, rid="card_chat"):
+                raise StepFailed(f"the card's buttons: {texts(nodes)[-8:]}")
+            dev.key("KEYCODE_BACK")
+            dev.key("KEYCODE_BACK")
+        finally:
+            if stopped:
+                mailbox.send_signal(signal.SIGCONT)
+        return (
+            f"mailbox={'stopped' if stopped else 'not on the host'} pins={before}->{pins} "
+            f"sheet={len(names)} card=nearby,add"
+        )
+
     def step_settings(self) -> str:
         """The settings (1201): More, Settings; the eight entries in their
         order, each with a one line description and no raw hash; each page
@@ -3425,7 +4258,10 @@ class Walk:
         """The Maps page (1207), open: the switch on, the storage used,
         the fixture's region with its size; the switch off, the page left
         and opened again still off (stored), then on again; never a line
-        that did not decode. The page's line for the detail."""
+        that did not decode. Then Delete all (1290): the row at the list's
+        foot with the storage line's total, its one question with the
+        regions' count, and after the yes no region, 0 B and the row off.
+        The page's line for the detail."""
         dev = self.need_device()
         nodes = self.maps_switch(True)
         detail, problems = maps_page_problems(nodes)
@@ -3439,8 +4275,45 @@ class Walk:
         self.wait_id("maps_auto", 10)
         nodes = self.maps_switch(False)
         dev.tap_node(find(nodes, rid="maps_auto")[0])
-        self.maps_switch(True)
-        return f"{detail} switch=off,stored,on"
+        nodes = self.maps_switch(True)
+        return f"{detail} switch=off,stored,on {self.delete_all_maps(nodes)}"
+
+    def delete_all_maps(self, nodes: list[Node]) -> str:
+        """The Maps page's Delete all (1290) on the open page `nodes`."""
+        dev = self.need_device()
+        total, problems = delete_all_row_problems(nodes)
+        if problems:
+            raise StepFailed("Delete all: " + "; ".join(problems))
+        regions = len(find(nodes, rid="maps_region_name"))
+        dev.tap_node(find(nodes, rid=DELETE_ALL)[0])
+        asked: list[Node] = []
+
+        def question():
+            nonlocal asked
+            asked = dev.dump()
+            return any(DELETE_ALL_ASK.fullmatch(t) for t in texts(asked))
+
+        wait_for(question, 10, every=0.3)
+        problems = delete_all_ask_problems(asked, regions)
+        if problems:
+            raise StepFailed("Delete all: " + "; ".join(problems))
+        dev.tap_node(find(asked, text=DELETE_ALL_YES)[0])
+        after: list[Node] = []
+
+        def emptied():
+            nonlocal after
+            after = dev.dump()
+            return not find(after, rid="maps_region_name") and find(after, rid=DELETE_ALL)
+
+        if not wait_for(emptied, 10, every=0.3):
+            raise StepFailed(f"Delete all: regions left; screen: {texts(after)[:8]}")
+        left, problems = delete_all_row_problems(after)
+        problems += decode_problems(after)
+        if not re.fullmatch(r"0\s?B", left):
+            problems.append(f"the row says {left!r} with no maps")
+        if problems:
+            raise StepFailed("Delete all: " + "; ".join(problems))
+        return f"delete_all={total},asked={regions},left={left}"
 
     def step_profile(self) -> str:
         """The profile (1187): our avatar at the top left of the chats
@@ -3670,6 +4543,133 @@ class Walk:
             raise StepFailed("; ".join(problems) + "; " + detail)
         return detail
 
+    def step_pan_into_empty(self) -> str:
+        """A pan out of the walk's region into the empty starts the load
+        for the screen at once and the chip says so (1292). The walk's
+        Frankfurt region, the autoload on, the source a socket on this
+        host that never answers; the map opened on the Römer at z18,
+        where the region holds the screen, then panned east a screen and
+        a half in two swipes of 400 ms. The source's connections are the
+        loads' starts: the first after the pan must come within
+        `PAN_LOAD_SLACK_MS` of its end, and the chip must say
+        "Loading the map of this area". The config is put back after."""
+        dev = self.need_device()
+        host = self.args.server.rpartition(":")[0]
+        self.put_region(FRANKFURT_REGION, "frankfurt-roemer.lmr")
+        source = StallingSource(host)
+        url = f"http://{host}:{source.port}/planet.pmtiles"
+        keep = "grep -v -e '^map_source' -e '^map_autoload' files/config 2>/dev/null"
+        dev.shell(
+            f"run-as {PACKAGE} sh -c \"{keep} > files/config.walk; "
+            f"echo 'map_autoload = on' >> files/config.walk; "
+            f"echo 'map_source = \\\"{url}\\\"' >> files/config.walk; "
+            f"cp files/config files/config.before 2>/dev/null; "
+            f"mv files/config.walk files/config\""
+        )
+        try:
+            # A new process reads the config afresh.
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+            self.map_at_rest(18_000)
+            time.sleep(1.0)
+            nodes = dev.dump()
+            box = self.map_box(nodes)
+            before_chip = map_chip(nodes)
+            connects_before = len(source.times)
+            x1, y1, x2, y2 = box
+            cy = (y1 + y2) // 2
+            reach = (x2 - x1) * 3 // 4
+            began = time.monotonic()
+            for _ in range(2):
+                dev.swipe(x2 - (x2 - x1) // 8, cy, x2 - (x2 - x1) // 8 - reach, cy, 400)
+            pan_end_ms = int((time.monotonic() - began) * 1000)
+            after_chip = ""
+
+            def loading():
+                nonlocal after_chip
+                after_chip = map_chip(dev.dump())
+                return after_chip.startswith(MAP_LOADING) or None
+
+            wait_for(loading, 10, every=0.5)
+            connect_ms = [int((t - began) * 1000) for t in source.times if t >= began]
+        finally:
+            source.close()
+            dev.shell(
+                f"run-as {PACKAGE} sh -c 'if [ -f files/config.before ]; then "
+                f"mv files/config.before files/config; else rm -f files/config; fi'",
+                check=False,
+            )
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+        detail = (
+            f"connects before={connects_before} after_ms={connect_ms} pan_end_ms={pan_end_ms} "
+            f"chip before={before_chip!r} after={after_chip!r}"
+        )
+        problems = pan_into_empty_problems(
+            before_chip, after_chip, connects_before, connect_ms, pan_end_ms
+        )
+        if problems:
+            raise StepFailed("; ".join(problems) + "; " + detail)
+        return detail
+
+    def step_region_fills_in(self) -> str:
+        """A region shows itself while it downloads (1291): the autoload
+        on, its source the Grunewald archive on this host at `FILL_RATE`,
+        no region over Grunewald on the phone; the map opened there at
+        z15 and grabbed until it rests after the source's last byte. The
+        grabs before that byte must hold at least `FILL_STATES_LEAST`
+        distinct pictures. The config is put back and the region removed
+        after."""
+        dev = self.need_device()
+        host = self.args.server.rpartition(":")[0]
+        data = GRUNEWALD_ARCHIVE.read_bytes()
+        source = ThrottledSource(host, data, FILL_RATE)
+        url = f"http://{host}:{source.port}/grunewald.pmtiles"
+        keep = "grep -v -e '^map_source' -e '^map_autoload' files/config 2>/dev/null"
+        dev.shell(
+            f"run-as {PACKAGE} sh -c \"rm -f files/maps/auto-*.lmr; {keep} > files/config.walk; "
+            f"echo 'map_autoload = on' >> files/config.walk; "
+            f"echo 'map_source = \\\"{url}\\\"' >> files/config.walk; "
+            f"cp files/config files/config.before 2>/dev/null; "
+            f"mv files/config.walk files/config\""
+        )
+        grabs: list[tuple[float, list[tuple[int, int, int]]]] = []
+        try:
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+            lat, lon = GRUNEWALD_E6
+            began = time.monotonic()
+            dev.shell(
+                f"am start -W -n {PACKAGE}/{MAP_ACTIVITY} "
+                f"--el lat_e6 {lat} --el lon_e6 {lon} --el zoom_milli 15000"
+            )
+            while time.monotonic() - began < FILL_TIMEOUT_S:
+                screen = dev.screen()
+                box = middle_half(screen.width, screen.height)
+                grabs.append((time.monotonic(), sample_grid(screen, box, 16, 16)))
+                states = fill_states(grabs)
+                last = source.last_byte
+                now = time.monotonic()
+                if last is not None and now - max(last, states[-1]) > FILL_REST_S:
+                    break
+        finally:
+            source.close()
+            dev.shell(
+                f"run-as {PACKAGE} sh -c 'rm -f files/maps/auto-*.lmr; "
+                f"if [ -f files/config.before ]; then "
+                f"mv files/config.before files/config; else rm -f files/config; fi'",
+                check=False,
+            )
+            dev.shell(f"am force-stop {PACKAGE}", check=False)
+        states = fill_states(grabs)
+        last = source.last_byte
+        ms = [int((t - began) * 1000) for t in states]
+        detail = (
+            f"pictures_ms={ms} last_byte_ms={int((last - began) * 1000) if last else None} "
+            f"served={source.served}/{len(data)} grabs={len(grabs)} rate={FILL_RATE}"
+        )
+        problems = region_fills_problems(states, len(source.sent), len(data), last)
+        if problems:
+            raise StepFailed("; ".join(problems) + "; " + detail)
+        return detail
+
     def map_at_rest(self, zoom_milli: int) -> tuple[int, Screen]:
         """The map screen asked for on the walk's Frankfurt place at
         `zoom_milli`; the milliseconds until two grabs in a row are the
@@ -3824,6 +4824,71 @@ class Walk:
             dev.key("KEYCODE_BACK")
         return f"code={code[:24]}… server={self.args.server} linked={LINKED_NAME!r}"
 
+    def step_move_phone(self) -> str:
+        """Move to a new phone (1281, walk finding 24), after link_device
+        and last before the teardown, since it ends the phone's mailbox:
+        the profile's "Move to a new phone" shows a join code whose QR
+        zbarimg reads as its text, the walk's server behind it; the host's
+        walk_move takes the mailbox over with it as the new phone; the sheet
+        says "Moved to <that name>"; Done opens the first screen, which says
+        the phone moved and offers to use it again; that takes it back and
+        the chats come again."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        if not self.on_phone:
+            self.start_on_phone(None)
+        dev.tap_node(self.wait_id("avatar", 10)[0])
+        dev.tap_node(self.wait_id(MOVE_ROW, 10)[0])
+        self.wait_id(MOVE_QR, 15)
+        shown = find(dev.dump(), rid=MOVE_CODE)
+        code = shown[0].text.strip() if shown else ""
+        problems = link_code_problems(code, self.screen_codes("move_phone"), self.args.server)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        new = fixture.root / "new-phone"
+        mover = (
+            [self.args.walk_move]
+            if self.args.walk_move
+            else [
+                "cargo",
+                "run",
+                "--quiet",
+                "--manifest-path",
+                str(REPO / "Cargo.toml"),
+                "-p",
+                "loquax-android",
+                "--example",
+                "walk_move",
+                "--",
+            ]
+        )
+        moved = subprocess.run(
+            [*mover, str(new), code, MOVED_NAME], capture_output=True, timeout=480
+        )
+        if moved.returncode != 0:
+            raise StepFailed(f"walk_move exit={moved.returncode}: {moved.stderr.decode()[-300:]}")
+        if not (new / "mailbox" / "identity").exists() or not (new / "mailbox-here").exists():
+            raise StepFailed(f"{new} holds no mailbox after the move")
+        self.wait_text(MOVED.format(MOVED_NAME), 15)
+        dev.tap_node(self.wait_text(DONE, 5)[0])
+        self.wait_text(MOVED_TITLE, 30, contains=True)
+        problems = moved_page_problems(dev.dump())
+        if problems:
+            raise StepFailed("; ".join(problems))
+        dev.tap_node(self.wait_id(TAKE_BACK_ID, 5)[0])
+        # The confirmation names the risk; its positive button takes it back.
+        confirm = []
+
+        def asked():
+            confirm[:] = [n for n in dev.dump() if n.rid == "android:id/button1"]
+            return bool(confirm)
+
+        if not wait_for(asked, 10, every=0.5):
+            raise StepFailed("no confirmation for Use this phone again")
+        dev.tap_node(confirm[0])
+        self.wait_id("write", 60)
+        return f"code={code[:24]}… moved to={MOVED_NAME!r} taken back"
+
     def step_teardown(self) -> str:
         done = []
         problems = []
@@ -3879,8 +4944,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--walk-mailbox",
         help="a built walk_mailbox example; default: cargo run it",
     )
+    p.add_argument(
+        "--walk-move",
+        help="a built walk_move example; default: cargo run it",
+    )
     p.add_argument("--adb", default="adb", help="the adb to use")
     p.add_argument("--keep", action="store_true", help="no teardown")
+    p.add_argument(
+        "--flight-secs",
+        type=int,
+        default=120,
+        help="how long flight_mode keeps the network away (the order's two minutes)",
+    )
     p.add_argument("--out", default=str(REPO / "target/tmp/device-walk"), help="log directory")
     p.add_argument(
         "--steps",

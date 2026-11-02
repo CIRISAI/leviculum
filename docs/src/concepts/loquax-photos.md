@@ -10,7 +10,7 @@ main path offers three steps.
 | Question | Decision |
 |---|---|
 | Wire | The LXMF image field, `0x06`, holding `[format, bytes]`, exactly as the reference names it and Columba writes and reads it. No field of our own. |
-| Sizes | `phone` (the default): longest edge 1600 px, JPEG quality 80. `small`: 800 px, quality 70. `original`: the picture as taken, only its metadata removed. |
+| Sizes | `phone` (the default): longest edge 1600 px, JPEG quality 80, at most 250 000 bytes (1288). `small`: 800 px, quality 70, the same bound. `original`: the picture as taken, only its metadata removed. |
 | Privacy | No photo carries EXIF in any size: the place, the time, the camera never go. The setting's one line says so. |
 | Orientation | Every photo goes upright, its EXIF orientation applied, since Columba draws the bytes without reading the tag. |
 | Where the pixels are done | In Rust, `loquax::photo` (feature `photos`), on every target. Java keeps the system picker and a viewer screen that shows a Bitmap. |
@@ -63,9 +63,12 @@ window show it from the same row.
 2. `phone` and `small`: decoded, turned upright by the EXIF orientation,
    scaled with a triangle filter if the longer side is past the step's
    edge (never up), encoded as JPEG at the step's quality. The JPEG
-   encoder writes no metadata. A picture of fine detail that is still
-   past 990 000 bytes steps its quality down by 10 to 40, as Columba's
-   compressor steps (`columba/app/src/main/java/network/columba/app/util/ImageUtils.kt:186-191`).
+   encoder writes no metadata. A picture past 250 000 bytes
+   (`photo::SHOWN_BY_COLUMBA`, see 2a) steps its quality down by 10 to
+   60, as Columba's compressor steps
+   (`columba/app/src/main/java/network/columba/app/util/ImageUtils.kt:186-191`),
+   and then its edge, by the root of how far it is over, since a JPEG's
+   bytes go with its pixels.
 3. `original`, upright JPEG: every APP segment but JFIF (APP0), the ICC
    profile (APP2) and Adobe's colour transform (APP14) is dropped, and
    comments with them; the scan is byte for byte the camera's
@@ -80,6 +83,40 @@ window show it from the same row.
    message around the picture costs its header, signature and framing.
    Only `original` can meet this; the error says to choose a smaller size.
 
+### 2a. What Columba shows (1288)
+
+Lew sent three photos from Loquax to Columba on 2026-11-01; one showed,
+two showed a grey box saying "Not available". The cause is in Columba,
+for every received picture past 255 995 bytes, whatever its format:
+
+1. The kt backend writes a received message's fields as JSON, bytes as
+   lower hex, so `fields[6]` becomes `["jpg","ffd8..."]`
+   (`columba/rns-api/src/main/java/network/columba/app/rns/api/util/AppDataParser.kt:204-232`).
+2. A fields JSON of 512 000 characters or more has each field longer
+   than 512 000 written to a file as its JSON text, and replaced by
+   `{"_file_ref": path}`
+   (`columba/data/src/main/java/network/columba/app/data/repository/ConversationRepository.kt:957-983`,
+   the threshold `500 * 1024` in
+   `columba/data/src/main/java/network/columba/app/data/storage/AttachmentStorageManager.kt:38`).
+3. Reading it back, the file's text is taken for the picture's hex
+   (`columba/app/src/main/java/network/columba/app/ui/model/MessageMapper.kt:532-543`);
+   `hexStringToByteArray` throws at the `[` (`:1076-1089`), the error is
+   caught (`:544`) and no bytes come back.
+4. The view model marks the image loaded without a picture
+   (`columba/app/src/main/java/network/columba/app/viewmodel/MessagingViewModel.kt:2427-2431`),
+   and the bubble draws "Not available"
+   (`columba/app/src/main/java/network/columba/app/ui/screens/MessagingScreen.kt:2356-2376`).
+
+`2 * bytes + 10 > 512 000` is a picture of 255 996 bytes or more. A 12 MP
+photo at 1600 px and quality 80 is 180 to 610 KB, so most went past it.
+Loquax therefore keeps `phone` and `small` at most 250 000 bytes, which
+also fits under a stock propagation node's 256 KB a transfer. The unit
+tests `columba_reads_a_picture_inline_and_loses_one_past_its_threshold`
+(a model of the four steps, pinned at 255 995 and 255 996) and
+`a_detailed_phone_photo_goes_at_a_size_columba_shows` pin it; with the old
+bound the second fails. `original` keeps the picture and can still be
+past it: Columba then shows "Not available", Sideband and Loquax show it.
+
 ### Measured sizes and times
 
 `cargo run --release -p loquax --features photos --example photo_cost`,
@@ -89,10 +126,10 @@ A phone is several times slower; no phone was measured in slice one.
 | picture | step | sent | prepare | decode of the original | thumbnail of what went (480 px) |
 |---|---|---|---|---|---|
 | 3456 x 3456, 11.9 MP, 2.9 MB camera JPEG | small | 800 x 800, 54 KB | 141 ms | 78 ms | 7 ms |
-| | phone | 1600 x 1600, 279 KB | 247 ms | | 17 ms |
+| | phone | 1600 x 1600, 223 KB (279 KB before 1288) | 266 ms | | 17 ms |
 | | original | refused (2.9 MB) | | | |
 | 3468 x 4624, 16 MP, 4.9 MB phone JPEG, turned | small | 600 x 800, 82 KB | 190 ms | 126 ms | 6 ms |
-| | phone | 1200 x 1600, 403 KB | 272 ms | | 14 ms |
+| | phone | 1200 x 1600, 403 KB before 1288, now at most 250 KB | 272 ms | | 14 ms |
 | fixture `photo-portrait.jpg`, 4.3 MP, 360 KB, turned | small | 600 x 800, 23 KB | 44 ms | 13 ms | 5 ms |
 | | phone | 1200 x 1600, 104 KB | 98 ms | | 11 ms |
 | | original | 1800 x 2400, 668 KB | 77 ms | | 25 ms |
@@ -175,7 +212,7 @@ same tree without and with the `photos` feature.
   went as resources.
 - **The mailbox** keeps the message packed as it came, like any other, and
   its archive cap counts it by its bytes
-  (`SUM(LENGTH(packed))`, `loquax/src/store.rs:2475`).
+  (`SUM(LENGTH(packed))`, `loquax/src/store.rs:2717`).
 
 ## 5. Android
 
@@ -240,11 +277,8 @@ same tree without and with the `photos` feature.
 
 - **The propagation limit.** A stock propagation node takes at most
   256 KB a transfer (`PROPAGATION_LIMIT`,
-  `reference/LXMF/LXMF/LXMRouter.py:55`). A `phone` photo of a 12 MP
-  picture is about 280 KB, so it can be refused when it goes through a
-  propagation node to a peer who is offline. Directly and through a
-  Loquax Mailbox it goes. Whether `phone` should aim under 256 KB is
-  Lew's call.
+  `reference/LXMF/LXMF/LXMRouter.py:55`). Since 1288 a `phone` photo is
+  at most 250 000 bytes, so it fits; an `original` can be refused there.
 - **Progress in the bubble** while a photo uploads is not built: the
   request resource's progress is not yet plumbed to the scene.
 - **HEIC** from a phone's camera is refused; the `image` crate has no HEIC

@@ -70,6 +70,7 @@ run   leviculum-std   msgpack_single_decoder     # reads leviculum-core's source
 run   leviculum-std   nrf_boot_no_spin           # reads leviculum-nrf/src/bin/*.rs; no nop spin above 10 000 may hold the executor at boot
 run   leviculum-std   rak4631_gnss_pulse_pin     # reads the RAK firmware sources; the GNSS task claims no pulse pin and nothing claims P0.17
 run   leviculum-std   t114_boot_lines            # reads the T114 binary, the shared node loop and the board file; the boot lines are the pre-move ones plus D2 and D7
+skip  leviculum-ui-iced desktop_theme              # its subject is the code (the desktop tone stream), and it opens a D-Bus connection
 run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
 run   loquax          package_metadata           # reads loquax/Cargo.toml and leviculum-cli/Cargo.toml; the package depends on leviculum, which enables and starts lnsd
 
@@ -164,6 +165,7 @@ skip  leviculum-map region                    # reads the committed region, but 
 skip  leviculum-map view                      # the outline table and the region drawn at pinned counts; subject is the draw, choice and pin order
 skip  leviculum-mapcut cut                    # synthetic tiles through the cut; subject is the code
 skip  leviculum-mapcut http                   # a loopback server and threads; subject is the HTTP reader and the load
+skip  leviculum-mapcut partial                # cuts in memory and reads every round back; subject is the writer and the reader
 skip  leviculum-mapcut pmtiles                # writes a temp archive and reads it back; subject is the reader
 skip  leviculum-mapcut simplify               # in-process geometry arithmetic; subject is the code
 skip  leviculum-mapfill fill                   # pixel-exact reference images; subject is the filler
@@ -238,6 +240,7 @@ skip  loquax-android   java_requests              # decodes every request the ap
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
 skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
+run   loquax-android   strings                    # reads the app's res/values*/strings.xml and asserts the words of walk findings 27 to 30 (1283)
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer

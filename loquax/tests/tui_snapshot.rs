@@ -115,6 +115,9 @@ mod support;
 #[path = "support/nomadnet_tree.rs"]
 mod nomadnet_tree;
 
+#[path = "support/lnpnd.rs"]
+mod lnpnd_node;
+
 #[path = "support/ugly_store.rs"]
 mod ugly_store;
 
@@ -2595,60 +2598,6 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     }
 }
 
-/// A propagation node on `daemon`: lnpnd's engine at stamp cost 0, no
-/// mailbox of its own, announced at once. The hash, and what keeps it alive.
-async fn propagation_node(
-    daemon: &support::Daemon,
-) -> (
-    [u8; 16],
-    leviculum_std::ReticulumNode,
-    std::sync::mpsc::Receiver<lnpnd::engine::EngineEvent>,
-    tempfile::TempDir,
-) {
-    use lnpnd::engine::{Engine, EngineConfig, EngineEvent};
-    let (engine, events) = Engine::new(EngineConfig {
-        identity: leviculum_std::generate_identity(),
-        node_config: leviculum_lxmf::PropagationNodeConfig {
-            stamp_cost: 0,
-            always_compute_stamp_value: false,
-            ..leviculum_lxmf::PropagationNodeConfig::default()
-        },
-        store: leviculum_lxmf::MemoryPropagationStore::new(64_000),
-        announce_interval_secs: 3600,
-        announce_delay_secs: 0,
-        announce_at_start: false,
-        peering: leviculum_lxmf::PeeringConfig::default(),
-        peer_store: Box::new(leviculum_lxmf::MemoryPeerStore::default()),
-        control_allowed: Vec::new(),
-        auth_allowed: None,
-        mailbox: None,
-        store_limit_bytes: 64_000,
-        delivery_limit_kb: 1000,
-    });
-    let storage = tempfile::tempdir().expect("pn storage");
-    let mut node = lnpnd::node_builder(engine, storage.path().to_path_buf())
-        .connect_to_shared_instance(&daemon.instance)
-        .build()
-        .await
-        .expect("build the propagation node");
-    node.start().await.expect("attach the propagation node");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let hash = loop {
-        match events.try_recv() {
-            Ok(EngineEvent::Ready { destination_hash }) => break destination_hash,
-            Ok(_) => {}
-            Err(_) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "the propagation node never got ready"
-                );
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    };
-    (hash, node, events, storage)
-}
-
 /// One `loquax` CLI run against `daemon` from `home`, with `stdin`.
 async fn cli(
     daemon: &support::Daemon,
@@ -2722,8 +2671,9 @@ key q
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_left_at_the_mailbox_arrives_without_a_key() {
     let daemon = daemon("sync", |b| b).await;
-    let (pn, _node, _events, _pn_storage) = propagation_node(&daemon).await;
-    let pn_hex: String = pn.iter().map(|b| format!("{b:02x}")).collect();
+    // lnpnd at stamp cost 0, so a deposit needs no proof-of-work.
+    let pn = lnpnd_node::PropagationNode::start(&daemon.instance, 0).await;
+    let pn_hex = pn.hex();
     let home = tempfile::tempdir().expect("tui home");
     let ours = fixed_identity(0x11);
     std::fs::write(

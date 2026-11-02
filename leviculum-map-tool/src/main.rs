@@ -170,6 +170,7 @@ fn cmd_cut(inputs: &[String], output: &Path, bbox: &str, zooms: (u8, u8), keep: 
             .unwrap_or(1),
         locale,
         buildings,
+        round: leviculum_mapcut::cut::ROUND,
     };
     let file = BufWriter::new(File::create(output)?);
     // A remote archive's tiles of the box are fetched first, in few
@@ -317,7 +318,14 @@ fn cmd_info(path: &Path) -> Res<()> {
     let mut per = std::collections::BTreeMap::<u8, (u64, u64)>::new();
     let mut seen = std::collections::HashSet::new();
     for n in 0..h.tiles {
-        let e = region.entry(n).map_err(|e| format!("{e:?}"))?;
+        // A version 4 slot saying nothing is there counts no tile.
+        let e = match region.slot(n).map_err(|e| format!("{e:?}"))? {
+            (_, leviculum_map::region::Slot::Here(e)) => e,
+            (_, leviculum_map::region::Slot::Empty) => continue,
+            (id, leviculum_map::region::Slot::Pending) => {
+                return Err(format!("tile {}/{}/{} has not arrived", id.z, id.x, id.y).into())
+            }
+        };
         let z = per.entry(e.id.z).or_default();
         z.0 += 1;
         if seen.insert(e.offset) {

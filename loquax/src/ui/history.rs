@@ -102,6 +102,9 @@ pub struct Restored {
     pub earlier: usize,
     /// What was typed and not sent.
     pub draft: Draft,
+    /// The group this conversation is, as the store kept it (1307 G2):
+    /// listed with its members before any of its messages is loaded.
+    pub group: Option<super::groups::GroupInfo>,
 }
 
 /// One change for the store to make.
@@ -136,6 +139,8 @@ pub enum StoreWrite {
         peer: [u8; 16],
         share: Option<super::share::Share>,
     },
+    /// Keep a group as the model knows it now (1307 G2).
+    Group(super::groups::GroupInfo),
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -193,6 +198,8 @@ impl<B: InputBuffer> UiModel<B> {
         for stored in restored {
             self.restore_one(stored);
         }
+        // The groups the restored messages speak of (1307).
+        self.learn_groups();
         let open = match listed {
             true => 0,
             false => self.order().first().copied().unwrap_or(0),
@@ -218,8 +225,19 @@ impl<B> UiModel<B> {
             && !stored.pinned
             && stored.flags == Flags::default()
             && stored.draft.is_empty()
+            && stored.group.is_none()
         {
             return;
+        }
+        // The group as the store kept it (1307 G2); what the loaded
+        // messages say is learned over it, the newest epoch winning. Its
+        // name too: a group whose invitation is beyond the loaded page, or
+        // made here with no message yet, has only the store's (pass five).
+        if let Some(group) = stored.group.clone() {
+            if !group.name.is_empty() {
+                self.names.remember(group.address, &group.name);
+            }
+            self.groups.insert(group.address, group);
         }
         let now = self.now;
         let index = self.conversation(stored.peer);
@@ -344,6 +362,11 @@ impl<B> UiModel<B> {
                 .into_iter()
                 .map(|(peer, share)| StoreWrite::Share { peer, share }),
         );
+        for address in core::mem::take(&mut self.groups_changed) {
+            if let Some(group) = self.groups.get(&address) {
+                writes.push(StoreWrite::Group(group.clone()));
+            }
+        }
         writes.append(&mut self.forgotten);
         writes
     }
@@ -729,7 +752,7 @@ impl<B> UiModel<B> {
             self.mark_out(MarkFlag::Deleted, ids);
         }
         for (sc, _) in self.sending.iter_mut() {
-            if *sc > c && *sc != super::receipts::RECEIPT_SEND {
+            if *sc > c && *sc != super::receipts::RECEIPT_SEND && *sc != super::groups::STATE_SEND {
                 *sc -= 1;
             }
         }

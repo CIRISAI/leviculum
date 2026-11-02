@@ -290,6 +290,20 @@
                     android:layout_marginTop="8dp"
                     android:orientation="horizontal">
 
+                    <!-- A node nearby that is no contact (1302): Add in
+                         place of Chat and Share. -->
+                    <Button
+                        android:id="@+id/card_add"
+                        style="?android:attr/borderlessButtonStyle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/nearby_add"
+                        android:textAllCaps="false"
+                        android:textColor="@color/accent"
+                        android:textSize="16sp"
+                        android:visibility="gone" />
+
                     <Button
                         android:id="@+id/card_chat"
                         style="?android:attr/borderlessButtonStyle"

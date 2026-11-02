@@ -53,6 +53,8 @@ public class LoquaxService extends Service implements Events.Listener {
     private int screens;
     private boolean running;
     private boolean stopping;
+    /** The phone's network, told to the library while the session runs (1298). */
+    private NetWatch network;
 
     /** Start or keep the service; from a screen in front, after a start. */
     static void start(Context context) {
@@ -131,6 +133,9 @@ public class LoquaxService extends Service implements Events.Listener {
             Events.start();
             look(false);
             Book.observe(this);
+            if (network == null) {
+                network = NetWatch.start(this);
+            }
             return;
         }
         if (!Core.str(answer, "need").isEmpty()) {
@@ -178,6 +183,10 @@ public class LoquaxService extends Service implements Events.Listener {
 
     @Override
     public void onDestroy() {
+        if (network != null) {
+            network.stop();
+            network = null;
+        }
         Events.service(null);
         main.removeCallbacksAndMessages(null);
         super.onDestroy();

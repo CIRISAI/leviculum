@@ -152,11 +152,15 @@ struct Owed {
 
 /// Put the capability mark into every send among `effects` that does not
 /// carry the namespace already (a receipt does, the mark in it).
-pub(super) fn mark_sends(effects: &mut [UiEffect]) {
+pub(super) fn mark_sends(effects: &mut [UiEffect], capabilities: u64) {
     for effect in effects {
         if let UiEffect::Send { fields, .. } = effect {
             if Lev::from_fields(fields).is_none() {
-                Lev::mark().put_into(fields);
+                Lev {
+                    capabilities: Some(capabilities),
+                    ..Lev::default()
+                }
+                .put_into(fields);
             }
         }
     }
@@ -512,7 +516,7 @@ fn owes_receipt(message: &super::Message) -> bool {
     !message.outbound
         && message.id.is_some()
         && !message.is_report()
-        && !message.is_reaction()
+        && !message.is_aside()
         && !message.ledger.iter().any(|entry| entry.what == SEEN)
 }
 

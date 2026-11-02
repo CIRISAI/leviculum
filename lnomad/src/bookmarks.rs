@@ -10,6 +10,10 @@
 //! empty, so a first run or a hand-mangled file never crashes the browser;
 //! saving creates the parent directories as needed.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -113,6 +117,7 @@ impl Bookmarks {
 
     /// Load the store from `path`, tolerating a missing or corrupt file by
     /// returning an empty set (never an error, so startup cannot fail on it).
+    #[cfg(feature = "std")]
     pub fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).unwrap_or_default(),
@@ -121,6 +126,7 @@ impl Bookmarks {
     }
 
     /// Write the store to `path` as TOML, creating parent directories as needed.
+    #[cfg(feature = "std")]
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -133,6 +139,7 @@ impl Bookmarks {
 /// The default bookmarks-store path: `${XDG_CONFIG_HOME:-~/.config}/lnomad/
 /// bookmarks.toml`. `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set, in
 /// which case the browser runs without persistence.
+#[cfg(feature = "std")]
 pub fn default_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)

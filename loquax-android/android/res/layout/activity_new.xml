@@ -44,6 +44,21 @@
         android:textColor="@color/text_secondary"
         android:textSize="15sp" />
 
+    <!-- "New group" at the top (1307, the study's 4.1): the friends to
+         tick, then the name; GroupDialogs asks the library. -->
+    <TextView
+        android:id="@+id/new_group"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:attr/selectableItemBackground"
+        android:minHeight="56dp"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:text="@string/group_new"
+        android:textColor="@color/accent"
+        android:textSize="17sp" />
+
     <TextView
         android:id="@+id/new_scan"
         android:layout_width="match_parent"

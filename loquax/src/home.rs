@@ -40,6 +40,10 @@ pub mod wire;
 pub mod client;
 #[cfg(feature = "history")]
 pub mod daemon;
+#[cfg(feature = "history")]
+pub mod group;
+#[cfg(feature = "std")]
+pub mod handover;
 #[cfg(feature = "std")]
 pub mod lock;
 #[cfg(feature = "std")]
@@ -56,6 +60,43 @@ pub mod server;
 pub mod setup;
 #[cfg(feature = "std")]
 pub mod watch;
+
+/// The network the phone has now, as the platform names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetworkKind {
+    /// None at all: flight mode, or out of reach of any.
+    None,
+    /// A WLAN.
+    Wifi,
+    /// Mobile data.
+    Mobile,
+    /// Something else that carries IP (Ethernet, a VPN, Waydroid's bridge).
+    #[default]
+    Other,
+}
+
+impl NetworkKind {
+    /// The word the platform hands in, `none`, `wifi`, `mobile` or anything
+    /// else for [`NetworkKind::Other`].
+    pub fn from_word(word: &str) -> Self {
+        match word {
+            "none" => Self::None,
+            "wifi" => Self::Wifi,
+            "mobile" => Self::Mobile,
+            _ => Self::Other,
+        }
+    }
+
+    /// The word for logs, the inverse of [`NetworkKind::from_word`].
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Wifi => "wifi",
+            Self::Mobile => "mobile",
+            Self::Other => "other",
+        }
+    }
+}
 
 /// The home destination's app name and aspect: `loquax.home`, a SINGLE
 /// destination of the home identity. A client learns its key from the
@@ -114,6 +155,25 @@ pub const WATCH_PATH: &str = "/watch";
 /// for the peer's announce as it always did.
 pub const KEY_PATH: &str = "/key";
 
+/// A move to another device (1281, [`handover`]): the move token and the
+/// cursor in, a page of the archive with each entry's id out, beside the
+/// identity's private key and its delivery ratchets. Answered only to an
+/// admitted device that joined with the token of the move the owner
+/// opened on the mailbox itself.
+pub const MOVE_PATH: &str = "/move";
+
+/// The new device holds everything up to the cursor (1281): the token and
+/// the cursor in, a status out. `Ok` ends the mailbox here, for good until
+/// its owner takes it back; [`wire::Status::Behind`] when the archive grew
+/// past the cursor, which the new device takes with `/move` first.
+pub const MOVED_PATH: &str = "/moved";
+
+/// 1307: make a group the home hosts and invite its members.
+pub const GROUP_PATH: &str = "/group";
+
+/// 1307 G2: add members to a group the home hosts (study 4.5).
+pub const GROUP_ADD_PATH: &str = "/groupadd";
+
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
 /// A message a client handed in with `/send`, packed as the home node
@@ -158,6 +218,11 @@ pub const KIND_PEERSTATE: u8 = 10;
 /// message id, and a message keeps one such entry, the first. A client from
 /// before it skips it as a kind it cannot show.
 pub const KIND_STALLED: u8 = 11;
+/// A member's message to a group this home hosts (1307,
+/// [`group`]), packed as it came: the group's history and the source of
+/// its copies. The owner's devices get the owner's own copy as a received
+/// message, so a client skips this kind.
+pub const KIND_GROUP: u8 = 12;
 
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that
@@ -232,6 +297,7 @@ pub fn policy(config: &crate::config::Config) -> outgoing::Policy {
                 .saturating_mul(24 * 3600),
         ),
         stall_secs: secs(outgoing::STALL_SECS),
+        answer_secs: secs(outgoing::ANSWER_SECS),
     }
 }
 

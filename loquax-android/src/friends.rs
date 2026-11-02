@@ -127,7 +127,9 @@ pub fn split_zoom(
 /// a fix: every peer with a position but ourselves and the blocked,
 /// newest first, each with `recent` set within [`WINDOW_SECS`]; and our
 /// own position apart as `me`, for the map's pin of ours. `photo` gives a
-/// linked contact's thumbnail; the card's words are in `lang`.
+/// linked contact's thumbnail; the card's words are in `lang`. A node the
+/// mesh announced that is no contact is a row as well, marked `nearby`
+/// (1302).
 pub fn friends<B>(
     model: &UiModel<B>,
     now: i64,
@@ -158,6 +160,8 @@ pub fn friends<B>(
             last_fix_at: list.liveness.last_fix_at.unwrap_or(0),
             live: scene::row_live(&list.liveness, Some(now)).resolve(lang),
             ring: crate::session::ring(scene::Ring::of(list.liveness.state)),
+            nearby: model.is_nearby(peer),
+            announced: model.names.announced(peer).unwrap_or_default().to_string(),
         }
     };
     let mut rows: Vec<FriendRow> = model
@@ -182,6 +186,70 @@ pub fn friends<B>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1302: a node the mesh announced is a row of the sheet, marked
+    /// nearby with the name it announced and no avatar letters asked of
+    /// the app; once it is added it is a friend's row. A peer known from
+    /// a message is never nearby.
+    #[test]
+    fn a_node_the_mesh_announced_is_a_nearby_row_until_added() {
+        use loquax::ui::UiEvent;
+        const NOW: i64 = 1_793_500_000;
+        let mut model = UiModel::<crate::session::Line>::new(&[]);
+        update_clock(&mut model, NOW);
+        let place = |lat: i32| leviculum_lxmf::telemetry::Location {
+            latitude_e6: lat,
+            longitude_e6: 11_256_000,
+            altitude_e2: 0,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 0,
+            last_update: NOW - 60,
+        };
+        for (identity, name, lat) in [
+            ([1u8; 16], "Walker", 43_773_100),
+            ([2u8; 16], "Rider", 43_774_100),
+        ] {
+            loquax::ui::update(
+                &mut model,
+                UiEvent::MeshPosition {
+                    identity,
+                    fix: place(lat),
+                    name: Some(name.to_string()),
+                    age: 0,
+                },
+            );
+        }
+        let sheet = friends(&model, NOW, None, Lang::En, |_| None);
+        assert_eq!(sheet.friends.len(), 2, "{sheet:?}");
+        assert!(sheet.friends.iter().all(|row| row.nearby));
+        let mut announced: Vec<&str> = sheet.friends.iter().map(|r| r.announced.as_str()).collect();
+        announced.sort_unstable();
+        assert_eq!(announced, ["Rider", "Walker"]);
+        let walker = loquax::mesh_position::delivery_of(&[1u8; 16]);
+        loquax::ui::update(&mut model, UiEvent::AddNearby { peer: walker });
+        let sheet = friends(&model, NOW, None, Lang::En, |_| None);
+        let row = |peer: &[u8; 16]| {
+            sheet
+                .friends
+                .iter()
+                .find(|r| r.peer == loquax::address::to_hex(peer))
+                .expect("a row")
+        };
+        assert!(!row(&walker).nearby, "added, a friend");
+        assert!(row(&loquax::mesh_position::delivery_of(&[2u8; 16])).nearby);
+    }
+
+    /// The model's clock at `now`, unix seconds.
+    fn update_clock(model: &mut UiModel<crate::session::Line>, now: i64) {
+        loquax::ui::update(
+            model,
+            loquax::ui::UiEvent::Clock(loquax::when::WallTime {
+                unix_secs: now,
+                offset_secs: 0,
+            }),
+        );
+    }
 
     #[test]
     fn the_geo_uri_names_the_place_twice_and_encodes_the_label() {

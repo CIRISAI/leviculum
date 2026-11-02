@@ -4,7 +4,7 @@
 //!
 //! Before it goes ([`prepare`]): decoded, turned upright by its EXIF
 //! orientation, scaled to the reader's [`PhotoSize`] and encoded as JPEG,
-//! which carries no metadata. "Original" keeps the picture as taken and
+//! which carries no metadata, within [`SHOWN_BY_COLUMBA`]. "Original" keeps the picture as taken and
 //! only takes its metadata out: a JPEG loses every APP segment but JFIF,
 //! the colour profile and Adobe's colour transform ([`strip_jpeg`]), a
 //! PNG its text, time and EXIF chunks ([`strip_png`]). An original that
@@ -35,11 +35,26 @@ pub use crate::ui::photos::PhotoSize;
 /// and the field's framing: 990 000 leaves 10 000 for them.
 pub const LARGEST: usize = 990_000;
 
+/// The most picture bytes a scaled photo carries, so that Columba shows
+/// it (1288). Columba stores a received message's fields as JSON, the
+/// picture as `["jpg","<hex>"]`, and once that field is past 512 000
+/// characters it writes the field's JSON text to a file
+/// (`columba/data/src/main/java/network/columba/app/data/repository/ConversationRepository.kt:957-983`,
+/// threshold `columba/data/src/main/java/network/columba/app/data/storage/AttachmentStorageManager.kt:38`);
+/// reading it back it takes that text for the hex of the picture
+/// (`columba/app/src/main/java/network/columba/app/ui/model/MessageMapper.kt:532-543`),
+/// which fails at the `[`, and the bubble says "Not available"
+/// (`columba/app/src/main/java/network/columba/app/ui/screens/MessagingScreen.kt:2356-2376`).
+/// `2 * bytes + 10 > 512 000` is a picture past 255 995 bytes; 250 000
+/// leaves room for a longer format word.
+pub const SHOWN_BY_COLUMBA: usize = 250_000;
+
 /// The JPEG quality an original is encoded at when it must be turned.
 const UPRIGHT_QUALITY: u8 = 95;
 
-/// The lowest quality a scaled photo steps down to before it is refused.
-const LOWEST_QUALITY: u8 = 40;
+/// The lowest quality a scaled photo steps down to; past it the photo
+/// gets smaller instead, which looks better on a phone than blocks.
+const LOWEST_QUALITY: u8 = 60;
 
 /// What decoding one picture may take: 12 000 px a side and 400 MiB,
 /// a 100 MP camera's photo and not a decompression bomb.
@@ -80,8 +95,8 @@ impl core::fmt::Display for PhotoError {
             PhotoError::TooLarge { bytes } => write!(
                 f,
                 "the photo is {} and others take at most {}: choose a smaller photo size",
-                crate::ui::photos::size_words(*bytes),
-                crate::ui::photos::size_words(LARGEST)
+                crate::ui::photos::size_words(*bytes as u64),
+                crate::ui::photos::size_words(LARGEST as u64)
             ),
             PhotoError::Encode(detail) => write!(f, "the photo did not encode: {detail}"),
         }
@@ -184,33 +199,51 @@ fn jpeg(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, PhotoError> {
     Ok(out)
 }
 
-/// `bytes` made ready to go at `size`: see the module's rules.
-pub fn prepare(bytes: &[u8], size: PhotoSize) -> Result<Prepared, PhotoError> {
-    let format = format_of(bytes)?;
-    let prepared = match (size.target(), format) {
-        (Some((edge, quality)), _) => {
-            let image = decode(bytes)?;
-            let image = match image.width().max(image.height()) > edge {
-                true => image.resize(edge, edge, FilterType::Triangle),
-                false => image,
-            };
-            // A picture of fine detail can be past the limit even scaled:
-            // the quality steps down by 10 to 40 before it is refused,
-            // as Columba's compressor steps
-            // (`columba/app/src/main/java/network/columba/app/util/ImageUtils.kt:186-191`).
-            let mut quality = quality;
-            let mut data = jpeg(&image, quality)?;
-            while data.len() > LARGEST && quality > LOWEST_QUALITY {
-                quality = quality.saturating_sub(10).max(LOWEST_QUALITY);
-                data = jpeg(&image, quality)?;
-            }
-            Prepared {
+/// `image` scaled into an `edge` box (never up) and encoded as JPEG at
+/// `quality`, within [`SHOWN_BY_COLUMBA`]. A 12 MP phone photo at 1600 px
+/// and quality 80 is 180 to 610 KB (1288's measure), so a picture of fine
+/// detail steps its quality down by 10 to [`LOWEST_QUALITY`], as
+/// Columba's compressor steps
+/// (`columba/app/src/main/java/network/columba/app/util/ImageUtils.kt:186-191`),
+/// and then its edge, by the root of how far it is over, since a JPEG's
+/// bytes go with its pixels. A smaller edge is scaled from the first
+/// scaled picture, not from the camera's, which costs far less.
+fn scaled(image: &DynamicImage, edge: u32, quality: u8) -> Result<Prepared, PhotoError> {
+    let mut image = match image.width().max(image.height()) > edge {
+        true => image.resize(edge, edge, FilterType::Triangle),
+        false => image.clone(),
+    };
+    let mut quality = quality;
+    loop {
+        let data = jpeg(&image, quality)?;
+        if data.len() <= SHOWN_BY_COLUMBA {
+            return Ok(Prepared {
                 format: "jpg",
                 data,
                 width: image.width(),
                 height: image.height(),
-            }
+            });
         }
+        if quality > LOWEST_QUALITY {
+            quality = quality.saturating_sub(10).max(LOWEST_QUALITY);
+            continue;
+        }
+        let shown = image.width().max(image.height());
+        // 0.95 of the root so the next try lands under, not on, the limit.
+        let factor = (SHOWN_BY_COLUMBA as f64 / data.len() as f64).sqrt() * 0.95;
+        let next = (f64::from(shown) * factor) as u32;
+        if next < 16 {
+            return Err(PhotoError::TooLarge { bytes: data.len() });
+        }
+        image = image.resize(next, next, FilterType::Triangle);
+    }
+}
+
+/// `bytes` made ready to go at `size`: see the module's rules.
+pub fn prepare(bytes: &[u8], size: PhotoSize) -> Result<Prepared, PhotoError> {
+    let format = format_of(bytes)?;
+    let prepared = match (size.target(), format) {
+        (Some((edge, quality)), _) => scaled(&decode(bytes)?, edge, quality)?,
         (None, ImageFormat::Jpeg) if orientation(bytes)? == Orientation::NoTransforms => {
             let data = strip_jpeg(bytes).ok_or_else(|| not_a_picture("a broken JPEG"))?;
             let (width, height) = dimensions(&data).ok_or_else(|| not_a_picture("no size"))?;
@@ -538,7 +571,149 @@ pub mod tests {
             Err(PhotoError::TooLarge { .. })
         ));
         let phone = prepare(&bytes, PhotoSize::Phone).expect("steps down");
-        assert!(phone.data.len() <= LARGEST, "{}", phone.data.len());
+        assert!(phone.data.len() <= SHOWN_BY_COLUMBA, "{}", phone.data.len());
+    }
+
+    /// The bytes Columba hands its bitmap decoder for a received
+    /// `fields[6] = [format, data]`, or none where it shows "Not
+    /// available": the kt backend writes bytes as lower hex
+    /// (`columba/rns-api/src/main/java/network/columba/app/rns/api/util/AppDataParser.kt:204-232`),
+    /// a fields JSON of 512 000 characters or more has each field past
+    /// 512 000 written to disk as its JSON text and replaced by a file
+    /// reference (`columba/data/src/main/java/network/columba/app/data/repository/ConversationRepository.kt:957-983`),
+    /// and the reader takes the file's text for hex
+    /// (`columba/app/src/main/java/network/columba/app/ui/model/MessageMapper.kt:532-543`,
+    /// `:1076-1089`), whose `require` throws on the `[`.
+    pub fn columba_reads(format: &str, data: &[u8]) -> Option<Vec<u8>> {
+        const THRESHOLD: usize = 500 * 1024;
+        let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+        let field = format!("[\"{format}\",\"{hex}\"]");
+        let fields_json = format!("{{\"6\":{field}}}");
+        let text = match fields_json.len() >= THRESHOLD && field.len() > THRESHOLD {
+            true => field,
+            false => hex,
+        };
+        if text.len() % 2 != 0 {
+            return None;
+        }
+        text.as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(core::str::from_utf8(pair).ok()?, 16).ok())
+            .collect()
+    }
+
+    /// The model above, against Columba's own numbers: a picture of
+    /// 255 995 bytes arrives whole, one of 255 996 does not.
+    #[test]
+    fn columba_reads_a_picture_inline_and_loses_one_past_its_threshold() {
+        let fits = vec![0xab; 255_995];
+        assert_eq!(columba_reads("jpg", &fits).as_deref(), Some(&fits[..]));
+        assert_eq!(columba_reads("jpg", &vec![0xab; 255_996]), None);
+        const { assert!(SHOWN_BY_COLUMBA < 255_996) };
+    }
+
+    /// A portrait photo of fine detail, as a phone takes one: a gradient
+    /// under grain and fine stripes, 1500 x 2000 shown, stored turned
+    /// with orientation 6. At 1600 px and quality 80 it is past what
+    /// Columba shows, the case of Lew's photo of 2026-11-01 (1288).
+    pub fn detailed_portrait() -> Vec<u8> {
+        let mut seed = 0x9e37_79b9_u32;
+        let shown = image::RgbImage::from_fn(1500, 2000, |x, y| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let grain = seed % 48;
+            let stripe = if (x / 3 + y / 5) % 2 == 0 { 30 } else { 0 };
+            image::Rgb([
+                ((x * 180 / 1500) + grain + stripe).min(255) as u8,
+                ((y * 180 / 2000) + grain).min(255) as u8,
+                (100 + grain + stripe).min(255) as u8,
+            ])
+        });
+        camera_jpeg(&DynamicImage::ImageRgb8(shown), 6)
+    }
+
+    #[test]
+    fn a_detailed_phone_photo_goes_at_a_size_columba_shows() {
+        let bytes = detailed_portrait();
+        let upright = decode(&bytes).expect("decodes");
+        assert_eq!((upright.width(), upright.height()), (1500, 2000));
+        // Without the limit: 1600 px at quality 80, as 1220 sent it.
+        let unlimited =
+            jpeg(&upright.resize(1600, 1600, FilterType::Triangle), 80).expect("encodes");
+        assert!(unlimited.len() > 255_995, "{}", unlimited.len());
+        assert_eq!(columba_reads("jpg", &unlimited), None, "the failure");
+        for size in [PhotoSize::Phone, PhotoSize::Small] {
+            let p = prepare(&bytes, size).expect("prepares");
+            assert!(
+                p.data.len() <= SHOWN_BY_COLUMBA,
+                "{size:?} {}",
+                p.data.len()
+            );
+            let read = columba_reads(p.format, &p.data).expect("Columba reads it");
+            assert_eq!(dimensions(&read), Some((p.width, p.height)));
+            assert!(p.height > p.width, "still a portrait");
+            assert!(p.height >= 800, "{size:?} {}x{}", p.width, p.height);
+        }
+    }
+
+    /// What goes is a baseline JPEG (SOF0), which every Android decoder
+    /// reads, and never a progressive or extended one, a WebP or an EXIF.
+    #[test]
+    fn what_goes_is_a_baseline_jpeg() {
+        let p = prepare(&detailed_portrait(), PhotoSize::Phone).expect("prepares");
+        assert_eq!(&p.data[..2], &[0xff, 0xd8]);
+        let sof: Vec<u8> = p
+            .data
+            .windows(2)
+            .take_while(|w| w != &[0xff, 0xda])
+            .filter(|w| w[0] == 0xff && (0xc0..=0xcf).contains(&w[1]) && w[1] != 0xc4)
+            .map(|w| w[1])
+            .collect();
+        assert_eq!(sof, vec![0xc0], "one baseline frame header");
+        assert!(!contains(&p.data, b"Exif") && !contains(&p.data, b"RIFF"));
+    }
+
+    /// An Ultra HDR photo, as a Pixel takes one: the picture with an MPF
+    /// APP2 segment naming a gain map, a second JPEG after its end. What
+    /// goes is the picture alone, one JPEG.
+    #[test]
+    fn an_ultra_hdr_photo_goes_as_its_picture_alone() {
+        let primary = camera_jpeg(&picture(1200, 900), 1);
+        let gain_map = jpeg(&picture(300, 225), 70).expect("encodes");
+        let mut mpf = vec![0xff, 0xe2];
+        let body = b"MPF\0II*\0\x08\0\0\0gain map follows";
+        mpf.extend_from_slice(&((body.len() + 2) as u16).to_be_bytes());
+        mpf.extend_from_slice(body);
+        let mut ultra = primary[..2].to_vec();
+        ultra.extend_from_slice(&mpf);
+        ultra.extend_from_slice(&primary[2..]);
+        ultra.extend_from_slice(&gain_map);
+        let p = prepare(&ultra, PhotoSize::Phone).expect("prepares");
+        assert_eq!((p.width, p.height), (1200, 900));
+        let eoi = p.data.windows(2).filter(|w| w == &[0xff, 0xd9]).count();
+        assert_eq!(eoi, 1, "one picture");
+        assert!(!contains(&p.data, b"MPF"));
+        assert!(corner_is_red(&p.data));
+        assert!(columba_reads(p.format, &p.data).is_some());
+    }
+
+    /// A 16 bit PNG, as an editor exports one, goes as an 8 bit JPEG.
+    #[test]
+    fn a_sixteen_bit_png_goes_as_an_eight_bit_jpeg() {
+        let wide = image::ImageBuffer::<image::Rgb<u16>, _>::from_fn(640, 480, |x, y| {
+            image::Rgb([(x * 100) as u16, (y * 130) as u16, 30_000])
+        });
+        let mut png = Vec::new();
+        DynamicImage::ImageRgb16(wide)
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .expect("png");
+        let p = prepare(&png, PhotoSize::Phone).expect("prepares");
+        assert_eq!((p.format, p.width, p.height), ("jpg", 640, 480));
+        assert_eq!(
+            decode(&p.data).expect("decodes").color(),
+            image::ColorType::Rgb8
+        );
     }
 
     #[test]

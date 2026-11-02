@@ -16,6 +16,11 @@
 //! The router holds one entry per message id, so one message is never on
 //! two legs at once: a leg starts only when the last one ended.
 //!
+//! A direct leg the recipient never answers (no link, so the message never
+//! reached `Sending`) is given up after [`ANSWER_SECS`] (1328) and handed
+//! to the propagation node, rather than waiting out the router's stock
+//! attempts: the announce and hourly retries go on regardless.
+//!
 //! A leg whose end never comes is given up after [`STALL_SECS`] without a
 //! sign of it (1293): the daemon calls it off in the router, and the
 //! message is treated as a direct failure, handed to the propagation node
@@ -33,6 +38,29 @@ pub const DEFAULT_RETRY_SECS: u64 = 3600;
 /// How many days a message is retried direct: seven, as Lew decided on
 /// 2026-10-29.
 pub const DEFAULT_DAYS: u64 = 7;
+
+/// How long a direct leg may wait for the recipient to answer, its message
+/// never reaching `Sending`, before it is given up and the propagation
+/// node is offered the copy: 60 s (1328).
+///
+/// The router's stock direct leg against a recipient that does not answer
+/// runs [`MAX_DELIVERY_ATTEMPTS`] link attempts, each of which the core
+/// retries twice with fresh keys and follows with a path request: on a
+/// 2-hop path over TCP one attempt took 40 s in the reproducer
+/// (`home_node.rs`, `..._reaches_a_costly_local_node`), the leg about six
+/// minutes, and on miauhaus legs ran past [`STALL_SECS`] without ending
+/// (1328), so a message to a Columba user who was offline waited thirteen
+/// minutes for its propagated copy. The reference's single link
+/// establishment waits 6 s per hop plus the first hop's time
+/// (`reference/Reticulum/RNS/Link.py:283-284`, `Reticulum.py:142`), so a
+/// peer that is there answers well inside the first attempt; 60 s covers
+/// that first attempt with its retries over two hops and the margin to
+/// start sending. What the bound cuts off costs nothing that matters: the
+/// recipient keeps one message per hash, and the next announce of the
+/// recipient tries direct again at once.
+///
+/// [`MAX_DELIVERY_ATTEMPTS`]: leviculum_lxmf::router::MAX_DELIVERY_ATTEMPTS
+pub const ANSWER_SECS: u64 = 60;
 
 /// How long a leg may go without a sign before it is given up: 779 s.
 ///
@@ -130,6 +158,10 @@ pub enum Act {
     /// without a sign, and whatever the router still holds of it would
     /// refuse the next leg as a duplicate.
     GiveUp { id: [u8; 32], leg: Leg },
+    /// Call off the direct leg of `id` in the router: the recipient did not
+    /// answer within [`Policy::answer_secs`]. A direct failure, recorded as
+    /// none.
+    Unanswered { id: [u8; 32] },
 }
 
 /// The timing, from the config.
@@ -142,6 +174,9 @@ pub struct Policy {
     /// How long a leg may go without a sign before it is given up, in
     /// seconds ([`STALL_SECS`]).
     pub stall_secs: i64,
+    /// How long a direct leg may wait for the recipient to answer, in
+    /// seconds ([`ANSWER_SECS`]).
+    pub answer_secs: i64,
 }
 
 impl Default for Policy {
@@ -150,6 +185,7 @@ impl Default for Policy {
             retry_secs: DEFAULT_RETRY_SECS as i64,
             horizon_secs: (DEFAULT_DAYS * 24 * 3600) as i64,
             stall_secs: STALL_SECS as i64,
+            answer_secs: ANSWER_SECS as i64,
         }
     }
 }
@@ -163,6 +199,11 @@ struct Item {
     in_flight: Option<Leg>,
     /// When the leg in flight started or last gave a sign.
     heard_at: i64,
+    /// When the leg in flight started.
+    started_at: i64,
+    /// The recipient answered the direct leg in flight: its message
+    /// reached `Sending`.
+    answered: bool,
     /// A direct leg was given up and the propagation node is owed the
     /// copy a failure would have sent it.
     propagation_owed: bool,
@@ -173,6 +214,8 @@ impl Item {
     fn start(&mut self, leg: Leg, now: i64) -> Act {
         self.in_flight = Some(leg);
         self.heard_at = now;
+        self.started_at = now;
+        self.answered = false;
         if leg == Leg::Direct {
             // A direct failure propagates by itself.
             self.propagation_owed = false;
@@ -216,6 +259,8 @@ impl Outgoing {
             propagated,
             in_flight: None,
             heard_at: i64::MIN,
+            started_at: i64::MIN,
+            answered: false,
             propagation_owed: false,
             next_direct_at: i64::MIN,
         });
@@ -253,14 +298,36 @@ impl Outgoing {
         }
     }
 
-    /// The clock moved: give up a leg that went silent, end what passed its
-    /// horizon, and try what is due.
+    /// The router reported `id`'s message sending: the recipient answered
+    /// the leg, which is a sign of it too.
+    pub fn answered(&mut self, id: &[u8; 32], now: i64) {
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == *id) {
+            if item.in_flight.is_some() {
+                item.heard_at = now;
+                item.answered = true;
+            }
+        }
+    }
+
+    /// The clock moved: give up a direct leg nobody answered and a leg that
+    /// went silent, end what passed its horizon, and try what is due.
     pub fn tick(&mut self, now: i64) -> Vec<Act> {
         let mut acts = Vec::new();
         let horizon = self.policy.horizon_secs;
         let retry = self.policy.retry_secs;
         let stall = self.policy.stall_secs;
+        let answer = self.policy.answer_secs;
         self.items.retain_mut(|item| {
+            if item.in_flight == Some(Leg::Direct)
+                && !item.answered
+                && now.saturating_sub(item.started_at) >= answer
+            {
+                item.in_flight = None;
+                item.propagation_owed |= !item.propagated;
+                acts.push(Act::Unanswered { id: item.id });
+                // The next leg waits for the next tick, as after a stall.
+                return true;
+            }
             if let Some(leg) = item.in_flight {
                 if now.saturating_sub(item.heard_at) < stall {
                     return true;
@@ -305,8 +372,13 @@ impl Outgoing {
         let retry = self.policy.retry_secs;
         let mut acts = Vec::new();
         for item in &mut self.items {
+            // A copy the propagation node is owed goes first, at the next
+            // tick: the announce that follows a direct leg given up is as a
+            // rule the path response the router's own path request drew
+            // from the cache, not the recipient (1328).
             if item.destination != destination
                 || item.in_flight.is_some()
+                || item.propagation_owed
                 || now.saturating_sub(item.created_at) >= horizon
             {
                 continue;
@@ -454,6 +526,7 @@ mod tests {
             retry_secs: 10,
             horizon_secs: 100,
             stall_secs: 1000,
+            answer_secs: 1000,
         });
         outgoing.add(ID, PEER, Vec::new(), 0, false);
         let mut now = 0;
@@ -479,6 +552,7 @@ mod tests {
             retry_secs: 10,
             horizon_secs: 100,
             stall_secs: 1000,
+            answer_secs: 1000,
         });
         outgoing.add(ID, PEER, Vec::new(), 0, true);
         assert_eq!(outgoing.tick(95), [send(Leg::Direct)]);
@@ -506,6 +580,8 @@ mod tests {
         assert_eq!(STALL_SECS, 779);
         let mut outgoing = outbox();
         assert_eq!(outgoing.tick(1000), [send(Leg::Direct)]);
+        // The recipient answered, then the link died mid-leg.
+        outgoing.answered(&ID, 1000);
         assert!(outgoing.tick(1000 + 778).is_empty());
         assert!(outgoing.announced(PEER, 1000 + 778).is_empty());
         assert_eq!(
@@ -569,10 +645,48 @@ mod tests {
     fn a_leg_that_gives_a_sign_is_not_given_up() {
         let mut outgoing = outbox();
         outgoing.tick(1000);
+        outgoing.answered(&ID, 1001);
         outgoing.heard(&ID, 1500);
         assert!(outgoing.tick(1000 + 779).is_empty());
         assert!(outgoing.tick(1500 + 778).is_empty());
         assert_eq!(outgoing.tick(1500 + 779).len(), 2);
+    }
+
+    /// 1328: a direct leg the recipient does not answer within the bound
+    /// (an announced Columba user who went offline) is called off, records
+    /// nothing, and the next tick offers the propagation node the copy;
+    /// the announce still tries direct. Controls: an answered leg runs on
+    /// past the bound, and a message already on a node is not offered
+    /// again.
+    #[test]
+    fn a_direct_leg_nobody_answers_goes_to_the_node_within_a_minute() {
+        assert_eq!(ANSWER_SECS, 60);
+        let mut outgoing = outbox();
+        assert_eq!(outgoing.tick(1000), [send(Leg::Direct)]);
+        // A sign that is no answer (a state before sending) moves nothing.
+        outgoing.heard(&ID, 1030);
+        assert!(outgoing.tick(1059).is_empty());
+        assert_eq!(outgoing.tick(1060), [Act::Unanswered { id: ID }]);
+        assert_eq!(outgoing.in_flight(&ID), None);
+        assert!(outgoing.left(&ID, Outcome::Failed, 1060).is_empty());
+        // The path response the router's request drew starts no direct leg
+        // before the owed copy.
+        assert!(outgoing.announced(PEER, 1060).is_empty());
+        assert_eq!(outgoing.tick(1061), [send(Leg::Propagated)]);
+        assert_eq!(
+            outgoing.left(&ID, Outcome::Sent, 1062),
+            [record(Change::Propagated)]
+        );
+        // Already on the node: the announce's unanswered leg ends with no
+        // second copy.
+        assert_eq!(outgoing.announced(PEER, 1100), [send(Leg::Direct)]);
+        assert_eq!(outgoing.tick(1160), [Act::Unanswered { id: ID }]);
+        assert!(outgoing.tick(1161).is_empty());
+        // Control: answered, the leg is not cut at the bound.
+        assert_eq!(outgoing.announced(PEER, 1200), [send(Leg::Direct)]);
+        outgoing.answered(&ID, 1205);
+        assert!(outgoing.tick(1300).is_empty());
+        assert_eq!(outgoing.in_flight(&ID), Some(Leg::Direct));
     }
 
     /// A restart finds a message that was on a leg in a process that no

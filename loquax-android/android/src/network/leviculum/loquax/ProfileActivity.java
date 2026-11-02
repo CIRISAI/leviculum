@@ -43,7 +43,8 @@ import java.util.Map;
  * contact's code, which adds a contact from an `lxma://` code or an
  * address alone and joins a mailbox from an `lqxh1` one (loquax::code); where the mailbox is, with the way to
  * another, and where it is on this phone, Link a device (1264), which shows the mailbox's join code
- * for another device and says when that device came; Advanced, collapsed: identity hash, home node, propagation
+ * for another device and says when that device came, and Move to a new phone (1281), whose code lets
+ * the new phone take the mailbox over; Advanced, collapsed: identity hash, home node, propagation
  * node, backup, app version.
  */
 public class ProfileActivity extends Activity {
@@ -289,6 +290,14 @@ public class ProfileActivity extends Activity {
                     linkDevice();
                 }
             });
+            TextView move = row(getString(R.string.profile_move_phone), R.id.profile_move_phone);
+            move.setTextColor(getColor(R.color.accent));
+            move.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    movePhone();
+                }
+            });
         }
         TextView change = row(getString(R.string.profile_mailbox_change), R.id.profile_mailbox_change);
         change.setTextColor(getColor(R.color.accent));
@@ -302,13 +311,72 @@ public class ProfileActivity extends Activity {
     }
 
     /**
-     * Link a device (1264): the mailbox's join code for one other device, as a QR on a white card and
-     * as text to share, how long it is good for, and a line that asks the library every second
-     * whether the device came: "Device linked: <its name>" then, or that the code ran out with a new
-     * one a tap away.
+     * Link a device (1264): the mailbox's join code for one other device, and a line that asks the
+     * library every second whether the device came: "Device linked: <its name>" then, or that the
+     * code ran out with a new one a tap away.
      */
     private void linkDevice() {
-        final Map<String, Object> code = Core.linkDevice();
+        codeSheet(Core.linkDevice(), R.string.link_title, R.string.link_text, R.string.link_waiting,
+                new int[] {R.id.link_text, R.id.link_qr, R.id.link_code, R.id.link_status},
+                new Look() {
+                    @Override
+                    public boolean look(TextView status) {
+                        Map<String, Object> linked = Core.linked();
+                        String state = Core.str(linked, "state");
+                        if ("linked".equals(state)) {
+                            status.setText(getString(R.string.link_linked, Core.str(linked, "name")));
+                            status.setTextColor(getColor(R.color.accent));
+                            return true;
+                        }
+                        if ("over".equals(state)) {
+                            status.setText(R.string.link_over);
+                            return true;
+                        }
+                        return false;
+                    }
+                }, false);
+    }
+
+    /**
+     * Move to a new phone (1281, walk finding 24): a code for the new phone, which takes the address,
+     * the contacts and the messages over it; the line says when it did, and this phone has stopped
+     * then. Done after the move opens the first screen, which says this phone moved.
+     */
+    private void movePhone() {
+        codeSheet(Core.movePhone(), R.string.move_title, R.string.move_text, R.string.move_waiting,
+                new int[] {R.id.link_text, R.id.move_qr, R.id.move_code, R.id.move_status},
+                new Look() {
+                    @Override
+                    public boolean look(TextView status) {
+                        Map<String, Object> moving = Core.moving();
+                        String state = Core.str(moving, "state");
+                        if ("moved".equals(state)) {
+                            status.setText(getString(R.string.move_moved, Core.str(moving, "name")));
+                            status.setTextColor(getColor(R.color.accent));
+                            return true;
+                        }
+                        if ("over".equals(state)) {
+                            status.setText(R.string.link_over);
+                            return true;
+                        }
+                        return false;
+                    }
+                }, true);
+    }
+
+    /** What a code sheet asks the library every second; true once the answer is final. */
+    private interface Look {
+        boolean look(TextView status);
+    }
+
+    /**
+     * A code for another device (1264, 1281): the instruction, the code as a QR on a white card and
+     * as text to share, how long it is good for, and the status line `look` keeps. `ids` are the
+     * instruction's, the QR's, the text's and the status line's. With `restart`, Done after a final
+     * answer opens the first screen afresh.
+     */
+    private void codeSheet(final Map<String, Object> code, int title, int how, int waiting, int[] ids,
+            final Look look, final boolean restart) {
         if (code.containsKey("error")) {
             Toast.makeText(this, Core.str(code, "error"), Toast.LENGTH_LONG).show();
             return;
@@ -317,9 +385,9 @@ public class ProfileActivity extends Activity {
         sheet.setOrientation(LinearLayout.VERTICAL);
         sheet.setGravity(Gravity.CENTER_HORIZONTAL);
         sheet.setPadding(dp(16), dp(16), dp(16), dp(8));
-        TextView how = text(getString(R.string.link_text), 15, R.color.text);
-        how.setId(R.id.link_text);
-        sheet.addView(how, matchWrap());
+        TextView said = text(getString(how), 15, R.color.text);
+        said.setId(ids[0]);
+        sheet.addView(said, matchWrap());
         LinearLayout card = new LinearLayout(this);
         card.setGravity(Gravity.CENTER);
         card.setPadding(dp(12), dp(12), dp(12), dp(12));
@@ -327,9 +395,9 @@ public class ProfileActivity extends Activity {
         white.setColor(Color.WHITE);
         white.setCornerRadius(dp(16));
         card.setBackground(white);
-        ImageView qr = QrCode.view(this, code, dp(240), getString(R.string.link_title));
+        ImageView qr = QrCode.view(this, code, dp(240), getString(title));
         if (qr != null) {
-            qr.setId(R.id.link_qr);
+            qr.setId(ids[1]);
             card.addView(qr, new LinearLayout.LayoutParams(dp(240), dp(240)));
         }
         LinearLayout.LayoutParams centred = new LinearLayout.LayoutParams(
@@ -344,43 +412,45 @@ public class ProfileActivity extends Activity {
         sheet.addView(good, matchWrap());
         // The code as text, for a device that pastes rather than scans; the walk reads it here.
         TextView text = text(Core.str(code, "code"), 11, R.color.text_secondary);
-        text.setId(R.id.link_code);
+        text.setId(ids[2]);
         text.setTypeface(Typeface.MONOSPACE);
         text.setTextIsSelectable(true);
         text.setPadding(0, dp(8), 0, 0);
         sheet.addView(text, matchWrap());
-        final TextView status = text(getString(R.string.link_waiting), 16, R.color.text);
-        status.setId(R.id.link_status);
+        final TextView status = text(getString(waiting), 16, R.color.text);
+        status.setId(ids[3]);
         status.setGravity(Gravity.CENTER);
         status.setPadding(0, dp(12), 0, 0);
         sheet.addView(status, matchWrap());
         ScrollView scroll = new ScrollView(this);
         scroll.addView(sheet);
+        final boolean[] over = new boolean[1];
         final AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(R.string.link_title)
+                .setTitle(title)
                 .setView(scroll)
                 .setNegativeButton(R.string.link_share, null)
-                .setPositiveButton(R.string.done, null)
+                .setPositiveButton(R.string.done, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface shown, int which) {
+                        if (restart && over[0]) {
+                            startActivity(new Intent(ProfileActivity.this, MainActivity.class)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+                        }
+                    }
+                })
                 .create();
-        final Runnable[] look = new Runnable[1];
-        look[0] = new Runnable() {
+        final Runnable[] poll = new Runnable[1];
+        poll[0] = new Runnable() {
             @Override
             public void run() {
                 if (!dialog.isShowing()) {
                     return;
                 }
-                Map<String, Object> linked = Core.linked();
-                String state = Core.str(linked, "state");
-                if ("linked".equals(state)) {
-                    status.setText(getString(R.string.link_linked, Core.str(linked, "name")));
-                    status.setTextColor(getColor(R.color.accent));
+                if (look.look(status)) {
+                    over[0] = true;
                     return;
                 }
-                if ("over".equals(state)) {
-                    status.setText(R.string.link_over);
-                    return;
-                }
-                status.postDelayed(look[0], 1000);
+                status.postDelayed(poll[0], 1000);
             }
         };
         dialog.setOnShowListener(new DialogInterface.OnShowListener() {
@@ -396,7 +466,7 @@ public class ProfileActivity extends Activity {
                                 startActivity(Intent.createChooser(send, getString(R.string.link_share)));
                             }
                         });
-                status.postDelayed(look[0], 1000);
+                status.postDelayed(poll[0], 1000);
             }
         });
         dialog.show();
