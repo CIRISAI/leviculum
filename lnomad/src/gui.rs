@@ -545,6 +545,8 @@ impl Window {
                     tasks.push(iced::exit());
                 }
                 Effect::Copy(text) => tasks.push(iced::clipboard::write(text)),
+                // Never raised here: the window is not hosted by a messenger.
+                Effect::Write(_) => {}
                 Effect::SaveBookmarks => {
                     if let Some(path) = &self.model.bookmarks_path {
                         let _ = self.model.bookmarks.save(path);

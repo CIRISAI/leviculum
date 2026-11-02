@@ -1488,6 +1488,12 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
         // send. Anything is better than the "malformed URL" this used to
         // produce, which read as a broken page rather than an unsupported
         // action.
+        // Hosted in a messenger (a tab of Loquax), there is a composer: the
+        // address goes to it, as NomadNet's does.
+        LinkKind::Lxmf(hash) if model.hosted => {
+            model.dismiss_toast();
+            vec![Effect::Write(hash)]
+        }
         LinkKind::Lxmf(hash) => {
             model.say(ToastKind::Info, with(StrId::LxmfCopied, hash.clone()));
             vec![Effect::Copy(hash)]
