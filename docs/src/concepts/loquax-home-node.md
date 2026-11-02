@@ -132,6 +132,7 @@ Link requests on `loquax.home`, msgpack on the wire:
         lang: str?]                -> [status, group: bin16]
 /groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...],
         lang: str?]                -> [status, group: bin16]
+/groupdelete [client_id: bin16, group: bin16] -> [status]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -181,7 +182,33 @@ group announces every hour on its own clock beside the announce at its
 engine's start, a member whose last three proofs each took more than
 2 s gets its lines held for 60 s and sent as one digest (`lev` key
 `0x06`), and a reaction goes to the members that understand groups with
-its target rewritten to each one's own copy (stock members get none). A `/sync` answer carries the entries after the cursor, oldest
+its target rewritten to each one's own copy (stock members get none).
+
+The writer's ticks (1307 pass four): the group's proof says the group
+has it, one tick. Once every copy of a line sent alone is proven the
+home sends the writer, when it understands groups, the status `lev`
+key `0x03` with the counts (two ticks once all are proven), again for
+every late copy a digest proves, and once every member that sends read
+receipts read it. A read receipt a member sends the group is booked
+against its copy (`group_fanout.read_at`); a member counts as a reader
+while its newest message to the group said capability bit 0. A copy a
+propagation node took is kept so (`group_fanout.propagated`, schema 13),
+and a restart tries it direct again but does not upload it twice.
+
+`/groupdelete` (1307 pass four) deletes a group the home hosts and its
+owner is admin of, for everyone: every present member gets the last
+membership with the standing ended (a stock member the text "Lew ended
+Familie."), then the home forgets the group's rows, its archived
+conversation and its key file. While the home runs, the group's engine
+proves and drops every later message to the address, as a stranger's;
+after a restart nothing answers at it, since the key is gone. A group
+the home does not host answers `Ok` (deleted before, or never there), so
+a lost answer asked again is no error; a group whose admin is someone
+else is refused. The owner's devices forget the conversation whole when
+the answer or the last membership comes; a member's device keeps the
+history, closed, under the line "Lew ended the group.".
+
+A `/sync` answer carries the entries after the cursor, oldest
 first, up to 64 KiB of messages (one larger entry still goes, alone), and
 `more` when others follow; the client asks again from the last sequence it
 got, over the same link. An answer too large for one packet goes as a
