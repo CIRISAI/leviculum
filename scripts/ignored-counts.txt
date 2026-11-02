@@ -41,6 +41,14 @@
 # needs a core-side inbound Resource cancel).
 2    -p leviculum-lxmf --test direct_delivery_attempts
 
+# 0 -> 2 (2026-11-02, 1305): the two N-home losses of the study
+# docs/drafts/mailbox-for-friends-study-2026-11.md, red on today's code by
+# design and kept on record until their fixes land: the ratchet loss
+# (comes off with H1, shared-seed ratchets) and the path flap (comes off with
+# H3, mesh-only announcing for a phone home). Run by hand with
+# `cargo test -p leviculum-lxmf --test two_homes -- --ignored`.
+2    -p leviculum-lxmf --test two_homes
+
 # Four of these need hardware or a live service: two RNode cases wanting a
 # board on /dev/ttyACM0, two i2p cases wanting a running i2pd SAM bridge.
 # The i2p pair runs under `just i2p-live` (T-0009), which starts a private

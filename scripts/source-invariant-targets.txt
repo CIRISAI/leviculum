@@ -145,6 +145,7 @@ skip  leviculum-lxmf  telemetry_request          # telemetry request codec; subj
 skip  leviculum-lxmf  telemetry_roundtrip        # telemetry roundtrip; subject is the codec
 skip  leviculum-lxmf  telemetry_vectors          # vector corpus; subject is the codec
 skip  leviculum-lxmf  timebase_jump              # clock-jump behaviour; subject is the code
+skip  leviculum-lxmf  two_homes                  # two-home losses as red mvrs; subject is the code
 skip  leviculum-lxmf  wall_clock_producer        # reads a fixture, but the subject is the producer
 skip  leviculum-lxmf-node control_loopback       # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node deferred_resource_builds # tokio runtime and sleeps
