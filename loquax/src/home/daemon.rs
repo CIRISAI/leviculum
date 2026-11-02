@@ -1421,15 +1421,8 @@ impl Sender {
     ) {
         if let Some(leg) = outgoing.in_flight(id) {
             tracing::info!(
-                "HOME outbox {} {} message={}{}",
-                leg_word(leg),
-                match outcome {
-                    Outcome::Delivered => "delivered",
-                    Outcome::Sent => "handed-on",
-                    Outcome::Failed => "failed",
-                },
-                crate::address::to_hex(id),
-                reason.map_or_else(String::new, |reason| format!(" reason={reason}"))
+                "{}",
+                left_line(leg, outcome, outgoing.unanswered(id), id, reason)
             );
         }
         let acts = outgoing.left(id, outcome, unix_now());
@@ -1595,6 +1588,37 @@ fn pn_pull_line(n: usize, pn: Option<[u8; 16]>, schedule: &Schedule, now_ms: u64
     format!("PN_PULL n={n} pn={pn} next_in_s={next}")
 }
 
+/// The line a leg the router let go of leaves. A direct leg that failed
+/// before the recipient answered is told as the outbox's own answer bound
+/// tells it, `unanswered`, with the router's reason (1331): the two are one
+/// fact, and which of them ends the leg first is no matter for the log.
+fn left_line(
+    leg: Leg,
+    outcome: Outcome,
+    unanswered: bool,
+    id: &[u8; 32],
+    reason: Option<&str>,
+) -> String {
+    let id = crate::address::to_hex(id);
+    if leg == Leg::Direct && outcome == Outcome::Failed && unanswered {
+        return format!(
+            "HOME outbox direct unanswered message={id}: reason=router: {}, \
+             offering the propagation node",
+            reason.unwrap_or("failed")
+        );
+    }
+    format!(
+        "HOME outbox {} {} message={id}{}",
+        leg_word(leg),
+        match outcome {
+            Outcome::Delivered => "delivered",
+            Outcome::Sent => "handed-on",
+            Outcome::Failed => "failed",
+        },
+        reason.map_or_else(String::new, |reason| format!(" reason={reason}"))
+    )
+}
+
 /// The router reported `state` for `id`: a sign of its leg, and from
 /// `Sending` on the recipient's answer, which lifts the direct leg's answer
 /// bound (1328).
@@ -1699,6 +1723,41 @@ mod tests {
         );
         assert_eq!(announce_period(Some(at), at + 86_400), ANNOUNCE_EVERY);
         assert_eq!(announce_period(Some(at), at - 10), ANNOUNCE_EVERY);
+    }
+
+    /// 1331: the router ending a direct leg nobody answered logs the line
+    /// the outbox's own bound logs, `unanswered`, with the router's reason;
+    /// a direct leg the recipient answered and a propagated leg log as
+    /// they did.
+    #[test]
+    fn a_router_failure_of_an_unanswered_direct_leg_is_told_as_unanswered() {
+        let id = [0xab; 32];
+        let hex = crate::address::to_hex(&id);
+        assert_eq!(
+            left_line(Leg::Direct, Outcome::Failed, true, &id, Some("failed")),
+            format!(
+                "HOME outbox direct unanswered message={hex}: reason=router: failed, \
+                 offering the propagation node"
+            )
+        );
+        assert_eq!(
+            left_line(Leg::Direct, Outcome::Failed, false, &id, Some("failed")),
+            format!("HOME outbox direct failed message={hex} reason=failed")
+        );
+        assert_eq!(
+            left_line(Leg::Direct, Outcome::Delivered, true, &id, None),
+            format!("HOME outbox direct delivered message={hex}")
+        );
+        assert_eq!(
+            left_line(
+                Leg::Propagated,
+                Outcome::Failed,
+                true,
+                &id,
+                Some("rejected")
+            ),
+            format!("HOME outbox propagated failed message={hex} reason=rejected")
+        );
     }
 
     /// 1293: a collection that found nothing says so, with the node and

@@ -41,7 +41,7 @@ pub const DEFAULT_DAYS: u64 = 7;
 
 /// How long a direct leg may wait for the recipient to answer, its message
 /// never reaching `Sending`, before it is given up and the propagation
-/// node is offered the copy: 60 s (1328).
+/// node is offered the copy: 45 s (1328, 1331).
 ///
 /// The router's stock direct leg against a recipient that does not answer
 /// runs [`MAX_DELIVERY_ATTEMPTS`] link attempts, each of which the core
@@ -53,14 +53,29 @@ pub const DEFAULT_DAYS: u64 = 7;
 /// minutes for its propagated copy. The reference's single link
 /// establishment waits 6 s per hop plus the first hop's time
 /// (`reference/Reticulum/RNS/Link.py:283-284`, `Reticulum.py:142`), so a
-/// peer that is there answers well inside the first attempt; 60 s covers
+/// peer that is there answers well inside the first attempt; 45 s covers
 /// that first attempt with its retries over two hops and the margin to
 /// start sending. What the bound cuts off costs nothing that matters: the
 /// recipient keeps one message per hash, and the next announce of the
 /// recipient tries direct again at once.
 ///
+/// It sits below the router's own end of such a leg (1331). A recipient
+/// whose key the home never held fails in the router after
+/// [`MAX_DELIVERY_ATTEMPTS`] attempts of [`DELIVERY_RETRY_WAIT_MS`] each,
+/// which its [`PROCESSING_INTERVAL_MS`] passes round up to 12 s: 60 s,
+/// and never under 50 s whatever the passes' phase
+/// (`leviculum-lxmf/src/router/direct_retry_tests.rs`). The outbox checks
+/// this bound on a 1 s tick against a start in whole seconds, so it fires
+/// between 44 s and 47 s after the leg began: 3 s under the router's
+/// floor, 13 s under what it does. At 60 s the two met within a second and
+/// the phase of the daemon's start chose which one ended the leg. A router
+/// that ends an unanswered leg first anyway (paths answered at once, a
+/// refusal) is the same fact and is told as `unanswered` too.
+///
 /// [`MAX_DELIVERY_ATTEMPTS`]: leviculum_lxmf::router::MAX_DELIVERY_ATTEMPTS
-pub const ANSWER_SECS: u64 = 60;
+/// [`DELIVERY_RETRY_WAIT_MS`]: leviculum_lxmf::router::DELIVERY_RETRY_WAIT_MS
+/// [`PROCESSING_INTERVAL_MS`]: leviculum_lxmf::router::PROCESSING_INTERVAL_MS
+pub const ANSWER_SECS: u64 = 45;
 
 /// How long a leg may go without a sign before it is given up: 779 s.
 ///
@@ -296,6 +311,14 @@ impl Outgoing {
                 item.heard_at = now;
             }
         }
+    }
+
+    /// `id` is on a direct leg the recipient has not answered: its message
+    /// never reached `Sending`. The router ending such a leg says the same
+    /// as [`Act::Unanswered`]: nobody answered (1331).
+    pub fn unanswered(&self, id: &[u8; 32]) -> bool {
+        self.item(id)
+            .is_some_and(|item| item.in_flight == Some(Leg::Direct) && !item.answered)
     }
 
     /// The router reported `id`'s message sending: the recipient answered
@@ -659,19 +682,20 @@ mod tests {
     /// past the bound, and a message already on a node is not offered
     /// again.
     #[test]
-    fn a_direct_leg_nobody_answers_goes_to_the_node_within_a_minute() {
-        assert_eq!(ANSWER_SECS, 60);
+    fn a_direct_leg_nobody_answers_goes_to_the_node_within_the_bound() {
+        assert_eq!(ANSWER_SECS, 45);
         let mut outgoing = outbox();
         assert_eq!(outgoing.tick(1000), [send(Leg::Direct)]);
         // A sign that is no answer (a state before sending) moves nothing.
         outgoing.heard(&ID, 1030);
-        assert!(outgoing.tick(1059).is_empty());
-        assert_eq!(outgoing.tick(1060), [Act::Unanswered { id: ID }]);
+        assert!(outgoing.unanswered(&ID));
+        assert!(outgoing.tick(1044).is_empty());
+        assert_eq!(outgoing.tick(1045), [Act::Unanswered { id: ID }]);
         assert_eq!(outgoing.in_flight(&ID), None);
-        assert!(outgoing.left(&ID, Outcome::Failed, 1060).is_empty());
+        assert!(outgoing.left(&ID, Outcome::Failed, 1045).is_empty());
         // The path response the router's request drew starts no direct leg
         // before the owed copy.
-        assert!(outgoing.announced(PEER, 1060).is_empty());
+        assert!(outgoing.announced(PEER, 1045).is_empty());
         assert_eq!(outgoing.tick(1061), [send(Leg::Propagated)]);
         assert_eq!(
             outgoing.left(&ID, Outcome::Sent, 1062),
@@ -680,13 +704,71 @@ mod tests {
         // Already on the node: the announce's unanswered leg ends with no
         // second copy.
         assert_eq!(outgoing.announced(PEER, 1100), [send(Leg::Direct)]);
-        assert_eq!(outgoing.tick(1160), [Act::Unanswered { id: ID }]);
-        assert!(outgoing.tick(1161).is_empty());
+        assert_eq!(outgoing.tick(1145), [Act::Unanswered { id: ID }]);
+        assert!(outgoing.tick(1146).is_empty());
         // Control: answered, the leg is not cut at the bound.
         assert_eq!(outgoing.announced(PEER, 1200), [send(Leg::Direct)]);
         outgoing.answered(&ID, 1205);
+        assert!(!outgoing.unanswered(&ID));
         assert!(outgoing.tick(1300).is_empty());
         assert_eq!(outgoing.in_flight(&ID), Some(Leg::Direct));
+    }
+
+    /// 1331: the home's answer bound and the router's own end of an
+    /// unanswered direct leg race, and either order offers the propagation
+    /// node the copy exactly once. The router's 60 s for a recipient whose
+    /// key the home never held is pinned in
+    /// `leviculum-lxmf/src/router/direct_retry_tests.rs`; the bound sits
+    /// under it with the tick phase and the whole-second start included.
+    #[test]
+    fn either_end_of_an_unanswered_direct_leg_offers_the_node_once() {
+        use leviculum_lxmf::router::{
+            DELIVERY_RETRY_WAIT_MS, MAX_DELIVERY_ATTEMPTS, PROCESSING_INTERVAL_MS,
+        };
+        // The router's floor: every attempt waits the retry wait at least.
+        let router_floor_secs = u64::from(MAX_DELIVERY_ATTEMPTS) * DELIVERY_RETRY_WAIT_MS / 1000;
+        let router_secs = u64::from(MAX_DELIVERY_ATTEMPTS)
+            * DELIVERY_RETRY_WAIT_MS.div_ceil(PROCESSING_INTERVAL_MS)
+            * PROCESSING_INTERVAL_MS
+            / 1000;
+        assert_eq!((router_floor_secs, router_secs), (50, 60));
+        // The latest the tick fires: the bound, a start up to a second
+        // before its whole-second stamp, a tick up to a second late.
+        assert!(ANSWER_SECS + 2 < router_floor_secs);
+
+        let offers = |acts: &[Act]| {
+            acts.iter()
+                .filter(|act| **act == send(Leg::Propagated))
+                .count()
+        };
+        let answer = ANSWER_SECS as i64;
+        // (a) The tick first: called off, the router's end of the leg it
+        // called off finds nothing, the next tick offers the copy.
+        let mut outgoing = outbox();
+        let mut acts = outgoing.tick(1000);
+        assert!(outgoing.unanswered(&ID));
+        acts.extend(outgoing.tick(1000 + answer));
+        assert_eq!(acts.last(), Some(&Act::Unanswered { id: ID }));
+        acts.extend(outgoing.left(&ID, Outcome::Failed, 1000 + answer));
+        for now in 1000 + answer + 1..1000 + 2 * router_secs as i64 {
+            acts.extend(outgoing.tick(now));
+        }
+        assert_eq!(offers(&acts), 1, "{acts:?}");
+        assert_eq!(outgoing.in_flight(&ID), Some(Leg::Propagated));
+        // (b) The router first, a second before the bound: the same fact,
+        // the copy goes at once and the bound finds no direct leg to cut.
+        let mut outgoing = outbox();
+        let mut acts = outgoing.tick(1000);
+        acts.extend(outgoing.tick(1000 + answer - 1));
+        assert!(outgoing.unanswered(&ID));
+        acts.extend(outgoing.left(&ID, Outcome::Failed, 1000 + answer - 1));
+        assert!(!outgoing.unanswered(&ID));
+        for now in 1000 + answer..1000 + 2 * router_secs as i64 {
+            acts.extend(outgoing.tick(now));
+        }
+        assert!(!acts.contains(&Act::Unanswered { id: ID }), "{acts:?}");
+        assert_eq!(offers(&acts), 1, "{acts:?}");
+        assert_eq!(outgoing.in_flight(&ID), Some(Leg::Propagated));
     }
 
     /// A restart finds a message that was on a leg in a process that no
