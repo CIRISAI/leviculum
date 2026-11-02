@@ -2294,7 +2294,13 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     assert_eq!(hosted.group.admin, owner);
     let group_hex = hex::encode(hosted.group.address);
 
-    // Anna's phone pulls the invitation and joins through its card.
+    // Anna's phone pulls the invitation and joins through its card. A
+    // scripted terminal keeps no watching link (`shell.rs`, `scripted`), so
+    // it pulls at start and not again for 15 minutes: Anna's home must
+    // hold the invitation before the phone starts, or the start pull can
+    // come first and the card never shows (1322 saw the pull answered
+    // 0.8 ms before the home archived it).
+    anna_node.wait_for("HOME invited to group=", 40).await;
     tui(
         &mesh,
         annas_phone.path(),
