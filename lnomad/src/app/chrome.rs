@@ -1,6 +1,6 @@
 //! The browser chrome laid out in character cells: the top bar, the footer,
 //! the help text. Shared by the frontend that draws it and by the click and
-//! hover hit-tests in [`update`], which is why it lives in the core.
+//! hover hit-tests in [`update`](super::event::update), which is why it lives in the core.
 
 use unicode_width::UnicodeWidthStr;
 

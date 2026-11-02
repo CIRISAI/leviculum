@@ -44,7 +44,7 @@
 //! | `q`, `Ctrl-c` | `Quit` |
 //!
 //! Since slice 1b the keys are a table ([`super::keys`]) whose
-//! [`Action`](super::keys::Action)s become these through [`Intent::of_key`],
+//! [`super::keys::Action`]s become these through [`Intent::of_key`],
 //! and the key handler folds them with [`apply`] as a tap does.
 
 use leviculum_ui::keymap::ScrollCmd;

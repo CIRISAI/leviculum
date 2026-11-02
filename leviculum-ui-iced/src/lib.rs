@@ -18,6 +18,9 @@
 //! Empty on a musl target, where the window's crates do not link (see the
 //! manifest).
 
+// On musl the crate is empty and the links above name nothing; rustdoc
+// still reads the crate's doc there (`just doc-touched`).
+#![cfg_attr(target_env = "musl", allow(rustdoc::broken_intra_doc_links))]
 #![cfg(not(target_env = "musl"))]
 
 pub mod avatar;
