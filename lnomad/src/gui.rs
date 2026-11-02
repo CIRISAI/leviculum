@@ -1538,18 +1538,38 @@ mod tests {
     /// Drawing the README at 1280 by 800, view and paint, the window's
     /// frame: measured over 10 frames and printed; held well under a
     /// second even in the unoptimised test profile.
+    ///
+    /// The bound is on the CPU time of the drawing thread (the render is
+    /// on it), not the wall clock: what it catches is a frame that does far
+    /// more work than its release time (16 ms; about 300 ms here), and a
+    /// quota or a loaded host stretches the wall clock without any (1.003 s
+    /// once at load 33, 1310). Where the scheduler's count is not readable
+    /// it falls back to the wall clock.
     #[test]
     fn a_readme_frame_is_drawn_in_well_under_a_second() {
         let window = readme(Theme::Light);
         let _ = shoot(&window);
         let frames = 10;
         let start = Instant::now();
+        let cpu_start = thread_cpu();
         for _ in 0..frames {
             let _ = shoot(&window);
         }
-        let each = start.elapsed() / frames;
-        println!("README frame at 1280x800: {each:?}");
+        let wall = start.elapsed() / frames;
+        let cpu = thread_cpu()
+            .zip(cpu_start)
+            .map(|(end, start)| (end - start) / frames);
+        println!("README frame at 1280x800: {cpu:?} CPU, {wall:?} wall");
+        let each = cpu.unwrap_or(wall);
         assert!(each < Duration::from_secs(1), "{each:?}");
+    }
+
+    /// This thread's time on a CPU so far, the scheduler's own count in
+    /// nanoseconds (`/proc/thread-self/schedstat`, Linux).
+    fn thread_cpu() -> Option<Duration> {
+        let stat = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+        let ns = stat.split_whitespace().next()?.parse().ok()?;
+        Some(Duration::from_nanos(ns))
     }
 
     /// The name search's results for "marcel" over three sites (the
