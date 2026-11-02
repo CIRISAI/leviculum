@@ -469,8 +469,24 @@ fn unix_secs() -> u64 {
 /// event is that an analysis can count rejections per reason without
 /// parsing prose, and a free-text field is one refactor away from breaking
 /// that. The prose stays on the `EngineEvent::Rejected` the operator sees.
+/// One refused message or transfer, at INFO: a refusal is the sender's
+/// loss until it retries, and at debug it was invisible on a node that
+/// logs at the default level (miauhaus, 2026-11-02 20:55, a resource
+/// upload refused with nothing in the node's log).
 pub(crate) fn log_reject(reason: &'static str, via: &'static str) {
-    tracing::debug!(event = "PN_REJECT", reason = reason, via = via);
+    tracing::info!(event = "PN_REJECT", reason = reason, via = via);
+}
+
+/// [`log_reject`] for a refusal by size: what was offered and the cap it
+/// failed, both in bytes, so the line alone says which limit bit.
+pub(crate) fn log_reject_sized(reason: &'static str, via: &'static str, bytes: u64, limit: u64) {
+    tracing::info!(
+        event = "PN_REJECT",
+        reason = reason,
+        via = via,
+        bytes = bytes,
+        limit = limit,
+    );
 }
 
 /// What a cull leaves behind, whichever ingest path caused it: one
@@ -842,6 +858,19 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         validate: &mut dyn FnMut(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
         out: &mut TickOutput,
     ) -> Option<TransientId> {
+        // A message that could never leave this node under its transfer
+        // limit is refused before it is stored, so the sender's retries
+        // fail where it can see them (`upload_fits_transfer_limit`). No
+        // proof, and the link goes, as for any refused upload.
+        if let Some(bytes) = ready.node.upload_too_large(data) {
+            let limit = ready.node.transfer_limit_bytes();
+            out.merge(core.close_link(link_id));
+            log_reject_sized("too_large", via, bytes, limit);
+            self.emit(EngineEvent::Rejected {
+                detail: format!("message of {bytes} B exceeds the transfer limit of {limit} B"),
+            });
+            return None;
+        }
         let outcome = ready.node.handle_upload(data, unix_secs(), &mut *validate);
         match outcome {
             UploadOutcome::Accepted {
@@ -1798,16 +1827,37 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
             // the sender as a static peer, or when it exceeds the announced
             // per-sync limit, in that order
             // (reference/LXMF/LXMF/LXMRouter.py:2206-2224).
+            //
+            // A client upload (no validated `/offer` on the link) is held to
+            // the per-message transfer limit as well: its envelope is at most
+            // the stored body plus the per-message overhead, so a resource
+            // above the limit carries a message that could never leave
+            // (`upload_fits_transfer_limit`). Each refusal is a PN_REJECT at
+            // INFO with the size and the cap; the sender learns only that the
+            // resource was refused (`RNS.Resource.REJECTED`, no reason on the
+            // wire).
             NodeEvent::ResourceAdvertised {
                 link_id, data_size, ..
             } if Self::owns_link(core, &ready, link_id) => {
-                let accept = ready.peering.admits_resource_on(core, link_id)
-                    && ready.node.accepts_resource_of(*data_size);
-                let verdict = if accept {
-                    ready.peering.on_inbound_resource_accepted(core, link_id);
-                    core.accept_resource(link_id)
+                let client = ready.peering.validated_peer(link_id).is_none();
+                let refusal = if !ready.peering.admits_resource_on(core, link_id) {
+                    Some(("not_static", 0))
+                } else if !ready.node.accepts_resource_of(*data_size) {
+                    Some(("over_sync_limit", ready.node.resource_limit_bytes()))
+                } else if client && *data_size > ready.node.transfer_limit_bytes() {
+                    Some(("too_large", ready.node.transfer_limit_bytes()))
                 } else {
-                    core.reject_resource(link_id)
+                    None
+                };
+                let verdict = match refusal {
+                    None => {
+                        ready.peering.on_inbound_resource_accepted(core, link_id);
+                        core.accept_resource(link_id)
+                    }
+                    Some((reason, limit)) => {
+                        log_reject_sized(reason, "resource", *data_size, limit);
+                        core.reject_resource(link_id)
+                    }
                 };
                 match verdict {
                     Ok(send) => out.merge(send),
@@ -3769,6 +3819,111 @@ mod tests {
                 .is_throttled_for_tests(&remote_hash, now + PN_STAMP_THROTTLE_SECS + 1),
             "and no longer"
         );
+    }
+
+    /// A client's upload resource larger than the per-message transfer
+    /// limit is refused at the advertisement, with a `PN_REJECT` that names
+    /// the size and the cap, and nothing is stored: a peer would skip that
+    /// message for good (`LXMPeer.py:370-373`), so taking it meant keeping
+    /// it here and telling the sender `SENT` (order 1294). One under the
+    /// limit, on the same kind of link, is stored.
+    #[test]
+    fn a_client_upload_over_the_transfer_limit_is_refused_and_said_so() {
+        use leviculum_lxmf::PeerSyncEnvelope;
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: PropagationNodeConfig {
+                transfer_limit_kb: 1,
+                ..cost_free()
+            },
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+        let sender = leviculum_std::generate_identity();
+
+        enable_log_dispatch();
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        let mut upload = |engine: &mut Engine<MemoryPropagationStore>, len: usize| {
+            let link_id = identified_link(
+                engine,
+                &mut server,
+                &mut client,
+                destination_hash,
+                &signing_key,
+                &sender,
+            );
+            // Both ride a resource, not a link packet.
+            let mut message = vec![len as u8; len];
+            message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+            let envelope = PeerSyncEnvelope {
+                timestamp: 1.0,
+                messages: vec![message],
+            }
+            .encode();
+            let (_, out) = client
+                .send_resource(&link_id, &envelope, None, false)
+                .expect("advertise");
+            let _ = converse(engine, &mut server, &mut client, out);
+            await_validation(engine);
+            let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+                State::Ready(ready) => ready,
+                _ => panic!("engine must be ready"),
+            };
+            let mut out = TickOutput::empty();
+            absorb(engine, &mut ready, &mut server, &mut out);
+            let stored = ready.node.store().len();
+            engine.state = State::Ready(ready);
+            (stored, envelope.len())
+        };
+        let ((over, over_len), (under, _)) = tracing::subscriber::with_default(subscriber, || {
+            (upload(&mut engine, 1_200), upload(&mut engine, 600))
+        });
+        assert_eq!(over, 0, "the oversized upload must not be stored");
+        assert_eq!(under, 1, "the one under the limit must be");
+        let log = capture.unquoted();
+        let rejects: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=PN_REJECT"))
+            .collect();
+        assert_eq!(rejects.len(), 1, "{log}");
+        // The resource's size, not the message's: refused before it moved.
+        let bytes = format!("bytes={over_len} ");
+        for field in [
+            "reason=too_large",
+            "via=resource",
+            "limit=1000",
+            " INFO ",
+            &bytes,
+        ] {
+            assert!(rejects[0].contains(field), "{field}: {}", rejects[0]);
+        }
     }
 
     /// A path request answered before the node's first announce must carry

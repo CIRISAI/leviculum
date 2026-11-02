@@ -365,6 +365,16 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
     ExitCode::from(code)
 }
 
+/// The per-message transfer limit an unset key resolves to, lxmd's
+/// `PROPAGATION_LIMIT` (`reference/LXMF/LXMF/LXMRouter.py:55`). It was 4
+/// until 1294, against the example config's 256: a stock peer then sent
+/// us nothing above 4 KB, and an upload above it stayed here for good.
+const DEFAULT_TRANSFER_LIMIT_KB: u64 = 256;
+
+/// The per-sync limit an unset key resolves to, lxmd's `SYNC_LIMIT`,
+/// 40 transfers (`reference/LXMF/LXMF/LXMRouter.py:59`); 32 until 1294.
+const DEFAULT_SYNC_LIMIT_KB: u64 = 256 * 40;
+
 /// Everything the daemon reads from config + flags, resolved.
 struct Effective {
     node_name: Option<String>,
@@ -456,11 +466,11 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             // (`lxmd.py:165-177`).
             file.get_u64("propagation", "propagation_message_max_accepted_size")?
                 .or(file.get_u64("propagation", "propagation_transfer_max_accepted_size")?)
-                .unwrap_or(4),
+                .unwrap_or(DEFAULT_TRANSFER_LIMIT_KB),
         ),
         sync_limit_kb: args.sync_limit_kb.unwrap_or(
             file.get_u64("propagation", "propagation_sync_max_accepted_size")?
-                .unwrap_or(32),
+                .unwrap_or(DEFAULT_SYNC_LIMIT_KB),
         ),
         // Unset costs are the role's own defaults, 13 / 0 / 1 (Lead,
         // 2026-09-12; flexibility 0 since 1294), one source with the board's.
@@ -1109,6 +1119,20 @@ mod tests {
         assert_eq!(effective.mailbox_stamp_cost, 12);
     }
 
+    /// A config that names no size limit runs lxmd's, 256 KB per message
+    /// and 10 240 KB per sync (`reference/LXMF/LXMF/LXMRouter.py:55`,
+    /// `:59`), the values the example config shows; 4 and 32 until 1294.
+    #[test]
+    fn an_unset_size_limit_resolves_to_the_references() {
+        let file = RawConfig::parse("[propagation]\nenable_node = yes\n").expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(
+            (effective.transfer_limit_kb, effective.sync_limit_kb),
+            (256, 10_240)
+        );
+    }
+
     /// A config that names no autopeer depth peers six hops deep, the depth
     /// lxmd's generated config carries (`lxmd.py:995`), not the router's
     /// code default of 4 (leviculum#442 D10).
@@ -1162,6 +1186,8 @@ mod tests {
         for line in [
             "# propagation_stamp_cost_target = 13",
             "# propagation_stamp_cost_flexibility = 0",
+            "# propagation_message_max_accepted_size = 256",
+            "# propagation_sync_max_accepted_size = 10240",
             "# peering_cost = 1",
             "\nautopeer_maxdepth = 6\n",
         ] {

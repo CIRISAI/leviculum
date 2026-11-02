@@ -466,6 +466,31 @@ impl PropagationRuntime {
                 ) {
                     output.core.merge(self.transport.close(node, link_id));
                 }
+                // A refused upload resource carries no reason on the wire
+                // (`RNS.Resource.REJECTED`). The limits the node announced
+                // are what a reader holds the message against: a node
+                // refuses a transfer above its sync limit, and lnpnd one
+                // above its per-message transfer limit (order 1294).
+                if reason == PropagationUploadFailure::Resource(ResourceError::RejectedByRemote) {
+                    let _limits = self
+                        .outbound_node
+                        .and_then(|destination| self.transport.known_node(&destination))
+                        .map(|known| {
+                            (
+                                known.announce.transfer_limit_kb,
+                                known.announce.sync_limit_kb,
+                            )
+                        });
+                    crate::tracing::debug!(
+                        "LXMF_PN_UPLOAD_REFUSED msg={} pn={} transfer_kb={} sync_kb={}",
+                        crate::tracing::Short(&message_id),
+                        self.outbound_node
+                            .map(|destination| alloc::format!("{destination}"))
+                            .unwrap_or_else(|| "-".into()),
+                        _limits.map_or_else(|| "-".into(), |l| alloc::format!("{}", l.0)),
+                        _limits.map_or_else(|| "-".into(), |l| alloc::format!("{}", l.1)),
+                    );
+                }
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
                     entry.set_state(super::MessageState::Outbound, &mut router.build_epochs);
                     entry.next_attempt_ms =
