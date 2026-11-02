@@ -1899,3 +1899,227 @@ async fn a_sender_holding_the_old_apps_ratchet_reaches_the_mailbox_after_its_ann
 async fn the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them() {
     stale_ratchet_round(true).await;
 }
+
+/// 1307, group chats slice G1: a group hosted by the home, its admin the
+/// home's owner writing from an admitted client, and a stock Python LXMF
+/// member. The admin's line reaches the Python member from the group's
+/// address, signed by the group, as "Lew: …" and with no `lev` pair; the
+/// member's reply names its own copy, and the copy the home hands the
+/// admin names the admin's original instead, prefixed "Bob: …". The
+/// member's proof is the group's, and both copies' proofs are booked in
+/// `group_fanout`. A second member with no node only waits in the outbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
+    use loquax::home::group;
+    use loquax::store::{groups, Store};
+
+    let peer = PythonPeer::start();
+    let bob = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    let home = mesh.home.path().to_path_buf();
+    let owner = local(&home, &["address"]);
+    assert_eq!(owner.code, Some(0), "{owner}");
+    let owner: [u8; 16] = hex::decode(owner.stdout.trim())
+        .expect("hex")
+        .try_into()
+        .expect("16 bytes");
+    let bob_address: [u8; 16] = hex::decode(&bob).expect("hex").try_into().expect("16");
+    let anna = loquax::engine::delivery_address(&leviculum_std::generate_identity())
+        .expect("anna's address");
+    let hosted = {
+        let mut store = Store::open_in(&home, owner).expect("the owner's store");
+        group::create(
+            &home,
+            &mut store,
+            "Familie",
+            (owner, "Lew"),
+            &[(bob_address, "Bob".into()), (anna, "Anna".into())],
+            1,
+        )
+        .expect("create the group")
+    };
+    let group_hex = hex::encode(hosted.group.address);
+    let code = admit(&home, "laptop");
+    let node = HomeNode::start(&home, &mesh.instance).await;
+    node.wait_for(
+        &format!("GROUP hosted name=Familie address={group_hex}"),
+        20,
+    )
+    .await;
+    let client = joined(&mesh, &node, &code).await;
+    // Bob announces, as a stock client does at start: the group's engine
+    // learns his key from it.
+    peer.lxmf_announce();
+
+    // Lew writes to the group from the client, through the home.
+    let line = "Brot ist da";
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![group_hex.clone(), "--timeout".to_string(), "40".to_string()],
+            line.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let lews_line: [u8; 32] = hex::decode(sent.enqueued_id())
+        .expect("hex")
+        .try_into()
+        .expect("32");
+    received_by(&peer, "Lew: Brot ist da", 40, &node).await;
+    let copy = peer
+        .received()
+        .into_iter()
+        .find(|m| {
+            m.get("content").and_then(|v| v.as_str()) == Some(&hex::encode("Lew: Brot ist da"))
+        })
+        .expect("the copy");
+    assert_eq!(copy["source_hash"], group_hex, "from the group: {copy}");
+    // Whether Bob could check the group's signature yet depends on whether
+    // the group's announce reached him before the copy did; a stock
+    // client shows it either way (study 3.1, "source unknown"). The
+    // owner's copy below is checked against the group's key.
+    // No fields at all: the plain text is the whole message (`{}` packed).
+    assert_eq!(
+        copy["fields"], "80",
+        "no lev pair for a stock member: {copy}"
+    );
+    let bobs_copy = copy["message_hash"].as_str().expect("hash").to_string();
+
+    // Bob answers his copy, as Columba writes a reply: FIELD_REPLY_TO.
+    let mut fields = vec![0x81, 0x30, 0xc4, 0x20];
+    fields.extend(hex::decode(&bobs_copy).expect("hex"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let reply = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": group_hex,
+                "method": "direct",
+                "content": hex::encode("Danke"),
+                "fields": hex::encode(&fields),
+            }),
+        ) {
+            Ok(result) => break result["message_hash"].as_str().expect("hash").to_string(),
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the group: {error}\n{}",
+                    node.log()
+                );
+                // As a stock client does for an address it holds no key
+                // for: ask the network, and the group's announce answers.
+                peer.rpc(
+                    "trigger_path_request",
+                    serde_json::json!({ "hash": group_hex }),
+                );
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": reply }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("Bob gave up: {state}\n{}", node.log()),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the group never proved Bob's reply: {state}\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // Lew's copy of the reply reaches the home's own delivery destination
+    // and is proven: booked, as is Bob's copy of Lew's line.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    while node.log().matches("GROUP copy delivered").count() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both copies were never proven:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+
+    let store = Store::open_in(&home, owner).expect("the store again");
+    let to_bob = store
+        .group_copy_for(&hosted.group.address, &lews_line, &bob_address)
+        .expect("row")
+        .expect("Bob's copy of Lew's line");
+    assert_eq!(hex::encode(to_bob.copy), bobs_copy);
+    assert_eq!(to_bob.state, groups::COPY_PROVEN);
+    let to_anna = store
+        .group_copy_for(&hosted.group.address, &lews_line, &anna)
+        .expect("row")
+        .expect("Anna's copy");
+    assert_eq!(to_anna.state, groups::COPY_SENT, "Anna has no node");
+    let reply_id: [u8; 32] = hex::decode(&reply).expect("hex").try_into().expect("32");
+    let to_lew = store
+        .group_copy_for(&hosted.group.address, &reply_id, &owner)
+        .expect("row")
+        .expect("Lew's copy of the reply");
+    assert_eq!(to_lew.state, groups::COPY_PROVEN);
+    let page = store.archive_since(0, usize::MAX).expect("archive");
+    let kept = page
+        .entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_RECEIVED)
+        .filter_map(|e| {
+            leviculum_lxmf::Message::unpack(
+                &e.packed,
+                None,
+                None,
+                leviculum_lxmf::DeliveryMethod::Direct,
+            )
+            .ok()
+        })
+        .find(|m| m.message_id == to_lew.copy)
+        .expect("Lew's copy in the owner's archive");
+    assert_eq!(kept.content, b"Bob: Danke");
+    let checked = leviculum_lxmf::Message::unpack(
+        &page
+            .entries
+            .iter()
+            .find(|e| {
+                e.kind == loquax::home::KIND_RECEIVED
+                    && leviculum_lxmf::Message::unpack(
+                        &e.packed,
+                        None,
+                        None,
+                        leviculum_lxmf::DeliveryMethod::Direct,
+                    )
+                    .is_ok_and(|m| m.message_id == to_lew.copy)
+            })
+            .expect("entry")
+            .packed,
+        None,
+        Some(&hosted.identity),
+        leviculum_lxmf::DeliveryMethod::Direct,
+    )
+    .expect("unpack");
+    assert_eq!(
+        checked.verification,
+        leviculum_lxmf::Verification::Valid,
+        "signed by the group"
+    );
+    assert_eq!(kept.source_hash, hosted.group.address);
+    assert_eq!(
+        leviculum_lxmf::reply::Reply::from_fields(&kept.fields).map(|r| r.to),
+        Some(lews_line),
+        "the reply names Lew's own original"
+    );
+    let originals: Vec<_> = page
+        .entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_GROUP)
+        .collect();
+    assert_eq!(originals.len(), 2, "Lew's line and Bob's reply");
+}
