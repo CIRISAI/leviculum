@@ -409,17 +409,16 @@ impl Store {
     /// from the archived original.
     pub fn group_copies_open(&self, group: &[u8; 16]) -> Result<Vec<Copy>, StoreError> {
         self.copies_select(
-            "grp = ?2 AND state = 0 AND digest IS NULL ORDER BY sent_at, original, member",
+            "grp = ?2 AND state = 0 AND digest IS NULL ORDER BY sent_at, rowid",
             group,
         )
     }
 
-    /// Every copy of `group` held for a digest, the oldest first.
+    /// Every copy of `group` held for a digest, the oldest first: by the
+    /// acceptance time, and within one second in the order the copies were
+    /// booked, which is the order the lines were accepted in.
     pub fn group_copies_held(&self, group: &[u8; 16]) -> Result<Vec<Copy>, StoreError> {
-        self.copies_select(
-            "grp = ?2 AND state = 3 ORDER BY sent_at, original, member",
-            group,
-        )
+        self.copies_select("grp = ?2 AND state = 3 ORDER BY sent_at, rowid", group)
     }
 
     /// At a restart: every copy of `group` that went out in a digest with
@@ -921,5 +920,42 @@ mod tests {
                 .contains("table client_groups is missing"),
             "{refused}"
         );
+    }
+
+    /// 1307 G2: lines accepted in one second are held and resent in the
+    /// order they were accepted, not in the order of their hashes (the
+    /// first line here has the larger id, so a sort by id would swap them).
+    #[test]
+    fn copies_of_one_second_keep_their_acceptance_order() {
+        let (_home, mut store) = opened();
+        store
+            .group_create(&familie(), &[GroupMember::new(LEW, "Lew", 100)])
+            .expect("group");
+        store
+            .group_fanout_add(&[Copy::held(GROUP, [9; 32], LEW, [0x19; 32], 100)])
+            .expect("first");
+        store
+            .group_fanout_add(&[Copy::held(GROUP, [1; 32], LEW, [0x11; 32], 100)])
+            .expect("second");
+        store
+            .group_fanout_add(&[Copy::sent(GROUP, [8; 32], LEW, [0x28; 32], 100)])
+            .expect("third");
+        store
+            .group_fanout_add(&[Copy::sent(GROUP, [2; 32], LEW, [0x22; 32], 100)])
+            .expect("fourth");
+        let held: Vec<[u8; 32]> = store
+            .group_copies_held(&GROUP)
+            .expect("held")
+            .iter()
+            .map(|c| c.original)
+            .collect();
+        assert_eq!(held, [[9; 32], [1; 32]]);
+        let open: Vec<[u8; 32]> = store
+            .group_copies_open(&GROUP)
+            .expect("open")
+            .iter()
+            .map(|c| c.original)
+            .collect();
+        assert_eq!(open, [[8; 32], [2; 32]]);
     }
 }

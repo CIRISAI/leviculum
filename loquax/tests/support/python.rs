@@ -181,9 +181,12 @@ impl Sent {
     /// line. Since 2026-08-21 the id is not on stdout, and this is the
     /// documented way to get it back out of a run.
     pub fn enqueued_id(&self) -> String {
+        // The event log of a home is appended to by every run in it: this
+        // run's line is the last one.
         let line = self
             .log
             .lines()
+            .rev()
             .find(|line| line.starts_with("LNMSG_ENQUEUED "))
             .unwrap_or_else(|| panic!("no LNMSG_ENQUEUED line in this run: {self}"));
         let id = line

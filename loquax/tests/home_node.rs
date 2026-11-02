@@ -1926,7 +1926,9 @@ async fn the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them() 
 /// pair; the member's reply names its own copy, and the copy the home
 /// hands the admin names the admin's original instead. Every copy's proof
 /// is booked in `group_fanout`, Anna's too, and Anna's home holds her copy
-/// with the writer in `lev 0x02`.
+/// with the writer in `lev 0x02`. G2: the home is killed with Anna's copy
+/// of a line unproven and, started again, makes it again from the archive
+/// and delivers it; Bob, slow, gets Lew's next two lines as one digest.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     use loquax::home::group;
@@ -2115,6 +2117,142 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+
+    // G2, item 1: the home is killed between a fan-out and its proof.
+    // Anna's home is away, so her copy of Lew's next line waits; Lew's
+    // home dies with it unproven and, started again, makes it again from
+    // the archive and delivers it once Anna's home is back.
+    drop(anna_node);
+    let waiting = "Wer kommt mit?";
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![group_hex.clone(), "--timeout".to_string(), "40".to_string()],
+            waiting.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let waiting_id: [u8; 32] = hex::decode(sent.enqueued_id())
+        .expect("hex")
+        .try_into()
+        .expect("32");
+    received_by(&peer, "Lew: Wer kommt mit?", 40, &node).await;
+    // Bob's proof is booked first, so Anna's copy is the one left open.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        let bobs = store
+            .group_copy_for(&hosted.group.address, &waiting_id, &bob_address)
+            .expect("row")
+            .map_or(-1, |c| c.state);
+        if bobs == groups::COPY_PROVEN {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Bob's copy was never proven:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    drop(node);
+    let annas_waiting = {
+        let mut store = Store::open_in(&home, owner).expect("the owner's store");
+        let row = store
+            .group_copy_for(&hosted.group.address, &waiting_id, &anna)
+            .expect("row")
+            .expect("Anna's copy of the waiting line");
+        assert_eq!(
+            row.state,
+            groups::COPY_SENT,
+            "unproven when the home died: {row:?} all={:?}\n{}\nAnna's home:\n{}",
+            store
+                .group_copies(&hosted.group.address, &waiting_id)
+                .expect("all"),
+            std::fs::read_to_string(home.join("daemon.stderr")).unwrap_or_default(),
+            std::fs::read_to_string(anna_home.path().join("daemon.stderr")).unwrap_or_default()
+        );
+        // G2, item 4: Bob is slow, as three proofs over 2 s would make
+        // him (`home::group`'s unit test measures that); here the flag is
+        // set while the home is down, and his next lines go as a digest.
+        store
+            .group_flag(&hosted.group.address, &bob_address, groups::MEMBER_SLOW)
+            .expect("slow");
+        row.copy
+    };
+    let node = HomeNode::start_as(&home, &mesh.instance, &[], Some("Lew")).await;
+    node.wait_for("GROUP Familie resumed 1 copies from the archive", 30)
+        .await;
+    let anna_node = HomeNode::start_as(anna_home.path(), &mesh.instance, &[], Some("Anna")).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        let state = store
+            .group_copy(&annas_waiting)
+            .expect("row")
+            .map_or(-1, |c| c.state);
+        if state == groups::COPY_PROVEN {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's copy was not delivered after the restart (state {state}):\n{}\nAnna's home:\n{}",
+            node.log(),
+            anna_node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // The digest: Lew's next two lines are held for slow Bob and reach
+    // him as one message after the window, the lines as text, no lev pair.
+    for line in ["eins", "zwei"] {
+        let sent = mesh
+            .run(
+                "send",
+                client.path().to_path_buf(),
+                vec![group_hex.clone(), "--timeout".to_string(), "40".to_string()],
+                line.as_bytes().to_vec(),
+            )
+            .await;
+        assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    }
+    let held_at = tokio::time::Instant::now();
+    received_by(
+        &peer,
+        "Lew: eins\nLew: zwei",
+        loquax::home::group::DIGEST_WINDOW_SECS as u64 + 40,
+        &node,
+    )
+    .await;
+    assert!(
+        held_at.elapsed()
+            >= Duration::from_secs(loquax::home::group::DIGEST_WINDOW_SECS as u64 - 5),
+        "the digest came before its window: {:?}",
+        held_at.elapsed()
+    );
+    let alone = ["Lew: eins", "Lew: zwei"].map(hex::encode);
+    assert!(
+        !peer.received().iter().any(|m| m
+            .get("content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|c| alone.iter().any(|a| a == c))),
+        "a held line went to Bob alone"
+    );
+    let digest = peer
+        .received()
+        .into_iter()
+        .find(|m| {
+            m.get("content").and_then(|v| v.as_str()) == Some(&hex::encode("Lew: eins\nLew: zwei"))
+        })
+        .expect("the digest");
+    assert_eq!(digest["source_hash"], group_hex, "from the group: {digest}");
+    assert_eq!(
+        digest["fields"], "80",
+        "text only for a stock member: {digest}"
+    );
+    node.wait_for("GROUP Familie digest of 2 lines", 5).await;
+
     drop(node);
     drop(anna_node);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
@@ -2244,7 +2382,8 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         .collect();
     assert_eq!(
         originals.len(),
-        3,
-        "Anna's Join, Lew's line and Bob's reply: every message to the group is kept"
+        6,
+        "Anna's Join, Lew's line, Bob's reply and Lew's three after it: every message \
+         to the group is kept"
     );
 }

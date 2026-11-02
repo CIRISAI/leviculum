@@ -718,6 +718,34 @@ impl Engine {
             Via::Propagated => DeliveryMethod::Propagated,
             Via::Direct | Via::Link => DeliveryMethod::Direct,
         };
+        // A recipient whose key this node does not hold (a group's engine
+        // started again after a kill, 1307 G2, keeps no known identities):
+        // ask its path, as a stock app does before it writes to an address
+        // it holds no key for. The answer is an announce and brings the key;
+        // the router only asks for a path it lacks, and a client of a shared
+        // instance has the path without the key.
+        let destination = DestinationHash::new(message.destination_hash);
+        if message.method == DeliveryMethod::Direct
+            && core
+                .storage()
+                .get_identity(destination.as_bytes())
+                .is_none()
+        {
+            tracing::info!(
+                "ENGINE no key for {}: asking its path",
+                crate::address::to_hex(&message.destination_hash)
+            );
+            let output = core.request_path_unthrottled(&destination);
+            self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            );
+        }
         if message.method == DeliveryMethod::Propagated
             && ready.router.outbound_propagation_node().is_none()
         {
