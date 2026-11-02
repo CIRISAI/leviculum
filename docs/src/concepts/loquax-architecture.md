@@ -286,7 +286,7 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    (`leviculum-lxmf/src/router.rs:1576-1580`).
 3. **`Delivered` is a Reticulum transport proof, not an application
    receipt.** It comes from `PacketDeliveryConfirmed` /
-   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1394-1416`) or from
+   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1400-1422`) or from
    `ResourceCompleted { is_sender: true }`
    (`leviculum-lxmf/src/node.rs:1324-1335`). It proves the bytes arrived at
    the destination identity. It does not prove an LXMF client parsed them
