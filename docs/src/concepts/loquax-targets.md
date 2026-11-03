@@ -65,17 +65,17 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 10 | Read receipts on/off | `SettingsActivity.java:589` | `loquax/src/gui.rs:1152` | `loquax/src/ui.rs:3546` |
 | 11 | Send a picture (Gallery) | `ChatActivity.java:1355` | `loquax/src/gui.rs:945`, `loquax/src/desktop.rs:158` (1341) | `loquax/src/ui.rs:3611` (palette `send picture`, a typed path), `loquax/src/shell.rs:375` (1371) |
 | 12 | Photo size, three tiers | `SettingsActivity.java:316` | `loquax/src/gui/chat.rs:380` (settings) (1371) | `loquax/src/ui.rs:3597` (palette `photo size`) (1371) |
-| 13 | View a photo | `ChatActivity.java:1675` | `loquax/src/gui.rs:1346` (own viewer) | `loquax/src/ui.rs:2435`, `loquax/src/shell.rs:401` (system viewer) |
+| 13 | View a photo | `ChatActivity.java:1675` | `loquax/src/gui.rs:1346` (own viewer) | `loquax/src/ui.rs:2435`, `loquax/src/shell.rs:405` (system viewer) |
 | 14 | Camera | `ChatActivity.java:988` | n/a | n/a |
-| 15 | Send a file | `ChatActivity.java:1408` | `loquax/src/gui.rs:948`, `loquax/src/shell.rs:773` (1341) | `loquax/src/ui.rs:3615` (palette `send file`, a typed path), `loquax/src/shell.rs:375` (1371) |
-| 16 | Open and save a received file | `ChatActivity.java:1575` | `loquax/src/gui.rs:1347`, `loquax/src/shell.rs:408` | `loquax/src/ui.rs:2446`, `loquax/src/shell.rs:348` |
-| 17 | Record a voice message | `RecordingBar.java:369` | `loquax/src/gui/chat.rs:1429`, `loquax/src/shell.rs:495`, `mic.rs` | `loquax/src/ui.rs:2918`, `loquax/src/shell.rs:435`, `mic.rs` |
-| 18 | Play a voice message | `ChatActivity.java:1526` | `loquax/src/gui.rs:1350`, `loquax/src/shell.rs:427` | `loquax/src/ui.rs:2455`, `loquax/src/shell.rs:367` |
+| 15 | Send a file | `ChatActivity.java:1408` | `loquax/src/gui.rs:948`, `loquax/src/shell.rs:777` (1341) | `loquax/src/ui.rs:3615` (palette `send file`, a typed path), `loquax/src/shell.rs:375` (1371) |
+| 16 | Open and save a received file | `ChatActivity.java:1575` | `loquax/src/gui.rs:1347`, `loquax/src/shell.rs:412` | `loquax/src/ui.rs:2446`, `loquax/src/shell.rs:348` |
+| 17 | Record a voice message | `RecordingBar.java:369` | `loquax/src/gui/chat.rs:1429`, `loquax/src/shell.rs:499`, `mic.rs` | `loquax/src/ui.rs:2918`, `loquax/src/shell.rs:435`, `mic.rs` |
+| 18 | Play a voice message | `ChatActivity.java:1526` | `loquax/src/gui.rs:1350`, `loquax/src/shell.rs:431` | `loquax/src/ui.rs:2455`, `loquax/src/shell.rs:367` |
 | 19 | Groups: new, join, members, add, remove, leave, delete, start again | `GroupDialogs.java:34` | `loquax/src/gui.rs:1145` (all verbs) | `loquax/src/ui.rs:3680` to `loquax/src/ui.rs:3762` |
 | 20 | Map with positions | `MapPane.java:350` | `loquax/src/gui.rs:1207` | `loquax/src/ui.rs:3632`, `tui/map.rs` |
 | 21 | Buildings on the map | `loquax/src/picture.rs:44` (shared) | `loquax/src/picture.rs:44` | `loquax/src/picture.rs:44` (sixel, kitty) |
 | 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1371` | `loquax/src/ui.rs:3628` |
-| 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:987` | `loquax/src/ui.rs:3607` (palette `delete all maps`), `loquax/src/shell.rs:389` (1371) |
+| 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:987` | `loquax/src/ui.rs:3607` (palette `delete all maps`), `loquax/src/shell.rs:393` (1371) |
 | 24 | Mesh positions (nodes nearby) | `MapPane.java:370` | `loquax/src/gui.rs:1661` | `loquax/src/tui/map.rs:1380` |
 | 25 | Share the position, once or timed | `ChatActivity.java:910`, `ShareService.java:39` | `loquax/src/gui.rs:1076`, `loquax/src/gui.rs:1084`, position by hand `loquax/src/ui/by_hand.rs:27` (1371) | `loquax/src/ui.rs:3598` (palette `position`), `loquax/src/ui.rs:3602` (`share position`, `stop sharing`) (1371) |
 | 26 | Pin | `ConversationsActivity.java:481` | row menu `loquax/src/gui/chat.rs:1132`, `loquax/src/gui.rs:1270` (1371) | `loquax/src/ui.rs:3512` |
@@ -124,13 +124,13 @@ not counted; since 1369 it is built on all three, behind the same
   in the lock through the window's theme reader (leviculum-ui-iced, mundy);
   neither `rfd` nor another dialog crate is in the tree, and zbus needs no
   GTK. The shell sends the pick as the phone sends its picker's
-  (`loquax/src/shell.rs:835`): a picture scaled at the reader's photo size, a file
+  (`loquax/src/shell.rs:839`): a picture scaled at the reader's photo size, a file
   whole up to what a receiver takes. Saving a received file is the
   existing save under the home's `files/` and the system's handler
-  (`loquax/src/shell.rs:408`), the same in both desktop targets.
+  (`loquax/src/shell.rs:412`), the same in both desktop targets.
 - **Voice** was already on both desktop targets: recording through the
   system's recorder (`pw-record`, `parecord`, `arecord`, `mic.rs`),
-  playback as a WAV file for the system's player (`loquax/src/shell.rs:427`). No
+  playback as a WAV file for the system's player (`loquax/src/shell.rs:431`). No
   audio crate was added.
 - **QR without a camera.** The phone's decoder (rqrr) moved from
   `loquax-android` into `loquax::scan`, and `scan::image_codes` reads a
