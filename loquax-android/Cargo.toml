@@ -38,7 +38,7 @@ crate-type = ["cdylib", "rlib"]
 # for the paperclip's photo and the bubbles' thumbnails (1220), `voice`
 # for the microphone's voice messages and their player (1222), `scan`
 # for the scanner's QR decoder (1152), shared with the desktop (1341).
-loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr", "scan", "photos", "voice"] }
+loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr", "scan", "photos", "voice", "browse"] }
 # The map's types the screen's call passes to loquax's.
 leviculum-map = { path = "../leviculum-map", features = ["std"] }
 leviculum-mapfill = { path = "../leviculum-mapfill" }
@@ -49,7 +49,7 @@ leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, feature
 leviculum-std = { path = "../leviculum-std" }
 # The Browse tab (1337): lnomad's browser core, which loquax hosts, and
 # with `std` its fetch session, which runs over the phone's own node
-# (pass two, `src/browse_fetch.rs`).
+# (pass two, `loquax::browse_fetch`, shared with the desktop since 1369).
 lnomad = { path = "../lnomad", default-features = false, features = ["std"] }
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # The admission token the phone's own mailbox issues its screens (1152).

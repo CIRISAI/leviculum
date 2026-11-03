@@ -166,7 +166,7 @@ struct Inner {
     /// here and the page says it is loading.
     browse_owed: Vec<lnomad::Effect>,
     /// The fetch they go to, over the phone's own node (1337 pass two).
-    fetching: Option<crate::browse_fetch::Fetching>,
+    fetching: Option<loquax::browse_fetch::Fetching>,
     /// What the tab hands Java once, with the next [`schema::Query::Browse`]:
     /// a text for the clipboard, and a downloaded file's path and name.
     browse_copy: Option<String>,
@@ -517,12 +517,12 @@ impl Session {
         let mut inner = inner;
         inner.costs.opened = Some(opened_rx);
         inner.network = network;
-        inner.fetching = Some(crate::browse_fetch::start(
+        inner.fetching = Some(loquax::browse_fetch::start(
             runtime.handle(),
-            crate::browse_fetch::Options {
+            loquax::browse_fetch::Options {
                 lends,
                 identity: browse_identity,
-                identify: home.join(crate::browse_fetch::IDENTIFY_FILE),
+                identify: home.join(loquax::browse_fetch::IDENTIFY_FILE),
             },
             Arc::clone(&wake),
         ));
@@ -1805,21 +1805,23 @@ impl Inner {
             .and_then(|fetching| fetching.told.try_recv().ok())
         {
             match told {
-                crate::browse_fetch::Told::Browse(event) => self.apply(UiEvent::Browse(event)),
-                crate::browse_fetch::Told::File { name, bytes } => {
+                loquax::browse_fetch::Told::Browse(event) => self.apply(UiEvent::Browse(event)),
+                loquax::browse_fetch::Told::File { name, bytes } => {
                     let event = self.keep_download(&name, &bytes);
                     self.apply(UiEvent::Browse(event));
                 }
+                // The phone asks for no pictures yet (below).
+                loquax::browse_fetch::Told::Picture { .. } => {}
             }
         }
         for effect in std::mem::take(&mut self.browse_owed) {
             let ask = match effect {
-                lnomad::Effect::Navigate(target) => crate::browse_fetch::Ask::Navigate(target),
-                lnomad::Effect::Download(target) => crate::browse_fetch::Ask::Download(target),
+                lnomad::Effect::Navigate(target) => loquax::browse_fetch::Ask::Navigate(target),
+                lnomad::Effect::Download(target) => loquax::browse_fetch::Ask::Download(target),
                 lnomad::Effect::SetIdentify { dest, on } => {
-                    crate::browse_fetch::Ask::Identify { dest, on }
+                    loquax::browse_fetch::Ask::Identify { dest, on }
                 }
-                lnomad::Effect::Cancel => crate::browse_fetch::Ask::Cancel,
+                lnomad::Effect::Cancel => loquax::browse_fetch::Ask::Cancel,
                 // The browser said "copied" already; Java writes it.
                 lnomad::Effect::Copy(text) => {
                     self.browse_copy = Some(text);

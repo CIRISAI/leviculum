@@ -24,7 +24,6 @@
 
 #[cfg(target_os = "android")]
 pub mod bitmap;
-pub mod browse_fetch;
 pub mod browser;
 pub mod friends;
 pub mod links;

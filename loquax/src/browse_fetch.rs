@@ -1,39 +1,43 @@
-//! The Browse tab's fetch on the phone (1337 pass two, #475): lnomad's
-//! fetch session over the phone's own node, lent by its engine
-//! ([`loquax::engine::Lent`]), not a second node beside it
-//! (`docs/src/concepts/lnomad-everywhere.md`, slice 3).
+//! The Browse tab's fetch (1337 pass two, #475; the desktop's since
+//! 1369): lnomad's fetch session over the node the messenger already
+//! runs, lent by its engine ([`crate::engine::Lent`]), not a second node
+//! beside it (`docs/src/concepts/lnomad-everywhere.md`, slice 3). The
+//! phone, the terminal and the window run this one task.
 //!
-//! Which node that is the session decides: the mailbox's when it is on
-//! this phone, since that node is the phone's way onto the network and
-//! the screens' leaf reaches nothing past it; the leaf's when the mailbox
-//! is a computer's, whose rendezvous carries it on. Either way the node
-//! comes on a channel and may come again: the phone's mailbox lends its
-//! node anew at every start, a restart after a rename included.
+//! Which node that is the host decides. On the phone: the mailbox's when
+//! it is on this phone, since that node is the phone's way onto the
+//! network and the screens' leaf reaches nothing past it; the leaf's when
+//! the mailbox is a computer's, whose rendezvous carries it on. On a
+//! desktop: the node the messenger attached to its daemon. Either way the
+//! node comes on a channel and may come again: the phone's mailbox lends
+//! its node anew at every start, a restart after a rename included.
 //!
 //! The fetch is lnomad's own ([`lnomad::fetch::Session`] over a
 //! [`LentNode`], [`lnomad::transfer::fetch_page`],
-//! [`lnomad::transfer::fetch_file`], [`lnomad::transfer::spawn_discovery`]);
-//! what this adds is the task the terminal's loop is on a desktop: one
-//! fetch in flight, a newer one or a cancel superseding it, and what it
-//! brought said back as the hosted browser's events.
+//! [`lnomad::transfer::fetch_file`], [`lnomad::transfer::spawn_discovery`],
+//! [`lnomad::transfer::spawn_image_queue`]); what this adds is the task
+//! lnomad's own loop is in the standalone browser: one fetch in flight, a
+//! newer one or a cancel superseding it, a page's pictures one after
+//! another, and what it brought said back as the hosted browser's events.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::engine::Lent;
+use crate::ui::browse::BrowseEvent;
 use leviculum_core::Identity;
 use lnomad::app::strings::Text;
+use lnomad::app::ImageRequest;
 use lnomad::fetch::{LentNode, Session as Fetch};
 use lnomad::{transfer, IdentifyStore, Target};
-use loquax::engine::Lent;
-use loquax::ui::browse::BrowseEvent;
 use tokio::sync::{mpsc, Mutex};
 
 /// One request's budget: lnomad's own default (`--timeout 30`).
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The file under the app's directory that keeps the nodes the reader
-/// identifies to, lnomad's `identify.toml`.
+/// The file under the app's directory (Loquax's home on a desktop) that
+/// keeps the nodes the reader identifies to, lnomad's `identify.toml`.
 pub const IDENTIFY_FILE: &str = "browse-identify.toml";
 
 /// What the session asks of the fetch: the hosted browser's effects that
@@ -48,6 +52,10 @@ pub enum Ask {
     Identify { dest: [u8; 16], on: bool },
     /// Drop the fetch in flight ([`lnomad::Effect::Cancel`]).
     Cancel,
+    /// Fetch the page's pictures one after another
+    /// ([`lnomad::Effect::FetchImages`]); an empty list stops the last
+    /// page's, as a navigation and a cancel do.
+    Images(Vec<ImageRequest>),
 }
 
 /// What the fetch tells the session.
@@ -57,6 +65,21 @@ pub enum Told {
     Browse(BrowseEvent),
     /// A file arrived, to be kept where the platform keeps downloads.
     File { name: String, bytes: Vec<u8> },
+    /// One of the page's pictures, for the host that draws it: its
+    /// transfer started, its bytes, or why not.
+    Picture {
+        link: usize,
+        target: Target,
+        shot: Shot,
+    },
+}
+
+/// What the picture queue says of one picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shot {
+    Started,
+    Bytes(Vec<u8>),
+    Failed(String),
 }
 
 /// The fetch's ends the session holds.
@@ -138,7 +161,7 @@ async fn run(options: Options, mut asks: mpsc::UnboundedReceiver<Ask>, teller: T
                     }
                     continue;
                 }
-                Some(Ask::Identify { .. } | Ask::Cancel) => continue,
+                Some(Ask::Identify { .. } | Ask::Cancel | Ask::Images(_)) => continue,
                 None => return,
             },
         };
@@ -178,6 +201,9 @@ async fn serve(
     let (brought_tx, mut brought) = mpsc::unbounded_channel::<(u64, Brought)>();
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let mut generation = 0u64;
+    let (shots_tx, mut shots) = mpsc::unbounded_channel::<transfer::ImageOutcome>();
+    let mut pictures: Option<tokio::task::JoinHandle<()>> = None;
+    let mut picture_generation = 0u64;
     let listening = loop {
         tokio::select! {
             _ = &mut ended => break true,
@@ -204,10 +230,42 @@ async fn serve(
                     break false;
                 }
             }
+            Some(shot) = shots.recv() => {
+                // A stale generation belongs to a page the reader has left.
+                if shot.generation != picture_generation {
+                    continue;
+                }
+                let told = Told::Picture {
+                    link: shot.link,
+                    target: shot.target,
+                    shot: match shot.result {
+                        transfer::ImageResult::Started => Shot::Started,
+                        transfer::ImageResult::Bytes(bytes) => Shot::Bytes(bytes),
+                        transfer::ImageResult::Failed(why) => Shot::Failed(why),
+                    },
+                };
+                if !teller.tell(told) {
+                    break false;
+                }
+            }
             ask = asks.recv() => {
                 let Some(ask) = ask else {
                     break false;
                 };
+                // A page's pictures go after the page, beside no other
+                // fetch: they neither end the fetch in flight nor wait.
+                if let Ask::Images(requests) = ask {
+                    picture_generation = stop(&mut pictures, picture_generation);
+                    if !requests.is_empty() {
+                        pictures = Some(transfer::spawn_image_queue(
+                            &session, &shots_tx, TIMEOUT, requests, picture_generation,
+                        ));
+                    }
+                    continue;
+                }
+                if !matches!(ask, Ask::Download(_) | Ask::Identify { .. }) {
+                    picture_generation = stop(&mut pictures, picture_generation);
+                }
                 if let Some(handle) = inflight.take() {
                     handle.abort();
                 }
@@ -235,14 +293,14 @@ async fn serve(
                             tracing::warn!("BROWSE identify not saved: {error}");
                         }
                     }
-                    Ask::Cancel => {}
+                    Ask::Cancel | Ask::Images(_) => {}
                 }
             }
         }
     };
     // The lender may be stopping its node, which it can only once nothing
     // here holds it: the fetch in flight and the discovery go first.
-    if let Some(handle) = inflight.take() {
+    for handle in [inflight.take(), pictures.take()].into_iter().flatten() {
         handle.abort();
         let _ = handle.await;
     }
@@ -253,4 +311,13 @@ async fn serve(
         let _ = session.into_inner().close().await;
     }
     listening
+}
+
+/// Stop the last page's picture queue, whose pictures are nobody's now:
+/// the task aborted and the generation moved on, which is returned.
+fn stop(task: &mut Option<tokio::task::JoinHandle<()>>, generation: u64) -> u64 {
+    if let Some(handle) = task.take() {
+        handle.abort();
+    }
+    generation.wrapping_add(1)
 }

@@ -65,6 +65,8 @@ pub const VERSION: &str = env!("LEVICULUM_VERSION");
 
 pub mod address;
 pub mod body;
+#[cfg(feature = "browse")]
+pub mod browse_fetch;
 pub mod clock;
 pub mod code;
 pub mod config;

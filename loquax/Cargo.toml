@@ -190,7 +190,15 @@ tui = [
     "photos",
     "voice",
     "dep:zbus",
+    # The Browse tab (1369): its fetch, and lnomad's terminal view, which
+    # draws it.
+    "browse",
+    "lnomad/tui",
 ]
+# The Browse tab's fetch (`loquax::browse_fetch`, 1337 pass two, 1369):
+# lnomad's fetch session with its `std`, over the node the messenger runs.
+# The phone, the terminal and the window carry it; the core does not.
+browse = ["std", "lnomad/std"]
 # QR codes (`loquax::home::qr`): the admission code in the terminal, and an
 # address for the phone's contact screen to show (1146).
 qr = ["dep:qrcodegen"]
@@ -229,6 +237,10 @@ gui = [
     "photos",
     "voice",
     "dep:zbus",
+    # The Browse tab (1369): its fetch, and lnomad's window view, which
+    # draws it with its pictures.
+    "browse",
+    "lnomad/gui",
 ]
 
 [dependencies]
