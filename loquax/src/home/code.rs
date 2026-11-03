@@ -181,6 +181,63 @@ impl HomeCode {
     }
 }
 
+/// How many characters a code without an address has: the prefix and the
+/// 84 bytes in base32.
+pub const TYPED_LEN: usize = PREFIX.len() + ((BODY_LEN + CHECK_LEN) * 8).div_ceil(5);
+
+/// How far a code typed by hand has come, on a device without a camera or
+/// a clipboard (the M9 types it on its keys, 1359). Whitespace and case
+/// are ignored as [`HomeCode::parse`] ignores them; positions count the
+/// characters that are left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typing {
+    /// So far so good: `typed` of [`TYPED_LEN`] characters.
+    Short { typed: usize },
+    /// The character at `at` cannot stand there: not the prefix's, not in
+    /// the alphabet, or one past the end. Said at once, not after the
+    /// last of 140.
+    Stray { at: usize },
+    /// All there: the code, or the checksum's verdict on a typo.
+    Complete(Result<HomeCode, CodeError>),
+}
+
+/// Where `text`, typed so far, stands.
+pub fn typing(text: &str) -> Typing {
+    let compact: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let stray = compact.chars().enumerate().find(|&(at, c)| match at {
+        _ if at >= TYPED_LEN => true,
+        _ if at < PREFIX.len() => PREFIX.as_bytes()[at] != c as u8 || !c.is_ascii(),
+        _ => !c.is_ascii() || !ALPHABET.contains(&(c as u8)),
+    });
+    match (stray, compact.len()) {
+        (Some((at, _)), _) => Typing::Stray { at },
+        (None, TYPED_LEN) => Typing::Complete(HomeCode::parse_code(&compact)),
+        (None, typed) => Typing::Short { typed },
+    }
+}
+
+/// `text` in groups of five with a space between, whitespace and case
+/// gone: how a device shows a code typed into it, so a person keeps their
+/// place against the code they copy from.
+pub fn grouped(text: &str) -> String {
+    let mut out = String::new();
+    let compact = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_lowercase());
+    for (i, c) in compact.enumerate() {
+        if i > 0 && i % 5 == 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// RFC 4648 base32 in lower case, unpadded: the code's, and a backup's
 /// ([`super::backup`]).
 pub(super) fn base32(bytes: &[u8]) -> String {
@@ -355,5 +412,38 @@ mod tests {
         );
         assert_eq!(HomeCode::parse("lqxh1abc"), Err(CodeError::Shape));
         assert_eq!(HomeCode::parse("lqxh1ab!d"), Err(CodeError::Shape));
+    }
+
+    /// A code typed one character at a time is short until its last, then
+    /// complete; a stray character is named where it stands; a typo the
+    /// alphabet allows is the checksum's.
+    #[test]
+    fn a_typed_code_says_how_far_it_came_and_where_it_went_wrong() {
+        let text = code().encode();
+        assert_eq!(text.len(), TYPED_LEN);
+        assert_eq!(TYPED_LEN, 140);
+        for typed in 0..TYPED_LEN {
+            assert_eq!(typing(&text[..typed]), Typing::Short { typed });
+        }
+        assert_eq!(typing(&text), Typing::Complete(Ok(code())));
+        assert_eq!(
+            typing(&grouped(&text.to_ascii_uppercase())),
+            Typing::Complete(Ok(code()))
+        );
+        assert_eq!(typing("lqxj1"), Typing::Stray { at: 3 });
+        assert_eq!(typing("lqxh1ab1"), Typing::Stray { at: 7 });
+        assert_eq!(
+            typing(&alloc::format!("{text}a")),
+            Typing::Stray { at: 140 }
+        );
+        let mut typo = text.clone();
+        typo.replace_range(60..61, if &text[60..61] == "a" { "b" } else { "a" });
+        assert_eq!(typing(&typo), Typing::Complete(Err(CodeError::Checksum)));
+    }
+
+    #[test]
+    fn a_code_is_shown_in_groups_of_five() {
+        assert_eq!(grouped("LQXH1 abcdefg"), "lqxh1 abcde fg");
+        assert_eq!(grouped(""), "");
     }
 }
