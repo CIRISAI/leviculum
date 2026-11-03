@@ -697,6 +697,34 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
     }
 }
 
+/// 1381, finding 22: a script speaks English whatever the host's locale,
+/// and its `lang` step switches the screen to German: the list then says
+/// `du:` before our own line. Both sessions run the same keys, so the one
+/// without the step is the control.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_speaks_english_until_its_lang_step_says_german() {
+    let daemon = daemon("tui-lang", |b| b).await;
+    let keys = "\
+until ready 20
+key enter
+key i
+type eins
+key enter
+frame sent
+key esc
+key esc
+key q
+";
+    let english = run_keys_script(&daemon, "lang-en", keys).await;
+    let german = run_keys_script(&daemon, "lang-de", &format!("lang de\n{keys}")).await;
+    let sent = frame(&english, "sent");
+    assert!(sent.contains("you: eins"), "{english}");
+    assert!(!sent.contains("du: eins"), "{english}");
+    let gesendet = frame(&german, "sent");
+    assert!(gesendet.contains("du: eins"), "{german}");
+    assert!(!gesendet.contains("you: eins"), "{german}");
+}
+
 /// The chat session. Every time on screen comes from a `clock` step, and the
 /// test sends each of the peer's messages only once the frame before it is
 /// drawn, so each arrives under its own clock.

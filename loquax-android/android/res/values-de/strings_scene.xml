@@ -65,6 +65,7 @@
     <string name="map_legend">* Person  @ gewählt  grau: alt oder in der Nähe</string>
     <string name="map_keys">Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen</string>
     <string name="draft_row">Entwurf: %1$s</string>
+    <string name="row_you">du: %1$s</string>
     <string name="reacted">hat mit %1$s reagiert</string>
     <string name="you_reacted">Du hast mit %1$s reagiert</string>
     <string name="run_updates">%1$d Meldungen seit %2$s</string>

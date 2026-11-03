@@ -7651,6 +7651,9 @@ pub(crate) mod tests {
             "▌<abababab…>"
         );
         assert_eq!(text(&view(&model).conversations[1]).trim_end(), "▌you: hi");
+        // 1381, finding 22: the terminal's list speaks the reader's language.
+        model.lang = strings::Lang::De;
+        assert_eq!(text(&view(&model).conversations[1]).trim_end(), "▌du: hi");
     }
 
     /// `Alt-Enter` puts a line break in the compose pane, `Enter` still

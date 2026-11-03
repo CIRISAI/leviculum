@@ -39,6 +39,7 @@ use leviculum_ui::delivery::DeliveryState;
 use leviculum_ui::footer;
 use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
 use leviculum_ui::input::{MouseButton, MouseEvent, MouseEventKind};
+use leviculum_ui::strings::Lang;
 use leviculum_ui::theme::{resolve_theme, Theme, ThemeFlag};
 use leviculum_ui::tokens::Tokens;
 use leviculum_ui_ratatui::background::detect_background;
@@ -111,11 +112,14 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         Ok(started) => started,
         Err(code) => return code,
     };
-    // A script plays its own terminal: monochrome and dark until its `tier`
-    // and `theme` steps say otherwise, whatever the host's.
+    // A script plays its own terminal: monochrome, dark and English until
+    // its `tier`, `theme` and `lang` steps say otherwise, whatever the
+    // host's. The real terminal speaks the locale's language, as the window
+    // does (1381): `LANG=C` is English.
     let theme_flag = options.theme.or(config.theme).unwrap_or_default();
     if options.script.is_none() {
         shell.model.tier = resolve_tier_from_env(options.no_color, options.color);
+        shell.model.lang = loquax::engine::locale();
     }
     let outcome = match &options.script {
         Some(script) => {
@@ -737,6 +741,8 @@ enum Step {
     Tier(Tier),
     /// Light or dark from now on.
     Theme(Theme),
+    /// The language the screen speaks from now on (1381).
+    Lang(Lang),
     /// The screen's style map, to the styles file.
     Styles(String),
     /// The terminal's focus came or went.
@@ -1001,6 +1007,11 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 "light" => Step::Theme(Theme::Light),
                 other => return Err(at(format!("unknown theme {other:?}, dark or light"))),
             },
+            "lang" => match rest.trim() {
+                "en" => Step::Lang(Lang::En),
+                "de" => Step::Lang(Lang::De),
+                other => return Err(at(format!("unknown lang {other:?}, en or de"))),
+            },
             "styles" => Step::Styles(rest.trim().to_string()),
             "focus" => match rest.trim() {
                 "in" => Step::Focus(true),
@@ -1257,6 +1268,7 @@ async fn run_script(
             Step::Keyboard(enhanced) => shell.model.enhanced = enhanced,
             Step::Tier(tier) => shell.model.tier = tier,
             Step::Theme(theme) => shell.model.theme = theme,
+            Step::Lang(lang) => shell.model.lang = lang,
             Step::Styles(label) => {
                 let view = ui::view(&shell.model);
                 terminal
@@ -2157,6 +2169,10 @@ mod tests {
         assert!(matches!(steps[3], Step::Tier(Tier::Mono)));
         assert!(parse_script("tier 8\n").is_err());
         assert!(parse_script("theme solarized\n").is_err());
+        let steps = parse_script("lang de\nlang en\n").expect("parses");
+        assert!(matches!(steps[0], Step::Lang(Lang::De)));
+        assert!(matches!(steps[1], Step::Lang(Lang::En)));
+        assert!(parse_script("lang fr\n").is_err());
     }
 
     #[test]

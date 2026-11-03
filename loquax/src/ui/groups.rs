@@ -2033,6 +2033,20 @@ mod tests {
             // card's title, not the wire's English with the code in it.
             let row = super::super::chat::list_row(&model, &LEW);
             assert_eq!(row.last, card.title.resolve(lang), "the row is the card");
+            // 1381, finding 21: the terminal's list draws the same line,
+            // no code and no wire English.
+            let list: alloc::string::String = super::super::layout::list(&model, 60, 12)
+                .iter()
+                .map(|line| {
+                    line.cells
+                        .iter()
+                        .map(|c| c.ch)
+                        .collect::<alloc::string::String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(list.contains(&card.title.resolve(lang)), "{list}");
+            assert!(!list.contains("lxma://"), "{list}");
             (card.title.resolve(lang), card.trust.resolve(lang))
         };
         let (title, trust) = card(Lang::De);

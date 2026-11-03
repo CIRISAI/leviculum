@@ -109,6 +109,8 @@ leviculum_ui::catalogue! {
     MapKeys = "map_keys", "arrows pan  +- zoom  space pin  enter open", "Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
+    // The terminal's list line of our own last message (1381).
+    RowYou = "row_you", "you: %1$s", "du: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";

@@ -1,7 +1,7 @@
 === 80x24
 ┌● Loquax (attaching)────┐┌  <abababab…>───────────────────────────── no relay ┐
 │▌<abababab…>      03:44 ││ ⌖ Sharing your position, 42 min left               │
-│▌you:                   ││                                                    │
+│▌you: Position shared   ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -26,7 +26,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === 120x40
 ┌● Loquax (attaching)──────────────┐┌  <abababab…>─────────────────────────────────── abababababababababababababababab ┐
 │▌<abababab…>                03:44 ││                                                                         no relay │
-│▌you:                             ││ ──────────────────────────────────────────────────────────────────────────────── │
+│▌you: Position shared             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││ ⌖ Sharing your position, 42 min left · click to stop                             │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
