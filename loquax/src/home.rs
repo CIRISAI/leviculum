@@ -60,6 +60,8 @@ pub mod server;
 #[cfg(feature = "std")]
 pub mod setup;
 #[cfg(feature = "std")]
+pub mod upstream;
+#[cfg(feature = "std")]
 pub mod watch;
 
 /// The network the phone has now, as the platform names it.

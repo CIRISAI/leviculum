@@ -79,6 +79,16 @@
 //! carry, which `loquax mailbox setup` writes with `rendezvous_dial = off`
 //! (`crate::home::setup`, 1266).
 //!
+//! Two keys say how a mailbox on a computer reaches the network (1354),
+//! for power users too: `mailbox_upstream`, `shared` or `mesh`. Unset, the
+//! mailbox runs beside the Reticulum daemon when one answers on its shared
+//! instance and on a node of its own when none does, as the phone's mailbox
+//! always does (`crate::home::upstream`). `shared` waits for the daemon;
+//! `mesh` runs on its own node even beside one. And `mailbox_servers`, the
+//! entry servers that node dials, one at a time with failover, written as
+//! `rendezvous` is (unset: the rendezvous list, `rendezvous` or the shipped
+//! one).
+//!
 //! A drawing's name is not checked here: the set is the frontend's, and a
 //! name an older loquax does not know falls back to its own choice, said
 //! once, rather than stop it from starting.
@@ -185,6 +195,21 @@ pub struct Config {
     /// `home_address`, when the file sets it: the fixed `host:port` a phone
     /// dials instead of a rendezvous.
     pub home_address: Option<String>,
+    /// `mailbox_upstream`, when the file sets it; unset decides by whether
+    /// a daemon answers (`crate::home::upstream`, 1354).
+    pub mailbox_upstream: Option<MailboxUpstream>,
+    /// `mailbox_servers`, when the file sets it: the entry servers a
+    /// mailbox on a node of its own dials, `host:port` each.
+    pub mailbox_servers: Option<Vec<String>>,
+}
+
+/// The `mailbox_upstream` key's two values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxUpstream {
+    /// Beside the device's Reticulum daemon, on its shared instance.
+    Shared,
+    /// On a node of its own that dials the entry servers.
+    Mesh,
 }
 
 /// A TCP connection's keepalive and user timeout, as the file sets them
@@ -456,28 +481,26 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 None => config.map_drawing.push((context.to_string(), drawing)),
             }
         }
-        if key.trim() == "rendezvous" {
-            let inner = value.trim();
-            let inner = inner
-                .strip_prefix('[')
-                .and_then(|v| v.strip_suffix(']'))
-                .unwrap_or(inner);
-            let mut list = Vec::new();
-            for entry in inner.split(',') {
-                let entry = entry.trim().trim_matches('"').trim();
-                if entry.is_empty() {
-                    continue;
-                }
-                if !is_host_port(entry) {
+        for (name, slot) in [
+            ("rendezvous", &mut config.rendezvous),
+            ("mailbox_servers", &mut config.mailbox_servers),
+        ] {
+            if key.trim() == name {
+                *slot = Some(host_port_list(value, index + 1, name)?);
+            }
+        }
+        if key.trim() == "mailbox_upstream" {
+            config.mailbox_upstream = Some(match value.trim().trim_matches('"') {
+                "shared" => MailboxUpstream::Shared,
+                "mesh" => MailboxUpstream::Mesh,
+                other => {
                     return Err(ConfigError::BadValue {
                         line: index + 1,
-                        key: "rendezvous",
-                        detail: alloc::format!("{entry:?} is not host:port"),
+                        key: "mailbox_upstream",
+                        detail: alloc::format!("{other:?} is not shared or mesh"),
                     });
                 }
-                list.push(entry.to_string());
-            }
-            config.rendezvous = Some(list);
+            });
         }
         if key.trim() == "home_address" {
             let entry = value.trim().trim_matches('"').trim();
@@ -505,6 +528,32 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         }
     }
     Ok(config)
+}
+
+/// A list of `host:port` entries, separated by commas and optionally in
+/// brackets, each optionally quoted; an empty one is an empty list.
+fn host_port_list(value: &str, line: usize, key: &'static str) -> Result<Vec<String>, ConfigError> {
+    let inner = value.trim();
+    let inner = inner
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(inner);
+    let mut list = Vec::new();
+    for entry in inner.split(',') {
+        let entry = entry.trim().trim_matches('"').trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if !is_host_port(entry) {
+            return Err(ConfigError::BadValue {
+                line,
+                key,
+                detail: alloc::format!("{entry:?} is not host:port"),
+            });
+        }
+        list.push(entry.to_string());
+    }
+    Ok(list)
 }
 
 /// Whether `text` reads as `host:port`, a port from 1 to 65535 behind the
@@ -896,8 +945,41 @@ mod tests {
         assert!(!dir.path().join(".config.new").exists());
     }
 
-    /// The four TCP keys (1176) parse under the names an lnsd section
-    /// uses, and a word where a number belongs is an error naming the key.
+    /// The mailbox's two keys (1354): `shared` or `mesh`, and a list of
+    /// entry servers written as `rendezvous` is.
+    #[test]
+    fn the_mailbox_upstream_keys_parse_and_a_bad_value_is_an_error() {
+        let config = parse_str(
+            "mailbox_upstream = mesh\nmailbox_servers = [\"a.example:4242\", b.example:4965]\n",
+        )
+        .expect("parses");
+        assert_eq!(config.mailbox_upstream, Some(MailboxUpstream::Mesh));
+        assert_eq!(
+            config.mailbox_servers,
+            Some(vec![
+                "a.example:4242".to_string(),
+                "b.example:4965".to_string()
+            ])
+        );
+        assert_eq!(
+            parse_str("mailbox_upstream = \"shared\"\n")
+                .expect("shared")
+                .mailbox_upstream,
+            Some(MailboxUpstream::Shared)
+        );
+        let none = parse_str("").expect("empty");
+        assert_eq!((none.mailbox_upstream, none.mailbox_servers), (None, None));
+        assert_eq!(
+            parse_str("x = 1\nmailbox_upstream = lnsd\n"),
+            Err(ConfigError::BadValue {
+                line: 2,
+                key: "mailbox_upstream",
+                detail: "\"lnsd\" is not shared or mesh".to_string(),
+            })
+        );
+        assert!(parse_str("mailbox_servers = a.example\n").is_err());
+    }
+
     #[test]
     fn the_rendezvous_keys_parse_and_a_bad_entry_is_an_error() {
         let config = parse_str(
@@ -925,6 +1007,8 @@ mod tests {
         assert!(parse_str("home_address = :4242\n").is_err());
     }
 
+    /// The four TCP keys (1176) parse under the names an lnsd section
+    /// uses, and a word where a number belongs is an error naming the key.
     #[test]
     fn the_tcp_liveness_keys_parse_and_a_word_is_an_error() {
         let config = parse_str(

@@ -412,6 +412,11 @@ required-features = ["history"]
 name = "home_node"
 required-features = ["tui"]
 
+# 1354: a mailbox on its own node on the host, against two entry nodes.
+[[test]]
+name = "mailbox_mesh"
+required-features = ["history"]
+
 # 1266: `loquax mailbox setup`, the five steps, by flags and by typed answers.
 [[test]]
 name = "mailbox_setup"
