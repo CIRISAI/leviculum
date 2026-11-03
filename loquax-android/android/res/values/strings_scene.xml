@@ -235,6 +235,7 @@
     <string name="enter_position">Type my position</string>
     <string name="map_centre">The map\'s centre</string>
     <string name="position_hint">52.5163, 13.3777</string>
+    <string name="fix_by_hand">Set by hand</string>
     <string name="no_fix">Loquax does not know where you are yet.</string>
     <string name="fix_age">Found %1$s</string>
     <string name="fix_now">Found just now</string>

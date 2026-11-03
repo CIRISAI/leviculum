@@ -1639,6 +1639,7 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
             let fix = model.bar.own_fix.as_ref();
             let words = match (fix, model.now) {
                 (None, _) => Text::key(StrId::NoFix),
+                (Some(_), _) if model.bar.by_hand => Text::key(StrId::FixByHand),
                 (Some(fix), Some(now)) if now.unix_secs - fix.last_update >= 60 => Text::Key(
                     StrId::FixAge,
                     Vec::from([Arg::Text(Box::new(ago(now.unix_secs - fix.last_update)))]),

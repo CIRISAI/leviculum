@@ -13,13 +13,60 @@ use leviculum_ui::input::InputBuffer;
 use leviculum_ui::toast::ToastKind;
 
 use super::contacts::Ask;
-use super::intent::{Intent, Target};
+use super::intent::{Intent, Switch, Target};
 use super::photos::PhotoSize;
 use super::share::Span;
 use super::state::MUTED_ALWAYS;
 use super::{Palette, UiEffect, UiEvent, UiModel};
 
 const NO_MESSAGE: &str = "no message here";
+
+/// A peer verb as [`UiModel::peer_verb`] takes it: the intent's word on a
+/// peer, once it no longer asks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerVerb {
+    Pin(Switch),
+    /// Seconds, for ever below zero, unmute at zero.
+    Mute(i64),
+    Archive(Switch),
+    Block(Switch),
+    Verify(Switch),
+    MarkUnread(Switch),
+    Rename(String),
+    Forget {
+        everywhere: bool,
+    },
+}
+
+impl PeerVerb {
+    /// The verb `intent` says and whom it names; none for another intent,
+    /// a rename without a name and a forget not yet confirmed.
+    pub fn of(intent: &Intent) -> Option<(Target, Self)> {
+        Some(match intent {
+            Intent::Pin { peer, on } => (*peer, Self::Pin(*on)),
+            Intent::Mute { peer, secs } => (*peer, Self::Mute(*secs)),
+            Intent::Archive { peer, on } => (*peer, Self::Archive(*on)),
+            Intent::Block { peer, on } => (*peer, Self::Block(*on)),
+            Intent::Verify { peer, on } => (*peer, Self::Verify(*on)),
+            Intent::MarkUnread { peer, on } => (*peer, Self::MarkUnread(*on)),
+            Intent::Rename {
+                peer,
+                name: Some(name),
+            } => (*peer, Self::Rename(name.clone())),
+            Intent::Forget {
+                peer,
+                everywhere,
+                confirmed: true,
+            } => (
+                *peer,
+                Self::Forget {
+                    everywhere: *everywhere,
+                },
+            ),
+            _ => return None,
+        })
+    }
+}
 
 impl<B> UiModel<B> {
     /// What a peer verb of a tap or the palette does in the model, on a
@@ -28,51 +75,44 @@ impl<B> UiModel<B> {
     /// forget once confirmed. None for every other intent, and for a verb
     /// that still asks.
     pub fn peer_word(&self, intent: &Intent) -> Option<UiEvent> {
-        let open = self.conversations.get(self.selected).map(|c| c.peer);
-        let peer_of = |target: &Target| match target {
-            Target::Peer(peer) => Some(*peer),
-            Target::Open => open,
+        let (peer, verb) = PeerVerb::of(intent)?;
+        self.peer_verb(peer, verb)
+    }
+
+    /// [`UiModel::peer_word`] of a verb already taken out of its intent.
+    pub fn peer_verb(&self, peer: Target, verb: PeerVerb) -> Option<UiEvent> {
+        let peer = match peer {
+            Target::Peer(peer) => peer,
+            Target::Open => self.conversations.get(self.selected)?.peer,
         };
-        let state = |peer: &[u8; 16]| self.peer_state(peer);
-        Some(match intent {
-            Intent::Pin { peer, on } => {
-                let peer = peer_of(peer)?;
-                let mut state = state(&peer);
+        let mut state = self.peer_state(&peer);
+        Some(match verb {
+            PeerVerb::Pin(on) => {
                 state.pinned = on.apply(state.pinned);
                 UiEvent::PeerState { peer, state }
             }
-            Intent::Archive { peer, on } => {
-                let peer = peer_of(peer)?;
-                let mut state = state(&peer);
+            PeerVerb::Archive(on) => {
                 state.archived = on.apply(state.archived);
                 UiEvent::PeerState { peer, state }
             }
-            Intent::Block { peer, on } => {
-                let peer = peer_of(peer)?;
-                let mut state = state(&peer);
+            PeerVerb::Block(on) => {
                 state.blocked = on.apply(state.blocked);
                 UiEvent::PeerState { peer, state }
             }
-            Intent::Mute { peer, secs } => {
-                let peer = peer_of(peer)?;
+            PeerVerb::Mute(secs) => {
                 let now = self.now.map_or(0, |now| now.unix_secs);
-                let mut state = state(&peer);
-                state.muted_until = match *secs {
+                state.muted_until = match secs {
                     0 => None,
                     secs if secs < 0 => Some(MUTED_ALWAYS),
                     secs => Some(now.saturating_add(secs)),
                 };
                 UiEvent::PeerState { peer, state }
             }
-            Intent::Verify { peer, on } => {
-                let peer = peer_of(peer)?;
-                UiEvent::Verify {
-                    peer,
-                    verified: on.apply(self.verified(&peer)),
-                }
-            }
-            Intent::MarkUnread { peer, on } => {
-                let peer = peer_of(peer)?;
+            PeerVerb::Verify(on) => UiEvent::Verify {
+                peer,
+                verified: on.apply(self.verified(&peer)),
+            },
+            PeerVerb::MarkUnread(on) => {
                 let unread = self
                     .conversations
                     .iter()
@@ -82,22 +122,8 @@ impl<B> UiModel<B> {
                     unread: on.apply(unread),
                 }
             }
-            Intent::Rename {
-                peer,
-                name: Some(name),
-            } => UiEvent::Rename {
-                peer: peer_of(peer)?,
-                name: name.clone(),
-            },
-            Intent::Forget {
-                peer,
-                everywhere,
-                confirmed: true,
-            } => UiEvent::DeleteConversation {
-                peer: peer_of(peer)?,
-                everywhere: *everywhere,
-            },
-            _ => return None,
+            PeerVerb::Rename(name) => UiEvent::Rename { peer, name },
+            PeerVerb::Forget { everywhere } => UiEvent::DeleteConversation { peer, everywhere },
         })
     }
 

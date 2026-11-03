@@ -1540,6 +1540,13 @@ pub enum UiEvent {
     /// The position sheet's "map centre" row: the map's centre is the own
     /// fix (1371).
     FixAtMapCentre,
+    /// A peer verb of a frontend without the model at hand (1371, the
+    /// window's row menu): what [`UiModel::peer_word`] makes of it, or
+    /// nothing.
+    PeerWord {
+        peer: intent::Target,
+        verb: verbs::PeerVerb,
+    },
     /// A node announced its position to the mesh (1302,
     /// [`crate::mesh_position`]): `identity` the hash of the identity the
     /// announce proved, `fix` its position, `name` the name a shell knows
@@ -1899,6 +1906,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::FixAtMapCentre => model.fix_at_map_centre(),
+        UiEvent::PeerWord { peer, verb } => match model.peer_verb(peer, verb) {
+            Some(event) => update(model, event),
+            None => Vec::new(),
+        },
         UiEvent::MeshPosition {
             identity,
             fix,

@@ -303,6 +303,7 @@ leviculum_ui::catalogue! {
     EnterPosition = "enter_position", "Type my position", "Meine Position eingeben";
     MapCentre = "map_centre", "The map's centre", "Die Kartenmitte";
     PositionHint = "position_hint", "52.5163, 13.3777", "52.5163, 13.3777";
+    FixByHand = "fix_by_hand", "Set by hand", "Von Hand gesetzt";
     NoFix = "no_fix", "Loquax does not know where you are yet.", "Loquax weiß noch nicht, wo du bist.";
     FixAge = "fix_age", "Found %1$s", "Ermittelt %1$s";
     FixNow = "fix_now", "Found just now", "Gerade eben ermittelt";

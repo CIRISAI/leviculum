@@ -108,6 +108,8 @@ pub struct Seen {
     /// The reader's switch "Send read receipts" (1233), the settings'
     /// row.
     pub receipts: bool,
+    /// The reader's photo size (1220), the settings' row (1371).
+    pub photo_size: loquax::ui::photos::PhotoSize,
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
@@ -164,6 +166,7 @@ impl Seen {
             scene: shell.model.scene(LayoutClass::Wide),
             now: shell.model.now,
             receipts: shell.model.reading.on,
+            photo_size: shell.model.photo_size,
             photo: None,
             browse: match (shell.model.browse.showing(), &shell.browsing.pictures) {
                 (true, Some(pictures)) => Some(Browsed {
@@ -214,6 +217,9 @@ pub async fn run(options: ShellOptions) -> ExitCode {
     // The desktop's portal is the window's picker (1341): Gallery and
     // File in the plus, as on the phone.
     shell.model.bar.abilities.picker = true;
+    // No receiver on a desktop (1371): the position sheet takes it by
+    // hand, typed or the map's centre.
+    shell.model.bar.abilities.manual = true;
     // The Browse tab's pictures (1369): lnomad's window code holds them in
     // the shell, which the window draws them from.
     shell.browsing.pictures = Some(Arc::default());
@@ -431,6 +437,10 @@ pub enum Message {
     NewAddress(String),
     /// What the new group's name field holds now (1307).
     GroupName(String),
+    /// What the position sheet's field holds now (1371).
+    Position(String),
+    /// What the row menu's rename field holds now (1371).
+    Renaming(String),
     NewGo,
     Compose(text_editor::Action),
     /// What the user asks (1218): a press on a scene node raises the
@@ -677,6 +687,16 @@ struct App {
     search: String,
     /// The new conversation's field while it is open.
     new_address: Option<String>,
+    /// The position sheet's field while it is open (1371).
+    position: Option<String>,
+    /// The row menu's rename field while it is open (1371): whose, and
+    /// what it holds.
+    renaming: Option<([u8; 16], String)>,
+    /// The map was shown once: the position sheet offers its centre.
+    map_shown: bool,
+    /// The keys' help over the window while it is open (1371), at this
+    /// line.
+    help: Option<usize>,
     compose: text_editor::Content,
     /// The message a reply being written answers, with its first line.
     reply: Option<([u8; 32], String)>,
@@ -747,6 +767,7 @@ impl App {
                 scene: empty.clone(),
                 now: None,
                 receipts: true,
+                photo_size: loquax::ui::photos::PhotoSize::default(),
                 photo: None,
                 browse: None,
                 copied: None,
@@ -775,6 +796,10 @@ impl App {
             flipped: false,
             search: String::new(),
             new_address: None,
+            position: None,
+            renaming: None,
+            map_shown: false,
+            help: None,
             compose: text_editor::Content::new(),
             reply: None,
             compose_for: None,
@@ -894,6 +919,12 @@ impl App {
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
             Message::Search(query) => self.search = query,
             Message::NewAddress(typed) => self.new_address = Some(typed),
+            Message::Position(typed) => self.position = Some(typed),
+            Message::Renaming(typed) => {
+                if let Some((_, name)) = self.renaming.as_mut() {
+                    *name = typed;
+                }
+            }
             Message::GroupName(typed) => {
                 self.tell(UiEvent::Group(loquax::ui::groups::Verb::Name(typed)));
             }
@@ -1018,8 +1049,29 @@ impl App {
             // The plus's sheet and the position sheet (1270) are the
             // model's; the window draws them from the scene.
             Intent::Attach { peer } => self.tell(UiEvent::OpenSheet(Sheet::Attach { peer })),
-            Intent::Locate { peer } => self.tell(UiEvent::OpenSheet(Sheet::Position { peer })),
-            Intent::CloseSheet => self.tell(UiEvent::CloseSheet),
+            Intent::Locate { peer } => {
+                self.tell_map_centre();
+                self.tell(UiEvent::OpenSheet(Sheet::Position { peer }));
+            }
+            Intent::CloseSheet => {
+                self.position = None;
+                self.tell(UiEvent::CloseSheet);
+            }
+            // The position by hand (1371): the sheet's field, then what
+            // it holds goes to the model, which reads it.
+            Intent::EnterPosition { text: None } => {
+                self.position = Some(String::new());
+                return iced::widget::operation::focus(chat::POSITION_FIELD);
+            }
+            Intent::EnterPosition { text: Some(text) } => {
+                self.position = None;
+                self.tell(UiEvent::EnterPosition { text });
+            }
+            Intent::FixAtMapCentre => {
+                self.position = None;
+                self.tell_map_centre();
+                self.tell(UiEvent::FixAtMapCentre);
+            }
             // Gallery and File: the desktop's chooser picks (1341).
             Intent::SendPhoto { peer, .. } => {
                 return self.pick(peer, desktop::Pick::Picture, StrId::AttachPhoto)
@@ -1027,6 +1079,17 @@ impl App {
             Intent::SendFile { peer, .. } => {
                 return self.pick(peer, desktop::Pick::File, StrId::AttachFile)
             }
+            // The keys' help (1371), the terminal's overlay in the window
+            // as lnomad's window draws it; Back or a click closes it.
+            Intent::Help => self.help = Some(0),
+            Intent::Back | Intent::Dismiss if self.help.is_some() => self.help = None,
+            Intent::Scroll(cmd) if self.help.is_some() => {
+                let (viewport, max) =
+                    leviculum_ui::help::scroll_bounds(&loquax::ui::help_groups(), self.help_area());
+                let at = self.help.unwrap_or_default();
+                self.help = Some(leviculum_ui::keymap::scrolled(at, cmd, viewport, max));
+            }
+            Intent::PhotoSize(size) => self.tell(UiEvent::PhotoSize(size)),
             Intent::Back | Intent::Dismiss if self.menu.is_none() && self.scene.sheet.is_some() => {
                 self.tell(UiEvent::CloseSheet)
             }
@@ -1117,6 +1180,7 @@ impl App {
             }
             Intent::ShowMap { peer } => {
                 self.screen = Screen::Map;
+                self.map_shown = true;
                 if let Some(peer) = peer {
                     self.apply(Message::Select(peer));
                 }
@@ -1146,6 +1210,44 @@ impl App {
             Intent::Menu(id) => {
                 self.menu = id;
                 self.deleting = None;
+                self.renaming = None;
+            }
+            // A row menu's verbs on a peer (1371): the model's, as the
+            // terminal's palette does them; a forget asks once, a rename
+            // opens its field.
+            Intent::Forget {
+                peer: Target::Peer(peer),
+                confirmed: false,
+                ..
+            } => self.deleting = Some(NodeId::Row(peer)),
+            Intent::Rename {
+                peer: Target::Peer(peer),
+                name: None,
+            } => {
+                let name = self
+                    .scene
+                    .list
+                    .iter()
+                    .flat_map(|list| &list.rows)
+                    .find(|r| r.id == NodeId::Row(peer))
+                    .map(|r| r.row.name.clone())
+                    .unwrap_or_default();
+                self.renaming = Some((peer, name));
+            }
+            word @ (Intent::Pin { .. }
+            | Intent::Mute { .. }
+            | Intent::Archive { .. }
+            | Intent::Block { .. }
+            | Intent::Verify { .. }
+            | Intent::MarkUnread { .. }
+            | Intent::Rename { .. }
+            | Intent::Forget { .. }) => {
+                self.menu = None;
+                self.deleting = None;
+                self.renaming = None;
+                if let Some((peer, verb)) = loquax::ui::verbs::PeerVerb::of(&word) {
+                    self.tell(UiEvent::PeerWord { peer, verb });
+                }
             }
             Intent::React {
                 to,
@@ -1243,6 +1345,16 @@ impl App {
             _ => {}
         }
         Task::none()
+    }
+
+    /// The map's centre, once the map was shown, for the position sheet
+    /// (1371).
+    fn tell_map_centre(&self) {
+        if self.map_shown {
+            let now = self.seen.now.map_or(0, |now| now.unix_secs);
+            let centre = loquax::ui::by_hand::of_world(self.view.centre, now);
+            self.tell(UiEvent::MapCentre(Some(centre)));
+        }
     }
 
     /// The layout class the window's width gives (1218): the list beside
@@ -1886,11 +1998,50 @@ impl App {
             (Screen::Chats, LayoutClass::Compact, Some(_)) => self.chat_pane(),
             (Screen::Chats, LayoutClass::Compact, None) => self.list_pane(),
         };
-        match (self.tabs(), self.class()) {
+        let window: Element<'_, Message> = match (self.tabs(), self.class()) {
             (Some(tabs), LayoutClass::Wide) => row![tabs, body].into(),
             (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
             (None, _) => body,
+        };
+        match self.help {
+            Some(scroll) => stack![window, self.help_layer(scroll)].into(),
+            None => window,
         }
+    }
+
+    /// The window in the help's cells.
+    fn help_area(&self) -> leviculum_ui::Rect {
+        let cells = |px: f32, cell: f32| (px / cell).clamp(0.0, f32::from(u16::MAX)) as u16;
+        leviculum_ui::Rect::new(
+            0,
+            0,
+            cells(self.window.width, lnomad::gui::CELL_W),
+            cells(self.window.height, lnomad::gui::CELL_H),
+        )
+    }
+
+    /// The keys' help over the window (1371): the keymap's rows in the
+    /// shared overlay, on the cell grid lnomad's window lays its help on;
+    /// a click closes it.
+    fn help_layer(&self, scroll: usize) -> Element<'_, Message> {
+        let grid = leviculum_ui_iced::help::Grid {
+            regular: lnomad::gui::MONO,
+            bold: lnomad::gui::MONO_BOLD,
+            size: lnomad::gui::PAGE_TEXT,
+            cell_w: lnomad::gui::CELL_W,
+            cell_h: lnomad::gui::CELL_H,
+        };
+        let overlay = leviculum_ui_iced::help::overlay(
+            &loquax::ui::help_groups(),
+            StrId::Help.text(self.lang),
+            scroll,
+            self.help_area(),
+            grid,
+            chat::palette(self.tokens()),
+        );
+        iced::widget::mouse_area(container(overlay).center(Length::Fill))
+            .on_press(Message::Intent(Intent::Dismiss))
+            .into()
     }
 
     /// The Browse tab (1369): lnomad's window view of the browser the
@@ -2243,6 +2394,7 @@ mod tests {
             scene: crate::shell::Model::new(&[]).scene(LayoutClass::Wide),
             now: None,
             receipts: true,
+            photo_size: loquax::ui::photos::PhotoSize::default(),
             photo: None,
             browse: None,
             copied: None,
@@ -2485,10 +2637,150 @@ mod tests {
             scene: model.scene(LayoutClass::Wide),
             now: model.now,
             receipts: model.reading.on,
+            photo_size: model.photo_size,
             photo: None,
             browse: None,
             copied: None,
         }
+    }
+
+    /// 1371: the desktop's position sheet. Without a fix it offers the
+    /// entry (the phone's "turn location on" is no row here); the entry
+    /// opens the field, pixel for pixel the golden; Enter hands the typed
+    /// position to the model, after which the sheet offers the shares,
+    /// the golden too, and "now" sends the report. Once the map was shown
+    /// its centre is a row, and a press on it makes that the fix.
+    #[test]
+    fn the_position_sheet_takes_a_typed_position_and_the_maps_centre() {
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        model.bar.abilities = loquax::ui::compose::Abilities::desktop();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let seen = |app: &mut App, model: &mut crate::shell::Model, rx: &mut _| {
+            for event in told(rx) {
+                update(model, event);
+            }
+            app.apply(Message::Seen(Box::new(seen_of(model))));
+        };
+        seen(&mut app, &mut model, &mut rx);
+        let _ = app.update(Message::Intent(Intent::Locate { peer: ANNA }));
+        seen(&mut app, &mut model, &mut rx);
+        let rows = |app: &App| -> Vec<StrId> {
+            let sheet = app.scene.sheet.as_ref().expect("the sheet");
+            sheet.actions.iter().map(|a| a.label_key).collect()
+        };
+        assert_eq!(rows(&app), [StrId::EnterPosition], "no map yet, no centre");
+
+        let _ = app.update(Message::Intent(Intent::EnterPosition { text: None }));
+        assert_eq!(app.position.as_deref(), Some(""));
+        let _ = app.update(Message::Position("52.5163, 13.3777".to_string()));
+        map::tests::same_as("gui-position-entry-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::EnterPosition {
+            text: app.position.clone(),
+        }));
+        assert_eq!(app.position, None);
+        seen(&mut app, &mut model, &mut rx);
+        let fix = model.bar.own_fix.expect("the typed fix");
+        assert_eq!(
+            (fix.latitude_e6, fix.longitude_e6),
+            (52_516_300, 13_377_700)
+        );
+        assert_eq!(
+            rows(&app),
+            [
+                StrId::ShareNow,
+                StrId::ShareFor15,
+                StrId::ShareFor1h,
+                StrId::ShareFor8h,
+                StrId::ShareUntilStopped,
+                StrId::EnterPosition
+            ]
+        );
+        map::tests::same_as("gui-position-sheet-light.png", &shoot(&app, w, h), w, h);
+        let sent = update(&mut model, UiEvent::ShareFix { peer: ANNA });
+        assert!(
+            sent.iter()
+                .any(|e| matches!(e, loquax::ui::UiEffect::Send { to, .. } if *to == ANNA)),
+            "the report goes: {sent:?}"
+        );
+
+        app.map_shown = true;
+        let _ = app.update(Message::Intent(Intent::Locate { peer: ANNA }));
+        seen(&mut app, &mut model, &mut rx);
+        assert_eq!(rows(&app).last(), Some(&StrId::MapCentre));
+        let _ = app.update(Message::Intent(Intent::FixAtMapCentre));
+        seen(&mut app, &mut model, &mut rx);
+        let centre = loquax::ui::by_hand::of_world(app.view.centre, 0);
+        let fix = model.bar.own_fix.expect("the centre");
+        assert_eq!(
+            (fix.latitude_e6, fix.longitude_e6),
+            (centre.latitude_e6, centre.longitude_e6)
+        );
+    }
+
+    /// 1371: a right click on a row opens its menu with the scene's verbs
+    /// and the contact's; pin and mute reach the model, a forget asks
+    /// once, a rename takes its field. The help opens and Back closes it;
+    /// the settings' photo size is told to the model.
+    #[test]
+    fn a_rows_menu_reaches_the_model_and_the_help_and_photo_size_are_there() {
+        let mut model = chat_model();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(900.0, 560.0);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let row = NodeId::Row(ANNA);
+        let _ = app.update(Message::Intent(Intent::Menu(Some(row))));
+        assert_eq!(app.menu, Some(row));
+        let pin = Intent::Pin {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            on: loquax::ui::intent::Switch::On,
+        };
+        let _ = app.update(Message::Intent(pin));
+        assert_eq!(app.menu, None, "a verb closes the menu");
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        assert!(model.peer_state(&ANNA).pinned);
+        let mute = Intent::Mute {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            secs: -1,
+        };
+        let _ = app.update(Message::Intent(mute));
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        assert!(model.muted(&ANNA));
+
+        let _ = app.update(Message::Intent(Intent::Menu(Some(row))));
+        let forget = Intent::Forget {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            everywhere: false,
+            confirmed: false,
+        };
+        let _ = app.update(Message::Intent(forget));
+        assert_eq!(app.deleting, Some(row), "it asks once");
+        assert!(told(&mut rx).is_empty(), "control: nothing forgotten yet");
+        let _ = app.update(Message::Intent(Intent::Rename {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            name: None,
+        }));
+        assert_eq!(
+            app.renaming.as_ref().map(|(p, _)| *p),
+            Some(ANNA),
+            "the field opens"
+        );
+
+        let _ = app.update(Message::Intent(Intent::Help));
+        assert_eq!(app.help, Some(0));
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert_eq!(app.help, None);
+
+        let small = loquax::ui::photos::PhotoSize::Small;
+        let _ = app.update(Message::Intent(Intent::PhotoSize(small)));
+        assert_eq!(told(&mut rx), [UiEvent::PhotoSize(small)]);
     }
 
     /// A press on a bubble's photo (1269): the shell's file decoded for
