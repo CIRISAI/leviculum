@@ -53,51 +53,51 @@ Rows marked (1341) were MISSING before this pass and are closed by it.
 
 | # | Feature | Android | Window | Terminal |
 |---|---------|---------|--------|----------|
-| 1 | Chats: list, open, send text | `ChatActivity.java:1825` | `loquax/src/gui.rs:1002` | `loquax/src/ui.rs:2150` |
-| 2 | Drafts | `ChatActivity.java:2321` | `loquax/src/gui.rs:844` | `loquax/src/ui.rs:1029` |
-| 3 | React | `ChatActivity.java:1952` | `loquax/src/gui.rs:1053` | `loquax/src/ui.rs:3544` (palette `react`) |
-| 4 | Reply | `ChatActivity.java:1825` | `loquax/src/gui.rs:1067` | MISSING |
+| 1 | Chats: list, open, send text | `ChatActivity.java:1825` | `loquax/src/gui.rs:1006` | `loquax/src/ui.rs:2148` |
+| 2 | Drafts | `ChatActivity.java:2321` | `loquax/src/gui.rs:848` | `loquax/src/ui.rs:1029` |
+| 3 | React | `ChatActivity.java:1952` | `loquax/src/gui.rs:1057` | `loquax/src/ui.rs:3542` (palette `react`) |
+| 4 | Reply | `ChatActivity.java:1825` | `loquax/src/gui.rs:1071` | MISSING |
 | 5 | Forward | `ChatActivity.java:2053` | MISSING | MISSING |
-| 6 | Send again | `ChatActivity.java:2445` | `loquax/src/gui.rs:1113` | MISSING |
-| 7 | Delete a message | `ChatActivity.java:2129` | `loquax/src/gui.rs:1124` | `loquax/src/ui.rs:3506` |
-| 8 | Copy a message | `ChatActivity.java:2073` | `loquax/src/gui.rs:1103` | `loquax/src/ui.rs:2341` (OSC 52) |
-| 9 | Search | `ConversationsActivity.java:65` | `loquax/src/gui.rs:992` | `loquax/src/ui.rs:3502` |
-| 10 | Read receipts on/off | `SettingsActivity.java:589` | `loquax/src/gui.rs:976` | `loquax/src/ui.rs:3480` |
-| 11 | Send a picture (Gallery) | `ChatActivity.java:1355` | `loquax/src/gui.rs:941`, `loquax/src/desktop.rs:158` (1341) | MISSING |
+| 6 | Send again | `ChatActivity.java:2445` | `loquax/src/gui.rs:1117` | MISSING |
+| 7 | Delete a message | `ChatActivity.java:2129` | `loquax/src/gui.rs:1128` | `loquax/src/ui.rs:3504` |
+| 8 | Copy a message | `ChatActivity.java:2073` | `loquax/src/gui.rs:1107` | `loquax/src/ui.rs:2339` (OSC 52) |
+| 9 | Search | `ConversationsActivity.java:65` | `loquax/src/gui.rs:996` | `loquax/src/ui.rs:3500` |
+| 10 | Read receipts on/off | `SettingsActivity.java:589` | `loquax/src/gui.rs:980` | `loquax/src/ui.rs:3478` |
+| 11 | Send a picture (Gallery) | `ChatActivity.java:1355` | `loquax/src/gui.rs:945`, `loquax/src/desktop.rs:158` (1341) | MISSING |
 | 12 | Photo size, three tiers | `SettingsActivity.java:316` | MISSING | MISSING (config key `photo_size` only) |
-| 13 | View a photo | `ChatActivity.java:1675` | `loquax/src/gui.rs:1114` (own viewer) | `loquax/src/ui.rs:2369`, `loquax/src/shell.rs:341` (system viewer) |
+| 13 | View a photo | `ChatActivity.java:1675` | `loquax/src/gui.rs:1118` (own viewer) | `loquax/src/ui.rs:2367`, `loquax/src/shell.rs:341` (system viewer) |
 | 14 | Camera | `ChatActivity.java:988` | n/a | n/a |
-| 15 | Send a file | `ChatActivity.java:1408` | `loquax/src/gui.rs:944`, `loquax/src/shell.rs:783` (1341) | MISSING |
-| 16 | Open and save a received file | `ChatActivity.java:1575` | `loquax/src/gui.rs:1115`, `loquax/src/shell.rs:348` | `loquax/src/ui.rs:2380`, `loquax/src/shell.rs:348` |
-| 17 | Record a voice message | `RecordingBar.java:369` | `loquax/src/gui/chat.rs:1255`, `loquax/src/shell.rs:445`, `mic.rs` | `loquax/src/ui.rs:2852`, `loquax/src/shell.rs:445`, `mic.rs` |
-| 18 | Play a voice message | `ChatActivity.java:1526` | `loquax/src/gui.rs:1118`, `loquax/src/shell.rs:367` | `loquax/src/ui.rs:2389`, `loquax/src/shell.rs:367` |
-| 19 | Groups: new, join, members, add, remove, leave, delete, start again | `GroupDialogs.java:34` | `loquax/src/gui.rs:969` (all verbs) | `loquax/src/ui.rs:3571` to `loquax/src/ui.rs:3653` |
-| 20 | Map with positions | `MapPane.java:350` | `loquax/src/gui.rs:1031` | `loquax/src/ui.rs:3524`, `tui/map.rs` |
+| 15 | Send a file | `ChatActivity.java:1408` | `loquax/src/gui.rs:948`, `loquax/src/shell.rs:773` (1341) | MISSING |
+| 16 | Open and save a received file | `ChatActivity.java:1575` | `loquax/src/gui.rs:1119`, `loquax/src/shell.rs:348` | `loquax/src/ui.rs:2378`, `loquax/src/shell.rs:348` |
+| 17 | Record a voice message | `RecordingBar.java:369` | `loquax/src/gui/chat.rs:1255`, `loquax/src/shell.rs:435`, `mic.rs` | `loquax/src/ui.rs:2850`, `loquax/src/shell.rs:435`, `mic.rs` |
+| 18 | Play a voice message | `ChatActivity.java:1526` | `loquax/src/gui.rs:1122`, `loquax/src/shell.rs:367` | `loquax/src/ui.rs:2387`, `loquax/src/shell.rs:367` |
+| 19 | Groups: new, join, members, add, remove, leave, delete, start again | `GroupDialogs.java:34` | `loquax/src/gui.rs:973` (all verbs) | `loquax/src/ui.rs:3569` to `loquax/src/ui.rs:3651` |
+| 20 | Map with positions | `MapPane.java:350` | `loquax/src/gui.rs:1035` | `loquax/src/ui.rs:3522`, `tui/map.rs` |
 | 21 | Buildings on the map | `loquax/src/picture.rs:44` (shared) | `loquax/src/picture.rs:44` | `loquax/src/picture.rs:44` (sixel, kitty) |
-| 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1139` | `loquax/src/ui.rs:3520` |
-| 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:983` | MISSING |
-| 24 | Mesh positions (nodes nearby) | `MapPane.java:370` | `loquax/src/gui.rs:1306` | `loquax/src/tui/map.rs:1380` |
+| 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1143` | `loquax/src/ui.rs:3518` |
+| 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:987` | MISSING |
+| 24 | Mesh positions (nodes nearby) | `MapPane.java:370` | `loquax/src/gui.rs:1310` | `loquax/src/tui/map.rs:1380` |
 | 25 | Share the position, once or timed | `ChatActivity.java:910`, `ShareService.java:39` | MISSING | MISSING |
-| 26 | Pin | `ConversationsActivity.java:481` | MISSING | `loquax/src/ui.rs:3514` |
+| 26 | Pin | `ConversationsActivity.java:481` | MISSING | `loquax/src/ui.rs:3512` |
 | 27 | Mute | `ContactActivity.java:444` | MISSING | MISSING |
-| 28 | Archive | `ConversationsActivity.java:485` | MISSING | `loquax/src/ui.rs:3515` |
-| 29 | Block | `ContactActivity.java:353` | MISSING | `loquax/src/ui.rs:3548` |
+| 28 | Archive | `ConversationsActivity.java:485` | MISSING | `loquax/src/ui.rs:3513` |
+| 29 | Block | `ContactActivity.java:353` | MISSING | `loquax/src/ui.rs:3546` |
 | 30 | Verify | `ContactActivity.java:299` | MISSING | MISSING |
 | 31 | Mark unread | `ConversationsActivity.java:479` | MISSING | MISSING |
-| 32 | Rename | `ContactActivity.java:493` | MISSING | `loquax/src/ui.rs:3540` |
-| 33 | Forget a conversation | `ContactActivity.java:411` | MISSING | `loquax/src/ui.rs:3510` |
-| 34 | Add a contact by code, typed or pasted | `AddContact.java:76` | `loquax/src/gui.rs:817` | `loquax/src/ui.rs:3565` |
-| 35 | A contact code from a QR | `loquax-android/src/lib.rs:326` (the scanner screen's decoder) | `loquax/src/gui.rs:1323`, `loquax/src/gui/chat.rs:441`, `loquax/src/scan.rs:39` (1341) | MISSING |
-| 36 | My code | `ProfileActivity.java:232` | MISSING | `loquax/src/ui.rs:3670` |
+| 32 | Rename | `ContactActivity.java:493` | MISSING | `loquax/src/ui.rs:3538` |
+| 33 | Forget a conversation | `ContactActivity.java:411` | MISSING | `loquax/src/ui.rs:3508` |
+| 34 | Add a contact by code, typed or pasted | `AddContact.java:76` | `loquax/src/gui.rs:821` | `loquax/src/ui.rs:3563` |
+| 35 | A contact code from a QR | `loquax-android/src/lib.rs:326` (the scanner screen's decoder) | `loquax/src/gui.rs:1327`, `loquax/src/gui/chat.rs:441`, `loquax/src/scan.rs:39` (1341) | MISSING |
+| 36 | My code | `ProfileActivity.java:232` | MISSING | `loquax/src/ui.rs:3668` |
 | 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:178`) | CLI (`loquax/src/main.rs:178`) |
 | 38 | Link a device | `ProfileActivity.java:319` | CLI (`loquax/src/main.rs:192`, `loquax/src/main.rs:208`) | CLI (`loquax/src/main.rs:192`, `loquax/src/main.rs:208`) |
 | 39 | Move the phone | `ProfileActivity.java:346` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:117` | MISSING | MISSING |
-| 41 | Help | `ConversationsActivity.java:421` | MISSING | `loquax/src/ui.rs:3448` |
-| 42 | Settings | `SettingsActivity.java` | `loquax/src/gui.rs:1342` | palette (`loquax/src/ui.rs:3680`, `loquax/src/ui.rs:3480`) |
-| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | off (`loquax/src/gui.rs:1048`) | off (`loquax/src/shell.rs:315`) |
+| 41 | Help | `ConversationsActivity.java:421` | MISSING | `loquax/src/ui.rs:3446` |
+| 42 | Settings | `SettingsActivity.java` | `loquax/src/gui.rs:1346` | palette (`loquax/src/ui.rs:3678`, `loquax/src/ui.rs:3478`) |
+| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | off (`loquax/src/gui.rs:1052`) | off (`loquax/src/shell.rs:315`) |
 | 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:236`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:408`, bell and `loquax/src/desktop.rs:118` (1341) |
-| 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:320` (1341) | n/a |
+| 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:324` (1341) | n/a |
 
 ## Counts
 
@@ -121,7 +121,7 @@ are no gaps.
   in the lock through the window's theme reader (leviculum-ui-iced, mundy);
   neither `rfd` nor another dialog crate is in the tree, and zbus needs no
   GTK. The shell sends the pick as the phone sends its picker's
-  (`loquax/src/shell.rs:783`): a picture scaled at the reader's photo size, a file
+  (`loquax/src/shell.rs:773`): a picture scaled at the reader's photo size, a file
   whole up to what a receiver takes. Saving a received file is the
   existing save under the home's `files/` and the system's handler
   (`loquax/src/shell.rs:348`), the same in both desktop targets.
@@ -175,7 +175,7 @@ the shared shell; on a PC lnomad remains its own program meanwhile.
 - **Terminal, rows 11, 15 and 35 (send a picture, a file, a code from a
   picture):** the terminal has no picker and its palette's asks are
   answered inside the core, which reads no files. The shell's attach
-  (`loquax/src/shell.rs:783`) and the decoder (`loquax/src/scan.rs:39`) are in place; what is
+  (`loquax/src/shell.rs:773`) and the decoder (`loquax/src/scan.rs:39`) are in place; what is
   missing is a palette command and an effect that hands a typed path to
   the shell, a change to the core's intents.
 - **Terminal, rows 4, 6, 27, 30, 31 (reply, send again, mute, verify, mark

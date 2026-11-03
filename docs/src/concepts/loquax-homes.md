@@ -60,7 +60,7 @@ What exists today for one home and carries over:
   (`loquax/src/store.rs:2009`), which adds nothing on a second take-in.
   The sync generalises it to both directions and to paging from a cursor.
 - The rule that authority lives with the key, not with an admission:
-  `may_move` (`loquax/src/home/server.rs:940`). Two homes recognise each
+  `may_move` (`loquax/src/home/server.rs:933`). Two homes recognise each
   other the same way, by a signature only a key holder can make
   (planned: a `/sibling` request over a link).
 - The ratchet export and import of 1185, `take_over`
