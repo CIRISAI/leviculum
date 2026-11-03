@@ -79,8 +79,12 @@
 //! ([`PropagationStore::for_each_received_before`]): it reads what expired,
 //! where it walked the whole store every maintenance tick, 24.6 ms on the
 //! Odroid at about 300 000 messages (order 1171's field profile,
-//! leviculum#478). All three indexes change together, through
-//! `index_insert` and `index_remove` only.
+//! leviculum#478). A fourth counts, by sequence, the entries a peer may be
+//! offered ([`PropagationStore::count_above_cursors`], `SequenceCounts`):
+//! a peer's unhandled count is a prefix sum, where it walked the store once
+//! per peer per `--status` request, 94 ms a request at 320 000 messages and
+//! 20 peers on the coder host (order 1370). All four indexes change
+//! together, through `index_insert` and `index_remove` only.
 //!
 //! [`write_behind`]: FilePropagationStore::write_behind
 //! [`writes_issued`]: FilePropagationStore::writes_issued
@@ -94,12 +98,14 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use leviculum_lxmf::propagation_store::{
-    copy_from, PropagationBodyStore, PropagationStore, StoredMessage, MIN_BODY_LEN,
+    copy_from, count_above_cursors_by_walk, PropagationBodyStore, PropagationStore, StoredMessage,
+    MIN_BODY_LEN,
 };
 use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::TransientId;
 
 use crate::durable::{device_fsync, write_durably, Fsync};
+use crate::sequence_counts::{Inserted, SequenceCounts};
 use crate::storage::{hex_decode, hex_encode, note_unreadable_entry};
 
 /// A directory of propagation-store messages with a hard byte capacity.
@@ -118,6 +124,9 @@ pub struct FilePropagationStore {
     /// `index` ordered by `(received_at, transient_id)`, what the expiry
     /// sweep reads (module docs, "The sequence index").
     by_received: BTreeSet<(u64, TransientId)>,
+    /// `index`'s entries of at most the counted size, counted by sequence
+    /// (module docs, "The sequence index").
+    counts: SequenceCounts,
     /// Last assigned append sequence; recovered as the maximum on disk.
     last_sequence: u64,
     fsync: Arc<dyn Fsync>,
@@ -324,17 +333,20 @@ impl FilePropagationStore {
             .values()
             .map(|entry| (entry.meta.received_at, entry.meta.transient_id))
             .collect();
-        Ok(Self {
+        let mut store = Self {
             dir,
             capacity,
             used,
             index,
             by_sequence,
             by_received,
+            counts: SequenceCounts::new(u64::MAX),
             last_sequence,
             fsync,
             writer: None,
-        })
+        };
+        store.rebuild_counts(u64::MAX);
+        Ok(store)
     }
 
     /// Hand every filesystem change from here on to a writer thread, so an
@@ -462,28 +474,61 @@ impl FilePropagationStore {
         }
     }
 
-    /// Put one entry in all three indexes, replacing whatever the ID held.
+    /// Put one entry in all four indexes, replacing whatever the ID held.
     fn index_insert(&mut self, transient_id: TransientId, entry: IndexEntry) {
         let sequence = entry.meta.sequence;
         let received_at = entry.meta.received_at;
+        let size = entry.meta.size;
+        let mut rebuild = false;
         if let Some(previous) = self.index.insert(transient_id, entry) {
             self.by_sequence
                 .remove(&(previous.meta.sequence, transient_id));
             self.by_received
                 .remove(&(previous.meta.received_at, transient_id));
+            rebuild |= self.counts.remove(previous.meta.sequence);
         }
         self.by_sequence.insert((sequence, transient_id));
         self.by_received.insert((received_at, transient_id));
+        rebuild |= self.counts.insert(sequence, size) == Inserted::Rebuild;
+        if rebuild {
+            self.rebuild_counts(self.counts.largest_size());
+        }
     }
 
-    /// Take one entry out of all three indexes.
+    /// Take one entry out of all four indexes.
     fn index_remove(&mut self, transient_id: &TransientId) -> Option<IndexEntry> {
         let entry = self.index.remove(transient_id)?;
         self.by_sequence
             .remove(&(entry.meta.sequence, *transient_id));
         self.by_received
             .remove(&(entry.meta.received_at, *transient_id));
+        if self.counts.remove(entry.meta.sequence) {
+            self.rebuild_counts(self.counts.largest_size());
+        }
         Some(entry)
+    }
+
+    /// The counting index afresh from the sequence index, weighing entries
+    /// of at most `largest_size`: at open, when the role names its size,
+    /// and when dead slots outnumber live ones (`SequenceCounts`).
+    fn rebuild_counts(&mut self, largest_size: u64) {
+        let index = &self.index;
+        self.counts = SequenceCounts::rebuilt(
+            largest_size,
+            index.len(),
+            self.by_sequence
+                .iter()
+                .filter_map(|(sequence, transient_id)| {
+                    index
+                        .get(transient_id)
+                        .map(|entry| (*sequence, entry.meta.size))
+                }),
+        );
+    }
+
+    /// Heap bytes of the counting index (`SequenceCounts`).
+    pub fn count_index_bytes(&self) -> usize {
+        self.counts.heap_bytes()
     }
 
     /// Queue a removal behind the writes before it, or remove now when no
@@ -805,6 +850,30 @@ impl PropagationStore for FilePropagationStore {
 
     fn count(&self) -> Result<usize, StorageError> {
         Ok(self.index.len())
+    }
+
+    /// A prefix sum of the counting index a cursor, `O(log n)`, when asked
+    /// for the size it weighs; the walk otherwise (module docs, "The
+    /// sequence index"). Queued, unconfirmed appends are not counted, as
+    /// `for_each` does not visit them.
+    fn count_above_cursors(
+        &self,
+        cursors: &[u64],
+        largest_size: u64,
+    ) -> Result<Vec<u64>, StorageError> {
+        if largest_size != self.counts.largest_size() {
+            return count_above_cursors_by_walk(self, cursors, largest_size);
+        }
+        Ok(cursors
+            .iter()
+            .map(|cursor| self.counts.above(*cursor))
+            .collect())
+    }
+
+    fn count_sizes_up_to(&mut self, largest_size: u64) {
+        if largest_size != self.counts.largest_size() {
+            self.rebuild_counts(largest_size);
+        }
     }
 
     fn newest_sequence(&self) -> Result<u64, StorageError> {
@@ -1471,19 +1540,34 @@ mod tests {
 
     fn assert_index_matches_walk(store: &FilePropagationStore, ids: &[TransientId], step: usize) {
         let (_, newest, _) = by_walk(store, 0);
-        for cursor in [
+        let cursors = [
             0,
             newest / 3,
             newest / 2,
             newest.saturating_sub(1),
             newest,
             newest + 1,
-        ] {
+        ];
+        for cursor in cursors {
             assert_eq!(
                 by_index(store, cursor),
                 by_walk(store, cursor),
                 "step {step}, cursor {cursor}"
             );
+        }
+        for largest in [store.counts.largest_size(), 120, u64::MAX] {
+            let counted = store.count_above_cursors(&cursors, largest).unwrap();
+            let walked: Vec<u64> = cursors
+                .iter()
+                .map(|cursor| {
+                    by_walk(store, *cursor)
+                        .0
+                        .iter()
+                        .filter(|meta| u64::from(meta.size) <= largest)
+                        .count() as u64
+                })
+                .collect();
+            assert_eq!(counted, walked, "step {step}, sizes up to {largest}");
         }
         for id in ids {
             let mut walked = None;
@@ -1524,12 +1608,12 @@ mod tests {
         }
     }
 
-    /// leviculum#478: the sequence and receive-time indexes answer
-    /// `for_each_above`, `for_each_received_before`, `newest_sequence`,
-    /// `count` and `meta` exactly as the whole-store walk
-    /// did, through appends, re-appends of a stored ID, purges, queued
-    /// writes the writer has not confirmed, and a reopen; and an ordered
-    /// walk that breaks visits no further.
+    /// leviculum#478: the sequence, receive-time and counting indexes
+    /// answer `for_each_above`, `for_each_received_before`,
+    /// `count_above_cursors`, `newest_sequence`, `count` and `meta` exactly
+    /// as the whole-store walk did, through appends, re-appends of a stored
+    /// ID, purges, queued writes the writer has not confirmed, and a reopen;
+    /// and an ordered walk that breaks visits no further.
     #[test]
     fn the_sequence_index_answers_as_the_store_walk_does() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1537,6 +1621,7 @@ mod tests {
             .expect("open")
             .write_behind()
             .expect("writer");
+        store.count_sizes_up_to(120);
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = move || {
             state ^= state << 13;
@@ -1555,8 +1640,9 @@ mod tests {
                     store.flush_writes();
                 }
                 _ => {
+                    let len = 80 + (next() % 80) as usize;
                     store
-                        .append(&id, 1_789_000_000 + step as u64, 13, &body_for(3, 80))
+                        .append(&id, 1_789_000_000 + step as u64, 13, &body_for(3, len))
                         .unwrap();
                 }
             }
@@ -1582,7 +1668,9 @@ mod tests {
         assert_eq!(visited, first, "a break ends the walk");
 
         drop(store);
-        let store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+        let mut store = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
         assert_index_matches_walk(&store, &ids, 401);
+        store.count_sizes_up_to(120);
+        assert_index_matches_walk(&store, &ids, 402);
     }
 }

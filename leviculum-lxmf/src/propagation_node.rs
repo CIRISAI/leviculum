@@ -995,7 +995,8 @@ impl<S: PropagationStore> PropagationNode<S> {
             + self.config.name.as_ref().map_or(0, |name| name.capacity())
     }
 
-    pub fn new(store: S, config: PropagationNodeConfig) -> Self {
+    pub fn new(mut store: S, config: PropagationNodeConfig) -> Self {
+        store.count_sizes_up_to(Self::largest_offered_size_under(&config));
         Self {
             store,
             config,
@@ -1150,6 +1151,27 @@ impl<S: PropagationStore> PropagationNode<S> {
     pub fn upload_fits_transfer_limit(&self, body_len: usize) -> bool {
         (body_len as u64).saturating_add(crate::peering::OFFER_PER_MESSAGE_OVERHEAD)
             <= self.transfer_limit_bytes()
+    }
+
+    /// The largest stored size a peer may be offered: a message above it
+    /// is local only ([`Self::is_local_only`]).
+    pub fn largest_offered_size(&self) -> u64 {
+        Self::largest_offered_size_under(&self.config)
+    }
+
+    fn largest_offered_size_under(config: &PropagationNodeConfig) -> u64 {
+        config
+            .transfer_limit_kb
+            .saturating_mul(1000)
+            .saturating_sub(crate::peering::OFFER_PER_MESSAGE_OVERHEAD)
+    }
+
+    /// Each cursor's count of stored messages above it that may be offered
+    /// to a peer, local-only ones left out: the per-peer unhandled count
+    /// ([`PropagationStore::count_above_cursors`]).
+    pub fn unhandled_above(&self, cursors: &[u64]) -> Result<Vec<u64>, StorageError> {
+        self.store
+            .count_above_cursors(cursors, self.largest_offered_size())
     }
 
     /// Whether a stored message of `size` bytes is local only: above our

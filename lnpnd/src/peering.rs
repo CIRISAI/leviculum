@@ -71,45 +71,6 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Per-message visits of the rotation's unhandled count: one per
-    /// collected sequence, sort comparison and binary-search probe (the
-    /// oracle: one per message and peer). Pins the work, not the clock.
-    static ROTATION_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[inline]
-fn count_rotation_visit() {
-    #[cfg(test)]
-    ROTATION_VISITS.with(|visits| visits.set(visits.get() + 1));
-}
-
-/// Each peer's count of `sequences` strictly above its cursor, omitting
-/// peers at zero. `PropagationStore::for_each` promises no order (the
-/// memory store walks by transient id), so this sorts once and
-/// binary-searches each cursor.
-fn unhandled_above_cursors(
-    mut sequences: Vec<u64>,
-    cursors: &[([u8; 16], u64)],
-) -> HashMap<[u8; 16], u64> {
-    sequences.sort_unstable_by(|a, b| {
-        count_rotation_visit();
-        a.cmp(b)
-    });
-    cursors
-        .iter()
-        .filter_map(|(hash, cursor)| {
-            let at_or_below = sequences.partition_point(|sequence| {
-                count_rotation_visit();
-                sequence <= cursor
-            });
-            let above = (sequences.len() - at_or_below) as u64;
-            (above > 0).then_some((*hash, above))
-        })
-        .collect()
-}
-
 /// One offer toward `peer` from its cursor, `offer_budget` bytes of encoded
 /// body at most: [`leviculum_lxmf::peering::build_offer`]'s plan, built over the store's ordered walk
 /// so it reads what the plan takes and stops (leviculum#478). The whole-store
@@ -385,23 +346,18 @@ impl PeeringRuntime {
 
     /// This node's equivalent of the reference's per-peer unhandled count:
     /// live store entries above the peer's cursor — what the next round
-    /// would look at. `None` when the peer is unknown.
+    /// would look at, local-only ones left out. `None` when the peer is
+    /// unknown. One prefix sum of the file store's counting index
+    /// ([`PropagationNode::unhandled_above`]), where it walked the store,
+    /// 4.7 ms a peer at 320 000 messages (order 1370).
     pub(crate) fn unhandled_toward<S: PropagationStore>(
         &self,
         node: &PropagationNode<S>,
         destination_hash: &[u8; 16],
     ) -> Option<usize> {
         let cursor = self.table.get(destination_hash)?.cursor;
-        let mut count = 0usize;
-        // A local-only message is owed to no peer (`is_local_only`).
-        node.store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor && !node.is_local_only(meta.size) {
-                    count += 1;
-                }
-            })
-            .ok()?;
-        Some(count)
+        let counts = node.unhandled_above(&[cursor]).ok()?;
+        counts.first().map(|count| *count as usize)
     }
 
     /// Reset one peer's cursor to 0: the bounded-full-re-offer path (§5's
@@ -483,37 +439,34 @@ impl PeeringRuntime {
         }
     }
 
-    /// [`Self::unhandled_toward`] for every peer: one pass over the store
-    /// collects the sequences, then [`unhandled_above_cursors`] counts each
-    /// peer's share in O(n log n + p log n) instead of a store walk per peer
-    /// (1011: 5 to 6 ms here at 20 000 messages and 20 peers, under the core
-    /// lock). Peers with nothing unhandled get no entry.
+    /// [`Self::unhandled_toward`] for every peer, one prefix sum each over
+    /// the file store's counting index (order 1370; 1011 had made it one
+    /// store walk and a sort, 8.8 ms at 320 000 messages, from a walk per
+    /// peer). Peers with nothing unhandled get no entry.
     fn unhandled_counts<S: PropagationStore>(
         &self,
         node: &PropagationNode<S>,
     ) -> HashMap<[u8; 16], u64> {
-        let cursors: Vec<([u8; 16], u64)> = self
+        let (hashes, cursors): (Vec<[u8; 16]>, Vec<u64>) = self
             .table
             .iter()
             .map(|peer| (peer.destination_hash, peer.cursor))
-            .collect();
-        let mut sequences: Vec<u64> = Vec::new();
-        let walked = node.store().for_each(&mut |meta| {
-            count_rotation_visit();
-            // A local-only message is owed to no peer (`is_local_only`).
-            if !node.is_local_only(meta.size) {
-                sequences.push(meta.sequence);
+            .unzip();
+        match node.unhandled_above(&cursors) {
+            Ok(counts) => hashes
+                .into_iter()
+                .zip(counts)
+                .filter(|(_, count)| *count > 0)
+                .collect(),
+            Err(error) => {
+                tracing::warn!("lnpnd: store count for rotation failed: {error}");
+                HashMap::new()
             }
-        });
-        if let Err(error) = walked {
-            tracing::warn!("lnpnd: store walk for rotation failed: {error}");
         }
-        unhandled_above_cursors(sequences, &cursors)
     }
 
     /// The pre-1011 [`Self::unhandled_counts`], every peer's cursor tested
-    /// against every message: the equivalence oracle and the work pin's
-    /// positive control.
+    /// against every message: the equivalence oracle.
     #[cfg(test)]
     fn unhandled_counts_by_walk<S: PropagationStore>(
         &self,
@@ -527,7 +480,6 @@ impl PeeringRuntime {
         let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
         let walked = node.store().for_each(&mut |meta| {
             for (hash, cursor) in &cursors {
-                count_rotation_visit();
                 if meta.sequence > *cursor && !node.is_local_only(meta.size) {
                     *counts.entry(*hash).or_default() += 1;
                 }
@@ -2220,12 +2172,6 @@ mod tests {
         PropagationNode::new(store, leviculum_lxmf::PropagationNodeConfig::default())
     }
 
-    fn rotation_visits<T>(work: impl FnOnce() -> T) -> (T, u64) {
-        ROTATION_VISITS.with(|visits| visits.set(0));
-        let result = work();
-        (result, ROTATION_VISITS.with(|visits| visits.get()))
-    }
-
     /// 1011: the sorted count gives the per-peer walk's answer for every
     /// input. 1000 random stores (gapped sequences, walked out of order)
     /// and tables (0 to 20 peers, cursors below, inside and above the
@@ -2250,30 +2196,61 @@ mod tests {
         }
     }
 
-    /// 1011: the rotation's unhandled count at the field's scale (20 000
-    /// stored messages, a full table of 20 peers) visits at most
-    /// n*ceil(log2 n) + p*ceil(log2 n) + n messages: the sort's
-    /// comparisons, the cursor searches and the one collecting pass. The
-    /// per-peer walk it replaced visits n*p, which the positive control
-    /// shows under the same counter.
+    /// Order 1370: over the production store the unhandled counts, one
+    /// peer's for `--status` and the whole table's for the rotation, walk
+    /// none of it, at 2 000 and 20 000 messages, and answer as the per-peer
+    /// walk does, local-only messages left out. Their cost is the counting
+    /// index's `O(log n)` a cursor, pinned by slot visits in
+    /// `leviculum-std` (`sequence_counts::a_count_visits_log_n_slots`).
+    /// The positive control hides the index: the same counts, one walk
+    /// each.
     #[test]
-    fn rotation_unhandled_count_visits_n_log_n_not_n_times_peers() {
-        let n: u64 = 20_000;
+    fn unhandled_counts_read_the_counting_index_not_the_store() {
         let p = MAX_PEERS_DEFAULT as u64;
-        let mut state = 0x2545_f491_4f6c_dd1d;
-        let node = node_with_messages(n as usize, 0, &mut state);
-        let cursors: Vec<u64> = (0..p).map(|k| k * n / p).collect();
-        let runtime = runtime_with_cursors(&cursors);
+        for messages in [2_000usize, 20_000] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let mut store = file_store_with(dir.path(), messages);
+            // sizes up to 2 KB over a 1 KB transfer limit: about half are
+            // local only.
+            let config = leviculum_lxmf::PropagationNodeConfig {
+                transfer_limit_kb: 1,
+                ..leviculum_lxmf::PropagationNodeConfig::default()
+            };
+            let largest = PropagationNode::new(
+                leviculum_lxmf::MemoryPropagationStore::new(0),
+                config.clone(),
+            )
+            .largest_offered_size();
+            store.count_sizes_up_to(largest);
+            let newest = store.newest_sequence().expect("newest");
+            let cursors: Vec<u64> = (0..p).map(|k| k * newest / p).collect();
+            let runtime = runtime_with_cursors(&cursors);
+            let indexed = PropagationNode::new(Indexed::new(&store), config.clone());
+            let walked = PropagationNode::new(WalkOnly::new(&store), config.clone());
 
-        let (sorted, visits) = rotation_visits(|| runtime.unhandled_counts(&node));
-        let (walked, walk_visits) = rotation_visits(|| runtime.unhandled_counts_by_walk(&node));
+            let oracle = runtime.unhandled_counts_by_walk(&walked);
+            walked.store().walks.set(0);
+            assert_eq!(runtime.unhandled_counts(&indexed), oracle);
+            for peer in runtime.peers() {
+                assert_eq!(
+                    runtime.unhandled_toward(&indexed, &peer),
+                    Some(oracle.get(&peer).copied().unwrap_or(0) as usize)
+                );
+            }
+            assert_eq!(
+                indexed.store().walks.get(),
+                0,
+                "{messages}: the count walked the store"
+            );
+            let local_only = indexed.unhandled_above(&[0]).expect("count")[0];
+            assert!(
+                (local_only as usize) < messages * 3 / 4 && (local_only as usize) > messages / 4,
+                "{messages}: {local_only} offerable, the limit cut nothing"
+            );
 
-        let log2_n = u64::from(n.next_power_of_two().trailing_zeros());
-        let bound = n * log2_n + p * log2_n + n;
-        eprintln!("ROTATION_VISITS n={n} p={p} sorted={visits} bound={bound} walk={walk_visits}");
-        assert_eq!(sorted, walked);
-        assert_eq!(walk_visits, n * p, "positive control: the walk visits n*p");
-        assert!(visits <= bound, "{visits} visits exceed {bound}");
+            assert_eq!(runtime.unhandled_counts(&walked), oracle);
+            assert_eq!(walked.store().walks.get(), 1, "positive control: one walk");
+        }
     }
 
     /// The production store before leviculum#478: only the verbs the trait
@@ -2354,6 +2331,13 @@ mod tests {
         }
         fn newest_sequence(&self) -> Result<u64, StorageError> {
             self.store.newest_sequence()
+        }
+        fn count_above_cursors(
+            &self,
+            cursors: &[u64],
+            largest_size: u64,
+        ) -> Result<Vec<u64>, StorageError> {
+            self.store.count_above_cursors(cursors, largest_size)
         }
         fn purge(&mut self, _: &TransientId) -> Result<bool, StorageError> {
             Err(StorageError::Io)
@@ -2710,8 +2694,9 @@ mod tests {
             "BENCH_UNHANDLED messages={} peers={p} per_peer_us_median={peer_median} \
              per_peer_us_max={peer_max} status_us_median={status_median} \
              status_us_max={status_max} rotation_us_median={rotation_median} \
-             rotation_us_max={rotation_max}",
+             rotation_us_max={rotation_max} count_index_bytes={}",
             node.store().len(),
+            node.store().count_index_bytes(),
         );
     }
 }

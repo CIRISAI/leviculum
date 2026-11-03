@@ -232,6 +232,29 @@ pub trait PropagationStore {
         })
     }
 
+    /// For each of `cursors`, how many entries have a
+    /// [`StoredMessage::sequence`] above it and a
+    /// [`StoredMessage::size`] of at most `largest_size`: a peer's
+    /// unhandled count, what its next sync would look at
+    /// ([`PropagationNode::unhandled_above`](crate::PropagationNode::unhandled_above)).
+    ///
+    /// The default collects one directory pass, sorts it and searches each
+    /// cursor, `O(n log n)`. A store that keeps a counting index overrides
+    /// it to `O(log n)` a cursor: the host node walked 320 000 entries per
+    /// peer for every `--status` request (leviculum#478, order 1370).
+    fn count_above_cursors(
+        &self,
+        cursors: &[u64],
+        largest_size: u64,
+    ) -> Result<Vec<u64>, StorageError> {
+        count_above_cursors_by_walk(self, cursors, largest_size)
+    }
+
+    /// The `largest_size` [`Self::count_above_cursors`] will be asked with,
+    /// told by the role when it is built so a counting index can weigh its
+    /// entries by it. The default keeps no index and ignores it.
+    fn count_sizes_up_to(&mut self, _largest_size: u64) {}
+
     /// Remove one message. Returns whether it was present.
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError>;
 
@@ -326,6 +349,30 @@ pub trait PropagationStore {
         self.for_each(&mut |meta| newest = newest.max(meta.sequence))?;
         Ok(newest)
     }
+}
+
+/// [`PropagationStore::count_above_cursors`] over one directory pass, sorted
+/// once and searched per cursor: the trait's default, and the answer a
+/// counting index falls back to when asked for a size it does not weigh.
+pub fn count_above_cursors_by_walk<S: PropagationStore + ?Sized>(
+    store: &S,
+    cursors: &[u64],
+    largest_size: u64,
+) -> Result<Vec<u64>, StorageError> {
+    let mut sequences: Vec<u64> = Vec::new();
+    store.for_each(&mut |meta| {
+        if u64::from(meta.size) <= largest_size {
+            sequences.push(meta.sequence);
+        }
+    })?;
+    sequences.sort_unstable();
+    Ok(cursors
+        .iter()
+        .map(|cursor| {
+            let at_or_below = sequences.partition_point(|sequence| sequence <= cursor);
+            (sequences.len() - at_or_below) as u64
+        })
+        .collect())
 }
 
 /// Reading one stored body, separated from the metadata verbs so a store
