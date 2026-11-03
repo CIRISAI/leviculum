@@ -18,6 +18,8 @@
 //! - [`render`]: the lines through ratatui into any `DrawTarget` of
 //!   `Rgb565`, with mousefood as the backend.
 //! - [`frame`]: the panel's frame on the heap, what the host draws into.
+//! - [`keyboard`]: the matrix's scan frames to key events: debounce,
+//!   the Shift and Sym layers, repeat (slice three, 1359).
 //! - [`keys`]: which M9 key is which key event, the list's rows and the
 //!   chat's.
 
@@ -28,6 +30,7 @@ extern crate alloc;
 pub mod chat;
 pub mod field;
 pub mod frame;
+pub mod keyboard;
 pub mod keys;
 pub mod render;
 pub mod screen;

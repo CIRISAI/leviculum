@@ -30,6 +30,7 @@ use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel, NONE_OPEN};
 use loquax::when::WallTime;
 use loquax_m9::field::Field;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
+use loquax_m9::keyboard::{self, Cap, Keyboard, Layout};
 use loquax_m9::keys::{event, M9Key};
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ENTRY_ROWS, ROWS};
@@ -358,6 +359,56 @@ fn typing_with_the_keys_sends_from_the_compose_line() {
     assert_eq!(
         rows.last().map(|r| r.trim_end().to_string()).as_deref(),
         Some(" Entwurf")
+    );
+}
+
+/// The layout `tests/keyboard/walk.txt` was written over, not the board's:
+/// q to p on row 0, a to l on row 1, Shift, z to m and Sym on row 2,
+/// Enter on row 3.
+fn walk_layout() -> Layout {
+    let mut cells = [[Cap::None; keyboard::COLUMNS]; keyboard::ROWS];
+    for (column, (plain, sym)) in "qwertyuiop".chars().zip("1234567890".chars()).enumerate() {
+        cells[0][column] = Cap::letter(plain, sym);
+    }
+    for (column, (plain, sym)) in "asdfghjkl".chars().zip("@#&*-+=()".chars()).enumerate() {
+        cells[1][column] = Cap::letter(plain, sym);
+    }
+    cells[2][0] = Cap::Shift;
+    for (column, (plain, sym)) in "zxcvbnm".chars().zip("!?,.;:'".chars()).enumerate() {
+        cells[2][column + 1] = Cap::letter(plain, sym);
+    }
+    cells[2][9] = Cap::Sym;
+    cells[3][4] = Cap::Key(M9Key::Enter);
+    Layout(cells)
+}
+
+/// Slice three (1359): a recording of scan frames, through the keyboard
+/// driver, the key table and the model, opens the chat, types "Hi!" with a
+/// tapped Shift, a bounce and a tapped Sym, and sends it. The recording is
+/// synthetic until the board records its own in the same format.
+#[test]
+fn a_recorded_walk_of_scan_frames_types_and_sends() {
+    let home = tempfile::tempdir().expect("home");
+    let mut model = on_the_list(home.path());
+    let layout = walk_layout();
+    let mut keys = Keyboard::new(&layout);
+    let recording = include_str!("keyboard/walk.txt");
+    let mut effects = Vec::new();
+    for poll in keyboard::parse_recording(recording) {
+        let (ms, scan) = poll.expect("a recorded poll");
+        let mut events = Vec::new();
+        keys.poll(ms, scan, &mut |e| events.push(e));
+        for e in events {
+            effects.extend(update(&mut model, UiEvent::Key(e)));
+        }
+    }
+    let peer = model.conversations[model.selected].peer;
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            UiEffect::Send { to, body, .. } if *to == peer && body == "Hi!"
+        )),
+        "the walk sends Hi!: {effects:?}"
     );
 }
 
