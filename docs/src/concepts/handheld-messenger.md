@@ -400,6 +400,68 @@ uncertainty of firmware bring-up.
 | 5 | groups: join, member sheet, the group verbs the scene already carries | 2 | the board joins a group made by the phone and reads the digest | the map |
 | 6 | the map, last: the map renderer behind a tab, positions from telemetry, region storage decided (SD against flash) | 3–4 | a position shared by the board shows on the phone's map and the reverse, frame time measured | routing/zoom niceties of the desktop |
 
+### Slice one done, on the host (1351)
+
+The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
+`thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
+m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
+positive control). It words the chats list scene in cells
+(`lines`, `loquax-m9/src/screen.rs:69`) and draws them through
+`leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
+without that crate's new default `terminal` feature, into ratatui over
+mousefood (`draw`, `loquax-m9/src/render.rs:45`). Mousefood's own
+`framebuffer` is off: the cells go straight into the caller's frame, and
+the crate's `framebuffer` feature turns it back on for the board's DMA
+measurement. What the slice settled on the host:
+
+- **The goldens.** The ugly store's Compact list drawn into the 320x240
+  frame, pinned as `loquax-m9/tests/golden/m9-chats.png` and, with the
+  cursor on the fourteenth row so the list scrolls,
+  `m9-chats-cursor.png`, compared in bytes. The positive control moves one
+  row's time two days back: the frame changes, and only in that row's 20
+  pixel rows. A third test redraws with one renderer and must equal a
+  fresh draw; it was red on the first run. ratatui never sends a wide
+  character's second cell, the atlas has no glyph wider than one, so an
+  emoji left the old pixels beside it. The screen now draws a wide
+  character as `?` and drops zero-width ones before it measures a line
+  (`narrow`, `loquax-m9/src/screen.rs:297`).
+- **The tick ladder.** The list's mark stands on the shared glyph table's
+  ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:242`).
+- **The key table.** Up, down, open and back are the navigation keys and
+  Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
+  (`LIST_ROWS`, `loquax-m9/src/keys.rs:39`); a test resolves each through
+  `keys::resolve` and `Intent::from_action` to `Scroll(LineUp)`,
+  `Scroll(LineDown)`, `Focus(Messages)` and `Back`. Which scancode is
+  which key stays the keyboard slice's.
+- **The census** (`m9_scene_census`, 64-bit host, debug build) now counts
+  the renderer and the stack, read off a painted stack whose positive
+  control is a 64 KiB frame:
+
+| what | held | peak | stack |
+|---|---:|---:|---:|
+| chats list scene | 26,532 B | 26,816 B | 49,672 B |
+| open chat scene | 111,184 B | 145,638 B | 67,384 B |
+| the panel's frame | 153,600 B | | |
+| renderer made (no mousefood frame) | 107,584 B | 107,584 B | 15,744 B |
+| chats list, first draw | 0 B | 86,840 B | 6,528 B |
+| chats list, cursor moved | 0 B | 86,816 B | 6,656 B |
+
+  A draw holds nothing; its peak is the screen's styled lines and their
+  ratatui text, built per draw, which 1343's spike did not have (7,946 B).
+- **Flash on xtensa**, `opt-level = "s"`, fat LTO, one codegen unit, as
+  1343 measured: an esp-hal binary that builds the model's list scene,
+  against the same binary that also draws it with this crate. The
+  renderer adds `.text` +60,028 B and `.rodata` +39,296 B (the plan:
+  +57,508 B and +48,772 B), `.data` +52 B. The scene the core builds is
+  the bigger part: `.text` +215,968 B and `.rodata` +46,212 B over the
+  esp-hal baseline (the probe ran under `/home/lew/scratch/1351/` on the
+  rig host and is not in the tree).
+
+Not yet done of slice one: the board's half, which needs the board code
+this pass left out. The frame dumped from the board equal to the golden,
+the two-region heap and the census printed from the board.
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice
@@ -413,8 +475,8 @@ uncertainty of firmware bring-up.
 
 ## Not yet built
 
-The M9 frontend: all six slices of "The slices, in order" above, and
-the `no_std` client seam they need. Of the 2026-10-21 list that stood
+The M9 frontend: the six slices of "The slices, in order" above but the
+host half of slice one, and the `no_std` client seam they need. Of the 2026-10-21 list that stood
 here, the rest has landed since: the core builds `no_std`
 (`just loquax-core-no-std`), the desktop window ships beside the
 terminal, Android went through the JNI facade rather than the C
