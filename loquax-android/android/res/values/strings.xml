@@ -1,12 +1,12 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Loquax</string>
+    <string name="app_name" translatable="false">Loquax</string>
     <string name="starting">Starting…</string>
     <string name="joining">Connecting to your mailbox…</string>
     <string name="code_label">The code your mailbox shows, from loquax mailbox setup on the computer</string>
-    <string name="code_hint">lqxh1…</string>
+    <string name="code_hint" translatable="false">lqxh1…</string>
     <string name="server_label">Your mailbox\'s address: host:port of its lnsd TCP server</string>
-    <string name="server_hint">192.168.1.20:4242</string>
+    <string name="server_hint" translatable="false">192.168.1.20:4242</string>
     <string name="join">Join</string>
     <string name="open">Open</string>
     <string name="address_hint">Address of a new conversation</string>
@@ -193,7 +193,7 @@
     <string name="restore_title">Your address from a backup</string>
     <string name="restore_text">Open the backup file, or type the code from the paper backup. Then enter its passphrase.</string>
     <string name="restore_file">Open the backup file</string>
-    <string name="restore_hint">lqxb1…</string>
+    <string name="restore_hint" translatable="false">lqxb1…</string>
     <string name="restore">Restore</string>
     <string name="restore_none">That is no Loquax backup. It starts with lqxb1.</string>
     <string name="passphrase">Passphrase</string>
@@ -231,8 +231,11 @@
     <string name="settings_appearance">Appearance</string>
     <string name="settings_appearance_summary">Map: like the phone, light or dark</string>
     <string name="settings_notifications">Notifications</string>
-    <string name="settings_notifications_summary">New messages, muted chats</string>
+    <string name="settings_notifications_summary">New messages, muted chats, the connection notice</string>
     <string name="settings_notifications_text">Loquax tells you of every new message. To mute one chat, hold it in the list, then Mute. Sound and vibration are in Android\'s settings for Loquax.</string>
+    <!-- 1345: the row that opens the connection notice's channel page. -->
+    <string name="connection_notice">Connection notice</string>
+    <string name="connection_notice_text">Minimise it or turn it off in Android\'s settings; Loquax stays connected.</string>
     <string name="settings_chats">Chats</string>
     <string name="settings_chats_summary">Photo size</string>
     <string name="settings_privacy">Privacy</string>
