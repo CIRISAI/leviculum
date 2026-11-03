@@ -1105,7 +1105,7 @@ Spoken by kitty, WezTerm, Ghostty and Konsole by their own documentation,
 not checked here. The crate is
 `ratatui-image` 11.0.6 (MIT), already in the tree behind
 `leviculum-ui-ratatui`'s `images` feature
-(`leviculum-ui-ratatui/Cargo.toml:34`), built without its default
+(`leviculum-ui-ratatui/Cargo.toml:40`), built without its default
 `chafa-dyn` so no C library comes in; `lnomad` draws pictures through it.
 Its terminal query (`Pictures::detect`,
 `leviculum-ui-ratatui/src/images.rs:113`) picks the protocol at start and
