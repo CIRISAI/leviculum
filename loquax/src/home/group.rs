@@ -43,9 +43,10 @@
 //!   `"Lew: …\nAnna: …"` for everyone, the `lev` key `0x06` for a Loquax
 //!   member; an attachment above [`SLOW_ATTACHMENT_BYTES`] becomes the line
 //!   "Lew sent a photo (too large for the radio)";
-//! - a reaction goes to every other member that understands groups, its
-//!   target rewritten to the recipient's own copy as a reply's is; a stock
-//!   member gets none (decided), a slow one none either;
+//! - a reaction goes to every other member, its target rewritten to the
+//!   recipient's own copy as a reply's is; a stock member gets it too
+//!   (1387, Lew 2026-11-03: Columba and Sideband draw reactions; G2 had
+//!   decided it got none), a slow one none, since a digest is text;
 //! - a member who joins by writing (a stock member's first line) is told
 //!   to the Loquax members with the membership, as a Join is; the admin
 //!   adds members with [`add`].
@@ -862,9 +863,11 @@ fn accept_message(
         .iter()
         .filter(|m| m.present() && m.address != sender)
     {
-        // A reaction goes to the members that understand groups and are
-        // not slow; a stock member gets none (decided for G2).
-        if reaction.is_some() && (!member.understands_groups() || member.flags & MEMBER_SLOW != 0) {
+        // A reaction goes to every member that is not slow, a stock one
+        // too: Columba and Sideband draw it under the id they know the
+        // target by (1387, Lew 2026-11-03). A digest carries text only, so
+        // a slow member gets none.
+        if reaction.is_some() && member.flags & MEMBER_SLOW != 0 {
             continue;
         }
         let out = copy_for(
@@ -2472,12 +2475,24 @@ mod tests {
         fields
     }
 
-    /// 1307 G2, item 5: a reaction goes to the other members that
-    /// understand groups, its target each one's own copy (or own original),
-    /// its text without a name in front; a stock member gets none, by the
-    /// decision. A stock member's reaction reaches the Loquax members too.
+    /// The reaction field `out` carries, opened.
+    fn reaction_in(scene: &Scene, out: &Outgoing) -> Reaction {
+        opened(scene, out)
+            .fields
+            .iter()
+            .find(|(k, _)| *k == FIELD_REACTION)
+            .and_then(|(_, v)| Reaction::decode_field_value(v))
+            .expect("reaction")
+    }
+
+    /// 1307 G2, item 5, and 1387 (Lew, 2026-11-03): a reaction goes to
+    /// every other member, its target each one's own copy (or own
+    /// original), its text without a name in front. A stock member gets
+    /// it too, since Columba and Sideband draw reactions: under his copy
+    /// of Anna's line, and under his own original when he wrote the line.
+    /// A stock member's reaction reaches the others the same way.
     #[test]
-    fn a_reaction_names_each_loquax_members_own_copy_and_skips_stock() {
+    fn a_reaction_names_each_members_own_copy_stock_members_too() {
         let mut scene = scene();
         let hosted = scene.hosted.clone();
         let anna_line = to_group(&scene, &scene.anna, 1.0, "Brot ist da", groups_mark());
@@ -2487,21 +2502,30 @@ mod tests {
         let thumbs = to_group(&scene, &scene.lew, 2.0, "", reaction(lews));
         let out = line(accept(&mut scene.store, &hosted, &thumbs, ACCEPTED + 1.0).expect("react"));
         let to: Vec<_> = out.iter().map(|o| o.destination).collect();
-        assert_eq!(to, [scene.anna.1], "Anna, not Bob's stock client");
+        assert_eq!(
+            to,
+            [scene.anna.1, scene.bob.1],
+            "Anna and Bob's stock client"
+        );
         let annas = opened(&scene, &out[0]);
         assert!(annas.content.is_empty(), "no name in front of a reaction");
-        let read = annas
-            .fields
-            .iter()
-            .find(|(k, _)| *k == FIELD_REACTION)
-            .and_then(|(_, v)| Reaction::decode_field_value(v))
-            .expect("reaction");
-        assert_eq!(read.to, anna_line.message_id, "her own original");
+        assert_eq!(
+            reaction_in(&scene, &out[0]).to,
+            anna_line.message_id,
+            "her own original"
+        );
         let lev = Lev::from_fields(&annas.fields).expect("lev");
         assert_eq!(
             lev.group_copy.map(|c| c.sender),
             Some(scene.lew.1),
             "who reacted"
+        );
+        let bobs_thumbs = opened(&scene, &out[1]);
+        assert!(bobs_thumbs.content.is_empty(), "no name for Bob either");
+        assert_eq!(reaction_in(&scene, &out[1]).to, bobs, "his copy");
+        assert!(
+            Lev::from_fields(&bobs_thumbs.fields).is_none(),
+            "no lev pair for a stock member"
         );
         // Bob reacts from his stock client to his copy: Lew's names Lew's
         // copy, Anna's her original; Bob is joined by it.
@@ -2537,6 +2561,52 @@ mod tests {
         assert!(targets.contains(&(scene.lew.1, Some(lews))), "{targets:?}");
         assert!(targets.contains(&(scene.anna.1, Some(anna_line.message_id))));
         assert!(targets.iter().all(|(to, _)| *to != scene.bob.1));
+        // Bob writes a line; Lew reacts to his copy of it: Bob's copy of
+        // the reaction names Bob's own original, the id his client holds.
+        let bob_line = to_group(&scene, &scene.bob, 4.0, "Komme gleich", Vec::new());
+        let copies =
+            line(accept(&mut scene.store, &hosted, &bob_line, ACCEPTED + 3.0).expect("bob's line"));
+        let lews = open_copy(&scene, &copies, scene.lew.1);
+        let thumbs = to_group(&scene, &scene.lew, 5.0, "", reaction(lews));
+        let out = line(accept(&mut scene.store, &hosted, &thumbs, ACCEPTED + 4.0).expect("react"));
+        let to_bob = out
+            .iter()
+            .find(|o| o.destination == scene.bob.1)
+            .expect("Bob's copy of the reaction");
+        assert_eq!(
+            reaction_in(&scene, to_bob).to,
+            bob_line.message_id,
+            "his own original"
+        );
+    }
+
+    /// 1307 G2, kept by 1387: a slow member gets no reaction, since a
+    /// digest carries text only; nothing is held for it either. Control:
+    /// Bob, stock and not slow, gets it.
+    #[test]
+    fn a_reaction_skips_a_slow_member() {
+        let mut scene = scene();
+        let hosted = scene.hosted.clone();
+        let group = hosted.group.address;
+        scene
+            .store
+            .group_flag(&group, &scene.anna.1, MEMBER_SLOW)
+            .expect("slow");
+        let anna_line = to_group(&scene, &scene.anna, 1.0, "Brot ist da", groups_mark());
+        let copies = line(accept(&mut scene.store, &hosted, &anna_line, ACCEPTED).expect("line"));
+        let lews = open_copy(&scene, &copies, scene.lew.1);
+        let thumbs = to_group(&scene, &scene.lew, 2.0, "", reaction(lews));
+        let out = line(accept(&mut scene.store, &hosted, &thumbs, ACCEPTED + 1.0).expect("react"));
+        let to: Vec<_> = out.iter().map(|o| o.destination).collect();
+        assert_eq!(to, [scene.bob.1], "Bob, not slow Anna");
+        let rows = scene
+            .store
+            .group_copies(&group, &thumbs.message_id)
+            .expect("rows");
+        assert!(
+            rows.iter().all(|r| r.member != scene.anna.1),
+            "nothing held for Anna: {rows:?}"
+        );
     }
 
     /// 1307 G2, item 6: a stock member who joins by writing is told to the
