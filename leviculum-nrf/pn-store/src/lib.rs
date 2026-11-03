@@ -200,7 +200,20 @@ impl RawRecord<'_> {
 /// record still reads flags `0xFF` (the commit word is written last) and
 /// the walk stops before it; a half-erased page fails its header CRC and
 /// is skipped whole.
+///
+/// One walk in the image, not one per caller: the generic face hands its
+/// closure to [`scan_dyn`], which is compiled once. Twelve callers each
+/// carried their own inlined copy of this loop until order 1355, which
+/// needed the bytes back on the RAK4631 (an indirect call per record, at
+/// most a few hundred a walk, costs nothing a scan of 64 KiB notices).
+#[inline]
 pub fn scan(region: &[u8], mut visit: impl FnMut(&RawRecord<'_>)) {
+    scan_dyn(region, &mut visit);
+}
+
+/// [`scan`]'s one compiled body.
+#[inline(never)]
+pub fn scan_dyn(region: &[u8], visit: &mut dyn FnMut(&RawRecord<'_>)) {
     let pages = region.len() / SECTOR_SIZE as usize;
     for page in 0..pages {
         let base = page * SECTOR_SIZE as usize;

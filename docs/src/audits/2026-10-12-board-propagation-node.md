@@ -83,7 +83,7 @@ Keys and stamps on the board, as built: the peer's X25519‖Ed25519
 keys are captured with the peer at announce time and persisted
 (#388 pass 3, `Peer::capture_identity`,
 `leviculum-lxmf/src/peering.rs:512`; `PnPeerStore`,
-`leviculum-nrf/pn-store/src/lib.rs:1222`), because the board's
+`leviculum-nrf/pn-store/src/lib.rs:1235`), because the board's
 `known_identities` cache is 8 slots against up to 16 peers. The
 peering key is mined on its own task, cooperatively
 (`miner_task`, `leviculum-nrf/src/pn.rs:653`), 10-32 s at the capped
@@ -92,7 +92,7 @@ cost 18, logged `PN_KEY`, persisted, never re-mined across a reset.
 **D1 — the peer table caps at 16 where the reference and lnpnd cap
 at 20.** Board: `BOARD_MAX_PEERS`,
 `leviculum-nrf/heap-budget/src/lib.rs:322`, wired at
-`leviculum-nrf/pn-store/src/lib.rs:1636`; reference `MAX_PEERS`,
+`leviculum-nrf/pn-store/src/lib.rs:1649`; reference `MAX_PEERS`,
 `reference/LXMF/LXMF/LXMRouter.py:43`; the shared default is 20
 (`MAX_PEERS_DEFAULT`, `leviculum-lxmf/src/peering.rs:63`). The §5
 derivation (`docs/src/concepts/propagation-node-on-a-board.md`,
@@ -151,7 +151,7 @@ it (the arm that names the reason says so,
 `leviculum-nrf/src/pn.rs:1636-1639`), and the inputs do not exist
 there: `PeerTraffic` is a host-side map persisted with the host's
 records, while the board's record codec restores zeros
-(`leviculum-nrf/pn-store/src/lib.rs:1205-1206`).
+(`leviculum-nrf/pn-store/src/lib.rs:1218-1219`).
 What a peer sees: with D1, a full board table is first-come-forever.
 The reference keeps ~10 % headroom by unpeering the peers that
 accept the least; a board keeps whoever came first, however dead
@@ -176,7 +176,7 @@ bypassed, path requested at start (`activate_static_peers`,
 `leviculum-lxmf/src/peering.rs:880`, against
 `reference/LXMF/LXMF/LXMRouter.py:633-642`). The board built its
 `PeeringConfig` with the default empty list (`board_peering_config`,
-`leviculum-nrf/pn-store/src/lib.rs:1635-1643`, which takes a list since
+`leviculum-nrf/pn-store/src/lib.rs:1648-1656`, which takes a list since
 the fix below) and never called `activate_static_peers`; there was no
 frame to configure one.
 What an operator sees: a board cannot be pinned to a home
@@ -395,7 +395,7 @@ peer is priced 0 and never offered to a stock peer.** The board
 skips the workblock at cost 0 while no peer demands a value
 (`always_compute_stamp_value: false` in `Engine::new` as audited, now
 `true` in `board_role_config`,
-`leviculum-nrf/pn-store/src/lib.rs:397`; the gate at
+`leviculum-nrf/pn-store/src/lib.rs:410`; the gate at
 `leviculum-lxmf/src/propagation_node.rs:1258-1269`), storing stamp
 value 0 as the record's tag. A stock peer announces cost 16 with
 flexibility 3 (`PROPAGATION_COST`,
@@ -426,7 +426,7 @@ message, 3655-3727 ms of CPU spread over ~50 settle passes
 the proof already left at receipt (#397), so the phone's round trip
 is untouched. Re-pricing an old store at boot costs the same CPU per
 stored record *plus one re-append-and-purge per record*, because the
-value is the record's tag (`leviculum-nrf/pn-store/src/lib.rs:917`)
+value is the record's tag (`leviculum-nrf/pn-store/src/lib.rs:930`)
 and the log is append-only: a full store re-priced is roughly one
 extra lap of the region's write pointer, ~150 appends and their
 share of page erases, once.
@@ -446,7 +446,7 @@ behaviour.
 wire and cannot be stored.** The advertisement gate admits a
 resource up to the announced sync limit, 5 000 B (D12); the record
 log refuses a body over `MAX_BODY` = 4 042 B
-(`leviculum-nrf/pn-store/src/lib.rs:909-912`, surfacing as
+(`leviculum-nrf/pn-store/src/lib.rs:922-925`, surfacing as
 `StorageError::Full` that no eviction can cure). By then the
 resource protocol has already acknowledged the transfer, and the
 store failure sends nothing — the reference has no signal for it
@@ -722,7 +722,7 @@ to consult it until D17. Uploads stay open, as on lnpnd. Pinned by
 What a board recalls across a reset, verified at the code: the peer
 table with identity hashes, public keys, mined peering keys, limits,
 costs, timebase, `last_heard` and the cursor (`PeerRecord` via
-`TAG_PEER` records, `leviculum-nrf/pn-store/src/lib.rs:1218`,
+`TAG_PEER` records, `leviculum-nrf/pn-store/src/lib.rs:1231`,
 restored at `leviculum-nrf/src/pn.rs:929-941`, where since leviculum#466
 a record unheard past the 14 days is left out and purged); the message store
 (a flash scan); the announced costs
@@ -741,7 +741,7 @@ persists the ids that left its store early, `lnpnd/src/departures.rs`;
 the board still forgets.) The announce recall
 cache (D5). The traffic counters (D3's input; lnpnd persists them
 with the record, the board's codec zeroes them,
-`leviculum-nrf/pn-store/src/lib.rs:1205-1206`).
+`leviculum-nrf/pn-store/src/lib.rs:1218-1219`).
 
 How long until it is a mailbox again: the store mounts in the boot
 path; the propagation announce fires 20 s after boot
