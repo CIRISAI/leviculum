@@ -361,6 +361,11 @@ sleeps. For a server that phones dial, a longer idle together with
     tcp_keepalive_probes = 4
 ```
 
+Loquax writes the phones' port with `tcp_keepalive_idle_secs = 240`, and
+a phone's dial to its mailbox takes the same idle, with a link keepalive of
+230 s at both ends of the device's link (1346,
+`docs/src/concepts/loquax-phone-power.md`, "The device link's keepalives").
+
 `mode = access_point` sends the connected phones no announce that is
 broadcast through the mesh, while their path requests are still answered
 and, for a destination the node does not know, asked on (the reference's

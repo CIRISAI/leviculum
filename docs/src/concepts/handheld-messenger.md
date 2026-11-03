@@ -336,10 +336,10 @@ The M9 is a full node in Mesh mode (the propagation-node decision on
 a home. What that needs, measured against the code:
 
 - **The wire is ready.** The five requests and their answers are
-  `no_std` (`wire`, `loquax/src/home.rs:37`), as are the admission
+  `no_std` (`wire`, `loquax/src/home.rs:38`), as are the admission
   code's codec (`code`), the archive relation and the wake rules.
 - **The client's ask loop is not.** `home::client` is gated `std`
-  (`loquax/src/home.rs:39`): it waits on tokio time and drives
+  (`loquax/src/home.rs:40`): it waits on tokio time and drives
   `leviculum_std::ReticulumNode`'s link API
   (`loquax/src/home/client.rs:10`). The board port is the same request
   flow over `leviculum-core`'s links and the firmware's clock — a seam

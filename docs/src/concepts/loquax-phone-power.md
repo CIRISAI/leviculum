@@ -24,7 +24,7 @@ then turns the winner into mAh.
 | Mode | What runs |
 |---|---|
 | `B` | today's defaults: the device walk's fixture (lnsd with a TCP server, the mailbox over the ugly store), the app installed and joined |
-| `Bprime` | the same with the levers this tree can pull from the host: the TCP server in `access_point` mode, `keepalive_interval` of the host's links set by `--bprime-link-keepalive` (600 s). The line names the levers still missing (`missing=tcp_keepalive_idle,phone_link_keepalive`): the TCP keepalive is fixed in `leviculum-std/src/interfaces/tcp.rs`, and the phone, the link's initiator and the side that sends keepalives, has no knob for its interval |
+| `Bprime` | the same with the levers this tree can pull from the host: the TCP server in `access_point` mode, `keepalive_interval` of the host's links set by `--bprime-link-keepalive` (600 s). The line named two levers missing until 1346, the TCP idle and the phone's link keepalive; both are the device link's defaults now (below), so `missing=` is empty and `B` already measures them on the phone's side |
 | `A` | a standalone node with AutoInterface only, no mailbox. It fails at setup today: loquax-android starts no AutoInterface, and its first start offers only a mailbox at home or on the phone, both over TCP |
 | `ref` | the reference app (Columba), given by `--ref-apk` and `--ref-package`, connected to the same lnsd. Its TCP client interface is set to the server once, by hand; the script installs over the old app with `-r`, so the setting stays. `--ref-address` is the app's LXMF address, which the traffic phase sends to |
 
@@ -100,6 +100,69 @@ of every phase and `POWER_SUMMARY modes=<n> ok=<n> failed=<n> ms=<n>`.
 fixture's steps. The exit code is 1 when a mode failed to run, never
 because of a number: the numbers are for the reviewer to judge against
 the note's thresholds, which tier R applies.
+
+## The device link's keepalives (1346)
+
+Option O2 of the Android background study: the battery is won at the
+keepalives, not at the architecture. Both are local timing; nothing on the
+wire changes. `loquax/src/home/keepalive.rs` holds the values and why.
+
+| | before 1346 | since 1346 | where |
+|---|---|---|---|
+| TCP keepalive idle, the device's dial to its mailbox or rendezvous | 5 s (`TCPInterface.py:85`) | 240 s, unless the config's `tcp_keepalive_idle_secs` says another | `TcpLiveness::for_device` in `loquax/src/config.rs`, applied by `attach_leaf` and the phone's own mailbox |
+| TCP keepalive idle, the mailbox's phones' port | 5 s | 240 s, written into a new `[[Loquax Mailbox TCP]]` (lnsd takes it, rnsd ignores it); a config that runs is never rewritten | `loquax/src/home/phone_server.rs` |
+| probe interval, probes, user timeout | 2 s, 12, 24 s | unchanged | `leviculum-std/src/interfaces/tcp.rs` |
+| link keepalive on the device's link to its mailbox, both ends | `rtt * 360 / 1.75`, 10.3 s on a 50 ms path (`Link.py:845`) | 230 s | the phone's watching link (`loquax/src/home/watch.rs`), the mailbox on the first request of every device link (`loquax/src/home/daemon.rs`) |
+| link keepalive on every other link | RTT-derived | unchanged | |
+| the phone's idle pump | 360 s | unchanged | `IDLE_PUMP` in `loquax-android/src/session.rs` |
+
+The link keepalive comes 10 s before the TCP probe would, so a live link
+costs one exchange per 230 s and the TCP probe never fires; it is the
+backstop for a connection that carries no link. 240 s stays under the 5 min
+RFC 4787 REQ-5 recommends for a NAT's idle mapping (2 min is its minimum;
+RFC 5382 REQ-5 asks 2 h 4 min for established TCP, which carrier NATs cut
+short). A relay keeps an idle link 900 s (`Transport.py:89`, `:688`).
+
+**A reference peer.** A responder goes stale at twice *its own* interval
+(`Link.py:797`), so a long interval works only where both ends set it, and
+both ends of the device link are Loquax. A Python rendezvous between them
+relays the link and keeps it (900 s above), and probes its side of the TCP
+connection every 5 s, which a phone dialling it pays for: only a leviculum
+mailbox or rendezvous can lengthen its side. A mailbox from before 1346
+keeps the RTT-derived interval and drops a quiet device link after about
+20 s: the phone turns the long interval off after two watching links in a
+row that ended before their first keepalive (`Lengthen`), and keeps the
+reference's for the rest of its session.
+
+**`access_point`.** The reference has no `I_WANT_TO_BE_AN_ACCESS_POINT`;
+access point is the interface's `mode`. It blocks the broadcast of
+announces onto the interface (`Transport.py:1195-1197`) and keeps paths
+learned through it a day (`AP_PATH_TIME`, `Transport.py:72`, `:774`,
+`:1875`). The phones' port has been written with `mode = access_point`
+since 1176 and keeps it: every announce of the mesh would wake a sleeping
+phone's modem.
+
+**A silent mailbox.** "Not connected" (the service notice, `Notice.java`,
+and the session's `link` event) comes within 300 s
+(`NOT_CONNECTED_WITHIN`): the kernel drops an idle connection to a peer
+that stopped answering after its idle and one probe, 242 s
+(`InterfaceConfig::tcp_silent_peer_bound`; 26 s before), and the carrier
+change (`leviculum_std::interfaces::carrier_changes`) wakes the idle pump,
+which looks at once. A TCP client that loses its connection tells the core
+nothing and redials on its own, so the carrier is the only word of it. The
+status dot (`home_link`) follows: the watching link is closed when no
+connection is left under it, instead of waiting out its stale time, twice
+230 s. A mailbox that closes the connection (a restart, a power cut) is
+noticed at once, as before.
+
+**The counters.** Once an hour the phone's log says
+`WAKE_SUMMARY keepalives=N links=N pumps=N bytes=N` (the keepalive round
+trips of its links to the home, the links that came up, the pump's turns,
+the bytes on its connections), and the mailbox says
+`WAKE_SUMMARY device=<address> keepalives=N links=N wakes=N bytes=N` for
+each device (`wakes` are the wakes it sent; `bytes` the requests, answers
+and wakes, without link headers). Tier R reads them beside the mAh (the
+study's M1 to M7).
 
 ## The parsers and their tests
 

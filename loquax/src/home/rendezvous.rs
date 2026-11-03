@@ -452,11 +452,13 @@ mod driver {
     /// rotation of the process: the phone's leaf and its own mailbox hear
     /// the same change. It also counts the rotations that re-dial for a
     /// change and are not up again yet, which is what the app's line says
-    /// ("Reconnecting…" while there is one).
+    /// ("Reconnecting…" while there is one), and the re-dials it started,
+    /// so a re-dial that was up again before anyone looked is still said.
     #[derive(Debug, Clone)]
     pub struct Network {
         notes: Arc<tokio::sync::watch::Sender<Note>>,
         owed: Arc<AtomicUsize>,
+        redials: Arc<AtomicUsize>,
     }
 
     impl Default for Network {
@@ -464,6 +466,7 @@ mod driver {
             Self {
                 notes: Arc::new(tokio::sync::watch::Sender::new(Note::default())),
                 owed: Arc::new(AtomicUsize::new(0)),
+                redials: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -490,6 +493,15 @@ mod driver {
         /// Whether a rotation re-dials for a change and is not up yet.
         pub fn reconnecting(&self) -> bool {
             self.owed.load(Ordering::Relaxed) > 0
+        }
+
+        /// How many times a rotation dropped its connection for a change.
+        /// Counted before the connection goes, with [`Self::reconnecting`]
+        /// set, so whoever the interface's going wakes sees both; a re-dial
+        /// on the loopback address is up again within milliseconds, before
+        /// a pump that sleeps 100 ms looks at [`Self::reconnecting`] (1346).
+        pub fn redials(&self) -> usize {
+            self.redials.load(Ordering::Relaxed)
         }
 
         fn subscribe(&self) -> tokio::sync::watch::Receiver<Note> {
@@ -763,11 +775,12 @@ mod driver {
                             let (host, port) = &dial.entries[index];
                             said(host, *port, "down", index);
                         }
+                        owed.set(true);
+                        dial.network.redials.fetch_add(1, Ordering::Relaxed);
                         drop_all(&dial.node, &mut ids);
                         rotation.restart();
                         up = false;
                         dial_at = None;
-                        owed.set(true);
                         tell(0, false);
                         if action == Evaluation::Redial {
                             ids = spawn(&dial.node, &dial, 0);
@@ -848,6 +861,7 @@ mod driver {
             }
         }
     }
+
     #[cfg(test)]
     mod tests {
         use super::*;

@@ -67,6 +67,16 @@ pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_
 const SETTLE: Duration = Duration::from_secs(5);
 /// How often the TCP interface is looked at while the pump runs fast.
 const LINK_EVERY_MS: u64 = 1_000;
+/// Within how long of its mailbox going silent the phone says "not
+/// connected" (1346): the notice (`Notice.java`) and the join screen's
+/// line follow [`Event::Link`], which the pump sends when it sees the
+/// TCP interface down. An idle connection to a silent peer is dropped by
+/// the kernel after the device's TCP idle and one probe
+/// (`InterfaceConfig::tcp_silent_peer_bound`, 242 s), the carrier change
+/// (`leviculum_std::interfaces::carrier_changes`) wakes the pump out of its
+/// idle sleep, and the pump looks at once. Before 1346 it was 26 s, and the idle pump could sleep
+/// the drop away for up to [`IDLE_PUMP`].
+pub const NOT_CONNECTED_WITHIN: Duration = Duration::from_secs(300);
 /// How many of a peer's newest positions the contact screen lists.
 const POSITIONS_SHOWN: usize = 10;
 /// How many of the positions we shared the privacy page lists (1201).
@@ -180,6 +190,8 @@ struct Inner {
     /// none before the first, and when that look was.
     link: Option<bool>,
     link_looked: Option<u64>,
+    /// Whether the last turn skipped its look at the TCP interface.
+    link_owed: bool,
     /// Wakes the pump out of an idle sleep (1176).
     wake: Arc<tokio::sync::Notify>,
     /// The watching link's word (`loquax::home::watch`), whether it is up,
@@ -204,6 +216,67 @@ struct Inner {
     /// says "Reconnecting…" now.
     network: loquax::home::rendezvous::Network,
     reconnecting: bool,
+    /// The network's re-dials at the last look.
+    redials: usize,
+    /// What the device link cost since the last `WAKE_SUMMARY` (1346).
+    costs: DeviceCosts,
+}
+
+/// The phone's side of the `WAKE_SUMMARY` line (1346): the pump's turns,
+/// the links to the home that came up (told by [`relay_node`]), their
+/// keepalive round trips, and the bytes on the connections to the home or
+/// rendezvous, read with the TCP interface's look.
+#[derive(Default)]
+struct DeviceCosts {
+    window: loquax::home::keepalive::Costs,
+    since_ms: u64,
+    /// Each link to the home this phone opened, and its keepalive total at
+    /// the last reading.
+    links: Vec<(leviculum_core::LinkId, u64)>,
+    /// Each interface's byte total at the last reading.
+    bytes: std::collections::BTreeMap<usize, u64>,
+    opened: Option<tokio::sync::mpsc::UnboundedReceiver<leviculum_core::LinkId>>,
+}
+
+impl DeviceCosts {
+    /// Read the totals the node keeps.
+    fn read(&mut self, node: &leviculum_std::driver::ReticulumNode) {
+        use loquax::home::keepalive::growth;
+        if let Some(opened) = &mut self.opened {
+            while let Ok(link) = opened.try_recv() {
+                self.window.links += 1;
+                self.links.push((link, 0));
+            }
+        }
+        let mut keepalives = 0;
+        self.links
+            .retain_mut(|(link, last)| match node.link_keepalive(link) {
+                Some((_, total)) => {
+                    keepalives += growth(last, total);
+                    true
+                }
+                None => false,
+            });
+        self.window.keepalives += keepalives;
+        for interface in node.interface_stats() {
+            if interface.is_local_client {
+                continue;
+            }
+            let last = self.bytes.entry(interface.interface_id.0).or_default();
+            self.window.bytes += growth(last, interface.rx_bytes + interface.tx_bytes);
+        }
+    }
+
+    /// The line, when the window is over: and a fresh window.
+    fn summary(&mut self, now_ms: u64) -> Option<String> {
+        if now_ms.saturating_sub(self.since_ms) < loquax::home::keepalive::SUMMARY_EVERY_MS {
+            return None;
+        }
+        self.since_ms = now_ms;
+        Some(loquax::home::keepalive::device_line(&std::mem::take(
+            &mut self.window,
+        )))
+    }
 }
 
 /// A running session.
@@ -405,6 +478,9 @@ impl Session {
         let (events_tx, events_rx) = channel();
         let (watch_tx, watch_rx) = tokio::sync::mpsc::unbounded_channel();
         let wake = Arc::new(tokio::sync::Notify::new());
+        // Subscribed before the watch opens its first link, so its
+        // establishment is counted.
+        let node_events = client.node.subscribe_events();
         let watching = watch::Watch {
             node: client.node.clone(),
             public_key,
@@ -431,7 +507,15 @@ impl Session {
         let (heard_tx, heard_rx) = tokio::sync::mpsc::unbounded_channel();
         runtime.spawn(watch::run(watching, heard_tx));
         runtime.spawn(relay_watch(heard_rx, watch_tx, Arc::clone(&wake)));
+        let (opened_tx, opened_rx) = tokio::sync::mpsc::unbounded_channel();
+        runtime.spawn(relay_node(
+            node_events,
+            leviculum_core::DestinationHash::new(home_destination),
+            opened_tx,
+            Arc::clone(&wake),
+        ));
         let mut inner = inner;
+        inner.costs.opened = Some(opened_rx);
         inner.network = network;
         inner.fetching = Some(crate::browse_fetch::start(
             runtime.handle(),
@@ -1692,6 +1776,7 @@ impl Inner {
             link: None,
             // The first pump looks, and says what it saw.
             link_looked: None,
+            link_owed: false,
             wake,
             watch,
             watching: false,
@@ -1703,6 +1788,8 @@ impl Inner {
             recorder: Vec::new(),
             network: loquax::home::rendezvous::Network::new(),
             reconnecting: false,
+            redials: 0,
+            costs: DeviceCosts::default(),
         })
     }
 
@@ -1787,6 +1874,7 @@ impl Inner {
         if self.gone {
             return false;
         }
+        self.costs.window.pumps += 1;
         match self.fanout.pump(&mut self.attached.outbox) {
             Ok(events) => {
                 for event in events {
@@ -1833,8 +1921,10 @@ impl Inner {
             }
         }
         self.browse();
-        self.look_at_link();
+        // The network first: a re-dial is said before the link it dropped
+        // and brought back (1346).
         self.look_at_network();
+        self.look_at_link();
         let elapsed = self.elapsed_ms();
         if let Some(say) = self.pull_line.tick(elapsed) {
             self.say(say);
@@ -1861,6 +1951,7 @@ impl Inner {
             || self.pull_owed
             || !self.sends.is_empty()
             || self.link.is_none()
+            || self.link_owed
             || self.reconnecting
             || self.network.reconnecting()
             || self.dirty;
@@ -1914,14 +2005,26 @@ impl Inner {
     /// the first look.
     fn look_at_link(&mut self) {
         let now = self.elapsed_ms();
-        if self
+        // A look skipped here is owed (1346): the pump that a carrier change
+        // woke inside the second may not go back to its idle sleep before
+        // it looked, or the change is said only at the idle pump's turn.
+        self.link_owed = self
             .link_looked
-            .is_some_and(|at| now.saturating_sub(at) < LINK_EVERY_MS)
-        {
+            .is_some_and(|at| now.saturating_sub(at) < LINK_EVERY_MS);
+        if self.link_owed {
             return;
         }
         self.link_looked = Some(now);
-        let up = link_up(&self.client.node);
+        self.costs.read(&self.client.node);
+        if let Some(line) = self.costs.summary(now) {
+            tracing::info!("{line}");
+        }
+        // Up only once the re-dial is over: "back" comes before the link,
+        // whichever of the two the node saw first, and a link held back
+        // for it is looked at again.
+        let carried = link_up(&self.client.node);
+        let up = carried && !self.reconnecting;
+        self.link_owed |= carried && self.reconnecting;
         if up && self.link == Some(false) {
             self.ask_for_home_path();
         }
@@ -1935,19 +2038,42 @@ impl Inner {
     /// a rotation that dropped its connection for it is not up again, and
     /// is gone once every one is.
     fn look_at_network(&mut self) {
+        // A re-dial that came and went between two looks is said all the
+        // same: "reconnecting", then "back" in the same turn (1346).
+        let redials = self.network.redials();
+        if redials != self.redials {
+            self.redials = redials;
+            if !self.reconnecting {
+                self.say_network(true);
+            }
+            // The re-dial dropped the connection whether a look saw it
+            // down or not: said so, and the next look says it up again.
+            if self.link == Some(true) {
+                self.link = Some(false);
+                let _ = self.events.send(Event::Link {
+                    v: VERSION,
+                    up: false,
+                });
+            }
+            self.link_owed = true;
+        }
         let now = self.network.reconnecting();
         if now != self.reconnecting {
-            self.reconnecting = now;
-            let state = match now {
-                true => "reconnecting",
-                false => "back",
-            };
-            tracing::info!("NETWORK {state}");
-            let _ = self.events.send(Event::Network {
-                v: VERSION,
-                state: state.to_string(),
-            });
+            self.say_network(now);
         }
+    }
+
+    fn say_network(&mut self, reconnecting: bool) {
+        self.reconnecting = reconnecting;
+        let state = match reconnecting {
+            true => "reconnecting",
+            false => "back",
+        };
+        tracing::info!("NETWORK {state}");
+        let _ = self.events.send(Event::Network {
+            v: VERSION,
+            state: state.to_string(),
+        });
     }
 
     /// The interface came back: ask for the home destination's path. The
@@ -3654,6 +3780,47 @@ async fn relay_watch(
     }
 }
 
+/// What the node says that the pump must hear while it may sleep (1346):
+/// an interface that went down or lost its carrier wakes it, so "not
+/// connected" comes within
+/// [`NOT_CONNECTED_WITHIN`] and not at the idle pump's next turn, and each
+/// link to the home this phone opened goes to the `WAKE_SUMMARY` count.
+/// Ends with the node's events or the session's end of `opened`.
+async fn relay_node(
+    mut tap: leviculum_std::driver::EventTap,
+    home: leviculum_core::DestinationHash,
+    opened: tokio::sync::mpsc::UnboundedSender<leviculum_core::LinkId>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    use leviculum_core::node::NodeEvent;
+    use leviculum_std::driver::TapEvent;
+    // A TCP client that lost its connection redials on its own and tells
+    // the core nothing: its carrier says it.
+    let mut carrier = leviculum_std::interfaces::carrier_changes();
+    loop {
+        tokio::select! {
+            Ok(()) = carrier.changed() => wake.notify_one(),
+            event = tap.recv() => match event {
+                Some(TapEvent::Event(NodeEvent::InterfaceDown(_))) | Some(TapEvent::Lagged(_)) => {
+                    wake.notify_one();
+                }
+                Some(TapEvent::Event(NodeEvent::LinkEstablished {
+                    link_id,
+                    is_initiator: true,
+                    destination_hash,
+                })) if destination_hash == home => {
+                    if opened.send(link_id).is_err() {
+                        return;
+                    }
+                }
+                Some(_) => {}
+                None => return,
+            },
+            () = opened.closed() => return,
+        }
+    }
+}
+
 fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
     node.interface_stats()
         .iter()
@@ -3809,6 +3976,52 @@ mod tests {
     /// holds, so this pins the periods instead: the pump's idle sleep and
     /// the watch's backstop are both the link keepalive's ceiling, and the
     /// idle sleep ends early only for the pull schedule.
+    /// 1346: a mailbox that goes silent is "not connected" within the
+    /// bound the phone promises, not after the old 26 s and not after an
+    /// idle pump's sleep: the kernel drops the long-idle connection after
+    /// its idle and one probe, and the `InterfaceDown` wakes the pump,
+    /// which looks within [`LINK_EVERY_MS`].
+    #[test]
+    fn a_silent_mailbox_is_not_connected_within_the_promised_bound() {
+        let section = |tcp: loquax::config::TcpLiveness| leviculum_std::config::InterfaceConfig {
+            tcp_keepalive_idle_secs: tcp.idle_secs,
+            tcp_keepalive_interval_secs: tcp.interval_secs,
+            tcp_keepalive_probes: tcp.probes,
+            tcp_user_timeout_secs: tcp.user_timeout_secs,
+            ..Default::default()
+        };
+        let reference = section(loquax::config::TcpLiveness::default())
+            .tcp_silent_peer_bound()
+            .expect("in range");
+        let device = section(loquax::config::TcpLiveness::default().for_device())
+            .tcp_silent_peer_bound()
+            .expect("in range");
+        assert_eq!(reference, Duration::from_secs(26), "before 1346");
+        assert_eq!(device, Duration::from_secs(242));
+        assert!(device + Duration::from_millis(LINK_EVERY_MS) <= NOT_CONNECTED_WITHIN);
+        assert!(
+            NOT_CONNECTED_WITHIN < IDLE_PUMP,
+            "the promise does not rest on the idle pump's turn"
+        );
+    }
+
+    /// The window closes once an hour of the pump's clock, with every
+    /// counter in the line, and starts over.
+    #[test]
+    fn the_wake_summary_is_said_once_an_hour() {
+        let mut costs = DeviceCosts::default();
+        costs.window.pumps = 12;
+        costs.window.links = 1;
+        assert_eq!(costs.summary(3_599_999), None);
+        assert_eq!(
+            costs.summary(3_600_000).as_deref(),
+            Some("WAKE_SUMMARY keepalives=0 links=1 pumps=12 bytes=0")
+        );
+        assert_eq!(costs.window, loquax::home::keepalive::Costs::default());
+        assert_eq!(costs.summary(7_100_000), None);
+        assert!(costs.summary(7_200_000).is_some());
+    }
+
     #[test]
     fn an_idle_client_wakes_no_more_often_than_the_link_keepalive() {
         let keepalive = Duration::from_secs(leviculum_core::constants::LINK_KEEPALIVE_SECS);

@@ -31,6 +31,7 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 pub mod admit;
 pub mod backup;
 pub mod code;
+pub mod keepalive;
 pub mod outgoing;
 pub mod relation;
 pub mod wake;

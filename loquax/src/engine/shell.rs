@@ -675,11 +675,14 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
         notices,
     };
     let mut attached = attach_through(joined, role, Upstream::Tcp).await?;
-    let side = match home_destination {
-        Some(hash) => {
-            crate::home::rendezvous::Side::Phone(leviculum_core::DestinationHash::new(hash))
-        }
-        None => crate::home::rendezvous::Side::Peer,
+    // A device's dial to its mailbox takes the long TCP idle (1346); a
+    // group's leaf is a mesh connection and keeps the reference's.
+    let (side, tcp) = match home_destination {
+        Some(hash) => (
+            crate::home::rendezvous::Side::Phone(leviculum_core::DestinationHash::new(hash)),
+            tcp.for_device(),
+        ),
+        None => (crate::home::rendezvous::Side::Peer, tcp),
     };
     attached.dial(&servers, side, tcp, timing, network)?;
     Ok(attached)

@@ -206,6 +206,20 @@ pub struct TcpLiveness {
     pub user_timeout_secs: Option<u64>,
 }
 
+impl TcpLiveness {
+    /// These keys on a device's connection to its mailbox (1346): the idle
+    /// [`crate::home::keepalive::TCP_IDLE_SECS`] unless the file sets one,
+    /// the rest as the file says or the reference's.
+    pub fn for_device(self) -> Self {
+        Self {
+            idle_secs: self
+                .idle_secs
+                .or(Some(crate::home::keepalive::TCP_IDLE_SECS)),
+            ..self
+        }
+    }
+}
+
 /// The prefix of a remembered map drawing's key; the context follows it.
 pub const MAP_DRAWING: &str = "map_drawing.";
 
@@ -928,6 +942,23 @@ mod tests {
             }
         );
         assert_eq!(parse_str("").unwrap().tcp, TcpLiveness::default());
+        // 1346: a device's connection takes the long idle unless the file
+        // names one, and keeps every key the file names.
+        assert_eq!(
+            TcpLiveness::default().for_device(),
+            TcpLiveness {
+                idle_secs: Some(crate::home::keepalive::TCP_IDLE_SECS),
+                ..TcpLiveness::default()
+            }
+        );
+        assert_eq!(
+            parse_str("tcp_keepalive_idle_secs = 600\n")
+                .unwrap()
+                .tcp
+                .for_device()
+                .idle_secs,
+            Some(600)
+        );
         assert!(matches!(
             parse_str("tcp_keepalive_idle_secs = long\n"),
             Err(ConfigError::BadValue {

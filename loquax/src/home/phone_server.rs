@@ -6,6 +6,11 @@
 //! asked on for a destination the node does not know (`Interface.py:54`,
 //! `Transport.py:2918`). Python's rnsd reads the section as lnsd does.
 //!
+//! Since 1346 the section probes an idle phone's connection after 240 s
+//! instead of the reference's 5 s (`super::keepalive`): the phones' only
+//! connection, so a long idle costs no other peer anything. rnsd ignores
+//! the key and probes every 5 s, which a phone on its port pays for.
+//!
 //! Written once, on the mailbox's first start: a config that already runs
 //! is never rewritten, and a section of that name already there is left
 //! alone. The daemon reads its config only when it starts, so the port
@@ -28,9 +33,11 @@ pub fn block(port: u16) -> String {
          # dial. In access point mode it sends them no announces of the mesh\n  \
          # and still answers their path requests. The tcp_keepalive_* keys\n  \
          # (lnsd only, rnsd ignores them) set how often an idle phone's\n  \
-         # connection is probed; unset is every 5 s.\n  \
+         # connection is probed: after {idle} s here, unset every 5 s.\n  \
          [[{SECTION}]]\n    type = TCPServerInterface\n    enabled = yes\n    \
-         listen_ip = 0.0.0.0\n    listen_port = {port}\n    mode = access_point\n"
+         listen_ip = 0.0.0.0\n    listen_port = {port}\n    mode = access_point\n    \
+         tcp_keepalive_idle_secs = {idle}\n",
+        idle = super::keepalive::TCP_IDLE_SECS,
     )
 }
 
@@ -213,6 +220,16 @@ mod tests {
         assert_eq!(phones.interface_type, "TCPServerInterface");
         assert_eq!(phones.listen_port, Some(PORT));
         assert_eq!(phones.mode.as_deref(), Some("access_point"));
+        // 1346: the phones' port probes an idle connection after the long
+        // idle, which lnsd checks and takes.
+        assert_eq!(
+            phones.tcp_keepalive_idle_secs,
+            Some(crate::home::keepalive::TCP_IDLE_SECS)
+        );
+        assert_eq!(
+            phones.tcp_silent_peer_bound(),
+            Ok(std::time::Duration::from_secs(242))
+        );
         assert!(config.interfaces.contains_key("Default Interface"));
     }
 

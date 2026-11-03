@@ -787,6 +787,7 @@ async fn network_changes_redial_the_first_entry_once_each() {
     wait_until("the first dial is up on A", 10, || up_on(&entry_a)).await;
     assert_eq!(seen(&log), ["A+"]);
     assert!(!network.reconnecting());
+    assert_eq!(network.redials(), 0, "the first dial is no re-dial");
 
     // 1. WLAN off and on: no network drops A and dials nothing, the
     //    WLAN back dials A once.
@@ -794,11 +795,14 @@ async fn network_changes_redial_the_first_entry_once_each() {
     wait_until("no network drops A", 5, || seen(&log).len() == 2).await;
     assert_eq!(seen(&log), ["A+", "A-"]);
     assert!(network.reconnecting(), "the line says Reconnecting");
+    // Counted before the drop (1346): whoever the drop wakes sees it.
+    assert_eq!(network.redials(), 1);
     quiet_for(&log, 1_500, "no network dials nothing").await;
     network.say(loquax::home::NetworkKind::Wifi, true);
     wait_until("the WLAN back dials A", 5, || up_on(&entry_a)).await;
     assert_eq!(seen(&log), ["A+", "A-", "A+"]);
     wait_until("the line is gone", 5, || !network.reconnecting()).await;
+    assert_eq!(network.redials(), 2);
 
     // 2. WLAN to mobile data: the platform says lost and available, a
     //    WLAN at the edge of its reach comes and goes once more, then
@@ -819,6 +823,7 @@ async fn network_changes_redial_the_first_entry_once_each() {
     wait_until("up on A", 5, || up_on(&entry_a)).await;
     quiet_for(&log, 1_500, "the burst was one dial").await;
     assert_eq!(seen(&log), ["A+", "A-", "A+", "A-", "A+"]);
+    assert_eq!(network.redials(), 3, "one re-dial for the burst");
 
     // 3. Flight mode for "two minutes" (two seconds here): nothing is
     //    dialled while it lasts, one dial when it ends.
@@ -847,6 +852,7 @@ async fn network_changes_redial_the_first_entry_once_each() {
     quiet_for(&log, 1_500, "the same network with A up keeps A").await;
     assert!(up_on(&entry_a));
     assert!(!network.reconnecting());
+    assert_eq!(network.redials(), 6, "the same network re-dials nothing");
 
     // The order: A gone, the rotation fails over to B. A answers again,
     // and a change dials the first entry, A, not the B that carries it.
