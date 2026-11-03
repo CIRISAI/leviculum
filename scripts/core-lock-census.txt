@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 60
+TOTAL 61
 
 driver::ReticulumNode::accept_resource
 driver::ReticulumNode::active_link_count
@@ -68,6 +68,7 @@ driver::ReticulumNode::remember_identity
 driver::ReticulumNode::remove_path
 driver::ReticulumNode::request_path
 driver::ReticulumNode::send_file_response
+driver::ReticulumNode::send_link_packet
 driver::ReticulumNode::send_proof
 driver::ReticulumNode::send_request
 driver::ReticulumNode::send_request_awaited

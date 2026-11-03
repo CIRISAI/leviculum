@@ -172,6 +172,8 @@ skip  leviculum-mapfill fill                   # pixel-exact reference images; s
 skip  leviculum-mapfill fixture                # reads the committed fixture, but the subject is the render pipeline (a golden count)
 skip  leviculum-mapfill frame                  # in-process framebuffer; subject is the code
 skip  leviculum-micron parser_tests              # reads README.mu for snippets, but the subject is the parser
+skip  leviculum-rrc   session                   # replays recorded envelopes; the subject is the session code
+skip  leviculum-rrc   vectors                   # a vector corpus; the subject is the codec
 skip  leviculum-proxy log_backpressure           # spawns the proxy binary
 skip  leviculum-proxy proxy_control              # binds sockets under a tokio runtime
 skip  leviculum-std   ble_handshake_primer       # btvirt + bluetoothd, no daemon; the #[ignore]d 1004 reproduction, run by name
@@ -223,6 +225,7 @@ skip  lnflash         vendored_softdevice        # close to the line: reads the 
 skip  loquax           home_node                  # spawns loquax --daemon and clients against Python over sockets; loquax-tui
 skip  loquax           import                     # its subject is the import code, and it spawns the loquax binary; loquax-tui
 skip  loquax           mailbox_cli                # spawns loquax against in-process daemons over sockets
+skip  loquax           rooms_hub                  # nodes, a daemon and a fake hub over sockets; subject is the hub link
 skip  loquax           mailbox_setup              # spawns the loquax binary over a temporary home; subject is the code; loquax-tui
 skip  loquax           python_interop             # drives Python over sockets; Tier 1
 skip  loquax           send_cli                   # spawns the loquax binary

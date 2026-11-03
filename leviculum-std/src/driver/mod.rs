@@ -3691,6 +3691,8 @@ impl ReticulumNode {
     /// RRC hub's `packet_callback`, #232). `data` must fit the link's MDU.
     ///
     /// See [`NodeCore::send_packet_on_link()`]. Returns the packet hash.
+    /// Takes the core lock while it builds the packet: a task beside the
+    /// node calls it, never a `CoreProcessor` hook.
     pub async fn send_link_packet(&self, link_id: &LinkId, data: &[u8]) -> Result<[u8; 32], Error> {
         dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
