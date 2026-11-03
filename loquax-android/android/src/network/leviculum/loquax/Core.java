@@ -236,6 +236,21 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "browse"))));
     }
 
+    /**
+     * A verb of the Rooms tab (1384): `tab`, `chats`, `show` with the
+     * list's index of a room (-1 for the list), `say` with the input
+     * field's text, which the library reads as the terminal's input line;
+     * the error in words, or null.
+     */
+    static String rooms(String verb, String text, int index) {
+        return command(map("t", "rooms", "verb", verb, "text", text, "index", index));
+    }
+
+    /** The Rooms tab as the library words it (1384). */
+    static Map<String, Object> roomsScreen() {
+        return answer(Native.query(MsgPack.pack(map("t", "rooms"))));
+    }
+
     /** One request; the error in words, or null. */
     static String command(Map<String, Object> request) {
         Map<String, Object> done = answer(Native.command(MsgPack.pack(request)));

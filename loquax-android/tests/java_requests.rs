@@ -554,6 +554,21 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
                 rows: 22,
             },
         ),
+        // The Rooms tab (1384): `Core.rooms`.
+        (
+            "rooms",
+            java_map(&[
+                ("t", Java::Str("rooms")),
+                ("verb", Java::Str("show")),
+                ("text", Java::Str("")),
+                ("index", Java::Long(-1)),
+            ]),
+            Request::Rooms {
+                verb: s("show"),
+                text: String::new(),
+                index: -1,
+            },
+        ),
     ]
 }
 
@@ -894,6 +909,11 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             java_map(&[("t", Java::Str("browse"))]),
             Query::Browse,
         ),
+        (
+            "roomsScreen",
+            java_map(&[("t", Java::Str("rooms"))]),
+            Query::Rooms,
+        ),
     ]
 }
 
@@ -940,6 +960,7 @@ fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
         "played",
         "browse",
         "browseSize",
+        "rooms",
     ];
     let mut wrong = Vec::new();
     for (name, bytes, _) in commands() {

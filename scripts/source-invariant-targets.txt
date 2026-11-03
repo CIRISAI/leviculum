@@ -248,6 +248,8 @@ skip  loquax-android   m9_scene_census            # counts the M9 screens' scene
 skip  loquax-android   m9_fixture_census          # counts the M9 image's fixture screens (the group's since 1366) and the client session's pull against the census budgets with a global allocator (1361, 1363); subject is the code
 skip  loquax-android   m9_client                  # the M9's no_std client against in-process mailboxes and a transport over loopback TCP, through a counting proxy (1363), and the group verbs from the board's keys (1366); subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
+skip  loquax-android   rooms                      # the Rooms tab's verbs and answer through the facade in Java's bytes, and its golden (1384); subject is the code
+skip  loquax-android   rooms_hub                  # the phone's session, its mailbox, a transport and a fake hub over loopback TCP (1384); subject is the hub link
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
 skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
 run   loquax-android   strings                    # reads the app's res/values*/strings.xml and asserts the words of walk findings 27 to 30 (1283)

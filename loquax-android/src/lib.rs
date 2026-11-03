@@ -30,6 +30,7 @@ pub mod links;
 pub mod mailbox;
 pub mod map;
 pub mod pull_line;
+pub mod rooms;
 pub mod schema;
 /// The scanner's decoder, the one the desktop reads a picture of a code
 /// with too (1341).

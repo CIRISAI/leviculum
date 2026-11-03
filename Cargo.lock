@@ -3501,12 +3501,14 @@ name = "loquax-android"
 version = "0.1.2"
 dependencies = [
  "embedded-graphics",
+ "hex",
  "jni",
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-map",
  "leviculum-mapcut",
  "leviculum-mapfill",
+ "leviculum-rrc",
  "leviculum-std",
  "leviculum-ui",
  "lnomad",
