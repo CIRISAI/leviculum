@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use leviculum_lxmf::constants::STAMP_SIZE;
+use leviculum_lxmf::processed_ids::ProcessedIds;
 use leviculum_lxmf::propagation_node::PROCESSED_ID_EXPIRY_SECS;
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::storage::StorageError;
@@ -80,7 +81,7 @@ fn price_processed_btree(ids: usize) {
     let lookup_ns = looked.elapsed().as_nanos() / absent.len() as u128;
     assert_eq!(hits, 0);
 
-    // The daily prune, the oldest day past its window plus the slack day.
+    // The prune a day past the oldest id's window, as the map was pruned.
     let prune_now = NOW + DAY;
     let pruned = Instant::now();
     cache.retain(|_, received| prune_now.saturating_sub(*received) <= window);
@@ -88,6 +89,49 @@ fn price_processed_btree(ids: usize) {
     println!(
         "BENCH_PROCESSED repr=btree_map ids={ids} build_ms={build_ms} rss_bytes={rss} \
          rss_per_id={} census_bytes={census} lookup_ns={lookup_ns} prune_ms={prune_ms} kept={}",
+        rss / ids as u64,
+        cache.len()
+    );
+}
+
+/// The processed cache as it is since order 1370
+/// ([`leviculum_lxmf::processed_ids`]), priced as [`price_processed_btree`]
+/// prices the map: built and sealed, then absent-id lookups and the daily
+/// prune that seals the day just ended and drops the oldest.
+fn price_processed_days(ids: usize, bucket_days: u64) {
+    let mut state = 0x243f_6a88_85a3_08d3 ^ ids as u64;
+    let window = PROCESSED_ID_EXPIRY_SECS;
+    let rss_before = resident_bytes();
+    let built = Instant::now();
+    let mut cache = ProcessedIds::with_bucket_secs(bucket_days * DAY);
+    for n in 0..ids {
+        let at = NOW - window + (n as u64 * window) / ids as u64;
+        cache.insert(&random_id(&mut state), at);
+    }
+    let sealed = Instant::now();
+    cache.prune(NOW, window);
+    let seal_ms = sealed.elapsed().as_millis();
+    let build_ms = built.elapsed().as_millis();
+    let rss = resident_bytes().saturating_sub(rss_before);
+    let census = cache.heap_bytes();
+
+    let absent: Vec<TransientId> = (0..10_000).map(|_| random_id(&mut state)).collect();
+    let looked = Instant::now();
+    let hits = absent.iter().filter(|id| cache.contains(id)).count();
+    let lookup_ns = looked.elapsed().as_nanos() / absent.len() as u128;
+    assert_eq!(hits, 0);
+
+    // A day of accepts at the cache's own rate, then the prune a day on.
+    for _ in 0..ids / 180 {
+        cache.insert(&random_id(&mut state), NOW + 10);
+    }
+    let pruned = Instant::now();
+    let dropped = cache.prune(NOW + DAY, window);
+    let prune_us = pruned.elapsed().as_micros();
+    println!(
+        "BENCH_PROCESSED repr=buckets bucket_days={bucket_days} ids={ids} build_ms={build_ms} first_seal_ms={seal_ms} \
+         rss_bytes={rss} rss_per_id={} census_bytes={census} lookup_ns={lookup_ns} \
+         daily_prune_us={prune_us} dropped={dropped} kept={}",
         rss / ids as u64,
         cache.len()
     );
@@ -237,6 +281,9 @@ fn price_make_room(capacity: u64, uploads: usize) {
 fn processed_and_eviction_cost_at_field_scale() {
     for ids in sizes_from_env("LNPND_BENCH_IDS", &[1_000_000, 10_000_000]) {
         price_processed_btree(ids);
+        for bucket_days in [1, 7] {
+            price_processed_days(ids, bucket_days);
+        }
     }
     for capacity in sizes_from_env("LNPND_BENCH_STORE_BYTES", &[2_000_000_000]) {
         price_make_room(capacity as u64, 20);

@@ -68,12 +68,12 @@ pub const MESSAGE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 /// (`clean_transient_id_caches`, `reference/LXMF/LXMF/LXMRouter.py:1011`).
 pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
 
-/// How long past [`PROCESSED_ID_EXPIRY_SECS`] a processed ID may stay, so
-/// the cache is pruned at most once a day instead of walked on every
-/// maintenance tick. The cache holds every ID accepted in up to 180 days,
-/// about 56 000 a day on the field node (leviculum#478); a day longer only
-/// widens the duplicate window by a day.
-pub const PROCESSED_ID_PRUNE_SLACK_SECS: u64 = 24 * 60 * 60;
+/// How long past [`PROCESSED_ID_EXPIRY_SECS`] a processed ID may stay: the
+/// width of the cache's buckets, a week, which are dropped whole instead of
+/// walked ([`crate::processed_ids`]). The cache holds every ID accepted in
+/// up to 180 days, about 56 000 a day on the field node (leviculum#478); a
+/// week longer only widens the duplicate window by a week.
+pub const PROCESSED_ID_PRUNE_SLACK_SECS: u64 = crate::processed_ids::PROCESSED_BUCKET_SECS;
 
 /// How many expired messages [`PropagationNode::tick_at_most`]'s caller in
 /// a host hook takes per call: purging one and logging it costs a few
@@ -953,10 +953,10 @@ pub struct PropagationNode<S> {
     /// an already-drained message is accepted again, which the client's
     /// own `has_message` filter tolerates (`message_list_response`,
     /// `reference/LXMF/LXMF/LXMRouter.py:1581`).
-    processed: alloc::collections::BTreeMap<TransientId, u64>,
-    /// When [`Self::tick`] next walks `processed`: the oldest entry's expiry
-    /// plus [`PROCESSED_ID_PRUNE_SLACK_SECS`], `u64::MAX` while empty.
-    processed_prune_at: u64,
+    ///
+    /// Week buckets of 16-byte id prefixes, exact for at least the
+    /// reference's window ([`crate::processed_ids`]).
+    processed: crate::processed_ids::ProcessedIds,
     /// Messages expired or displaced since the role was built, for a host's
     /// status line ([`Self::evicted_total`]).
     evicted_total: u64,
@@ -987,7 +987,7 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// processed-id duplicate cache and the announced name. The store
     /// adapter accounts for its own queued writes.
     pub fn heap_bytes(&self) -> usize {
-        leviculum_core::heap_census::btree_map_bytes(&self.processed)
+        self.processed.heap_bytes()
             + self
                 .departed
                 .as_ref()
@@ -999,8 +999,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         Self {
             store,
             config,
-            processed: alloc::collections::BTreeMap::new(),
-            processed_prune_at: u64::MAX,
+            processed: crate::processed_ids::ProcessedIds::new(),
             evicted_total: 0,
             departed: None,
             compute_stamp_value: false,
@@ -1281,7 +1280,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         // A store that remembers its own departures answers for them past a
         // restart; an expired message is not one (`track_departures`).
         let received_since = now_secs.saturating_sub(self.config.message_expiry_secs);
-        let duplicate = self.processed.contains_key(&transient_id)
+        let duplicate = self.processed.contains(&transient_id)
             || self.store.contains(&transient_id).unwrap_or(false)
             || self
                 .store
@@ -1606,10 +1605,7 @@ impl<S: PropagationStore> PropagationNode<S> {
     }
 
     fn remember_processed(&mut self, transient_id: TransientId, at_secs: u64) {
-        self.processed.insert(transient_id, at_secs);
-        self.processed_prune_at = self
-            .processed_prune_at
-            .min(at_secs.saturating_add(PROCESSED_ID_EXPIRY_SECS + PROCESSED_ID_PRUNE_SLACK_SECS));
+        self.processed.insert(&transient_id, at_secs);
     }
 
     fn note_departure(&mut self, transient_id: &TransientId, now_secs: u64) {
@@ -1713,10 +1709,9 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// Neither half walks what did not expire. The store hands over only
     /// the entries received before `now - expiry`
     /// ([`PropagationStore::for_each_received_before`]); the processed-ID
-    /// cache is walked once its oldest entry is due, at most once a day
-    /// ([`PROCESSED_ID_PRUNE_SLACK_SECS`]). Both walked every entry on every
-    /// tick before, 24.6 ms on the field node's Odroid at 300 000 messages
-    /// (leviculum#478).
+    /// cache drops whole week buckets ([`crate::processed_ids`]). Both walked
+    /// every entry on every tick before, 24.6 ms on the field node's Odroid
+    /// at 300 000 messages (leviculum#478).
     pub fn tick_at_most(&mut self, now_secs: u64, max_expired: usize) -> Vec<Eviction> {
         let expiry = self.config.message_expiry_secs;
         let floor = self.calendar_jump_floor;
@@ -1745,18 +1740,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         expired.retain(|eviction| self.store.purge(&eviction.transient_id).unwrap_or(false));
         self.evicted_total += expired.len() as u64;
 
-        if now_secs >= self.processed_prune_at {
-            let mut oldest = u64::MAX;
-            self.processed.retain(|_, received| {
-                let keep = now_secs.saturating_sub(*received) <= PROCESSED_ID_EXPIRY_SECS;
-                if keep {
-                    oldest = oldest.min(*received);
-                }
-                keep
-            });
-            self.processed_prune_at =
-                oldest.saturating_add(PROCESSED_ID_EXPIRY_SECS + PROCESSED_ID_PRUNE_SLACK_SECS);
-        }
+        self.processed.prune(now_secs, PROCESSED_ID_EXPIRY_SECS);
         if let Some(departed) = self.departed.as_mut() {
             departed.retain(|_, left| now_secs.saturating_sub(*left) <= expiry);
         }

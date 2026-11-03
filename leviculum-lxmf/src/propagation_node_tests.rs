@@ -1914,11 +1914,11 @@ fn list_pressure_reports_throttling_instead_of_hiding_stored_mail() {
     assert!(node.store().contains(&id).unwrap());
 }
 
-/// Order 1295, leviculum#478: the processed-ID cache is pruned once its
-/// oldest entry is a slack day past the 180-day window, not walked on every
-/// tick, and it still forgets that entry and keeps the younger ones.
+/// Orders 1295 and 1370, leviculum#478: the processed-ID cache forgets an
+/// entry once its bucket (a week) is past the 180-day window, not before,
+/// and keeps the younger ones.
 #[test]
-fn the_processed_cache_is_pruned_a_slack_day_after_its_oldest_is_due() {
+fn the_processed_cache_is_pruned_a_bucket_after_its_oldest_is_due() {
     const DAY: u64 = 24 * 60 * 60;
     let mut node = node(64 * 1024);
     let old = envelope(7, 1);

@@ -78,6 +78,7 @@ pub mod msgpack;
 pub mod node;
 pub mod paper;
 pub mod peering;
+pub mod processed_ids;
 pub mod propagation;
 pub mod propagation_client;
 pub mod propagation_node;
