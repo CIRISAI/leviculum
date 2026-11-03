@@ -98,7 +98,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | `loquax/src/gui.rs:2188`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1378`, behind `browse_tab` (1369) |
 | 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:310`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:413`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:401` (1341) | n/a |
-| 46 | Rooms tab (RRC) | MISSING (1379) | `loquax/src/gui.rs:2202`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1401`, behind `rooms_hub` (1379) |
+| 46 | Rooms tab (RRC) | `RoomsPane.java:171`, behind `rooms_hub` (1384) | `loquax/src/gui.rs:2202`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1401`, behind `rooms_hub` (1379) |
 
 ## Counts
 
@@ -117,11 +117,15 @@ The Rooms tab (row 46, 1379) is Reticulum Relay Chat on the hub the
 config's `rooms_hub` names; without one there is no tab. The model, the
 scene's `RoomsNode` and the hub link (`loquax/src/rooms_link.rs`, over the
 node the engine lends to `Lender::Rooms`) are shared; the window and the
-terminal draw the node. The phone has the core and the link's crate but no
-pane yet: its Java side needs a `RoomsScreen` in the schema and a pane
-beside `BrowsePane`, the next pass. The M9 needs a renderer screen for the
-node in `loquax-m9`, an input line on its keyboard, and the hub link over
-its own node; the codec is `no_std` already (`leviculum-rrc`).
+terminal draw the node. The phone draws it since 1384: the schema's
+`RoomsScreen` (`loquax-android/src/rooms.rs`) flattens the node, the
+session lends the phone's node (the mailbox's when it is on the phone,
+else the leaf's) to the Rooms and runs the same hub link, and
+`RoomsPane.java` draws it beside `BrowsePane`, its tab shown only where
+`rooms_hub` is set, as on the desktop. The M9 needs a renderer screen for
+the node in `loquax-m9`, rows in its key table, and the hub link over its
+own node; what each takes is written down on [the handheld
+page](handheld-messenger.md), "The Rooms on the M9".
 
 ## What 1341 brought, and how
 
