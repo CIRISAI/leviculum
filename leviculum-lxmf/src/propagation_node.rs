@@ -75,6 +75,19 @@ pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
 /// week longer only widens the duplicate window by a week.
 pub const PROCESSED_ID_PRUNE_SLACK_SECS: u64 = crate::processed_ids::PROCESSED_BUCKET_SECS;
 
+/// How long one eviction walk's candidates serve later full appends: the
+/// reference weighs its store once per store job, `JOB_STORE_INTERVAL` 120
+/// times `PROCESSING_INTERVAL` 4 s (`reference/LXMF/LXMF/LXMRouter.py:31,876,899`),
+/// so a choice this old is no staler than the reference's own.
+pub const EVICTION_CANDIDATES_SECS: u64 = 480;
+
+/// One eviction walk chooses candidates worth this fraction of the
+/// capacity beyond what the append needs: 2 MB, about 6 000 messages, on a
+/// 2 GB store, so a full store walks once per that many accepts instead of
+/// on every one (order 1370: 789 ms an upload at 6 M messages on the coder
+/// host, 15 of 20 uploads walking).
+pub const EVICTION_CANDIDATE_FRACTION: u64 = 1024;
+
 /// How many expired messages [`PropagationNode::tick_at_most`]'s caller in
 /// a host hook takes per call: purging one and logging it costs a few
 /// microseconds, so a backlog of tens of thousands (a node back from a long
@@ -960,6 +973,11 @@ pub struct PropagationNode<S> {
     /// Messages expired or displaced since the role was built, for a host's
     /// status line ([`Self::evicted_total`]).
     evicted_total: u64,
+    /// The heaviest messages the last eviction walk found, heaviest first,
+    /// and when it ran: what the next full append evicts from without a
+    /// walk, for [`EVICTION_CANDIDATES_SECS`] ([`Self::make_room`]).
+    eviction_candidates: Vec<Eviction>,
+    eviction_walked_at: u64,
     /// Ids that left the store before they expired (a confirmed
     /// collection, an own-mailbox delivery, a displacement), with when,
     /// for a host to persist: `None` unless [`Self::track_departures`]
@@ -993,6 +1011,7 @@ impl<S: PropagationStore> PropagationNode<S> {
                 .as_ref()
                 .map_or(0, leviculum_core::heap_census::btree_map_bytes)
             + self.config.name.as_ref().map_or(0, |name| name.capacity())
+            + self.eviction_candidates.capacity() * core::mem::size_of::<Eviction>()
     }
 
     pub fn new(mut store: S, config: PropagationNodeConfig) -> Self {
@@ -1002,6 +1021,8 @@ impl<S: PropagationStore> PropagationNode<S> {
             config,
             processed: crate::processed_ids::ProcessedIds::new(),
             evicted_total: 0,
+            eviction_candidates: Vec::new(),
+            eviction_walked_at: 0,
             departed: None,
             compute_stamp_value: false,
             calendar_jump_floor: 0,
@@ -1783,9 +1804,98 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// loop compares like with like: `free_space` and it are the store's own
     /// accounting unit. The *weight* is still the raw `age × size` the
     /// reference computes over body bytes.
+    ///
+    /// **One walk serves many appends** (order 1370). The reference sorts
+    /// its whole store by weight once per store job; this sorted the whole
+    /// store on every full append, 789 ms an upload on the coder host at
+    /// 6 M messages (a full 2 GB store), and a full store finds itself full
+    /// again on most appends. A walk now keeps only the heaviest messages
+    /// worth `needed` plus [`EVICTION_CANDIDATE_FRACTION`] of the capacity
+    /// (a bounded heap, `O(n log k)`, `k` entries of memory, no copy of the
+    /// store) and evicts from that list, heaviest first, exactly what the
+    /// append needs. The rest serve the next full appends for
+    /// [`EVICTION_CANDIDATES_SECS`], the reference's own store-job cadence;
+    /// a candidate gone meanwhile is skipped, and messages that arrived
+    /// since the walk wait for the next one, as they wait for the
+    /// reference's next job. The receive-time index cannot replace the walk:
+    /// the weight multiplies age by size, so no order by age alone is the
+    /// reference's order.
     fn make_room(&mut self, needed: u64, now_secs: u64) -> Vec<Eviction> {
-        let mut weighted: Vec<(f64, Eviction)> = Vec::new();
+        let mut evicted = Vec::new();
+        let stale = now_secs < self.eviction_walked_at
+            || now_secs - self.eviction_walked_at >= EVICTION_CANDIDATES_SECS;
+        if stale {
+            self.eviction_candidates.clear();
+        }
+        let mut walked = false;
+        while self.store.free_space() < needed {
+            if self.eviction_candidates.is_empty() {
+                if walked {
+                    break;
+                }
+                let want = needed
+                    .saturating_sub(self.store.free_space())
+                    .saturating_add(self.store.capacity() / EVICTION_CANDIDATE_FRACTION);
+                self.eviction_candidates = self.heaviest(want, now_secs);
+                self.eviction_walked_at = now_secs;
+                walked = true;
+                if self.eviction_candidates.is_empty() {
+                    break;
+                }
+            }
+            // Heaviest last, so taking it is a pop.
+            let Some(candidate) = self.eviction_candidates.pop() else {
+                break;
+            };
+            if self.store.purge(&candidate.transient_id).unwrap_or(false) {
+                self.note_departure(&candidate.transient_id, now_secs);
+                evicted.push(Eviction {
+                    age_secs: now_secs.saturating_sub(self.eviction_walked_at) + candidate.age_secs,
+                    ..candidate
+                });
+            }
+        }
+        self.evicted_total += evicted.len() as u64;
+        evicted
+    }
+
+    /// The heaviest stored messages whose sizes add up to at least `bytes`
+    /// (all of them when the store holds less), lightest first: one walk,
+    /// a min-heap of the best seen so far that drops its lightest while the
+    /// rest still add up. Equal weights go to the message the walk met
+    /// first, as the stable sort this replaced left them.
+    fn heaviest(&self, bytes: u64, now_secs: u64) -> Vec<Eviction> {
+        use alloc::collections::BinaryHeap;
+        use core::cmp::{Ordering, Reverse};
+
+        struct Weighed {
+            weight: f64,
+            walked: u64,
+            eviction: Eviction,
+        }
+        impl Ord for Weighed {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.weight
+                    .total_cmp(&other.weight)
+                    .then(other.walked.cmp(&self.walked))
+            }
+        }
+        impl PartialOrd for Weighed {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl PartialEq for Weighed {
+            fn eq(&self, other: &Self) -> bool {
+                self.cmp(other) == Ordering::Equal
+            }
+        }
+        impl Eq for Weighed {}
+
         let prioritised = &self.config.prioritised_destinations;
+        let mut best: BinaryHeap<Reverse<Weighed>> = BinaryHeap::new();
+        let mut held = 0u64;
+        let mut walked = 0u64;
         let _ = self.store.for_each(&mut |meta: &StoredMessage| {
             let age_secs = now_secs.saturating_sub(meta.received_at);
             let age_weight = (age_secs as f64 / (4.0 * 24.0 * 60.0 * 60.0)).max(1.0);
@@ -1794,35 +1904,45 @@ impl<S: PropagationStore> PropagationNode<S> {
             } else {
                 1.0
             };
-            weighted.push((
-                priority * age_weight * meta.size as f64,
-                Eviction {
+            let weight = priority * age_weight * meta.size as f64;
+            walked += 1;
+            // Already enough, and lighter than the lightest kept: it would
+            // be pushed and popped again.
+            if held >= bytes
+                && best
+                    .peek()
+                    .is_some_and(|Reverse(lightest)| weight <= lightest.weight)
+            {
+                return;
+            }
+            best.push(Reverse(Weighed {
+                weight,
+                walked,
+                eviction: Eviction {
                     transient_id: meta.transient_id,
                     size: meta.size,
                     age_secs,
                     reason: EvictionReason::Displaced,
                 },
-            ));
-        });
-        weighted.sort_by(|left, right| {
-            right
-                .0
-                .partial_cmp(&left.0)
-                .unwrap_or(core::cmp::Ordering::Equal)
-        });
-
-        let mut evicted = Vec::new();
-        for (_, eviction) in weighted {
-            if self.store.free_space() >= needed {
-                break;
+            }));
+            held += u64::from(meta.size);
+            while let Some(Reverse(lightest)) = best.peek() {
+                let size = u64::from(lightest.eviction.size);
+                if held - size < bytes {
+                    break;
+                }
+                held -= size;
+                best.pop();
             }
-            if self.store.purge(&eviction.transient_id).unwrap_or(false) {
-                self.note_departure(&eviction.transient_id, now_secs);
-                evicted.push(eviction);
-            }
-        }
-        self.evicted_total += evicted.len() as u64;
-        evicted
+        });
+        // Ascending by `Reverse` is heaviest first; reversed for `pop`.
+        let mut lightest_first: Vec<Eviction> = best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|Reverse(weighed)| weighed.eviction)
+            .collect();
+        lightest_first.reverse();
+        lightest_first
     }
 }
 

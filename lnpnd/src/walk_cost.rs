@@ -140,6 +140,7 @@ fn price_processed_days(ids: usize, bucket_days: u64) {
 /// [`PropagationStore`] over directory entries alone, for an eviction pass
 /// over millions of messages without their bodies.
 struct MetaStore {
+    walks: std::cell::Cell<usize>,
     index: BTreeMap<TransientId, StoredMessage>,
     used: u64,
     capacity: u64,
@@ -175,6 +176,7 @@ impl PropagationStore for MetaStore {
         Ok(())
     }
     fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+        self.walks.set(self.walks.get() + 1);
         self.index.values().for_each(visit);
         Ok(())
     }
@@ -207,6 +209,7 @@ impl PropagationStore for MetaStore {
 fn price_make_room(capacity: u64, uploads: usize) {
     let mut state = 0x1319_8a2e_0370_7344 ^ capacity;
     let mut store = MetaStore {
+        walks: std::cell::Cell::new(0),
         index: BTreeMap::new(),
         used: 0,
         capacity,
@@ -255,7 +258,7 @@ fn price_make_room(capacity: u64, uploads: usize) {
     println!(
         "BENCH_MAKE_ROOM capacity={capacity} messages={messages} fill_ms={fill_ms} \
          uploads={uploads} first_us={} median_us={} max_us={} uploads_that_evicted={walks} \
-         evicted_total={}",
+         evicted_total={} store_walks={}",
         micros[0],
         {
             let mut sorted = micros.clone();
@@ -263,7 +266,8 @@ fn price_make_room(capacity: u64, uploads: usize) {
             sorted[sorted.len() / 2]
         },
         micros.iter().max().copied().unwrap_or(0),
-        evicted.iter().sum::<usize>()
+        evicted.iter().sum::<usize>(),
+        node.store().walks.get()
     );
 }
 
@@ -286,6 +290,6 @@ fn processed_and_eviction_cost_at_field_scale() {
         }
     }
     for capacity in sizes_from_env("LNPND_BENCH_STORE_BYTES", &[2_000_000_000]) {
-        price_make_room(capacity as u64, 20);
+        price_make_room(capacity as u64, 200);
     }
 }

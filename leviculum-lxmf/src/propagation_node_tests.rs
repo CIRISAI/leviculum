@@ -1952,3 +1952,212 @@ fn the_processed_cache_is_pruned_a_bucket_after_its_oldest_is_due() {
     assert!(!is_duplicate(&mut node, &old, pruned));
     assert!(is_duplicate(&mut node, &young, pruned));
 }
+
+/// The memory store, its whole-store walks counted.
+struct WalkCounted {
+    store: MemoryPropagationStore,
+    walks: core::cell::Cell<usize>,
+}
+
+impl PropagationStore for WalkCounted {
+    fn append(
+        &mut self,
+        transient_id: &TransientId,
+        received_at: u64,
+        stamp_value: u8,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        self.store
+            .append(transient_id, received_at, stamp_value, body)
+    }
+    fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+        self.walks.set(self.walks.get() + 1);
+        self.store.for_each(visit)
+    }
+    fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
+        self.store.purge(transient_id)
+    }
+    fn free_space(&self) -> u64 {
+        self.store.free_space()
+    }
+    fn capacity(&self) -> u64 {
+        self.store.capacity()
+    }
+    fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+        self.store.contains(transient_id)
+    }
+}
+
+fn next_random(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+/// A memory store of `capacity` filled until an append fails, bodies of 120
+/// to 520 bytes for one of eight destinations, received over the 30 days
+/// before `now`.
+fn full_store(capacity: u64, now: u64, state: &mut u64) -> WalkCounted {
+    let mut store = MemoryPropagationStore::new(capacity);
+    loop {
+        let mut transient_id = [0u8; 32];
+        for chunk in transient_id.chunks_mut(8) {
+            chunk.copy_from_slice(&next_random(state).to_le_bytes());
+        }
+        let len = 120 + (next_random(state) % 401) as usize;
+        let body = vec![(next_random(state) % 8) as u8; len];
+        let received_at = now - next_random(state) % (30 * DAY);
+        if store.append(&transient_id, received_at, 0, &body).is_err() {
+            break;
+        }
+    }
+    WalkCounted {
+        store,
+        walks: core::cell::Cell::new(0),
+    }
+}
+
+/// The eviction order before order 1370: every stored message weighed and
+/// stably sorted, heaviest first (`get_weight`,
+/// `reference/LXMF/LXMF/LXMRouter.py:1056-1067`, sorted at `:1194`).
+fn weight_order(
+    store: &MemoryPropagationStore,
+    prioritised: &[[u8; DESTINATION_LENGTH]],
+    now: u64,
+) -> Vec<TransientId> {
+    let mut weighted: Vec<(f64, TransientId)> = Vec::new();
+    store
+        .for_each(&mut |meta| {
+            let age = now.saturating_sub(meta.received_at);
+            let age_weight = (age as f64 / (4.0 * DAY as f64)).max(1.0);
+            let priority = if prioritised.contains(&meta.destination_hash) {
+                0.1
+            } else {
+                1.0
+            };
+            weighted.push((priority * age_weight * meta.size as f64, meta.transient_id));
+        })
+        .unwrap();
+    weighted.sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap());
+    weighted.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Order 1370: a full append evicts exactly what the whole-store sort it
+/// replaced evicted, the heaviest first until the body fits, over random
+/// stores with sizes, ages and a prioritised destination; and the uploads
+/// after it, inside the reference's store-job cadence, keep taking the
+/// sorted order's next messages.
+#[test]
+fn eviction_takes_the_reference_weight_order_from_one_walk() {
+    let now = 1_790_000_000;
+    let mut state = 0x9e37_79b9_7f4a_7c15;
+    for case in 0..40 {
+        let store = full_store(20_000 + next_random(&mut state) % 40_000, now, &mut state);
+        let prioritised = vec![[(next_random(&mut state) % 8) as u8; DESTINATION_LENGTH]];
+        let order = weight_order(&store.store, &prioritised, now);
+        let config = PropagationNodeConfig {
+            prioritised_destinations: prioritised,
+            ..cost_free()
+        };
+        let mut node = PropagationNode::new(store, config);
+        let mut evicted: Vec<TransientId> = Vec::new();
+        for upload in 0..6u8 {
+            let bytes = envelope_sized(9, upload, 200 + 60 * upload as usize);
+            match node.handle_upload(&bytes, now + upload as u64, stamp_of_value_zero) {
+                UploadOutcome::Accepted {
+                    duplicate: false,
+                    evicted: displaced,
+                    ..
+                } => evicted.extend(displaced.iter().map(|eviction| eviction.transient_id)),
+                other => panic!("case {case}, upload {upload}: {other:?}"),
+            }
+        }
+        assert!(
+            !evicted.is_empty(),
+            "case {case}: a full store evicted nothing"
+        );
+        assert_eq!(
+            evicted,
+            order[..evicted.len()],
+            "case {case}: not the reference's weight order"
+        );
+    }
+}
+
+/// Order 1370: uploads into a full store walk it once per
+/// [`EVICTION_CANDIDATE_FRACTION`] of its capacity, not once per upload, at
+/// 4 MB and 16 MB alike, and again once the candidates are
+/// [`EVICTION_CANDIDATES_SECS`] old. The candidate list holds what one
+/// fraction is worth, not the store. The positive control is the walk
+/// count of the sort it replaced: one per upload that found the store
+/// full.
+#[test]
+fn a_full_store_is_walked_once_per_candidate_fraction_not_per_upload() {
+    let now = 1_790_000_000;
+    let mut state = 0x2545_f491_4f6c_dd1d;
+    for capacity in [4 << 20u64, 16 << 20] {
+        let mut node = PropagationNode::new(full_store(capacity, now, &mut state), cost_free());
+        let messages = node.store().store.len();
+        let uploads = 200usize;
+        let (mut displacing, mut most_candidates) = (0usize, 0usize);
+        for upload in 0..uploads {
+            let bytes = envelope_sized((upload / 256) as u8 + 9, upload as u8, 300);
+            match node.handle_upload(&bytes, now + 1, stamp_of_value_zero) {
+                UploadOutcome::Accepted {
+                    duplicate: false,
+                    evicted,
+                    ..
+                } => displacing += usize::from(!evicted.is_empty()),
+                other => panic!("{capacity}: upload {upload}: {other:?}"),
+            }
+            most_candidates = most_candidates.max(node.eviction_candidates.len());
+        }
+        let walks = node.store().walks.get();
+        // 200 uploads of about 330 stored bytes against candidates worth
+        // capacity / 1024 plus one upload each walk.
+        let fraction = capacity / EVICTION_CANDIDATE_FRACTION;
+        let bound = (uploads as u64 * 340).div_ceil(fraction + 300) + 1;
+        std::eprintln!(
+            "MAKE_ROOM_PIN capacity={capacity} messages={messages} uploads={uploads} \
+             displacing={displacing} walks={walks} bound={bound} most_candidates={most_candidates}"
+        );
+        assert!(
+            displacing > uploads / 2,
+            "{capacity}: the store was not full"
+        );
+        assert!(
+            walks as u64 <= bound,
+            "{capacity}: {walks} walks exceed {bound}"
+        );
+        assert!(
+            walks * 4 < displacing,
+            "{capacity}: {walks} walks for {displacing} full uploads, the sort's count"
+        );
+        assert!(
+            (most_candidates as u64) * 120 <= fraction + 2 * 520,
+            "{capacity}: {most_candidates} candidates for {fraction} bytes"
+        );
+
+        // Past the cadence the first full upload weighs afresh, whatever
+        // candidates are left.
+        let before = node.store().walks.get();
+        let late = now + 1 + EVICTION_CANDIDATES_SECS;
+        let displaced = (0..50u8).find(|seed| {
+            let bytes = envelope_sized(200, *seed, 300);
+            matches!(
+                node.handle_upload(&bytes, late, stamp_of_value_zero),
+                UploadOutcome::Accepted { evicted, .. } if !evicted.is_empty()
+            )
+        });
+        assert!(
+            displaced.is_some(),
+            "{capacity}: the store stopped being full"
+        );
+        assert_eq!(
+            node.store().walks.get(),
+            before + 1,
+            "{capacity}: stale candidates reused"
+        );
+    }
+}
