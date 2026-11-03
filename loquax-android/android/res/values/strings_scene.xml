@@ -25,6 +25,7 @@
     <string name="rooms_too_many">You are in %1$d rooms, as many as this hub allows. Leave one first.</string>
     <string name="rooms_you">you</string>
     <string name="rooms_came_in">%1$s came in</string>
+    <string name="rooms_we_came_in">you came in</string>
     <string name="rooms_went_out">%1$s left</string>
     <string name="settings">Settings</string>
     <string name="mailbox_connected">You. Your mailbox is connected.</string>

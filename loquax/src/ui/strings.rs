@@ -63,6 +63,8 @@ leviculum_ui::catalogue! {
     RoomsTooMany = "rooms_too_many", "You are in %1$d rooms, as many as this hub allows. Leave one first.", "Du bist in %1$d Räumen, so vielen, wie dieser Hub erlaubt. Verlass zuerst einen.";
     RoomsYou = "rooms_you", "you", "du";
     RoomsCameIn = "rooms_came_in", "%1$s came in", "%1$s ist da";
+    // Our own join (1384): "du ist da" was the nick put into the line above.
+    RoomsWeCameIn = "rooms_we_came_in", "you came in", "du bist da";
     RoomsWentOut = "rooms_went_out", "%1$s left", "%1$s ist gegangen";
     Settings = "settings", "Settings", "Einstellungen";
     MailboxConnected = "mailbox_connected", "You. Your mailbox is connected.", "Du. Dein Postfach ist verbunden.";

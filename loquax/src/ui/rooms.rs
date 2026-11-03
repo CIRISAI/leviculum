@@ -637,6 +637,11 @@ fn line_node(line: &RoomLine) -> RoomLineNode {
         (None, false) => Text::Raw(String::new()),
     };
     let (who, text) = match line.kind {
+        // Our own join has its own sentence: the reader's "you" put into
+        // a nick's sentence is no German (1384).
+        RoomLineKind::Joined if line.ours => {
+            (Text::Raw(String::new()), Text::key(StrId::RoomsWeCameIn))
+        }
         RoomLineKind::Joined => (
             Text::Raw(String::new()),
             Text::Key(
@@ -915,5 +920,26 @@ mod tests {
         // And with the tab behind, the scene has no Rooms.
         update(&mut model, UiEvent::Tab(TabId::Chats));
         assert!(model.scene(LayoutClass::Wide).rooms.is_none());
+    }
+
+    /// 1384: our own join is a sentence of its own, since "du" put into
+    /// a nick's "%1$s ist da" is no German; another's join is the nick's
+    /// (the control).
+    #[test]
+    fn our_join_is_said_as_ours_and_anothers_with_the_nick() {
+        use super::super::strings::Lang;
+        let mut model = in_lab();
+        rooms(
+            &mut model,
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: Some("bob".into()),
+            },
+        );
+        let node = node(&model);
+        let lines = node.open.expect("the open room").lines;
+        let said: Vec<String> = lines.iter().map(|l| l.text.resolve(Lang::De)).collect();
+        assert_eq!(said, ["du bist da", "bob ist da"]);
+        assert_eq!(lines[0].text.resolve(Lang::En), "you came in");
     }
 }
