@@ -149,8 +149,9 @@ WELCOME_NAME = "welcome_name"
 WELCOME_QR = "welcome_qr"
 PHONE_NAME = "Walk Phone"
 # The always-on notification (walk finding 19): its line names the
-# mailbox, never the server it dials.
-SESSION_LINE = re.compile(r"^Connected to your mailbox(?:, \d+ unread)?$")
+# mailbox, never the server it dials, and carries no unread count, which
+# would post it again on every new message and undo a swipe (1345).
+SESSION_LINE = re.compile(r"^Connected to your mailbox$")
 NOT_CONNECTED = "Not connected, trying again"
 # A friend's code from another app (walk finding 12): the name dialog, the
 # name the walk gives, and the chat's banner that must not show right
@@ -1459,8 +1460,8 @@ def session_line(dumpsys: str, package: str) -> str | None:
 
 def session_line_problems(line: str | None, server: str) -> list[str]:
     """What is wrong with the session notification's line (walk finding
-    19): none, not "Connected to your mailbox" with the unread count, or
-    the server's address on it."""
+    19): none, not "Connected to your mailbox" (no unread count since
+    1345), or the server's address on it."""
     if line is None:
         return ["no session notification"]
     problems = []
@@ -2546,8 +2547,8 @@ class Walk:
 
     def step_notification_text(self) -> str:
         """The always-on notification (walk finding 19): joined to the
-        host's mailbox, its line says "Connected to your mailbox" (with
-        the unread count) and never the server's address."""
+        host's mailbox, its line says "Connected to your mailbox", with no
+        unread count (1345), and never the server's address."""
         dev = self.need_device()
         seen: list[str | None] = []
 

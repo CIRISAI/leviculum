@@ -22,9 +22,7 @@
     <string name="stopped">Stopped.</string>
     <string name="channel_session">Connection to your mailbox</string>
     <string name="channel_messages">New messages</string>
-    <string name="connecting">Not connected, trying again</string>
     <string name="connected">Connected to your mailbox</string>
-    <string name="connected_unread">Connected to your mailbox, %1$d unread</string>
     <string name="not_connected">Not connected, trying again</string>
     <string name="stop">Stop</string>
     <string name="battery_title">Stay connected in the background?</string>
@@ -216,7 +214,6 @@
     <string name="propagation_node">Relay</string>
     <string name="propagation_node_text">While your mailbox is offline, mail for you waits at a relay in the network, which Loquax chooses by itself.</string>
     <string name="here_running">Your mailbox is running on this phone</string>
-    <string name="here_running_unread">Your mailbox is running on this phone, %1$d unread</string>
     <string name="scan_code">Scan the code</string>
     <string name="scan_backup">Scan the paper backup</string>
     <string name="scan_hint">Hold the code in front of the camera.</string>

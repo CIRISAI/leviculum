@@ -207,10 +207,7 @@
     <string name="propagation_node">Relais</string>
     <string name="propagation_node_text">Solange dein Postfach offline ist, wartet Post für dich bei einem Relais im Netz, das Loquax selbst wählt.</string>
     <string name="here_running">Dein Postfach läuft auf diesem Telefon</string>
-    <string name="here_running_unread">Dein Postfach läuft auf diesem Telefon, %1$d ungelesen</string>
-    <string name="connecting">Nicht verbunden, neuer Versuch läuft</string>
     <string name="connected">Mit deinem Postfach verbunden</string>
-    <string name="connected_unread">Mit deinem Postfach verbunden, %1$d ungelesen</string>
     <string name="not_connected">Nicht verbunden, neuer Versuch läuft</string>
     <string name="scan_code">Code scannen</string>
     <string name="scan_backup">Papiersicherung scannen</string>

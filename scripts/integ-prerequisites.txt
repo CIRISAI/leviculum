@@ -173,3 +173,7 @@ command:python3 loquax-android/device_walk_script the_walks_parsers_pass_their_t
 # The recorder's level windows (1276): Levels.java against the core's rms.
 command:javac loquax-android/fling the_recorders_windows_are_the_librarys
 command:java loquax-android/fling the_recorders_windows_are_the_librarys
+
+# The service notice's rules (1345): Notice.java run with its host test.
+command:javac loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
+command:java loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran

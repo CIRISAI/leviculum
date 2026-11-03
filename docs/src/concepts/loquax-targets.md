@@ -62,9 +62,9 @@ Rows marked (1341) were MISSING before this pass and are closed by it.
 | 7 | Delete a message | `ChatActivity.java:2129` | `loquax/src/gui.rs:1124` | `loquax/src/ui.rs:3506` |
 | 8 | Copy a message | `ChatActivity.java:2073` | `loquax/src/gui.rs:1103` | `loquax/src/ui.rs:2341` (OSC 52) |
 | 9 | Search | `ConversationsActivity.java:65` | `loquax/src/gui.rs:992` | `loquax/src/ui.rs:3502` |
-| 10 | Read receipts on/off | `SettingsActivity.java:588` | `loquax/src/gui.rs:976` | `loquax/src/ui.rs:3480` |
+| 10 | Read receipts on/off | `SettingsActivity.java:589` | `loquax/src/gui.rs:976` | `loquax/src/ui.rs:3480` |
 | 11 | Send a picture (Gallery) | `ChatActivity.java:1355` | `loquax/src/gui.rs:941`, `loquax/src/desktop.rs:158` (1341) | MISSING |
-| 12 | Photo size, three tiers | `SettingsActivity.java:315` | MISSING | MISSING (config key `photo_size` only) |
+| 12 | Photo size, three tiers | `SettingsActivity.java:316` | MISSING | MISSING (config key `photo_size` only) |
 | 13 | View a photo | `ChatActivity.java:1675` | `loquax/src/gui.rs:1114` (own viewer) | `loquax/src/ui.rs:2369`, `loquax/src/shell.rs:341` (system viewer) |
 | 14 | Camera | `ChatActivity.java:988` | n/a | n/a |
 | 15 | Send a file | `ChatActivity.java:1408` | `loquax/src/gui.rs:944`, `loquax/src/shell.rs:783` (1341) | MISSING |
@@ -75,7 +75,7 @@ Rows marked (1341) were MISSING before this pass and are closed by it.
 | 20 | Map with positions | `MapPane.java:350` | `loquax/src/gui.rs:1031` | `loquax/src/ui.rs:3524`, `tui/map.rs` |
 | 21 | Buildings on the map | `loquax/src/picture.rs:44` (shared) | `loquax/src/picture.rs:44` | `loquax/src/picture.rs:44` (sixel, kitty) |
 | 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1139` | `loquax/src/ui.rs:3520` |
-| 23 | Delete all downloaded maps | `SettingsActivity.java:512` | `loquax/src/gui.rs:983` | MISSING |
+| 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:983` | MISSING |
 | 24 | Mesh positions (nodes nearby) | `MapPane.java:370` | `loquax/src/gui.rs:1306` | `loquax/src/tui/map.rs:1380` |
 | 25 | Share the position, once or timed | `ChatActivity.java:910`, `ShareService.java:39` | MISSING | MISSING |
 | 26 | Pin | `ConversationsActivity.java:481` | MISSING | `loquax/src/ui.rs:3514` |
@@ -96,8 +96,8 @@ Rows marked (1341) were MISSING before this pass and are closed by it.
 | 41 | Help | `ConversationsActivity.java:421` | MISSING | `loquax/src/ui.rs:3448` |
 | 42 | Settings | `SettingsActivity.java` | `loquax/src/gui.rs:1342` | palette (`loquax/src/ui.rs:3680`, `loquax/src/ui.rs:3480`) |
 | 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | off (`loquax/src/gui.rs:1048`) | off (`loquax/src/shell.rs:315`) |
-| 44 | Notifications of new messages | `LoquaxService.java:251` | `loquax/src/gui.rs:236`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:408`, bell and `loquax/src/desktop.rs:118` (1341) |
-| 45 | Icon and application id | `AndroidManifest.xml:64` | `loquax/src/gui.rs:320` (1341) | n/a |
+| 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:236`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:408`, bell and `loquax/src/desktop.rs:118` (1341) |
+| 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:320` (1341) | n/a |
 
 ## Counts
 
@@ -134,7 +134,7 @@ are no gaps.
   PNG, JPEG, WebP or GIF of a code (`loquax/src/scan.rs:39`). The window's new
   conversation offers "Read a code from a picture"; pasting a code's text
   already worked in both desktop targets.
-- **Notifications** follow the phone's rule (`LoquaxService.java:251`):
+- **Notifications** follow the phone's rule (`LoquaxService.java:305`):
   a grown unread count, not muted, not at the first look, not while the
   screen is in front (`desktop.rs`, `Notices`). The window posts through
   `org.freedesktop.Notifications` while it lacks the focus; the terminal,
