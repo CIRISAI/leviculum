@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! /join  [token: bin16, name: str]           -> [status]
-//! /sync  [cursor: uint]                       -> [status, first: uint, more: bool,
+//! /sync  [cursor: uint, (page: uint)]         -> [status, first: uint, more: bool,
 //!                                                 [[seq: uint, kind: uint, at: int, packed: bin], ...]]
 //! /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
 //!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
@@ -47,6 +47,13 @@
 //!
 //! A field's value is its raw msgpack, carried as bytes, so the home node
 //! signs exactly what the client composed.
+//!
+//! `/sync`'s second element is optional (1363): the most bytes the answer
+//! may take, for a client on a narrow medium. A LoRa client asks
+//! [`super::ask::LORA_PAGE_BYTES`], so one page is one packet on a link of
+//! the default MTU and never a resource. The home cuts the page to it, at
+//! least one entry, and says `more`; a home from before reads the cursor
+//! alone and answers its own page.
 //!
 //! The status is the first element of every answer, so a refusal decodes
 //! the same way whatever was asked. `first` is the oldest sequence the
@@ -260,6 +267,60 @@ pub fn read_sync_request(data: &[u8]) -> Result<u64, Malformed> {
     Ok(msgpack::read_uint(data, &mut p)?)
 }
 
+/// A `/sync` that asks pages of at most `page_bytes` encoded bytes (1363).
+pub fn sync_request_paged(cursor: u64, page_bytes: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::uint(&mut out, cursor);
+    msgpack::uint(&mut out, page_bytes);
+    out
+}
+
+/// A `/sync` as the home reads it: the cursor, and the page's bound when
+/// the client asked one.
+pub fn read_sync_paged(data: &[u8]) -> Result<(u64, Option<u64>), Malformed> {
+    let mut p = 0;
+    let len = msgpack::array_len(data, &mut p)?;
+    if len < 1 {
+        return Err(Malformed);
+    }
+    let cursor = msgpack::read_uint(data, &mut p)?;
+    let page = match len {
+        1 => None,
+        _ => Some(msgpack::read_uint(data, &mut p)?),
+    };
+    Ok((cursor, page))
+}
+
+/// Cut `page` from its end until its answer takes at most `bytes`, one
+/// entry always kept, `more` set when one went: what a client that asked
+/// a bound gets.
+pub fn fit_page(page: &mut Page, bytes: usize) {
+    let mut len = sync_answer(page).len();
+    while len > bytes && page.entries.len() > 1 {
+        if let Some(entry) = page.entries.pop() {
+            len = len.saturating_sub(entry_len(&entry));
+        }
+        // An upper bound: the entries' array header only shrinks.
+        page.more = true;
+    }
+}
+
+/// What one entry takes in a `/sync` answer.
+fn entry_len(entry: &Entry) -> usize {
+    let mut out = Vec::new();
+    entry_out(&mut out, entry);
+    out.len()
+}
+
+fn entry_out(out: &mut Vec<u8>, entry: &Entry) {
+    msgpack::array(out, 4);
+    msgpack::uint(out, entry.seq);
+    msgpack::uint(out, u64::from(entry.kind));
+    msgpack::int(out, entry.at);
+    msgpack::bin(out, &entry.packed);
+}
+
 pub fn watch_request(cursor: u64) -> Vec<u8> {
     sync_request(cursor)
 }
@@ -319,11 +380,7 @@ pub fn sync_answer(page: &Page) -> Vec<u8> {
     msgpack::bool(&mut out, page.more);
     msgpack::array(&mut out, page.entries.len());
     for entry in &page.entries {
-        msgpack::array(&mut out, 4);
-        msgpack::uint(&mut out, entry.seq);
-        msgpack::uint(&mut out, u64::from(entry.kind));
-        msgpack::int(&mut out, entry.at);
-        msgpack::bin(&mut out, &entry.packed);
+        entry_out(&mut out, entry);
     }
     out
 }

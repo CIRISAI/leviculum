@@ -1027,14 +1027,24 @@ fn moved(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> A
 }
 
 fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
-    let Ok(cursor) = wire::read_sync_request(data) else {
+    let Ok((cursor, asked)) = wire::read_sync_paged(data) else {
         return wire::status_answer(Status::Malformed);
     };
     if let Some(refused) = refuse_unless_admitted(store, &device, "sync") {
         return refused;
     }
-    match store.archive_since(cursor, super::SYNC_PAGE_BYTES) {
-        Ok(page) => {
+    // A client on LoRa asks a page that fits one packet (1363); the
+    // archive's own bound counts the messages, the cut the whole answer.
+    let bound = asked.map_or(super::SYNC_PAGE_BYTES, |asked| {
+        usize::try_from(asked).map_or(super::SYNC_PAGE_BYTES, |asked| {
+            asked.min(super::SYNC_PAGE_BYTES)
+        })
+    });
+    match store.archive_since(cursor, bound) {
+        Ok(mut page) => {
+            if asked.is_some() {
+                wire::fit_page(&mut page, bound);
+            }
             tracing::info!(
                 "HOME sync device={} cursor={cursor} entries={} more={}",
                 crate::address::to_hex(&device),
@@ -2047,6 +2057,68 @@ mod tests {
         // And the sequence goes on growing past every eviction.
         let next = archive(&mut store, 10);
         assert!(next > big);
+    }
+
+    /// 1363: a client on LoRa asks pages its link carries as one packet.
+    /// Each answer keeps the bound, carries one entry at least, and the
+    /// pages walked by cursor bring every entry once. Control: the same
+    /// archive asked without a bound comes as one page over the bound.
+    #[test]
+    fn a_page_asked_with_a_bound_keeps_it_and_the_walk_misses_nothing() {
+        let (_dir, mut store) = store();
+        admitted(&mut store);
+        let seqs: Vec<u64> = (1..=5).map(|n| archive(&mut store, n)).collect();
+        let bound = crate::home::ask::LORA_PAGE_BYTES;
+        let asked = |store: &mut Store, cursor: u64| {
+            let data = wire::sync_request_paged(cursor, bound as u64);
+            let answer = answer(store, &home(), SYNC_PATH, &data, Some(LAPTOP), 100.0);
+            (
+                answer.bytes.len(),
+                read_sync_answer(&answer.bytes).expect("answer"),
+            )
+        };
+        let (mut cursor, mut walked) = (0, Vec::new());
+        loop {
+            let (len, page) = asked(&mut store, cursor);
+            let page = page.expect("page");
+            assert!(len <= bound, "{len} B over the bound {bound}");
+            assert!(!page.entries.is_empty());
+            walked.extend(page.entries.iter().map(|e| e.seq));
+            cursor = page.entries.last().expect("one").seq;
+            if !page.more {
+                break;
+            }
+        }
+        assert_eq!(walked, seqs);
+        let whole = answer(
+            &mut store,
+            &home(),
+            SYNC_PATH,
+            &sync_request(0),
+            Some(LAPTOP),
+            100.0,
+        );
+        assert!(whole.bytes.len() > bound);
+        assert_eq!(
+            read_sync_answer(&whole.bytes)
+                .expect("answer")
+                .expect("page")
+                .entries
+                .len(),
+            5
+        );
+        // One entry larger than the bound still comes, alone.
+        let big = store
+            .archive_append(KIND_RECEIVED, &[9; 32], &[9; 600], 50, u64::MAX)
+            .expect("append")
+            .expect("new");
+        let (len, page) = asked(&mut store, cursor);
+        let page = page.expect("page");
+        assert_eq!(
+            page.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            [big]
+        );
+        assert!(len > bound && !page.more);
     }
 
     #[test]
