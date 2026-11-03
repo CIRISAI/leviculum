@@ -907,16 +907,21 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         validate: &mut dyn FnMut(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
         out: &mut TickOutput,
     ) -> Option<TransientId> {
-        // A message that could never leave this node under its transfer
-        // limit is refused before it is stored, so the sender's retries
-        // fail where it can see them (`upload_fits_transfer_limit`). No
-        // proof, and the link goes, as for any refused upload.
-        if let Some(bytes) = ready.node.upload_too_large(data) {
-            let limit = ready.node.transfer_limit_bytes();
+        // A message above the delivery limit is refused before it is
+        // stored, so the sender's retries fail where it can see them. No
+        // proof, and the link goes, as for any refused upload. One above
+        // the transfer limit but within the delivery limit is stored local
+        // only (`is_local_only`): its recipient collects it here, no peer is
+        // offered it, and the client is proven as for any other.
+        let body_len = ready.node.upload_body_len(data);
+        let delivery_limit = ready.delivery_limit_kb.saturating_mul(1000);
+        if let Some(bytes) = body_len.filter(|bytes| *bytes > delivery_limit) {
             out.merge(core.close_link(link_id));
-            log_reject_sized("too_large", via, bytes, limit);
+            log_reject_sized("too_large", via, bytes, delivery_limit);
             self.emit(EngineEvent::Rejected {
-                detail: format!("message of {bytes} B exceeds the transfer limit of {limit} B"),
+                detail: format!(
+                    "message of {bytes} B exceeds the delivery limit of {delivery_limit} B"
+                ),
             });
             return None;
         }
@@ -942,6 +947,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                     value = stamp_value,
                     dup = duplicate,
                     via = via,
+                    local_only = ready.node.is_local_only(size),
                 );
                 self.emit(EngineEvent::Accepted {
                     transient_id,
@@ -1897,10 +1903,9 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
             // (reference/LXMF/LXMF/LXMRouter.py:2206-2224).
             //
             // A client upload (no validated `/offer` on the link) is held to
-            // the per-message transfer limit as well: its envelope is at most
-            // the stored body plus the per-message overhead, so a resource
-            // above the limit carries a message that could never leave
-            // (`upload_fits_transfer_limit`). Each refusal is a PN_REJECT at
+            // the delivery limit as well: above the transfer limit it is
+            // stored local only (`is_local_only`), above the delivery limit
+            // its recipient could not take it either. Each refusal is a PN_REJECT at
             // INFO with the size and the cap; the sender learns only that the
             // resource was refused (`RNS.Resource.REJECTED`, no reason on the
             // wire).
@@ -1912,8 +1917,8 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
                     Some(("not_static", 0))
                 } else if !ready.node.accepts_resource_of(*data_size) {
                     Some(("over_sync_limit", ready.node.resource_limit_bytes()))
-                } else if client && *data_size > ready.node.transfer_limit_bytes() {
-                    Some(("too_large", ready.node.transfer_limit_bytes()))
+                } else if client && *data_size > ready.delivery_limit_kb.saturating_mul(1000) {
+                    Some(("too_large", ready.delivery_limit_kb.saturating_mul(1000)))
                 } else if !client && ready.peering.store_full() {
                     // An offer accepted before the store failed: refusing
                     // the resource keeps the peer's cursor where it was.
@@ -4013,14 +4018,16 @@ mod tests {
         );
     }
 
-    /// A client's upload resource larger than the per-message transfer
-    /// limit is refused at the advertisement, with a `PN_REJECT` that names
-    /// the size and the cap, and nothing is stored: a peer would skip that
-    /// message for good (`LXMPeer.py:370-373`), so taking it meant keeping
-    /// it here and telling the sender `SENT` (order 1294). One under the
-    /// limit, on the same kind of link, is stored.
+    /// A client's upload resource larger than the delivery limit is refused
+    /// at the advertisement, with a `PN_REJECT` that names the size and the
+    /// cap, and nothing is stored. One between the transfer and the delivery
+    /// limit is stored local only and says so in its `PN_ACCEPT` (order
+    /// 1295, reversing 1294's refusal: the reference stores it too, and its
+    /// recipient collects it here); one under the transfer limit is stored
+    /// as any other.
     #[test]
-    fn a_client_upload_over_the_transfer_limit_is_refused_and_said_so() {
+    fn a_client_upload_over_the_delivery_limit_is_refused_and_one_over_the_transfer_limit_is_local()
+    {
         use leviculum_lxmf::PeerSyncEnvelope;
 
         let server_dir = tempfile::tempdir().expect("tempdir");
@@ -4045,7 +4052,7 @@ mod tests {
             auth_allowed: None,
             mailbox: None,
             store_limit_bytes: 64_000,
-            delivery_limit_kb: 1000,
+            delivery_limit_kb: 2,
         });
         let start = server.now_ms();
         let _ = engine.on_tick(&mut server, start);
@@ -4094,12 +4101,29 @@ mod tests {
             engine.state = State::Ready(ready);
             (stored, envelope.len())
         };
-        let ((over, over_len), (under, _)) = tracing::subscriber::with_default(subscriber, || {
-            (upload(&mut engine, 1_200), upload(&mut engine, 600))
-        });
-        assert_eq!(over, 0, "the oversized upload must not be stored");
-        assert_eq!(under, 1, "the one under the limit must be");
+        let ((over, over_len), (local, _), (under, _)) =
+            tracing::subscriber::with_default(subscriber, || {
+                (
+                    upload(&mut engine, 2_500),
+                    upload(&mut engine, 1_200),
+                    upload(&mut engine, 600),
+                )
+            });
+        assert_eq!(
+            over, 0,
+            "the upload over the delivery limit must not be stored"
+        );
+        assert_eq!(local, 1, "the one over the transfer limit must be");
+        assert_eq!(under, 2, "and the one under it");
         let log = capture.unquoted();
+        let accepts: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=PN_ACCEPT"))
+            .collect();
+        assert_eq!(accepts.len(), 2, "{log}");
+        assert!(accepts[0].contains("local_only=true"), "{}", accepts[0]);
+        assert!(accepts[0].contains("bytes=1232"), "{}", accepts[0]);
+        assert!(accepts[1].contains("local_only=false"), "{}", accepts[1]);
         let rejects: Vec<&str> = log
             .lines()
             .filter(|line| line.contains("event=PN_REJECT"))
@@ -4110,7 +4134,7 @@ mod tests {
         for field in [
             "reason=too_large",
             "via=resource",
-            "limit=1000",
+            "limit=2000",
             " INFO ",
             &bytes,
         ] {

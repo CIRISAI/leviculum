@@ -81,6 +81,7 @@ class Stats:
         # Phase 2
         self.accepted = 0
         self.accepted_dup = 0
+        self.accepted_local_only = 0
         self.accepted_bytes = 0
         self.accepted_via = defaultdict(int)
         self.rejected_by_reason = defaultdict(int)
@@ -185,6 +186,8 @@ def consume(stats, line):
         else:
             stats.accepted += 1
             stats.accepted_bytes += as_int(values, "bytes")
+            if values.get("local_only") == "true":
+                stats.accepted_local_only += 1
         stats.accepted_via[values.get("via", "?")] += 1
         value = as_int(values, "value", -1)
         if value >= 0:
@@ -292,6 +295,7 @@ def report(stats):
     out("\n== 2. Uploads ==\n")
     out(f"accepted         {stats.accepted} ({human_bytes(stats.accepted_bytes)})\n")
     out(f"  duplicates     {stats.accepted_dup} (re-proven, not re-stored)\n")
+    out(f"  local only     {stats.accepted_local_only} (above the transfer limit, offered to no peer)\n")
     for via, count in sorted(stats.accepted_via.items()):
         out(f"  via {via:<10} {count}\n")
     if stats.stamp_value_min is not None:

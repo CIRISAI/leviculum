@@ -88,8 +88,9 @@ Three defaults differ deliberately from the reference and are wire-legal:
 is 16), `propagation_stamp_cost_flexibility` to 0, so the node takes exactly
 what a stock peer will take from it, and `peering_cost` to 1. A stock lxmd
 peer can never sync *toward* a node announcing peering cost 0. A client
-upload larger than the per-message transfer limit is refused rather than
-kept on this node for good; lnpnd(1) has the reasons.
+upload larger than the per-message transfer limit is stored local only:
+its recipient collects it here, and no peer is offered it; lnpnd(1) has
+the details.
 
 The config directory keeps lxmd's layout: `config`, `identity` (the node's
 mesh address, the same file format Python's RNS uses), the optional `allowed`

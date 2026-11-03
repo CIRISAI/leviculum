@@ -115,12 +115,18 @@ fn unhandled_above_cursors(
 /// so it reads what the plan takes and stops (leviculum#478). The whole-store
 /// walk it replaced cost 170 ms a sync tick on the field node at 300 000
 /// messages, and the same again when the round's link came up.
+///
+/// `own_transfer_limit_bytes` is ours: a message above it is local only and
+/// never offered ([`PropagationNode::is_local_only`]); `u64::MAX` offers by
+/// the peer's limit alone.
 fn plan_offer<S: PropagationStore + ?Sized>(
     peer: &Peer,
     store: &S,
+    own_transfer_limit_bytes: u64,
     offer_budget: usize,
 ) -> Result<Option<OfferPlan>, StorageError> {
-    let mut builder = OfferBuilder::new(peer, offer_budget);
+    let mut builder =
+        OfferBuilder::new(peer, offer_budget).with_own_transfer_limit(own_transfer_limit_bytes);
     store.for_each_above(peer.cursor, &mut |meta| builder.push(meta))?;
     Ok(builder.finish())
 }
@@ -387,9 +393,10 @@ impl PeeringRuntime {
     ) -> Option<usize> {
         let cursor = self.table.get(destination_hash)?.cursor;
         let mut count = 0usize;
+        // A local-only message is owed to no peer (`is_local_only`).
         node.store()
             .for_each(&mut |meta| {
-                if meta.sequence > cursor {
+                if meta.sequence > cursor && !node.is_local_only(meta.size) {
                     count += 1;
                 }
             })
@@ -493,7 +500,10 @@ impl PeeringRuntime {
         let mut sequences: Vec<u64> = Vec::new();
         let walked = node.store().for_each(&mut |meta| {
             count_rotation_visit();
-            sequences.push(meta.sequence);
+            // A local-only message is owed to no peer (`is_local_only`).
+            if !node.is_local_only(meta.size) {
+                sequences.push(meta.sequence);
+            }
         });
         if let Err(error) = walked {
             tracing::warn!("lnpnd: store walk for rotation failed: {error}");
@@ -518,7 +528,7 @@ impl PeeringRuntime {
         let walked = node.store().for_each(&mut |meta| {
             for (hash, cursor) in &cursors {
                 count_rotation_visit();
-                if meta.sequence > *cursor {
+                if meta.sequence > *cursor && !node.is_local_only(meta.size) {
                     *counts.entry(*hash).or_default() += 1;
                 }
             }
@@ -1535,7 +1545,12 @@ impl PeeringRuntime {
         // against the link that will carry it. An empty id list still
         // carries the full skip scan, so dead entries step past here as
         // before.
-        let Ok(probe) = plan_offer(peer, node.store(), OFFER_PROBE_BUDGET) else {
+        let Ok(probe) = plan_offer(
+            peer,
+            node.store(),
+            node.transfer_limit_bytes(),
+            OFFER_PROBE_BUDGET,
+        ) else {
             // A store that cannot be walked now will most likely fail on
             // the next pass too: the peer is booked like an unreachable
             // one, so it climbs the backoff ladder instead of staying due.
@@ -1677,7 +1692,12 @@ impl PeeringRuntime {
             return;
         };
         let cursor = peer.cursor;
-        let Ok(planned) = plan_offer(peer, node.store(), offer_budget_for_mdu(mdu)) else {
+        let Ok(planned) = plan_offer(
+            peer,
+            node.store(),
+            node.transfer_limit_bytes(),
+            offer_budget_for_mdu(mdu),
+        ) else {
             if let RoundStep::End(end) =
                 round_step(self.round_view().as_ref(), RoundEvent::StoreFailed)
             {
@@ -2411,10 +2431,10 @@ mod tests {
                     offer_budget_for_mdu(8192),
                 ] {
                     let case = format!("cursor {cursor} cost {stamp_cost} limit {transfer_limit_kb} budget {budget}");
-                    let planned = plan_offer(peer, &store, budget).expect("indexed");
+                    let planned = plan_offer(peer, &store, u64::MAX, budget).expect("indexed");
                     assert_eq!(
                         planned,
-                        plan_offer(peer, &walked, budget).expect("walk"),
+                        plan_offer(peer, &walked, u64::MAX, budget).expect("walk"),
                         "{case}"
                     );
                     if let Some(plan) = planned {
@@ -2430,6 +2450,83 @@ mod tests {
         }
     }
 
+    /// Order 1295 (reversing 1294's refusal): a client upload above our
+    /// transfer limit is stored local only. Its recipient collects it from
+    /// this node, no offer to a peer carries it, even to a peer whose own
+    /// limit would take it, and it is owed to no peer. Positive control: a
+    /// 200 KB message beside it is offered and owed, and without our own
+    /// limit the 300 KB one would be offered too.
+    #[test]
+    fn a_local_only_upload_is_collected_here_and_offered_to_no_peer() {
+        use leviculum_lxmf::{
+            GetOutcome, MessageGetRequest, PropagationNodeConfig, PropagationUpload, TransferLimit,
+            UploadOutcome,
+        };
+
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(2_000_000),
+            // lnpnd's defaults, the reference's (`LXMRouter.py:55,59`).
+            PropagationNodeConfig {
+                stamp_cost: 0,
+                transfer_limit_kb: 256,
+                sync_limit_kb: 10240,
+                ..PropagationNodeConfig::default()
+            },
+        );
+        let recipient = [7u8; 16];
+        let mut upload = |len: usize, seed: u8| {
+            let mut lxmf_data = recipient.to_vec();
+            lxmf_data.resize(len, seed);
+            let envelope = PropagationUpload::single(1.0, lxmf_data, [0xee; 32]).encode();
+            assert!(
+                node.upload_body_len(&envelope)
+                    .is_some_and(|body| body < 1_000_000),
+                "inside the delivery limit"
+            );
+            match node.handle_upload(&envelope, unix_secs(), |_, _| Some(0)) {
+                UploadOutcome::Accepted {
+                    transient_id, size, ..
+                } => (transient_id, size),
+                other => panic!("{other:?}"),
+            }
+        };
+        let (big, big_size) = upload(300_000, 1);
+        let (small, small_size) = upload(200_000, 2);
+        assert!(node.is_local_only(big_size));
+        assert!(!node.is_local_only(small_size));
+
+        // Collected by its recipient from this node.
+        let fetch = MessageGetRequest {
+            wants: Some(vec![big]),
+            haves: None,
+            transfer_limit_kb: Some(TransferLimit::Integer(1000)),
+        };
+        match node.handle_get(&fetch.encode().expect("request"), &recipient, unix_secs()) {
+            Ok(GetOutcome::Fetch { plan, .. }) => assert_eq!(plan.served_ids(), vec![big]),
+            other => panic!("{other:?}"),
+        }
+
+        // Offered to no peer, not even one that takes a megabyte.
+        let runtime = peer_with(0, 0, 1000);
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let budget = offer_budget_for_mdu(8192);
+        let plan = plan_offer(peer, node.store(), node.transfer_limit_bytes(), budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(plan.ids, vec![small]);
+        assert_eq!(plan.skipped_oversize, 1, "skipped for good");
+        assert_eq!(
+            runtime.unhandled_toward(&node, &[1; 16]),
+            Some(1),
+            "owed: 200 KB only"
+        );
+
+        let unlimited = plan_offer(peer, node.store(), u64::MAX, budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(unlimited.ids, vec![big, small], "positive control");
+    }
+
     /// leviculum#478: what a sync tick, a sync link coming up and a peer's
     /// answer ask of the production store walks none of it. The positive
     /// control asks the same of the store as it was and counts the walks.
@@ -2441,8 +2538,8 @@ mod tests {
         let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
         let round = |view: &dyn PropagationStore| {
             view.newest_sequence().expect("newest");
-            plan_offer(peer, view, OFFER_PROBE_BUDGET).expect("probe");
-            let plan = plan_offer(peer, view, offer_budget_for_mdu(8192))
+            plan_offer(peer, view, u64::MAX, OFFER_PROBE_BUDGET).expect("probe");
+            let plan = plan_offer(peer, view, u64::MAX, offer_budget_for_mdu(8192))
                 .expect("offer")
                 .expect("something to offer");
             assert!(
@@ -2507,10 +2604,10 @@ mod tests {
         let round = |view: &dyn PropagationStore, peer: &Peer| {
             let tick = Instant::now();
             view.newest_sequence().expect("newest");
-            let probe = plan_offer(peer, view, OFFER_PROBE_BUDGET).expect("probe");
+            let probe = plan_offer(peer, view, u64::MAX, OFFER_PROBE_BUDGET).expect("probe");
             let tick_us = tick.elapsed().as_micros();
             let link = Instant::now();
-            let offer = plan_offer(peer, view, offer_budget_for_mdu(431)).expect("offer");
+            let offer = plan_offer(peer, view, u64::MAX, offer_budget_for_mdu(431)).expect("offer");
             let link_us = link.elapsed().as_micros();
             let batch = Instant::now();
             if let Some(plan) = &offer {

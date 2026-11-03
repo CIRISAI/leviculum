@@ -1133,44 +1133,49 @@ impl<S: PropagationStore> PropagationNode<S> {
         self.config.sync_limit_kb.saturating_mul(1000)
     }
 
-    /// The announced per-message transfer limit in bytes, the cap a
-    /// client upload is held to ([`Self::upload_fits_transfer_limit`]).
+    /// The announced per-message transfer limit in bytes, the cap above
+    /// which a stored message is local only ([`Self::is_local_only`]).
     pub fn transfer_limit_bytes(&self) -> u64 {
         self.config.transfer_limit_kb.saturating_mul(1000)
     }
 
-    /// Whether a client upload whose stored body (`lxmf_data ‖ stamp`) is
-    /// `body_len` bytes could ever leave this node toward a peer: the
-    /// offering side skips, for good, a message whose size plus
+    /// Whether a message whose stored body (`lxmf_data ‖ stamp`) is
+    /// `body_len` bytes may leave this node toward a peer: the offering
+    /// side skips, for good, a message whose size plus
     /// [`crate::peering::OFFER_PER_MESSAGE_OVERHEAD`] exceeds the peer's
     /// transfer limit (`reference/LXMF/LXMF/LXMPeer.py:370-373`; ours at
-    /// `build_offer`), and our own announced limit is the one we hold
-    /// it to.
-    ///
-    /// **Deviation:** the reference checks only the sync limit at upload
-    /// (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`) and so takes a
-    /// message between the two limits that then stays on the first node
-    /// it reached; a sender whose recipient collects elsewhere never gets
-    /// it, and is told `SENT`. Refusing it at upload moves no wire byte
-    /// and makes the sender's own retries fail visibly instead (leviculum
-    /// #478, order 1294). It costs the case where the recipient collects
-    /// from this very node.
+    /// `build_offer`), and our own announced limit is the one we hold it
+    /// to. A message that fails it is *local only* ([`Self::is_local_only`]).
     pub fn upload_fits_transfer_limit(&self, body_len: usize) -> bool {
         (body_len as u64).saturating_add(crate::peering::OFFER_PER_MESSAGE_OVERHEAD)
             <= self.transfer_limit_bytes()
     }
 
-    /// The stored size of the message in one upload envelope when it
-    /// fails [`Self::upload_fits_transfer_limit`], `None` when it fits or
-    /// does not decode (the accept path classifies that). A host asks
-    /// before [`Self::handle_upload`]. The board does not ask yet: order
-    /// 1294 changed the host, and the board's refusal needs its own rig
-    /// acceptance (its limit is `BOARD_TRANSFER_LIMIT_KB`,
-    /// `leviculum-nrf/heap-budget`).
-    pub fn upload_too_large(&self, envelope: &[u8]) -> Option<u64> {
+    /// Whether a stored message of `size` bytes is local only: above our
+    /// own transfer limit, so it is never offered to a peer and never
+    /// counted as owed to one, and only its recipient collecting from this
+    /// node takes it away. Only a client upload can be one: a stock peer
+    /// offers us nothing above the limit we announce
+    /// (`reference/LXMF/LXMF/LXMPeer.py:370`, our announced limit is its
+    /// `propagation_transfer_limit`).
+    ///
+    /// The reference stores such an upload too (it checks only the sync
+    /// limit at upload, `reference/LXMF/LXMF/LXMRouter.py:2220-2224`) and
+    /// lets each peer's own limit decide; we decide by ours, so a message
+    /// the sender was told is stored here stays here for its recipient
+    /// (order 1294 refused it at upload; reversed by the reviewer on
+    /// 2026-11-03, order 1295).
+    pub fn is_local_only(&self, size: u32) -> bool {
+        !self.upload_fits_transfer_limit(size as usize)
+    }
+
+    /// The stored size (`lxmf_data ‖ stamp`) of the message in one upload
+    /// envelope, `None` when it does not decode (the accept path classifies
+    /// that). A host asks before [`Self::handle_upload`], to refuse above
+    /// its delivery limit and to log a local-only accept.
+    pub fn upload_body_len(&self, envelope: &[u8]) -> Option<u64> {
         let upload = PropagationUpload::decode(envelope).ok()?;
-        let body_len = upload.unstamped_lxmf().len() + STAMP_SIZE;
-        (!self.upload_fits_transfer_limit(body_len)).then_some(body_len as u64)
+        Some((upload.unstamped_lxmf().len() + STAMP_SIZE) as u64)
     }
 
     /// Accept one client upload envelope (`[timestamp, [lxmf_data ‖ stamp]]`,
