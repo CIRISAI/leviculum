@@ -1393,6 +1393,9 @@ name = "loquax-m9"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
+ "leviculum-lxmf",
+ "leviculum-map",
+ "leviculum-mapfill",
  "leviculum-ui",
  "leviculum-ui-ratatui",
  "loquax",
