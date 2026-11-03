@@ -29,7 +29,7 @@ socket `\0rns/{instance_name}/rpc` (`spawn_rpc_server_with_limits`,
 `leviculum-std/src/rpc/mod.rs:98-113`, against
 `reference/Reticulum/RNS/Reticulum.py:349`), with TCP loopback under
 `shared_instance_type = tcp` and on Windows (`endpoint`,
-`leviculum-std/src/interfaces/ipc.rs:68`, against the AF_INET arm,
+`leviculum-std/src/interfaces/ipc.rs:82`, against the AF_INET arm,
 `reference/Reticulum/RNS/Reticulum.py:352`); the framing is the
 CPython `multiprocessing.connection` 4-byte big-endian length prefix
 (`read_message_bounded`, `leviculum-std/src/rpc/connection.rs:82`);
@@ -104,14 +104,14 @@ Linux, `rnstatus` against both daemons.
 *Fixed in 217fc8f6.* Both channels move to TCP loopback when the key says
 `tcp`, on every platform, at the configured ports or 37428/37429, the
 instance name unused, as the reference resolves them
-(`endpoint`, `leviculum-std/src/interfaces/ipc.rs:68`). One module binds and
+(`endpoint`, `leviculum-std/src/interfaces/ipc.rs:82`). One module binds and
 dials for the data channel (`spawn_local_server`,
 `leviculum-std/src/interfaces/local.rs:140`; `spawn_local_client`,
 `leviculum-std/src/interfaces/local.rs:470`) and the RPC channel
 (`spawn_rpc_server`, `leviculum-std/src/rpc/mod.rs:50`; `rpc_client_call_at`,
 `leviculum-std/src/rpc/mod.rs:428`), through `bind`
-(`leviculum-std/src/interfaces/ipc.rs:152`) and `connect`
-(`leviculum-std/src/interfaces/ipc.rs:174`). A node takes the
+(`leviculum-std/src/interfaces/ipc.rs:166`) and `connect`
+(`leviculum-std/src/interfaces/ipc.rs:188`). A node takes the
 transport from the config it is built from; our client tools take it from
 the config they read (`dial_as_configured`,
 `leviculum-std/src/daemon_rpc.rs:41`). In that mode the server and its
@@ -140,7 +140,7 @@ fix). No tool-visible consequence.
 
 Platform note, already stated in the code: the non-Linux Unix fallback
 binds a filesystem socket under the temp directory
-(`bind_unix`, `leviculum-std/src/interfaces/ipc.rs:197-212`), which no
+(`bind_unix`, `leviculum-std/src/interfaces/ipc.rs:211-226`), which no
 Python client dials; the macOS/BSD path is community-supported and
 outside the drop-in contract (`leviculum-std/src/interfaces/ipc.rs:17-20`).
 

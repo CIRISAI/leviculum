@@ -89,8 +89,8 @@ Rows marked (1341) were MISSING before this pass and are closed by it.
 | 34 | Add a contact by code, typed or pasted | `AddContact.java:76` | `loquax/src/gui.rs:821` | `loquax/src/ui.rs:3563` |
 | 35 | A contact code from a QR | `loquax-android/src/lib.rs:326` (the scanner screen's decoder) | `loquax/src/gui.rs:1327`, `loquax/src/gui/chat.rs:441`, `loquax/src/scan.rs:39` (1341) | MISSING |
 | 36 | My code | `ProfileActivity.java:232` | MISSING | `loquax/src/ui.rs:3668` |
-| 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:178`) | CLI (`loquax/src/main.rs:178`) |
-| 38 | Link a device | `ProfileActivity.java:319` | CLI (`loquax/src/main.rs:192`, `loquax/src/main.rs:208`) | CLI (`loquax/src/main.rs:192`, `loquax/src/main.rs:208`) |
+| 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:193`) | CLI (`loquax/src/main.rs:193`) |
+| 38 | Link a device | `ProfileActivity.java:319` | CLI (`loquax/src/main.rs:207`, `loquax/src/main.rs:223`) | CLI (`loquax/src/main.rs:207`, `loquax/src/main.rs:223`) |
 | 39 | Move the phone | `ProfileActivity.java:346` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:117` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:421` | MISSING | `loquax/src/ui.rs:3446` |
