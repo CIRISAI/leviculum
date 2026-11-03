@@ -251,6 +251,7 @@ run   loquax-android   strings                    # reads the app's res/values*/
 run   loquax-android   icon                       # reads the icon PNGs, the adaptive icon, the manifest and the deb's desktop entry and asserts their sizes and names (1336)
 skip  loquax-m9        golden                     # the M9 chats list drawn into the 320x240 frame and pinned as PNG (1351); subject is the renderer
 skip  loquax-m9        firmware                   # the M9 image's fixture screens drawn, dumped and read back against PNG goldens (1361); subject is the renderer and the dump
+skip  loquax-m9        groups                     # the M9's group screens and their key table walked through the model, frames drawn against each other (1366); subject is the renderer and the keys
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
