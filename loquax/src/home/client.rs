@@ -11,15 +11,6 @@ use leviculum_std::ReticulumNode;
 
 use super::wire::{self, Entry, Status};
 
-/// How long after a path request the next one goes while no path has come:
-/// first the reference's wait between a path request and the next attempt
-/// (`leviculum_lxmf::router::PATH_REQUEST_WAIT_MS`), doubled on each one
-/// unanswered up to [`PATH_RETRY_MAX`]. A mailbox behind a third party's
-/// plain port whose announce has not reached the entry node yet is found by
-/// a later request, or by its next announce (1196).
-const PATH_RETRY: Duration = Duration::from_millis(leviculum_lxmf::router::PATH_REQUEST_WAIT_MS);
-/// The longest wait between two path requests within one attempt.
-const PATH_RETRY_MAX: Duration = Duration::from_secs(60);
 /// How often a waiting path is looked for.
 const PATH_POLL: Duration = Duration::from_millis(100);
 /// How long a request a home built before it may not know waits for its
@@ -27,40 +18,7 @@ const PATH_POLL: Duration = Duration::from_millis(100);
 /// five): a home answers `/group` from its own store, at once.
 const KNOWN_WAIT: Duration = Duration::from_secs(15);
 
-/// Why talking to the home node failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HomeError {
-    /// No path to the home destination came within the budget.
-    NoPath,
-    /// The link did not come up.
-    NoLink(String),
-    /// The home node answered with a refusal.
-    Refused(Status),
-    /// The request or its answer did not make it.
-    Transfer(String),
-    /// The answer did not decode.
-    Malformed,
-    /// The budget ran out.
-    Timeout,
-    /// The home node answers on the link but stays silent on this path:
-    /// it was built before the path (a home before 1307 drops `/group`,
-    /// no handler).
-    Unsupported(&'static str),
-}
-
-impl core::fmt::Display for HomeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::NoPath => write!(f, "no path to the mailbox"),
-            Self::NoLink(detail) => write!(f, "the mailbox did not answer the link: {detail}"),
-            Self::Refused(status) => write!(f, "{status}"),
-            Self::Transfer(detail) => write!(f, "the request to the mailbox failed: {detail}"),
-            Self::Malformed => write!(f, "the mailbox's answer did not decode"),
-            Self::Timeout => write!(f, "the mailbox did not answer in time"),
-            Self::Unsupported(path) => write!(f, "the mailbox does not know {path}"),
-        }
-    }
-}
+pub use super::ask::HomeError;
 
 impl std::error::Error for HomeError {}
 
@@ -92,10 +50,7 @@ pub async fn join(
     )
     .await;
     let _ = node.close_link(&link).await;
-    match wire::read_status(&answer?).map_err(|_| HomeError::Malformed)? {
-        Status::Ok => Ok(()),
-        status => Err(HomeError::Refused(status)),
-    }
+    super::ask::join_outcome(&answer?)
 }
 
 /// Hand one message to the home node to send: link, identify as `device`,
@@ -568,31 +523,25 @@ pub(crate) async fn open(
 ) -> Result<LinkId, HomeError> {
     let destination =
         DestinationHash::new(super::destination_hash(public_key).map_err(HomeError::NoLink)?);
-    let mut asked: Option<tokio::time::Instant> = None;
-    let mut retry = PATH_RETRY;
-    let mut requests = 0u32;
+    let start = tokio::time::Instant::now();
+    let mut ladder = super::ask::PathLadder::new();
     while !node.has_path(&destination) {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             tracing::info!(
-                "HOME no path to the mailbox after {requests} path request(s); the next \
-                 attempt asks again"
+                "HOME no path to the mailbox after {} path request(s); the next \
+                 attempt asks again",
+                ladder.requests()
             );
             return Err(HomeError::NoPath);
         }
-        if let Some(at) = asked {
-            if now.duration_since(at) >= retry {
-                retry = (retry * 2).min(PATH_RETRY_MAX);
-                asked = None;
-            }
-        }
-        if asked.is_none() {
-            asked = Some(now);
-            requests += 1;
-            if requests > 1 {
+        let since = u64::try_from(now.duration_since(start).as_millis()).unwrap_or(u64::MAX);
+        if ladder.due(since) {
+            if ladder.requests() > 1 {
                 tracing::info!(
-                    "HOME looking for the mailbox: path request {requests}, the next in {} s",
-                    retry.as_secs()
+                    "HOME looking for the mailbox: path request {}, the next in {} s",
+                    ladder.requests(),
+                    ladder.retry_ms() / 1000
                 );
             }
             node.request_path(&destination)
@@ -602,16 +551,11 @@ pub(crate) async fn open(
         tokio::time::sleep(PATH_POLL).await;
     }
     // Rule 3 (1196): a link over a long path may take the transport's own
-    // establishment time, per hop as the reference reckons it
-    // (`ESTABLISHMENT_TIMEOUT_PER_HOP`, `reference/Reticulum/RNS/Link.py:284`),
-    // however short the caller's budget was set on a TCP round trip's
-    // reckoning.
-    let hops = u64::from(node.hops_to(&destination).unwrap_or(1).max(1));
+    // establishment time, however short the caller's budget was set on a
+    // TCP round trip's reckoning (`ask::establishment_ms`).
+    let hops = node.hops_to(&destination).unwrap_or(1);
     let deadline = deadline.max(
-        tokio::time::Instant::now()
-            + Duration::from_millis(
-                leviculum_core::constants::ESTABLISHMENT_TIMEOUT_PER_HOP_MS.saturating_mul(hops),
-            ),
+        tokio::time::Instant::now() + Duration::from_millis(super::ask::establishment_ms(hops)),
     );
     let mut signing_key = [0u8; 32];
     signing_key.copy_from_slice(&public_key[32..]);
