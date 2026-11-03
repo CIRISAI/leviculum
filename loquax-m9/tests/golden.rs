@@ -7,13 +7,18 @@
 //! test's target dir as `m9-golden/<name>`; `LOQUAX_WRITE_GOLDEN=1` writes
 //! the goldens instead, for a change that means to move them.
 //!
-//! The board dumps the same frame over its debug link and the rig compares
-//! it with the same file (item 3, a later slice).
+//! Every frame is compared after a trip through the board's dump
+//! (`loquax_m9::dump`, slice four), so a golden here is also what a dump of
+//! that frame reads back as, byte for byte.
 
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
 
-use std::path::{Path, PathBuf};
+mod support;
+
+use std::path::Path;
+
+use support::check;
 
 use leviculum_lxmf::lev::{
     DigestLine, GroupCopy, Invite, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS,
@@ -30,7 +35,7 @@ use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel, NONE_OPEN};
 use loquax::when::WallTime;
 use loquax_m9::field::Field;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
-use loquax_m9::keyboard::{self, Cap, Keyboard, Layout};
+use loquax_m9::keyboard::{self, Keyboard, Layout};
 use loquax_m9::keys::{event, M9Key};
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ENTRY_ROWS, ROWS};
@@ -138,45 +143,6 @@ fn on_the_list(home: &Path) -> UiModel<Field> {
     model.selected = ugly_store::PINNED;
     model.focus = Pane::Conversations;
     model
-}
-
-fn png(frame: &Frame) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, WIDTH, HEIGHT);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().expect("png header");
-    writer
-        .write_image_data(&frame.to_rgb888())
-        .expect("png data");
-    writer.finish().expect("png end");
-    out
-}
-
-fn golden(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name)
-}
-
-fn check(name: &str, frame: &Frame) {
-    let got = png(frame);
-    let path = golden(name);
-    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
-        std::fs::write(&path, &got).expect("write the golden");
-    }
-    let want = std::fs::read(&path).unwrap_or_default();
-    if got != want {
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m9-golden");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join(name), &got);
-        panic!(
-            "{name} moved: {} B drawn against {} B pinned; the drawn one is {}",
-            got.len(),
-            want.len(),
-            dir.join(name).display()
-        );
-    }
 }
 
 /// The pixel rows two frames differ in, top and bottom.
@@ -363,23 +329,9 @@ fn typing_with_the_keys_sends_from_the_compose_line() {
 }
 
 /// The layout `tests/keyboard/walk.txt` was written over, not the board's:
-/// q to p on row 0, a to l on row 1, Shift, z to m and Sym on row 2,
-/// Enter on row 3.
+/// the provisional one the board types with until its own is read.
 fn walk_layout() -> Layout {
-    let mut cells = [[Cap::None; keyboard::COLUMNS]; keyboard::ROWS];
-    for (column, (plain, sym)) in "qwertyuiop".chars().zip("1234567890".chars()).enumerate() {
-        cells[0][column] = Cap::letter(plain, sym);
-    }
-    for (column, (plain, sym)) in "asdfghjkl".chars().zip("@#&*-+=()".chars()).enumerate() {
-        cells[1][column] = Cap::letter(plain, sym);
-    }
-    cells[2][0] = Cap::Shift;
-    for (column, (plain, sym)) in "zxcvbnm".chars().zip("!?,.;:'".chars()).enumerate() {
-        cells[2][column + 1] = Cap::letter(plain, sym);
-    }
-    cells[2][9] = Cap::Sym;
-    cells[3][4] = Cap::Key(M9Key::Enter);
-    Layout(cells)
+    loquax_m9::kbraw::provisional_layout()
 }
 
 /// Slice three (1359): a recording of scan frames, through the keyboard

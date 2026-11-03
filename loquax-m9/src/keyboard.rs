@@ -337,35 +337,10 @@ mod tests {
     use alloc::vec::Vec;
     use leviculum_ui::input::KeyCode;
 
-    /// A test layout, not the board's: q to p on row 0, a to l and
-    /// Backspace on row 1, Shift, z to m, Sym on row 2, the arrows,
-    /// Enter, Back and the space on row 3.
+    /// The test layout the board also types with until its own is read
+    /// ([`crate::kbraw::provisional_layout`]).
     fn layout() -> Layout {
-        let mut cells = [[Cap::None; COLUMNS]; ROWS];
-        for (column, (plain, sym)) in "qwertyuiop".chars().zip("1234567890".chars()).enumerate() {
-            cells[0][column] = Cap::letter(plain, sym);
-        }
-        for (column, (plain, sym)) in "asdfghjkl".chars().zip("@#&*-+=()".chars()).enumerate() {
-            cells[1][column] = Cap::letter(plain, sym);
-        }
-        cells[1][9] = Cap::Key(M9Key::Backspace);
-        cells[2][0] = Cap::Shift;
-        for (column, (plain, sym)) in "zxcvbnm".chars().zip("!?,.;:'".chars()).enumerate() {
-            cells[2][column + 1] = Cap::letter(plain, sym);
-        }
-        cells[2][9] = Cap::Sym;
-        let keys = [M9Key::Up, M9Key::Down, M9Key::Left, M9Key::Right];
-        for (column, key) in keys.into_iter().enumerate() {
-            cells[3][column] = Cap::Key(key);
-        }
-        cells[3][4] = Cap::Key(M9Key::Enter);
-        cells[3][5] = Cap::Key(M9Key::Back);
-        cells[3][6] = Cap::Char {
-            plain: ' ',
-            shifted: ' ',
-            sym: ' ',
-        };
-        Layout(cells)
+        crate::kbraw::provisional_layout()
     }
 
     const H: (usize, usize) = (1, 5);

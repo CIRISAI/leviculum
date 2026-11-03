@@ -2,9 +2,16 @@
 //! mounts its ST7789 (`docs/src/concepts/thinknode-m9.md`, "The board as
 //! the UI sees it"). The host draws into it for the goldens; on the board
 //! it is what a flush sends.
+//!
+//! It remembers which rows a draw touched since the board last flushed
+//! ([`Frame::take_dirty`]): a full flush is 30.8 ms on the shared 40 MHz
+//! bus (`thinknode-m9.md`, "The board as the UI sees it"), and the ST7789's
+//! row window lets the board send only the band that changed, which for a
+//! moved cursor is two entries of the list, not the screen.
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use embedded_graphics::pixelcolor::raw::RawU16;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -18,6 +25,10 @@ pub const HEIGHT: u32 = 240;
 /// One frame of the panel, row-major, a raw RGB565 word a pixel.
 pub struct Frame {
     pixels: Vec<u16>,
+    /// The first and last row drawn into since the last
+    /// [`Frame::take_dirty`]. A cell, because the renderer hands the frame
+    /// back only by shared reference.
+    dirty: Cell<Option<(u32, u32)>>,
 }
 
 impl Default for Frame {
@@ -31,12 +42,36 @@ impl Frame {
     pub fn new() -> Self {
         Self {
             pixels: vec![0; (WIDTH * HEIGHT) as usize],
+            dirty: Cell::new(None),
         }
+    }
+
+    /// A frame of these raw RGB565 words, row by row: a dump read back.
+    /// `None` unless there are exactly [`WIDTH`] x [`HEIGHT`] of them.
+    pub fn from_pixels(pixels: Vec<u16>) -> Option<Self> {
+        (pixels.len() == (WIDTH * HEIGHT) as usize).then(|| Self {
+            pixels,
+            dirty: Cell::new(None),
+        })
     }
 
     /// The raw RGB565 words, row by row.
     pub fn pixels(&self) -> &[u16] {
         &self.pixels
+    }
+
+    /// The raw RGB565 word at `(x, y)`, black off the frame.
+    pub fn pixel(&self, x: u32, y: u32) -> u16 {
+        match x < WIDTH && y < HEIGHT {
+            true => self.pixels[(y * WIDTH + x) as usize],
+            false => 0,
+        }
+    }
+
+    /// The rows `first..=last` drawn into since the last call, and none
+    /// from now on: what the board flushes after a draw.
+    pub fn take_dirty(&self) -> Option<(u32, u32)> {
+        self.dirty.take()
     }
 
     /// The frame as 8-bit RGB, three bytes a pixel, each channel widened by
@@ -77,6 +112,11 @@ impl DrawTarget for Frame {
             };
             if x < WIDTH && y < HEIGHT {
                 self.pixels[(y * WIDTH + x) as usize] = RawU16::from(colour).into_inner();
+                let band = match self.dirty.get() {
+                    Some((first, last)) => (first.min(y), last.max(y)),
+                    None => (y, y),
+                };
+                self.dirty.set(Some(band));
             }
         }
         Ok(())
@@ -103,5 +143,18 @@ mod tests {
             &frame.to_rgb888()[lit[0] * 3..lit[0] * 3 + 3],
             &[255, 255, 255]
         );
+    }
+
+    #[test]
+    fn the_dirty_band_is_the_rows_drawn_since_the_last_flush() {
+        let mut frame = Frame::new();
+        assert_eq!(frame.take_dirty(), None);
+        let _ = frame.draw_iter([
+            Pixel(Point::new(5, 30), Rgb565::WHITE),
+            Pixel(Point::new(9, 12), Rgb565::WHITE),
+            Pixel(Point::new(0, 999), Rgb565::WHITE),
+        ]);
+        assert_eq!(frame.take_dirty(), Some((12, 30)));
+        assert_eq!(frame.take_dirty(), None, "a flush empties the band");
     }
 }

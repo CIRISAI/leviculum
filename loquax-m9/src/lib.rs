@@ -22,14 +22,24 @@
 //!   the Shift and Sym layers, repeat (slice three, 1359).
 //! - [`keys`]: which M9 key is which key event, the list's rows and the
 //!   chat's.
+//! - [`kbraw`]: the keyboard controller's I2C answer, logged raw and read
+//!   into a scan by a table (slice four, 1361).
+//! - [`dump`]: the frame as text lines over the debug link, and read back,
+//!   for the rig to compare with the goldens (slice four).
+//! - [`fixture`]: the model the board shows before it has a network.
+//! - [`census`]: what a screen costs where it is drawn, and its budget.
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod census;
 pub mod chat;
+pub mod dump;
 pub mod field;
+pub mod fixture;
 pub mod frame;
+pub mod kbraw;
 pub mod keyboard;
 pub mod keys;
 pub mod render;
