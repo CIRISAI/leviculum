@@ -2648,7 +2648,9 @@ loquax-name:
 # and it fails there (land gate on d365c0d2, forge stage, home_reach's Python
 # peer). Next to check-standard-integ in `guards` and `fast`; here at the
 # end so no cited Justfile line moves. Reads the test targets' call graphs
-# from the text; ~0.8 s, no build, its fixtures first.
-[doc('Check that every Python-spawning test declares its prerequisites')]
+# from the text; ~0.8 s, no build, its fixtures first. Since 1353 the same for
+# the four reference codec tools the voice round trip spawns, each by its own
+# `command:` line (hamster has no codec2, and the pre-push run panicked).
+[doc('Check that every Python- or codec-spawning test declares its needs')]
 check-python-test-prerequisites:
     @python3 scripts/check-python-test-prerequisites.py

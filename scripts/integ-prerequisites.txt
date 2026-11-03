@@ -81,13 +81,16 @@ reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reache
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
 # The voice round trip (1222) starts the same Python peer, and makes and
 # judges its sounds with the reference codecs: opus-tools and codec2 from
-# apt (scripts/install-ci.sh).
+# apt (scripts/install-ci.sh). Looked up on PATH, not at /usr/bin: a host
+# with them elsewhere runs the test (1353). scripts/check-python-test-
+# prerequisites.py refuses a test that spawns one of these four without its
+# `command:` line.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/opusenc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/opusdec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/c2enc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/c2dec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:opusenc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:opusdec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:c2enc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:c2dec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
 # The photo (1220) and file (1221) round trips start the same Python peer;
 # the home node merge brought them beside 1282's guard, which found them.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size
