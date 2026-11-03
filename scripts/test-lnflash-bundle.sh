@@ -51,12 +51,15 @@ STUBS="$WORK/stubs"
 mkdir -p "$STUBS"
 cat >"$STUBS/cargo" <<'EOF'
 #!/usr/bin/env bash
-# metadata: where the fixture's target directory is. build: a placeholder
-# where cargo would have written the artefact.
+# metadata: where the fixture's target directory and workspace root are.
+# build: a placeholder where cargo would have written the artefact, and a
+# line saying which firmware rustflags it was handed.
 case "$1" in
-metadata) printf '{"target_directory":"%s"}\n' "$FIXTURE_TARGET" ;;
+metadata) printf '{"target_directory":"%s","workspace_root":"%s"}\n' "$FIXTURE_TARGET" "$PWD" ;;
 build)
     echo "$*" >>"$FIXTURE_TARGET/cargo-builds.log"
+    [ "${3:-}" = lnflash ] ||
+        echo "$4 ${CARGO_TARGET_THUMBV7EM_NONE_EABIHF_RUSTFLAGS:-}" >>"$FIXTURE_TARGET/cargo-rustflags.log"
     if [ "${3:-}" = lnflash ]; then
         out="$FIXTURE_TARGET/x86_64-unknown-linux-musl/release/lnflash"
         mkdir -p "$(dirname "$out")"
@@ -96,6 +99,7 @@ setup() { # <case>
         "$FIXTURE_TARGET/thumbv7em-none-eabihf/release"
     cp "$BUNDLE_SH" "$TREE/scripts/lnflash-bundle.sh"
     cp "$REPO/scripts/cargo-target-dir.sh" "$TREE/scripts/"
+    cp "$REPO/scripts/nrf-rustflags.sh" "$TREE/scripts/"
     printf '[workspace.package]\nversion = "%s"\n' "$VERSION" >"$TREE/Cargo.toml"
     printf '/target/\n/.deb-version-*\n' >"$TREE/.gitignore"
     echo "fixture bin2uf2 source" >"$TREE/leviculum-nrf/tools/bin2uf2.rs"
@@ -189,6 +193,11 @@ assert_build_features() { # <extra, comma-prefixed or empty>
         grep -qxF -- "build --release --bin $bin --features $features$1" \
             "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null ||
             fail "the $name firmware was not built with --features $features$1: $(cat "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null)"
+        # The shipped images carry no host path: the tree is remapped to /src
+        # (scripts/nrf-rustflags.sh, order 1368).
+        grep -F -- "$bin --remap-path-prefix=" "$FIXTURE_TARGET/cargo-rustflags.log" 2>/dev/null |
+            grep -qF -- "=$TREE=/src" ||
+            fail "the $name firmware was not built with the path remap: $(cat "$FIXTURE_TARGET/cargo-rustflags.log" 2>/dev/null)"
     done
 }
 

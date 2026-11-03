@@ -2157,10 +2157,6 @@ btvirt-selftest:
 # because that write is a soft brick: docs/src/concepts/lnode-flashing.md.
 # The firmware crate is outside the workspace (cross-compiled), so we
 # invoke cargo from its own directory.
-# Every firmware build here goes through scripts/nrf-rustflags.sh, which
-# remaps the host's paths out of the image (order 1368): a panic reads
-# `/src/leviculum-core/...` or `/registry/...`, and the image bytes are the
-# same in every checkout.
 [doc('Flash every attached T114 with the current firmware')]
 flash:
     cd leviculum-nrf && bash ../scripts/nrf-rustflags.sh cargo run --release --bin t114 --features bsp-t114

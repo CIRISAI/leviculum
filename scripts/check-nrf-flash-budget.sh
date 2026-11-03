@@ -262,10 +262,10 @@ LOG
 
     # The host-path guard: a .rodata with a registry path in it is red, one
     # with only remapped paths is not.
-    printf 'panicked at /home/u/.cargo/registry/src/x/lib.rs:1:1' >"$dir/home.rodata"
+    printf 'panicked at /home/u/.cargo/registry/src/x/lib' >"$dir/home.rodata"
     expect 1 "[flash-budget] FAIL home: .rodata carries a host path (1 line(s) with /home/), e.g.:" \
         "a /home/ path in .rodata is red" host_path_verdict home "$dir/home.rodata"
-    printf 'panicked at /registry/x/lib.rs:1:1\0/src/leviculum-core/src/lib.rs' >"$dir/clean.rodata"
+    printf 'panicked at /registry/x/lib\0/src/leviculum-core/src' >"$dir/clean.rodata"
     expect 0 "" "remapped paths pass" host_path_verdict clean "$dir/clean.rodata"
 
     if [ "$fails" -ne 0 ]; then
