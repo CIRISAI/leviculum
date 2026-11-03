@@ -11,7 +11,10 @@
 //!
 //! Since 1351 it counts the M9's renderer too (`loquax-m9`): the panel's
 //! frame, mousefood and ratatui made once, the chats list's first draw and
-//! a redraw with the cursor moved. And the stack each step takes below
+//! a redraw with the cursor moved. Since 1356 the open chat as the M9
+//! shows it: the scene the M9 builds with the keys on the list and a chat
+//! open, the chat's first draw, a redraw with the cursor twelve bubbles
+//! up, and one with a line typed into the compose field by the M9's keys. And the stack each step takes below
 //! its caller, read off a painted stack: a debug build's frames on a
 //! 64-bit host, so again bounds from above for the board's `opt-level =
 //! "s"` build, which the board's own census replaces.
@@ -25,17 +28,18 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use leviculum_ui::input::{InputBuffer, KeyEvent};
+use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
 use loquax::store::Store;
 use loquax::ui::groups::Verb;
 use loquax::ui::intent::Target;
 use loquax::ui::scene::LayoutClass;
 use loquax::ui::strings::Lang;
-use loquax::ui::{update, UiEvent, UiModel, NONE_OPEN};
+use loquax::ui::{update, Pane, UiEvent, UiModel, NONE_OPEN};
 use loquax::when::WallTime;
+use loquax_m9::field::Field;
 use loquax_m9::frame::Frame;
 use loquax_m9::render::Renderer;
-use loquax_m9::screen::Look;
+use loquax_m9::screen::{self, Look};
 
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
@@ -125,32 +129,6 @@ fn stack<R>(f: impl FnOnce() -> R) -> (R, usize) {
     (out, used)
 }
 
-/// A compose field nobody types into.
-#[derive(Debug, Default, Clone)]
-struct Line(String);
-
-impl InputBuffer for Line {
-    fn value(&self) -> &str {
-        &self.0
-    }
-    fn cursor(&self) -> usize {
-        self.0.chars().count()
-    }
-    fn edit(&mut self, _key: &KeyEvent) -> bool {
-        false
-    }
-    fn take(&mut self) -> String {
-        std::mem::take(&mut self.0)
-    }
-    fn newline(&mut self) {
-        self.0.push('\n');
-    }
-    fn set_cursor(&mut self, _at: usize) {}
-    fn set_value(&mut self, text: &str) {
-        self.0 = text.to_string();
-    }
-}
-
 /// The reader: no conversation's peer.
 const OWN: usize = 0x30;
 
@@ -167,13 +145,13 @@ fn now() -> WallTime {
 
 /// The model a terminal loquax restores from the ugly store, as the shell
 /// builds it: contacts, names, the history, the positions.
-fn ugly_model(home: &Path) -> UiModel<Line> {
+fn ugly_model(home: &Path) -> UiModel<Field> {
     let own = ugly_store::identity(OWN);
     ugly_store::fill_store_of(home, &own);
     let me = loquax::engine::delivery_address(&own).expect("address");
     let store = Store::open_in(home, me).expect("the store");
     let contacts = loquax::names::load_contacts(home).expect("contacts");
-    let mut model = UiModel::<Line>::new(&[]);
+    let mut model = UiModel::<Field>::new(&[]);
     model.address = Some(me);
     model.names = loquax::names::Names::new(contacts);
     for (peer, name) in store.names().expect("names") {
@@ -276,6 +254,73 @@ fn census() {
     );
     drop(scene);
 
+    // Slice two: the open chat as the M9 shows it. With the keys on the
+    // list the M9 builds the Wide scene and drops its chat (the list's
+    // peak carries the chat's build); with them in the chat, the Compact
+    // one. Then the chat's first draw, a redraw with the cursor twelve
+    // bubbles up, and one with a line typed in by the M9's keys.
+    let key = |model: &mut UiModel<Field>, code: KeyCode| {
+        update(model, UiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    };
+    model.focus = Pane::Conversations;
+    let (scene, listed_held, listed_peak) = counted(|| screen::scene(&model));
+    println!("list with a chat open (M9): held {listed_held} B, peak {listed_peak} B");
+    assert!(scene.list.is_some() && scene.chat.is_none());
+    drop(scene);
+    key(&mut model, KeyCode::Enter);
+    assert_eq!(model.focus, Pane::Messages);
+    let mut frame = Frame::new();
+    let mut renderer = Renderer::new(&mut frame).expect("renderer");
+    let ((scene, m9_chat_held, m9_chat_peak), m9_chat_stack) =
+        stack(|| counted(|| screen::scene(&model)));
+    println!(
+        "open chat scene (M9): held {m9_chat_held} B, peak {m9_chat_peak} B, \
+         stack {m9_chat_stack} B"
+    );
+    let look = Look::of(&model);
+    let ((drawn, chat_draw_held, chat_draw_peak), chat_draw_stack) =
+        stack(|| counted(|| renderer.draw(&scene, &look)));
+    drawn.expect("the chat's first draw");
+    println!(
+        "open chat first draw: held {chat_draw_held} B, peak {chat_draw_peak} B, \
+         stack {chat_draw_stack} B"
+    );
+    drop(scene);
+    for _ in 0..12 {
+        key(&mut model, KeyCode::Up);
+    }
+    let scene = screen::scene(&model);
+    let look = Look::of(&model);
+    let ((drawn, cursor_held, cursor_peak), cursor_stack) =
+        stack(|| counted(|| renderer.draw(&scene, &look)));
+    drawn.expect("the chat's redraw");
+    println!(
+        "open chat redraw, cursor moved: held {cursor_held} B, peak {cursor_peak} B, \
+         stack {cursor_stack} B"
+    );
+    drop(scene);
+    key(&mut model, KeyCode::Char('i'));
+    for c in "Bis gleich in Köln!".chars() {
+        key(&mut model, KeyCode::Char(c));
+    }
+    assert_eq!(model.focus, Pane::Compose);
+    let scene = screen::scene(&model);
+    let look = Look::of(&model);
+    let ((drawn, typed_held, typed_peak), typed_stack) =
+        stack(|| counted(|| renderer.draw(&scene, &look)));
+    drawn.expect("the compose line's redraw");
+    println!(
+        "open chat redraw, a line typed: held {typed_held} B, peak {typed_peak} B, \
+         stack {typed_stack} B"
+    );
+    drop(scene);
+    drop(renderer);
+    assert!(
+        frame.pixels().iter().any(|&p| p != 0),
+        "the chat was drawn into the frame (the measurements' positive control)"
+    );
+    drop(frame);
+
     // A fresh group with three members, as the picker makes it, then its
     // member sheet.
     model.selected = NONE_OPEN;
@@ -345,6 +390,33 @@ fn census() {
         renderer_stack < 32_000 && draw_stack < 16_000 && redraw_stack < 16_000,
         "making the renderer took {renderer_stack} B of stack, a draw \
          {draw_stack} B and {redraw_stack} B"
+    );
+    // The open chat on the M9 (1356), about double the 2026-11-03 figures:
+    // the scene as the Compact one above (111,184 held, 145,638 peak,
+    // 81,560 stack), the list with a chat open the same peak (the list and
+    // the chat built, the chat dropped); a draw (81,056 B peak, 11,312 B
+    // stack) lays out only the bubbles on screen and keeps nothing.
+    assert!(
+        m9_chat_held < 250_000 && m9_chat_peak < 320_000 && listed_peak < 320_000,
+        "the M9's open chat scene held {m9_chat_held} B, peak {m9_chat_peak} B; \
+         the list with a chat open peaked at {listed_peak} B"
+    );
+    assert!(
+        chat_draw_peak < 180_000 && cursor_peak < 180_000 && typed_peak < 180_000,
+        "a chat draw peaked at {chat_draw_peak} B, {cursor_peak} B and \
+         {typed_peak} B: only the bubbles on screen are laid out"
+    );
+    assert!(
+        chat_draw_held == 0 && cursor_held == 0 && typed_held == 0,
+        "a chat draw held {chat_draw_held} B, {cursor_held} B, {typed_held} B"
+    );
+    assert!(
+        m9_chat_stack < 160_000
+            && chat_draw_stack < 24_000
+            && cursor_stack < 24_000
+            && typed_stack < 24_000,
+        "the chat's scene took {m9_chat_stack} B of stack, its draws \
+         {chat_draw_stack} B, {cursor_stack} B and {typed_stack} B"
     );
     assert!(
         group_peak < 80_000 && members_held < 20_000 && members_peak < 80_000,
