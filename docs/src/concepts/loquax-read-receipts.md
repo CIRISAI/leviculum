@@ -145,10 +145,27 @@ sends itself alone, flagged left (`VEC-MSG-LEV-GROUP-LEAVE`), and the
 admin removes a member by sending the group that member alone, flagged
 left. Every Loquax client sets bit 1 on every message it sends, with
 read receipts off too (`{0x00: 2}`). `0x06` is the digest
-`[[bin16 writer, uint64 ms, str text], ...]` a group's home sends a slow
-member in place of one copy a line (`VEC-MSG-LEV-GROUP-DIGEST`); its text
-is the same lines as `"Name: text"`, one a line, which is all a stock
-member gets.
+`[[bin16 writer, uint64 ms, str text, uint left_out?], ...]` a group's
+home sends a slow member in place of one copy a line
+(`VEC-MSG-LEV-GROUP-DIGEST`); its text is the same lines as
+`"Name: text"`, one a line, which is all a stock member gets. A line that
+stands for what the home left out carries a fourth element: 1 a photo,
+2 a voice message, 3 a file, each too large for the radio, 4 a message
+no longer there; its text is then the English sentence ("sent a photo
+(too large for the radio)", the caption after `": "`). Every other line
+keeps three elements, and a reader before it reads the first three.
+
+Wire text is English. Localisation happens on the reader from the lev
+data. The invitation's text, "Lew invited you to Familie: lxma://…
+Reply /leave to leave.", is English whatever the admin's language, and
+so is every other text a home or a client composes without a human
+typing it (the group's own lines, a digest's prefixes and left-out
+lines); a stock client shows that English. A Loquax reader renders the
+card from `0x04`'s admin's name and group name in its own catalogue
+("Lew lädt dich zu Familie ein" on a German phone), the membership lines
+and the end from `0x05` ("Anna ist beigetreten."), and a left-out digest
+line from `0x06`'s fourth element; the English text stays the message's
+body, archived for search and for every other client.
 
 `0x03` is the group status a home sends the writer of one message
 `[bin32 original, uint delivered, uint read, uint members, uint

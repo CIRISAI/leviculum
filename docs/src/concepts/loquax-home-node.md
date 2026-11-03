@@ -128,10 +128,10 @@ Link requests on `loquax.home`, msgpack on the wire:
                                        known: bin, name: str, first: uint, more: bool,
                                        [[seq, kind, id: bin32, at, packed], ...]]
 /moved [token: bin16, cursor: uint] -> [status]
-/group [client_id: bin16, name: str, [[address: bin16, name: str], ...],
-        lang: str?]                -> [status, group: bin16]
-/groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...],
-        lang: str?]                -> [status, group: bin16]
+/group [client_id: bin16, name: str, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
+/groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...]]
+                                   -> [status, group: bin16]
 /groupdelete [client_id: bin16, group: bin16] -> [status]
 ```
 
@@ -156,10 +156,12 @@ again answers the group it made then. A home that archives an invitation
 learns the group's key from it, so a Join from any of its devices goes
 out before the group's announce is heard.
 
-The invitation is a text every client shows, in the admin's language
-(the optional `lang`, `de`; English is said by leaving it out, so the
-request is the three elements a home from before reads): "Lew invited
-you to Familie: lxma://… Reply /leave to leave." A member whose newest
+The invitation is a text every client shows, in English whatever the
+admin's language (1348; a phone of 1307 pass six still sends its
+language as a fourth element, which the home reads past and ignores):
+"Lew invited you to Familie: lxma://… Reply /leave to leave." A Loquax
+says the card in its reader's language from the `lev` key `0x04`
+([the `lev` keys](loquax-read-receipts.md)). A member whose newest
 message to the owner did not say it understands groups, or that never
 wrote, is taken for a stock client (Columba, Sideband), and its text
 adds once "Loquax shows members and names:" and the site's address

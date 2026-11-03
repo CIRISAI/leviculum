@@ -353,7 +353,19 @@ over to the server home when they sync (2.4).
 The invitation is an LXMF message from the admin carrying `0x04`, with
 the content as text for any client that is not Loquax ("Lew invited you
 to Familie: lxma://…; reply /leave to leave"). Loquax shows it as a card,
-"Lew hat dich zu Familie eingeladen", the trust sentence, "Join".
+"Lew lädt dich zu Familie ein", the trust sentence, "Join".
+
+Languages (decided 2026-11-03, 1348): every text a home or a client
+composes without a human typing it is English on the wire, whatever the
+admin's or the reader's language: the invitation, "Lew ended Familie.",
+"Lew removed Anna.", "Anna left.", "You are no longer in Familie.", a
+digest's "Name: " prefixes and its "sent a photo (too large for the
+radio)" line, the stock member's Loquax sentence. Every stock client
+shows that English. A Loquax reader says the same in its own language
+from the `lev` data beside it: the card from `0x04`'s inviter and name,
+the membership lines and the end from `0x05`, a digest's left-out line
+from `0x06`'s fourth element. The `/group` request carries no language
+(the fourth element pass six sent is read past and ignored).
 
 | # | screen | taps |
 |---|---|---|
