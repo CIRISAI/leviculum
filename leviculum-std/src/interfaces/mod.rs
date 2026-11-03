@@ -225,6 +225,24 @@ pub(crate) struct InterfaceCounters {
     duty_hold: AtomicBool,
 }
 
+/// The process's count of carrier changes, see [`carrier_changes`].
+static CARRIER_CHANGES: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+
+fn carrier_sender() -> &'static tokio::sync::watch::Sender<u64> {
+    CARRIER_CHANGES.get_or_init(|| tokio::sync::watch::Sender::new(0))
+}
+
+/// Said whenever an interface of any node in this process sees its carrier
+/// come up or go down (1346): a TCP client that loses its connection marks
+/// itself offline and redials on its own, as the reference's does, and
+/// tells the core nothing, so no `InterfaceDown` reaches an application.
+/// A phone that sleeps between its timers hears the loss here and then
+/// looks at its own node's [`interface_stats`](crate::ReticulumNode::interface_stats);
+/// a change of another node's interface wakes it for nothing.
+pub fn carrier_changes() -> tokio::sync::watch::Receiver<u64> {
+    carrier_sender().subscribe()
+}
+
 impl InterfaceCounters {
     pub(crate) fn new() -> Self {
         Self {
@@ -252,8 +270,16 @@ impl InterfaceCounters {
 
     /// Record the carrier coming up or going down. Called by the owning
     /// interface task only; readers use [`is_online`](Self::is_online).
+    /// A change is said on [`carrier_changes`].
     pub(crate) fn set_online(&self, online: bool) {
-        self.online.store(online, Ordering::Release);
+        if self.swap_online(online) {
+            carrier_sender().send_modify(|changes| *changes = changes.wrapping_add(1));
+        }
+    }
+
+    /// Set the carrier, `true` when that changed it.
+    fn swap_online(&self, online: bool) -> bool {
+        self.online.swap(online, Ordering::AcqRel) != online
     }
 
     /// Whether the owning interface task currently considers its carrier up.
@@ -1144,6 +1170,30 @@ mod tests {
     /// against either stack. It is the freeze predicate that has to know the
     /// difference, and it can only get it by watching the value across at
     /// least one full sampling period.
+    /// 1346: a carrier that changes is said; setting the state it already
+    /// has is no change. The signal is the process's, so other tests'
+    /// interfaces may say changes too: only the positive side is asserted
+    /// on it, the repeat on the swap that decides.
+    #[test]
+    fn a_carrier_change_is_said_and_a_repeat_is_not() {
+        let mut changes = carrier_changes();
+        let counters = InterfaceCounters::new();
+        assert!(!counters.swap_online(true), "online already");
+        changes.mark_unchanged();
+        counters.set_online(false);
+        assert!(
+            changes.has_changed().expect("the sender lives"),
+            "down is said"
+        );
+        assert!(!counters.swap_online(false), "down again is no change");
+        changes.mark_unchanged();
+        counters.set_online(true);
+        assert!(
+            changes.has_changed().expect("the sender lives"),
+            "up is said"
+        );
+    }
+
     #[test]
     fn a_zero_speed_reading_does_not_mean_the_bytes_have_been_accounted() {
         let counters = InterfaceCounters::new();

@@ -1430,6 +1430,22 @@ impl InterfaceConfig {
         }
         ingress_control_default_for_type(&self.interface_type)
     }
+
+    /// How long an idle TCP connection of this section stays up after its
+    /// peer stopped answering, on Linux and Android, from its `tcp_*` keys
+    /// and today's defaults for the keys it leaves out (1346). `Err` names
+    /// a key whose value the node would refuse at start. With no key set it
+    /// is 26 s: the reference's probe after 5 s, every 2 s, and its 24 s
+    /// user timeout (TCPInterface.py:84-87).
+    pub fn tcp_silent_peer_bound(&self) -> std::result::Result<std::time::Duration, String> {
+        crate::interfaces::tcp::TcpLiveness::from_keys(
+            self.tcp_keepalive_idle_secs,
+            self.tcp_keepalive_interval_secs,
+            self.tcp_keepalive_probes,
+            self.tcp_user_timeout_secs,
+        )
+        .map(|liveness| liveness.silent_peer_bound())
+    }
 }
 
 /// Parse a TOML config, recording whether it names `enable_transport`: serde

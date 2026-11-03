@@ -471,8 +471,9 @@ pub struct Link {
     /// Count of keepalives sent proactively (initiator), since establishment.
     /// Diagnostic counter only; not used for any timeout decision.
     keepalives_sent: u64,
-    /// Count of keepalive responses received (initiator), since establishment.
-    /// Diagnostic counter only; not used for any timeout decision.
+    /// Count of keepalive round trips since establishment: the responses
+    /// received on an initiator, the echoes owed on a responder. Diagnostic
+    /// counter only; not used for any timeout decision.
     keepalives_acked: u64,
     /// When the link was established (clock milliseconds)
     established_at_ms: Option<u64>,
@@ -1606,7 +1607,9 @@ impl Link {
         self.keepalives_sent
     }
 
-    /// Number of keepalive responses received since establishment (diagnostic).
+    /// Number of keepalive round trips since establishment (diagnostic): on
+    /// an initiator the responses received, on a responder the keepalives it
+    /// answered, so either end can count what its link cost.
     pub fn keepalives_acked(&self) -> u64 {
         self.keepalives_acked
     }
@@ -2835,6 +2838,7 @@ impl Link {
                 return Err(LinkError::InvalidRtt);
             }
             // Responder should echo back
+            self.keepalives_acked = self.keepalives_acked.saturating_add(1);
             Ok(true)
         }
     }
@@ -3892,6 +3896,41 @@ mod tests {
         assert!(link.should_close(1_000_000 + timeout + 1));
     }
 
+    /// 1346: a peer that stops answering on a link with a long keepalive
+    /// override is stale after twice the override, not after twice the
+    /// RTT-derived interval it had before, and closed RTT * 4 + 5 s later
+    /// (Link.py:797-805). The device link of Loquax sets 230 s at both ends;
+    /// the RTT-derived value it replaces on a 50 ms TCP path is 10.3 s.
+    #[test]
+    fn a_silent_peer_on_a_long_keepalive_is_gone_after_twice_the_override() {
+        let (mut initiator, _responder) = setup_active_link_pair();
+        initiator.update_keepalive_from_rtt(0.05);
+        let established = 1_000_000;
+        initiator.mark_established(established);
+        // The old value: stale 20.6 s after the last inbound.
+        assert_eq!(initiator.stale_time_ms(), 20_571);
+        assert!(initiator.is_stale(established + 20_572));
+
+        initiator.set_keepalive_override(Some(230));
+        initiator.update_keepalive_from_rtt(0.05);
+        assert_eq!(initiator.keepalive_ms(), 230_000);
+        assert!(!initiator.should_send_keepalive(established + 229_999));
+        assert!(initiator.should_send_keepalive(established + 230_000));
+        assert!(
+            !initiator.is_stale(established + 20_572),
+            "not gone at the old bound"
+        );
+        assert!(!initiator.is_stale(established + 460_000));
+        assert!(initiator.is_stale(established + 460_001));
+        initiator.set_state(LinkState::Stale);
+        let rtt_ms = initiator.rtt_us().unwrap_or(0) / 1_000;
+        assert_eq!(
+            initiator.stale_close_timeout_ms(),
+            460_000 + 4 * rtt_ms + 5_000,
+            "closed RTT * 4 + 5 s after it went stale"
+        );
+    }
+
     #[test]
     fn test_keepalive_counters() {
         let (mut initiator, mut responder) = setup_active_link_pair();
@@ -3906,6 +3945,10 @@ mod tests {
         let init_ka = initiator.build_keepalive_packet().unwrap();
         let echo = init_ka.last().copied().unwrap();
         assert!(responder.process_keepalive(&[echo]).unwrap()); // responder echoes
+                                                                // The responder counts the round trip it answered (1346), so the
+                                                                // mailbox end of a device link can say what the link cost it.
+        assert_eq!(responder.keepalives_acked(), 1);
+        assert_eq!(responder.keepalives_sent(), 0);
 
         // Initiator processes the responder echo -> ack counter increments.
         let resp_ka = responder.build_keepalive_packet().unwrap();
