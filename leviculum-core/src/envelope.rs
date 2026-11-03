@@ -389,6 +389,20 @@ pub const PN_LIST_MAX_HASHES: usize = 16;
 /// the air.
 pub const TYPE_POSITION_SHARE: u8 = 0x17;
 
+/// Dump the frame the display shows over the debug stream (order 1361, the
+/// ThinkNode M9's Loquax image): `PBM <w> <h>`, the rows as `PBR` lines and
+/// a closing `PBE <fnv32>`, the text format of `loquax_m9::dump`, so the rig
+/// compares the board's screen with the golden the host pinned.
+///
+/// Payload is empty, dump what is shown, or one byte naming a screen the
+/// board first walks to from its fixture model with its own keys
+/// (`loquax_m9::fixture::Screen`: 0 the chats list, 1 the pinned chat); a
+/// screen it does not know is refused with [`REFUSE_VALUE`]. Acked before
+/// the dump starts, so the ack is not stuck behind seconds of text. Only a
+/// board with a display it renders accepts it; every other board refuses it
+/// as an unknown type.
+pub const TYPE_FRAME_DUMP: u8 = 0x18;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -795,6 +809,25 @@ pub fn decode_store_storm_payload(payload: &[u8]) -> Option<StoreStormWire> {
 /// Encode a complete position-share frame (order 1301).
 pub fn encode_position_share(setting: u8) -> Vec<u8> {
     encode_frame(TYPE_POSITION_SHARE, &[setting])
+}
+
+/// Encode a complete frame-dump request (order 1361): what is shown for
+/// `None`, else the screen the byte names.
+pub fn encode_frame_dump(screen: Option<u8>) -> Vec<u8> {
+    match screen {
+        Some(screen) => encode_frame(TYPE_FRAME_DUMP, &[screen]),
+        None => encode_frame(TYPE_FRAME_DUMP, &[]),
+    }
+}
+
+/// Decode a [`TYPE_FRAME_DUMP`] payload: `Some(None)` for what is shown,
+/// `Some(Some(screen))` for one byte, `None` (malformed) for more.
+pub fn decode_frame_dump_payload(payload: &[u8]) -> Option<Option<u8>> {
+    match payload {
+        [] => Some(None),
+        [screen] => Some(Some(*screen)),
+        _ => None,
+    }
 }
 
 /// What one [`TYPE_PN_CONFIG`] asks for (Codeberg #384). A field holding
@@ -4509,6 +4542,31 @@ mod tests {
             }
         );
     }
+    #[test]
+    fn a_frame_dump_request_round_trips_and_no_other_board_takes_it() {
+        assert_eq!(encode_frame_dump(None), [0xA4, 0xA5, TYPE_FRAME_DUMP, 0, 0]);
+        assert_eq!(
+            encode_frame_dump(Some(1)),
+            [0xA4, 0xA5, TYPE_FRAME_DUMP, 0, 1, 1]
+        );
+        for screen in [None, Some(0), Some(1), Some(0xFF)] {
+            let frame = encode_frame_dump(screen);
+            let decoded = decode_frame(&frame).expect("an envelope");
+            assert_eq!(decoded.frame_type, TYPE_FRAME_DUMP);
+            assert_eq!(decode_frame_dump_payload(decoded.payload), Some(screen));
+        }
+        assert_eq!(decode_frame_dump_payload(&[0, 1]), None);
+        // The nRF boards' list does not carry it: refused by name, as every
+        // type a board has no consumer for.
+        assert_eq!(
+            classify_control_frame(&encode_frame_dump(None), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_FRAME_DUMP,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
     #[test]
     fn position_share_classifies_and_refuses_a_setting_it_does_not_know() {
         for setting in 0..=crate::position_share_store::POSITION_SHARE_MAX {
