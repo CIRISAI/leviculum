@@ -355,11 +355,13 @@ impl App {
                 receipts,
                 self.photo_rows(t),
                 self.maps_rows(t),
-                container(link(
-                    self.word(StrId::Help),
-                    Message::Intent(Intent::Help),
-                    t
-                ))
+                container(
+                    column![
+                        link(self.word(StrId::MyCode), Message::Intent(Intent::MyCode), t),
+                        link(self.word(StrId::Help), Message::Intent(Intent::Help), t),
+                    ]
+                    .spacing(4)
+                )
                 .padding([12, 16]),
             ]
             .width(Length::Fill),

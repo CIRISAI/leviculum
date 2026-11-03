@@ -110,6 +110,8 @@ pub struct Seen {
     pub receipts: bool,
     /// The reader's photo size (1220), the settings' row (1371).
     pub photo_size: loquax::ui::photos::PhotoSize,
+    /// Our own contact code, what "My code" shows (1371).
+    pub own_code: Option<String>,
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
@@ -167,6 +169,7 @@ impl Seen {
             now: shell.model.now,
             receipts: shell.model.reading.on,
             photo_size: shell.model.photo_size,
+            own_code: shell.model.own_code.as_ref().map(|c| c.code.clone()),
             photo: None,
             browse: match (shell.model.browse.showing(), &shell.browsing.pictures) {
                 (true, Some(pictures)) => Some(Browsed {
@@ -697,6 +700,8 @@ struct App {
     /// The keys' help over the window while it is open (1371), at this
     /// line.
     help: Option<usize>,
+    /// "My code" over the window while it is open (1371).
+    code_open: bool,
     compose: text_editor::Content,
     /// The message a reply being written answers, with its first line.
     reply: Option<([u8; 32], String)>,
@@ -768,6 +773,7 @@ impl App {
                 now: None,
                 receipts: true,
                 photo_size: loquax::ui::photos::PhotoSize::default(),
+                own_code: None,
                 photo: None,
                 browse: None,
                 copied: None,
@@ -800,6 +806,7 @@ impl App {
             renaming: None,
             map_shown: false,
             help: None,
+            code_open: false,
             compose: text_editor::Content::new(),
             reply: None,
             compose_for: None,
@@ -1083,6 +1090,18 @@ impl App {
             // as lnomad's window draws it; Back or a click closes it.
             Intent::Help => self.help = Some(0),
             Intent::Back | Intent::Dismiss if self.help.is_some() => self.help = None,
+            // Our own code and its QR (1371), as the phone's profile and
+            // the terminal's `my code` show it.
+            Intent::MyCode => match self.seen.own_code {
+                Some(_) => self.code_open = true,
+                None => self.seen.notice = Some(loquax::ui::NO_OWN_CODE.to_string()),
+            },
+            Intent::Back | Intent::Dismiss if self.code_open => self.code_open = false,
+            Intent::Copy if self.code_open => {
+                if let Some(code) = self.seen.own_code.clone() {
+                    return iced::clipboard::write(code);
+                }
+            }
             Intent::Scroll(cmd) if self.help.is_some() => {
                 let (viewport, max) =
                     leviculum_ui::help::scroll_bounds(&loquax::ui::help_groups(), self.help_area());
@@ -2003,10 +2022,67 @@ impl App {
             (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
             (None, _) => body,
         };
-        match self.help {
-            Some(scroll) => stack![window, self.help_layer(scroll)].into(),
-            None => window,
+        match (self.help, self.code_open) {
+            (Some(scroll), _) => stack![window, self.help_layer(scroll)].into(),
+            (None, true) => stack![window, self.code_layer()].into(),
+            (None, false) => window,
         }
+    }
+
+    /// "My code" over the window (1371): the code's QR, the code as
+    /// text, Copy and Close.
+    fn code_layer(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let Some(code) = &self.seen.own_code else {
+            return Space::new().into();
+        };
+        let qr: Element<'_, Message> = match loquax::home::qr::verbatim_modules(code) {
+            Ok((size, modules)) => Canvas::new(QrCanvas { size, modules })
+                .width(QR_SIDE)
+                .height(QR_SIDE)
+                .into(),
+            Err(why) => text(why).into(),
+        };
+        let words = column![
+            text(StrId::MyCode.text(self.lang))
+                .size(18)
+                .color(chat::colour(t.text)),
+            qr,
+            text(code.clone())
+                .size(13)
+                .wrapping(text::Wrapping::Glyph)
+                .align_x(iced::Alignment::Center)
+                .width(Length::Fill)
+                .color(chat::colour(t.text_secondary)),
+            row![
+                button(
+                    text(StrId::ActionCopy.text(self.lang))
+                        .size(15)
+                        .color(chat::colour(t.accent))
+                )
+                .on_press(Message::Intent(Intent::Copy))
+                .style(|_: &Theme, _| button::Style::default()),
+                button(
+                    text(StrId::Close.text(self.lang))
+                        .size(15)
+                        .color(chat::colour(t.accent))
+                )
+                .on_press(Message::Intent(Intent::Back))
+                .style(|_: &Theme, _| button::Style::default()),
+            ]
+            .spacing(12),
+        ]
+        .spacing(10)
+        .align_x(iced::Alignment::Center)
+        .width(Length::Fixed(380.0));
+        let panel = container(words)
+            .padding(20)
+            .style(move |_: &Theme| container::Style {
+                background: Some(iced::Background::Color(chat::colour(t.panel))),
+                border: iced::border::rounded(12),
+                ..container::Style::default()
+            });
+        container(panel).center(Length::Fill).into()
     }
 
     /// The window in the help's cells.
@@ -2152,6 +2228,44 @@ impl App {
 /// The frame on screen, where the view moved it.
 struct PictureCanvas<'a> {
     app: &'a App,
+}
+
+/// The side of "My code"'s QR, in logical pixels.
+const QR_SIDE: f32 = 260.0;
+
+/// A QR code's modules drawn dark on white with a quiet zone of four.
+struct QrCanvas {
+    size: u32,
+    modules: Vec<bool>,
+}
+
+impl canvas::Program<Message> for QrCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), Color::WHITE);
+        let size = self.size as usize;
+        let cell = bounds.width.min(bounds.height) / (size + 8) as f32;
+        for (i, dark) in self.modules.iter().enumerate() {
+            if *dark {
+                let (x, y) = ((i % size + 4) as f32, (i / size + 4) as f32);
+                frame.fill_rectangle(
+                    Point::new(x * cell, y * cell),
+                    Size::new(cell, cell),
+                    Color::BLACK,
+                );
+            }
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 impl canvas::Program<Message> for PictureCanvas<'_> {
@@ -2395,6 +2509,7 @@ mod tests {
             now: None,
             receipts: true,
             photo_size: loquax::ui::photos::PhotoSize::default(),
+            own_code: None,
             photo: None,
             browse: None,
             copied: None,
@@ -2638,6 +2753,7 @@ mod tests {
             now: model.now,
             receipts: model.reading.on,
             photo_size: model.photo_size,
+            own_code: model.own_code.as_ref().map(|c| c.code.clone()),
             photo: None,
             browse: None,
             copied: None,
@@ -2718,6 +2834,48 @@ mod tests {
             (fix.latitude_e6, fix.longitude_e6),
             (centre.latitude_e6, centre.longitude_e6)
         );
+    }
+
+    /// 1371: "My code" in the window: the settings' row opens the code
+    /// and its QR over the window, pixel for pixel the golden, the QR
+    /// reading back as the code; Copy hands the code to the clipboard
+    /// and Back closes it. Control: without a code only the notice.
+    #[test]
+    fn my_code_shows_the_code_and_its_qr() {
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        let (mut app, _rx) = {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                App::new(Frames::new(loquax::picture::Maps::default()), Some(tx)),
+                rx,
+            )
+        };
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let _ = app.update(Message::Intent(Intent::MyCode));
+        assert!(!app.code_open, "control: no code yet");
+        assert_eq!(app.seen.notice.as_deref(), Some(loquax::ui::NO_OWN_CODE));
+
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key).expect("a code");
+        model.own_code = Some(loquax::ui::OwnCode {
+            code: code.clone(),
+            qr: Vec::new(),
+        });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let _ = app.update(Message::Intent(Intent::MyCode));
+        assert!(app.code_open);
+        let shot = shoot(&app, w, h);
+        map::tests::same_as("gui-my-code-light.png", &shot, w, h);
+        let luma: Vec<u8> = shot.chunks(3).map(|px| px[1]).collect();
+        let read = loquax::scan::decode(w as usize, h as usize, w as usize, &luma);
+        assert_eq!(read, [code], "the QR reads as the code");
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert!(!app.code_open);
     }
 
     /// 1371: a right click on a row opens its menu with the scene's verbs
