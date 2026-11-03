@@ -697,7 +697,7 @@ conformance cells already run, pointed at a board.
 
 **D18 — no client allow/ignore lists on the board.** lnpnd carries
 the reference's `auth_required`/`allowed` and `ignored` lists
-(`lnpnd/src/main.rs:671-686`); on the board every identified client
+(`lnpnd/src/main.rs:681-696`); on the board every identified client
 may `/get` its mailbox and anyone may upload.
 What an operator sees: a board mailbox cannot be restricted to a
 user set. Class: semantic. Price: 16 B flash per hash plus a lookup

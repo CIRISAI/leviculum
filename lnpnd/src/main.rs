@@ -660,6 +660,16 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         store_free_kb(&store),
         effective.store_limit_kb
     );
+    // What the start cost, and whether the index file spared it the walk
+    // (order 1376: 130 s at 323 597 messages before it did).
+    let opened = store.open_profile();
+    eprintln!(
+        "lnpnd: message store opened in {} ms, index file {}, {} from it, {} file(s) read",
+        opened.total_us / 1000,
+        opened.index_file.as_str(),
+        opened.from_index_file,
+        opened.files_read
+    );
     // From here on the durable writes run on the store's own writer thread,
     // not in the hooks that hold the core lock (order 1081); the re-pricing
     // above ran before, inline, while nothing else was waiting.
