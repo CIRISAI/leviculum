@@ -295,6 +295,7 @@ fn spawn_local_interface_from_stream(
             // Stated here rather than left to a fallback so the local server
             // says what it means (Codeberg #189).
             ingress_control: Some(false),
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -526,6 +527,7 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
             // 60 s alike); pinned end-to-end, under a ~10 % CPU quota only
             // (2026-10-14), by `lnpnd/tests/status_under_transport_load.rs`.
             ingress_control: Some(false),
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

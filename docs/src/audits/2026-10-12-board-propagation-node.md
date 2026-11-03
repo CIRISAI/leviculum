@@ -27,7 +27,7 @@ The budget frame every price below moves in, from the boot plan
 (`budget_total`, `leviculum-nrf/heap-budget/src/lib.rs:408`): heap
 96 KiB (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:49`), node
 box 31 704 B (`NODE_BOX_BYTES`,
-`leviculum-nrf/heap-budget/src/lib.rs:846`, 31 744 B and slack 16 B since 867;
+`leviculum-nrf/heap-budget/src/lib.rs:853`, 31 744 B and slack 16 B since 867 and again since 1380;
 31 712 B and slack 48 B since #852, 31 736 B and slack 24 B since 860),
 role budget 21 120 B
 (`ROLE_BUDGET_BYTES`, `leviculum-nrf/heap-budget/src/lib.rs:298` =

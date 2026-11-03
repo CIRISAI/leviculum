@@ -2941,6 +2941,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_kind(id)
     }
 
+    /// Record the route rule an interface's medium declared (Codeberg #230,
+    /// order 1380): the media-aware driver calls this at registration with
+    /// [`PathChoice::HopsAndLoss`](crate::transport::PathChoice::HopsAndLoss)
+    /// for a radio interface. See
+    /// [`Transport::set_interface_path_choice`](crate::transport::Transport::set_interface_path_choice).
+    pub fn set_interface_path_choice(&mut self, id: usize, choice: crate::transport::PathChoice) {
+        self.transport.set_interface_path_choice(id, choice);
+    }
+
+    /// The route rule an interface runs under, override applied.
+    pub fn interface_path_choice(&self, id: usize) -> crate::transport::PathChoice {
+        self.transport.interface_path_choice(id)
+    }
+
     /// Set whether the ingress burst limiter runs for an interface (Codeberg
     /// #8). The media-aware driver resolves the flag (point-to-point off,
     /// shared/broadcast on, config-overridable) and calls this at registration.
@@ -3291,6 +3305,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.mark_interface_torn_down(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);
+        self.transport.remove_interface_path_choice(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
         self.transport.remove_interface_link_profile(iface_idx);
 

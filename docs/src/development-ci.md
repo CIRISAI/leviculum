@@ -408,7 +408,7 @@ the stack, ~13 KB of margin left for the whole call tree.
 that frame to 12 672 B. It does so only because the compiler builds the
 `Box::new` argument straight into the allocation, which Rust does not
 promise; the gate's limit is therefore held below the node box
-(`NODE_BOX_BYTES`, 31 752 B), so a build that stops eliding the copy puts
+(`NODE_BOX_BYTES`, 31 744 B), so a build that stops eliding the copy puts
 one whole `NodeCore` in a frame and fails here.
 
 The gate prefers `arm-none-eabi-objdump` and falls back to the rustup

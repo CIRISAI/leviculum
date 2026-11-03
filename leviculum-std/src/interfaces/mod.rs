@@ -798,6 +798,15 @@ pub(crate) struct InterfaceInfo {
     /// (`LocalClientInterface.should_ingress_limit() -> False`,
     /// LocalInterface.py:137-138).
     pub ingress_control: Option<bool>,
+    /// The route rule this interface's medium declares for competing copies
+    /// of one announce emission (Codeberg #230, order 1380): `HopsAndLoss`
+    /// on the radio interfaces (RNode, RNode multi vports, BLE), where a
+    /// direct link can be marginal and its announce re-hear ratio says so,
+    /// `Hops` on every other. The driver hands it to
+    /// `Transport::set_interface_path_choice` at registration, a spawned
+    /// interface's included; the `[reticulum] path_choice` key, when set,
+    /// overrides it in the core (`TransportConfig::path_choice`).
+    pub path_choice: leviculum_core::transport::PathChoice,
 }
 
 /// Event loop's handle to a spawned interface task
@@ -1094,6 +1103,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,

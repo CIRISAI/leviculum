@@ -36,11 +36,11 @@ pub struct Config {
 /// `path_choice` as a config value (Codeberg #230): the serde face of
 /// [`leviculum_core::transport::PathChoice`], kept separate because the
 /// core enum is `no_std` and carries no serde.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathChoiceSetting {
-    /// Fewer hops wins — today's rule and Python's, the default.
-    #[default]
+    /// Fewer hops wins — Python's rule, and the medium default on every
+    /// interface but the radio ones.
     Hops,
     /// Hops with the direct link priced by its announce re-hear evidence.
     HopsAndLoss,
@@ -228,12 +228,16 @@ pub struct ReticulumConfig {
     #[serde(default)]
     pub path_entries_dump: bool,
     /// Route choice between competing copies of one announce emission
-    /// (Codeberg #230). Leviculum-only key; rnsd reading a shared config
-    /// ignores it, and the default is Python's own rule, so a stock config
-    /// behaves identically on either daemon. See
-    /// [`leviculum_core::transport::PathChoice`].
+    /// (Codeberg #230), as an override over every interface. Leviculum-only
+    /// key; rnsd reading a shared config ignores it. `None` (the key
+    /// absent) leaves each interface on its medium's default since order
+    /// 1380: `hops_and_loss` on the radio interfaces (RNode, BLE), `hops`
+    /// on TCP, UDP, I2P, local IPC, serial, KISS, pipe and AutoInterface.
+    /// The wire is the same either way; only which next hop our own path
+    /// table keeps changes. See [`leviculum_core::transport::PathChoice`]
+    /// and the config page (`docs/src/configuration.md`).
     #[serde(default)]
-    pub path_choice: PathChoiceSetting,
+    pub path_choice: Option<PathChoiceSetting>,
     /// Seconds between this node's management announces, the probe and
     /// remote-management destinations (#449). Leviculum-only key; rnsd
     /// reading a shared config ignores it. Default
@@ -641,7 +645,7 @@ impl Default for ReticulumConfig {
             link_establishment_timeout_ms: None,
             max_links: None,
             path_entries_dump: false,
-            path_choice: PathChoiceSetting::default(),
+            path_choice: None,
             mgmt_announce_interval_secs: DEFAULT_MGMT_ANNOUNCE_INTERVAL_SECS,
             discover_interfaces: default_discover_interfaces(),
             autoconnect_discovered_interfaces: 0,

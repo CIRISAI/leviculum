@@ -3810,6 +3810,7 @@ where
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Rnode,
             ingress_control: None,
+            path_choice: leviculum_core::transport::PathChoice::HopsAndLoss,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -4785,6 +4786,7 @@ pub(crate) fn spawn_rnode_multi_interface(
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Rnode,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::HopsAndLoss,
             },
             incoming: incoming_rx,
             outgoing: outgoing_tx,
@@ -5302,6 +5304,143 @@ mod tests {
         handle.detach();
         stub.abort();
         node.stop().await.expect("stop");
+    }
+
+    /// Codeberg #230, order 1380: a radio registers with the announce
+    /// re-hear evidence rule and a wired interface beside it with hop
+    /// count, on both registration paths — a configured RNode (the startup
+    /// loop) and a hot-plugged one (the dynamic path) — and an explicit
+    /// `path_choice` holds every interface on the override.
+    #[tokio::test]
+    async fn test_a_radio_registers_with_the_evidence_rule_and_udp_with_hops() {
+        use crate::driver::ReticulumNodeBuilder;
+        use leviculum_core::transport::PathChoice;
+
+        struct MockFactory(std::sync::Mutex<Option<RNodeChannelHalves>>);
+        impl RNodeChannelFactory for MockFactory {
+            fn open(&self) -> RNodeChannelOpenFuture {
+                let taken = self.0.lock().unwrap().take();
+                Box::pin(async move { taken.ok_or_else(|| "channel already opened".into()) })
+            }
+        }
+        fn radio() -> (Arc<MockFactory>, tokio::io::DuplexStream) {
+            let (port, peer) = tokio::io::duplex(64 * 1024);
+            let (read_half, write_half) = tokio::io::split(port);
+            let halves: RNodeChannelHalves = (
+                Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
+                Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+            );
+            (
+                Arc::new(MockFactory(std::sync::Mutex::new(Some(halves)))),
+                peer,
+            )
+        }
+
+        for (override_choice, radio_rule, wired_rule) in [
+            (None, PathChoice::HopsAndLoss, PathChoice::Hops),
+            (Some(PathChoice::Hops), PathChoice::Hops, PathChoice::Hops),
+            (
+                Some(PathChoice::HopsAndLoss),
+                PathChoice::HopsAndLoss,
+                PathChoice::HopsAndLoss,
+            ),
+        ] {
+            let td = tempfile::tempdir().expect("tempdir");
+            let (configured_factory, configured_peer) = radio();
+            let mut builder = ReticulumNodeBuilder::new()
+                .enable_transport(true)
+                .storage_path(td.path().to_path_buf())
+                .add_rnode_channel_interface(configured_factory, 868_000_000, 125_000, 7, 5, 17)
+                .add_udp_interface(
+                    "127.0.0.1:0".parse().expect("listen addr"),
+                    "127.0.0.1:9".parse().expect("forward addr"),
+                );
+            if let Some(choice) = override_choice {
+                builder = builder.path_choice(choice);
+            }
+            let mut node = builder.build_sync().expect("build_sync");
+            node.start().await.expect("start");
+            let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let (closed_tx, _closed_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let configured_stub = tokio::spawn(rnode_firmware_stub_signals(
+                configured_peer,
+                cfg_tx,
+                closed_tx,
+            ));
+            tokio::time::timeout(Duration::from_secs(8), cfg_rx.recv())
+                .await
+                .expect("configured radio must reach configured within 8s")
+                .expect("cfg channel open");
+
+            // By name: a configured channel radio reports kind `unknown`
+            // in the snapshot (its config row carries no RNode type).
+            let stats = node.interface_stats();
+            let id_of = |prefix: &str| {
+                stats
+                    .iter()
+                    .find(|e| e.name.starts_with(prefix))
+                    .map(|e| e.interface_id)
+                    .unwrap_or_else(|| panic!("no {prefix} interface in {stats:?}"))
+            };
+            let configured_radio = id_of("rnode_channel_");
+            let udp = id_of("udp_");
+            assert_eq!(
+                node.interface_path_choice(configured_radio),
+                radio_rule,
+                "configured radio, override {override_choice:?}"
+            );
+            assert_eq!(
+                node.interface_path_choice(udp),
+                wired_rule,
+                "UDP beside it, override {override_choice:?}"
+            );
+
+            let (plugged_factory, plugged_peer) = radio();
+            let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let (closed_tx, _closed_rx) = tokio::sync::mpsc::channel::<()>(1);
+            let plugged_stub =
+                tokio::spawn(rnode_firmware_stub_signals(plugged_peer, cfg_tx, closed_tx));
+            let handle = node
+                .spawn_rnode_channel_interface(RNodeChannelConfig {
+                    factory: plugged_factory,
+                    frequency: 868_000_000,
+                    bandwidth: 125_000,
+                    tx_power: 17,
+                    sf: 7,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                    flow_control: false,
+                    buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
+                })
+                .expect("attach must succeed on a running node");
+            tokio::time::timeout(Duration::from_secs(8), cfg_rx.recv())
+                .await
+                .expect("hot-plugged radio must reach configured within 8s")
+                .expect("cfg channel open");
+            let mut plugged_rule = None;
+            for _ in 0..80 {
+                if node
+                    .interface_stats()
+                    .iter()
+                    .any(|e| e.interface_id == handle.id())
+                {
+                    plugged_rule = Some(node.interface_path_choice(handle.id()));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                plugged_rule,
+                Some(radio_rule),
+                "hot-plugged radio, override {override_choice:?}"
+            );
+
+            handle.detach();
+            plugged_stub.abort();
+            configured_stub.abort();
+            node.stop().await.expect("stop");
+        }
     }
 
     #[tokio::test]
@@ -10708,6 +10847,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,

@@ -578,14 +578,17 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         }
         // Route choice between competing copies of one announce emission
         // (Codeberg #230). Leviculum-only key — rnsd reading the shared
-        // config ignores it — and the default is Python's own hop rule, so
-        // only the exact opt-in string changes anything. An unrecognised
-        // value keeps the default, like every other tolerant value in this
-        // section (the LINE is still validated as a keyword, so a typo'd
-        // KEY fails the parse as before).
+        // config ignores it. Set, it overrides every interface's medium
+        // default (`hops_and_loss` on radio, `hops` elsewhere, order 1380);
+        // an unrecognised value keeps the medium defaults, like every other
+        // tolerant value in this section (the LINE is still validated as a
+        // keyword, so a typo'd KEY fails the parse as before).
         "path_choice" => {
-            if value.trim().eq_ignore_ascii_case("hops_and_loss") {
-                config.path_choice = crate::config::PathChoiceSetting::HopsAndLoss;
+            let value = value.trim();
+            if value.eq_ignore_ascii_case("hops_and_loss") {
+                config.path_choice = Some(crate::config::PathChoiceSetting::HopsAndLoss);
+            } else if value.eq_ignore_ascii_case("hops") {
+                config.path_choice = Some(crate::config::PathChoiceSetting::Hops);
             }
         }
         // Cadence of the management (probe, remote-management) announces,
@@ -2928,21 +2931,27 @@ mod tests {
     }
 
     #[test]
-    fn test_path_choice_defaults_to_hops_and_is_opt_in() {
-        // Codeberg #230: the evidence rule is a deliberate opt-in. Absent
-        // key, the explicit default spelling and any unrecognised value all
-        // keep the hop rule, so a typo'd VALUE degrades to Python's
-        // behaviour rather than to a surprise; only the exact opt-in string
-        // selects the evidence rule.
+    fn test_path_choice_absent_leaves_the_medium_default_and_either_value_overrides() {
+        // Codeberg #230, order 1380: with the key absent every interface
+        // runs its medium's default (the evidence rule on radio, hop count
+        // elsewhere). Either exact spelling overrides that on every
+        // interface; an unrecognised value keeps the medium defaults rather
+        // than guessing which override was meant.
         use crate::config::PathChoiceSetting;
         let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
-        assert_eq!(absent.reticulum.path_choice, PathChoiceSetting::Hops);
+        assert_eq!(absent.reticulum.path_choice, None);
         let explicit = parse_ini("[reticulum]\n  path_choice = hops\n").unwrap();
-        assert_eq!(explicit.reticulum.path_choice, PathChoiceSetting::Hops);
+        assert_eq!(
+            explicit.reticulum.path_choice,
+            Some(PathChoiceSetting::Hops)
+        );
         let on = parse_ini("[reticulum]\n  path_choice = hops_and_loss\n").unwrap();
-        assert_eq!(on.reticulum.path_choice, PathChoiceSetting::HopsAndLoss);
+        assert_eq!(
+            on.reticulum.path_choice,
+            Some(PathChoiceSetting::HopsAndLoss)
+        );
         let typo = parse_ini("[reticulum]\n  path_choice = hops_and_los\n").unwrap();
-        assert_eq!(typo.reticulum.path_choice, PathChoiceSetting::Hops);
+        assert_eq!(typo.reticulum.path_choice, None);
     }
 
     #[test]

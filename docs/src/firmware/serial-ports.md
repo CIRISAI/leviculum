@@ -199,7 +199,7 @@ implements no RNode KISS command set — there is no `CMD_DETECT`,
 > `SerialInterface` honours [the LoRa keys] too and configures the
 > attached LNode's radio over the serial port — the LNode frames HDLC,
 > so it cannot be driven by the KISS-framed `RNodeInterface`.
-> (`docs/src/guide/configuration.md:503-512`)
+> (`docs/src/guide/configuration.md:526-535`)
 
 ```ini
 [interfaces]
@@ -224,7 +224,7 @@ For a RAK4631 / WisMesh Pocket V2 the only change is the port
 
 **Who applies the LoRa keys.** Under `lnsd` the five LoRa keys are sent
 to the board as a radio-config frame at interface startup
-(`leviculum-std/src/interfaces/serial.rs:554`), so the config decides
+(`leviculum-std/src/interfaces/serial.rs:555`), so the config decides
 the channel. Under Python-RNS `rnsd` they are inert: its
 `SerialInterface` reads port settings only and pushes nothing to the
 board, which then keeps whatever profile is in its flash — the compiled

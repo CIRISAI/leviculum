@@ -92,6 +92,7 @@ where
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Channel,
             ingress_control: None,
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

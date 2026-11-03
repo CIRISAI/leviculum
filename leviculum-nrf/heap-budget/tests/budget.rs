@@ -102,16 +102,17 @@ fn the_t114_boot_line_has_these_values() {
         budget_serve_cap(nb)
     );
     assert_eq!(max_endpoint_links(nb), 4);
-    // Four links fit with 8 B left: the heap to the byte at #661,
+    // Four links fit with 16 B left: the heap to the byte at #661,
     // 4 × 16 B since the RTT retry state left `Link` (#662), less the 8 B
     // the boxed split request/response state takes in `NodeCore` (#666),
     // the 8 B of the boxed loop refusals (#852), the 24 B of the
     // link-layer drop counters (860), the 8 B of the resource-refusal
     // counters (867) and the 8 B of the boxed torn-down-interface
-    // tombstones (981).
-    assert_eq!(nb, 31_752);
-    assert_eq!(budget_total(nb), HEAP_SIZE - 8);
-    assert_eq!(budget_slack(nb), 8);
+    // tombstones (981), plus the 8 B boxing the path-choice evidence map
+    // gave back (1380, Codeberg #230).
+    assert_eq!(nb, 31_744);
+    assert_eq!(budget_total(nb), HEAP_SIZE - 16);
+    assert_eq!(budget_slack(nb), 16);
     assert_eq!(budget_serve_cap(nb), 0);
     // The binaries' two boot assertions hold on it.
     assert!(budget_total(nb) <= HEAP_SIZE);
@@ -132,13 +133,14 @@ fn max_endpoint_links_at_its_boundaries() {
     // the cap is reached, slack is zero, the total is the heap to the byte.
     let exact = full - MAX_LINKS * per_link;
     assert_eq!(exact, 31_760);
-    // The boards are 8 B below it: not one byte to spare at #661, then
+    // The boards are 16 B below it: not one byte to spare at #661, then
     // 16 B a link freed when the RTT retry state left `Link` (#662), then
     // 8 B of that spent on the boxed split state in `NodeCore` (#666),
     // 8 B on the boxed loop refusals (#852), 24 B on the link-layer
     // drop counters (860), 8 B on the resource-refusal counters (867)
-    // and 8 B on the boxed torn-down-interface tombstones (981).
-    assert_eq!(exact - NODE_BOX_BYTES, 8);
+    // and 8 B on the boxed torn-down-interface tombstones (981), and 8 B
+    // given back by boxing the path-choice evidence map (1380).
+    assert_eq!(exact - NODE_BOX_BYTES, 16);
     assert_eq!(max_endpoint_links(exact), MAX_LINKS);
     assert_eq!(budget_slack(exact), 0);
     assert_eq!(budget_total(exact), HEAP_SIZE);
@@ -172,10 +174,10 @@ fn budget_serve_cap_at_its_boundaries() {
     // One byte of slack funds nothing either.
     assert_eq!(budget_serve_cap(exact - 1), 0);
     // The serve cap is the largest cap whose peak fits the slack: the
-    // T114's 8 B fund nothing, not even a one-byte serve (#661, #662,
-    // #666, #852, 860, 867, 981).
+    // T114's 16 B fund nothing, not even a one-byte serve (#661, #662,
+    // #666, #852, 860, 867, 981, 1380).
     let slack = budget_slack(T114_NODE_BOX);
-    assert_eq!(slack, 8);
+    assert_eq!(slack, 16);
     assert_eq!(budget_serve_cap(T114_NODE_BOX), 0);
     assert!(serve_peak_bytes(1, SERVE_RESOURCE_SDU) > slack);
     // A link fewer frees almost a whole link's cost for the serve.

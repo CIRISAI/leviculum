@@ -190,12 +190,14 @@ impl NodeCoreBuilder {
     }
 
     /// Route-choice rule for competing copies of one announce emission
-    /// (Codeberg #230). Default [`PathChoice::Hops`], today's hop-count
-    /// rule; [`PathChoice::HopsAndLoss`] prices a marginal direct link by
+    /// (Codeberg #230), as an override over every interface's medium
+    /// default. Unset, each interface runs the rule its medium declared
+    /// (`Transport::set_interface_path_choice`), hop count where it declared
+    /// none; [`PathChoice::HopsAndLoss`] prices a marginal direct link by
     /// its announce re-hear evidence. See
     /// [`TransportConfig::path_choice`](crate::transport::TransportConfig::path_choice).
     pub fn path_choice(mut self, choice: PathChoice) -> Self {
-        self.transport_config.path_choice = choice;
+        self.transport_config.path_choice = Some(choice);
         self
     }
 

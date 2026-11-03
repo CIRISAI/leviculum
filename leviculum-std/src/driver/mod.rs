@@ -2041,6 +2041,10 @@ impl ReticulumNode {
                     // keeps that default; a config interface's own
                     // `register_interface_config` runs after this loop and
                     // still wins.
+                    // Route rule (Codeberg #230, order 1380): the medium
+                    // declares it, the core applies `[reticulum]
+                    // path_choice` over it when the operator set one.
+                    core.set_interface_path_choice(handle.info.id.0, handle.info.path_choice);
                     if let Some(ingress_on) = handle.info.ingress_control {
                         core.set_interface_ingress_control(handle.info.id.0, ingress_on);
                         if !ingress_on {
@@ -3560,6 +3564,18 @@ impl ReticulumNode {
     /// Get transport statistics (packets sent, received, forwarded, dropped)
     pub fn transport_stats(&self) -> leviculum_core::transport::TransportStats {
         self.inner.lock_recover().transport_stats()
+    }
+
+    /// The route rule interface `id` runs under (Codeberg #230): the
+    /// `path_choice` override when one is set, otherwise what the
+    /// interface's medium declared. Crate-only, for the registration tests.
+    /// Takes the core lock: never from a `CoreProcessor` hook.
+    #[cfg(all(test, feature = "serial"))]
+    pub(crate) fn interface_path_choice(
+        &self,
+        id: InterfaceId,
+    ) -> leviculum_core::transport::PathChoice {
+        self.inner.lock_recover().interface_path_choice(id.0)
     }
 
     /// A read-only snapshot of every interface: its name and online status
@@ -5209,6 +5225,7 @@ async fn run_event_loop(
                 let inherited_mode = handle.info.mode;
                 let inherited_kind = handle.info.kind;
                 let inherited_ingress = handle.info.ingress_control;
+                let declared_path_choice = handle.info.path_choice;
                 let announce_cap_bps = handle.info.announce_cap_bitrate;
                 {
                     let mut core = inner.lock_recover();
@@ -5225,6 +5242,10 @@ async fn run_event_loop(
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
                     core.set_interface_kind(iface_idx, inherited_kind);
+                    // Codeberg #230: a runtime-attached radio (a multi-RNode
+                    // vport, a hot-plugged RNode, a BLE peer) prices its
+                    // direct link like a configured one.
+                    core.set_interface_path_choice(iface_idx, declared_path_choice);
                     // Codeberg #404: a runtime-attached radio is capped like a
                     // configured one. `None` for every medium that declares no
                     // announce-cap bitrate, which is every dynamically spawned
@@ -6903,6 +6924,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -7225,6 +7247,7 @@ mod tests {
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Udp,
                     ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -8044,6 +8067,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -8878,6 +8902,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -8935,6 +8960,7 @@ mod tests {
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Unknown,
                     ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -9009,6 +9035,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: l_inc_rx,
             outgoing: l_out_tx,
@@ -9038,6 +9065,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -9096,6 +9124,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -9175,6 +9204,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: lora_inc_rx,
             outgoing: lora_out_tx,
@@ -9203,6 +9233,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: plain_inc_rx,
             outgoing: plain_out_tx,
@@ -9285,6 +9316,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -9347,6 +9379,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -9409,6 +9442,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -9699,6 +9733,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -10406,6 +10441,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: in_rx,
             outgoing: out_tx,
@@ -11533,6 +11569,7 @@ mod tests {
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Tcp,
                     ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
                 },
                 incoming: in_rx,
                 outgoing: out_tx,
