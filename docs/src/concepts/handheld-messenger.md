@@ -336,10 +336,10 @@ The M9 is a full node in Mesh mode (the propagation-node decision on
 a home. What that needs, measured against the code:
 
 - **The wire is ready.** The five requests and their answers are
-  `no_std` (`wire`, `loquax/src/home.rs:38`), as are the admission
+  `no_std` (`wire`, `loquax/src/home.rs:41`), as are the admission
   code's codec (`code`), the archive relation and the wake rules.
 - **The client's ask loop is not.** `home::client` is gated `std`
-  (`loquax/src/home.rs:40`): it waits on tokio time and drives
+  (`loquax/src/home.rs:43`): it waits on tokio time and drives
   `leviculum_std::ReticulumNode`'s link API
   (`loquax/src/home/client.rs:10`). The board port is the same request
   flow over `leviculum-core`'s links and the firmware's clock — a seam
@@ -548,6 +548,105 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   965,645 B on the 64-bit host, under the 1.1 MB the rule above puts in
   the PSRAM it gives the UI. The ceilings asserted are about double.
 
+### Slice three done, on the host (1359)
+
+The keyboard as a driver and the pairing's flow, both `no_std`, both
+host-tested. Of the table above it takes the host halves of the keyboard
+(slice 3) and of the pairing (slice 4); the board halves stay with the
+board: the controller's I2C reads, the send over the mesh, the flow over
+`leviculum-core`'s links. Nothing was flashed or read off the board in
+this slice.
+
+- **What the board has told us of the keyboard, and what not.** The
+  controller ACKs at 0x6D on our V1.1 unit, the wiki says it reads a 5 x
+  10 matrix, its INT is a 15 ms pulse that does not come for every key
+  ([The ThinkNode M9](thinknode-m9.md), "Keyboard", "Two hardware
+  revisions" and "The keypad"). Its register map, which cell is which
+  key, and whether it debounces, repeats or holds a layer itself are
+  unread, and no foreign header stands in for them. So the driver starts
+  at a scan of the matrix and the board's half is a decoder from the
+  controller's answer to that scan, read in slice four.
+- **The scan frame** (`Scan`, `loquax-m9/src/keyboard.rs:63`): 50 bits,
+  bit `row * 10 + column`, carried as 7 bytes least significant first
+  (`Scan::from_frame`, `loquax-m9/src/keyboard.rs:83`); the six bits past
+  the matrix are dropped. The firmware prints one line a poll over the
+  debug CDC, `KB <ms> <14 hex digits>`, and `parse_recording`
+  (`loquax-m9/src/keyboard.rs:310`) reads a capture as it was taken, the
+  firmware's other lines skipped. An example from the walk below:
+  `KB 190 00800000000000` is cell (1, 5) alone, byte 1 bit 7, at 190 ms. The board's layout table and its
+  first real fixture come from one such capture with each key pressed
+  once.
+- **The driver** (`Keyboard::poll`, `loquax-m9/src/keyboard.rs:207`):
+  polled every 10 ms while the panel is lit (`POLL_MS`, under the 15 ms
+  INT pulse; whether the polls see every press is a board measurement),
+  a cell changes state after two alike polls, each cell on its own, so a
+  second key down while the first is held is seen. A `Cap`
+  (`loquax-m9/src/keyboard.rs:108`) carries a key's plain, shifted and
+  symbol character; Shift and Sym held with a key apply to it, tapped
+  alone they apply to the next key only, so one thumb types a capital or
+  a `!`. Characters, Backspace and the arrows repeat after 500 ms every
+  80 ms; Enter and Back never do. What comes out is the key events the
+  table of slices one and two resolves; the M9 still binds nothing of its
+  own.
+- **The walk**: `tests/keyboard/walk.txt` under `loquax-m9`, a recording
+  in that format over a test layout, synthetic until the board records
+  its own; through the driver, the key table and the model it opens the
+  pinned chat, types "Hi!" with a tapped Shift, a one-poll bounce and a
+  tapped Sym, and sends it (`a_recorded_walk_of_scan_frames_types_and_sends`).
+
+**The pairing: decided, typed on the keys first, written by lnflash
+second.** The page's three options weighed against its own facts: the
+board cannot scan, so a code the board shows is for a phone to read, and
+the phone has no way back to the board but the mesh, a delivery protocol
+that does not exist; that direction stays the board's own contact code,
+not the pairing. Typing the code needs nothing but the board and the
+phone's "Link a device" screen, which already shows the code as text,
+so it is the path an owner without a computer has; `lnflash --home
+<code>` is the same code over the USB control link for whoever has the
+board on a cable, and needs a control fact the envelope does not carry
+yet. Both end in the same join.
+
+- **The typed code** (`typing`, `loquax/src/home/code.rs:205`): 140
+  characters (`TYPED_LEN`, `loquax/src/home/code.rs:186`), whitespace and
+  case ignored as every parser of the code ignores them. A stray
+  character is named where it stands, a wrong prefix letter, one outside
+  base32, one past the end, not after the last of 140; the complete code
+  goes to the same parser and checksum as on every device. `grouped`
+  (`loquax/src/home/code.rs:226`) shows it in fives, so the eye keeps its
+  place against the code it copies.
+- **The join without the waiting** (`Join`,
+  `loquax/src/home/ask.rs:168`): the seam this page asked for, cut as the
+  store's. The path ladder (`PathLadder`, `loquax/src/home/ask.rs:66`;
+  requests at 0, 7, 21, 49 and 105 s, then a minute apart), the per-hop
+  link budget of rule 3 (`establishment_ms`,
+  `loquax/src/home/ask.rs:120`) and what a `/join` answer means
+  (`join_outcome`, `loquax/src/home/ask.rs:126`) are `no_std` and shared:
+  the desktop's `open` takes the ladder and the budget from there, and
+  `HomeError` lives there. The join is a set of `Step`s
+  (`loquax/src/home/ask.rs:135`), request a path, connect, identify, send
+  `/join`, done, which the platform performs and reports back; a report
+  out of turn ends the join instead of being read as the home's word.
+
+What of `home::client` is not `no_std` yet, all of it behind
+`#[cfg(feature = "std")]` (`loquax/src/home.rs:43`):
+
+| piece | where | what it needs on the board |
+|---|---|---|
+| the link loop: path, connect, identify | `open`, `loquax/src/home/client.rs:518` | nothing more: `Join` is its board form; other requests get the same steps |
+| one request and its answer | `request`, `loquax/src/home/client.rs:583` | the firmware's request over a core link, reported to `Join::answered` |
+| the join | `join`, `loquax/src/home/client.rs:34` | none: `Join` replaces it |
+| the pull and its pages | `pull`, `loquax/src/home/client.rs:370`; `pages`, `loquax/src/home/client.rs:384` | a `Pull` flow like `Join` with the page loop, and the batch size the session census fixes |
+| send, mark and the group verbs | `send`, `loquax/src/home/client.rs:59`; `mark`, `loquax/src/home/client.rs:116` | the same steps with their own request; slice five for the groups |
+| the client id | `client_id`, `loquax/src/home/client.rs:363` | a random source the firmware has |
+| being a client: the home's key, the cursor | `load_client`, `loquax/src/home/client.rs:615`; `save_client`, `loquax/src/home/client.rs:640`; `load_cursor`, `loquax/src/home/client.rs:646` | a record in flash beside the store, the device identity with it |
+
+What moves to make the admit flow run on the board, in order: the
+pairing screen in `loquax-m9`, the typed code drawn grouped with its
+`Typing` verdict; the firmware's driver of `Join` over `leviculum-core`'s
+path requests and links; the home's key and the device identity written
+to flash on `Done(Ok)`; then `lnflash --home`, a control fact in the
+envelope and its handler, which ends in the same record.
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice
@@ -562,8 +661,11 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
 ## Not yet built
 
 The M9 frontend: the six slices of "The slices, in order" above but the
-host halves of slice one and of slice two (1356, the chat drawn and typed
-into), and the `no_std` client seam they need. Of the 2026-10-21 list that stood
+host halves of slice one, of slice two (1356, the chat drawn and typed
+into) and of slice three (1359, the keyboard driver, the typed code and
+the join's `no_std` steps). Of the client seam, the pull, the sends and
+the client's record in flash are still `std` (the table under "Slice
+three done"). Of the 2026-10-21 list that stood
 here, the rest has landed since: the core builds `no_std`
 (`just loquax-core-no-std`), the desktop window ships beside the
 terminal, Android went through the JNI facade rather than the C
