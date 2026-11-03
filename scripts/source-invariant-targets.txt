@@ -242,12 +242,14 @@ skip  loquax-android   glyph                      # Glyph.java against the core'
 skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
+skip  loquax-android   m9_fixture_census          # counts the M9 image's two fixture screens against the census budgets with a global allocator (1361); subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
 skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
 run   loquax-android   strings                    # reads the app's res/values*/strings.xml and asserts the words of walk findings 27 to 30 (1283)
 run   loquax-android   icon                       # reads the icon PNGs, the adaptive icon, the manifest and the deb's desktop entry and asserts their sizes and names (1336)
 skip  loquax-m9        golden                     # the M9 chats list drawn into the 320x240 frame and pinned as PNG (1351); subject is the renderer
+skip  loquax-m9        firmware                   # the M9 image's fixture screens drawn, dumped and read back against PNG goldens (1361); subject is the renderer and the dump
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
