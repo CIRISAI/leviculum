@@ -216,7 +216,7 @@ messenger core holds the same types a board will.
 Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
 place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
 it"; the frontend renders the scene the other three targets already
-render (`Scene`, `loquax/src/ui/scene.rs:960`), and this section records
+render (`Scene`, `loquax/src/ui/scene.rs:966`), and this section records
 what was measured for the plan, the budgets, and the slices. The host
 numbers below are 64-bit figures from a counting allocator, upper bounds
 for the 32-bit board (the 1337 pattern); the spike code ran under
@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:690`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:692`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -316,7 +316,7 @@ stays the separate renderer it is.
 ### The input model
 
 One table. The M9's keyboard feeds the same resolver the terminal uses:
-a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:971`)
+a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:979`)
 through the shared rows (`ROWS`, `loquax/src/keys.rs:216`, over
 `leviculum_ui::keymap`'s scroll rows), and the action becomes a scene
 intent (`Intent::from_action`, `loquax/src/ui/intent.rs:492`). Nothing
@@ -474,12 +474,12 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
 - **The chat in cells** (`lines`, `loquax-m9/src/chat.rs:40`). The
   scene's chat set as the terminal sets a conversation: a bubble wrapped
   to three quarters of the 53 cells (`block_cap`,
-  `loquax/src/ui/layout.rs:337`), tinted with a margin cell either side,
+  `loquax/src/ui/layout.rs:336`), tinted with a margin cell either side,
   ours flush right, theirs flush left, the time and the mark's ASCII rung
   closing its last row, a blank row between two groups. The day line and
   a group's note line (who joined or left) are the terminal's own
-  (`date_line`, `loquax/src/ui/layout.rs:307`, and `note_line`,
-  `loquax/src/ui/layout.rs:291`, public since this slice). A group's chat
+  (`date_line`, `loquax/src/ui/layout.rs:306`, and `note_line`,
+  `loquax/src/ui/layout.rs:290`, public since this slice). A group's chat
   names the writer above a group of bubbles, which is how a digest's
   lines read (each a bubble under its writer, the model's work), and a
   line that came after newer ones says "arrived late" under it. Quotes,
@@ -896,8 +896,8 @@ host half. Nothing was flashed: the board half is the rig's.
 verbs, the yes/no question, "New group" with its friends, ticks and
 name, the invitation card with its Join. A phone taps a node and runs
 its `Action`. The terminal reaches these verbs through its palette only:
-the rows from `new group` (`loquax/src/keys.rs:842`) to `start again`
-(`loquax/src/keys.rs:874`) have no chord. The M9 has no palette. So its
+the rows from `new group` (`loquax/src/keys.rs:850`) to `start again`
+(`loquax/src/keys.rs:882`) have no chord. The M9 has no palette. So its
 group keys run the node's `Action` the way a tap does (`hit`,
 `loquax-m9/src/group.rs:136`), and nothing new enters the model. The
 cursor over the sheet's and the picker's rows is the M9's own, as a
@@ -1008,7 +1008,7 @@ grows by 17,248 B to 944,768 B (`just build-m9`).
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
-message to the group (`group_state`, `loquax/src/ui/groups.rs:1349`) and
+message to the group (`group_state`, `loquax/src/ui/groups.rs:1403`) and
 the home sends as any message (`/send`). `ask_of`
 (`loquax-m9/src/group.rs:293`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
@@ -1147,7 +1147,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4248`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4269`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1156,7 +1156,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:809`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:811`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
