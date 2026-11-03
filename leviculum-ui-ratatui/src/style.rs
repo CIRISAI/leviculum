@@ -2,6 +2,9 @@
 //! drawn in, the colour-depth post-pass, and the bridge from the terminal-free
 //! styled text model ([`leviculum_ui::style`]) to ratatui text.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as RtLine, Span as RtSpan, Text};
 use ratatui::Frame;

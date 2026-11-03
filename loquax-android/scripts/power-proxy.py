@@ -75,7 +75,10 @@ HERE = Path(__file__).resolve().parent
 MODES = ["B", "Bprime", "A", "ref"]
 # The note's levers (section 1) and whether this tree has a knob for them.
 BPRIME_LEVERS = ["server_access_point", "host_link_keepalive"]
-BPRIME_MISSING = ["tcp_keepalive_idle", "phone_link_keepalive"]
+# Both former gaps are defaults since 1346: the device's TCP idle and its
+# link keepalive (docs/src/concepts/loquax-phone-power.md, "The device link's
+# keepalives").
+BPRIME_MISSING: list[str] = []
 
 
 def load_walk():

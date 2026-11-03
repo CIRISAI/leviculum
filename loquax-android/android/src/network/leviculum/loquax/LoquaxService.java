@@ -22,34 +22,44 @@ import java.util.Map;
  * The foreground service that holds the session while no screen is in
  * front: the process stays, so the leaf node, its link to the home node and
  * the sync schedule's quiet pulls keep running in the library. It shows the
- * persistent notification (the home node, the unread count, a stop button)
- * and one notification per conversation with new messages, which opens the
- * chat. Screens bind to it ({@link ServiceLink}) while they are visible, so
- * no message notification is posted over the app itself.
+ * persistent notification (connected or not, a stop button) and one
+ * notification per conversation with new messages, which opens the chat
+ * and carries that conversation's count. Screens bind to it
+ * ({@link ServiceLink}) while they are visible, so no message notification
+ * is posted over the app itself.
  *
  * Type remoteMessaging: the app carries messages between the phone and its
  * home node. Started sticky: when the system ends the process and starts
  * the service again, it starts the session from the saved home code and
- * address, as the first screen does on a later start.
+ * address, as the first screen does on a later start. After a reboot
+ * {@link BootReceiver} starts it when the user had it running (1345).
  */
 public class LoquaxService extends Service implements Events.Listener {
     static final String STOP = "network.leviculum.loquax.STOP";
-    private static final String SESSION_CHANNEL = "session";
+    static final String SESSION_CHANNEL = "session";
     private static final String MESSAGES_CHANNEL = "messages";
     private static final int SESSION_ID = 1;
     /** How long a failed start waits before the next. */
     private static final long RETRY_MS = 30000;
+    /** Where the wish to run survives a reboot: running and not stopped (1345). */
+    private static final String PREFS = "service";
+    private static final String WANTED = "wanted";
+
+    /** The service in this process once it is in the foreground; null otherwise. */
+    private static LoquaxService foreground;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Binder binder = new Local();
     /** Each conversation's unread count as last seen; null before the first look. */
     private Map<String, Long> unread;
-    private long total;
     /** Whether the TCP interface to the home node is up, as the library last said. */
     private boolean linkUp;
     /** Whether the mailbox runs here, in this process (1152). */
     private boolean here;
-    private String line;
+    /** What the persistent notification says now. */
+    private Notice.State state = Notice.State.STARTING;
+    /** What it said when last posted; null before startForeground. */
+    private Notice.State shown;
     private int screens;
     private boolean running;
     private boolean stopping;
@@ -58,7 +68,45 @@ public class LoquaxService extends Service implements Events.Listener {
 
     /** Start or keep the service; from a screen in front, after a start. */
     static void start(Context context) {
+        if (foreground != null) {
+            // Already in the foreground: a second startForegroundService
+            // would want a second startForeground, which posts the notice
+            // again and undoes a swipe (1345).
+            return;
+        }
         context.startForegroundService(new Intent(context, LoquaxService.class));
+    }
+
+    /** Whether the user had the service running: it ran and was not stopped. */
+    static boolean wanted(Context context) {
+        return context.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(WANTED, false);
+    }
+
+    private static void want(Context context, boolean wanted) {
+        context.getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(WANTED, wanted).apply();
+    }
+
+    /**
+     * The two channels, made before the first notification and before
+     * Settings opens the session channel's system page.
+     *
+     * The session channel is LOW, and a lower one is not ours to set: a
+     * foreground service's notification needs at least LOW
+     * (developer.android.com/develop/background-work/services/fgs/launch),
+     * and NotificationManagerService lifts an app's MIN or NONE channel of
+     * a foreground service to LOW unless the user set the importance
+     * (AOSP frameworks/base 8617e4ec9efa2c34bbebda750f29e43d0fdf4044 and
+     * 025d4a59fced3af7acfccef9cbae13735ddce7c8). What the user sets there
+     * holds, so Settings sends them to the channel's page, where they pick
+     * minimised or off (Android 8 to 13, where the notice cannot be
+     * swiped, and every later one).
+     */
+    static void channels(Context context) {
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        manager.createNotificationChannel(new NotificationChannel(SESSION_CHANNEL,
+                context.getString(R.string.channel_session), NotificationManager.IMPORTANCE_LOW));
+        manager.createNotificationChannel(new NotificationChannel(MESSAGES_CHANNEL,
+                context.getString(R.string.channel_messages), NotificationManager.IMPORTANCE_DEFAULT));
     }
 
     final class Local extends Binder {
@@ -70,12 +118,7 @@ public class LoquaxService extends Service implements Events.Listener {
     @Override
     public void onCreate() {
         super.onCreate();
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(new NotificationChannel(SESSION_CHANNEL,
-                getString(R.string.channel_session), NotificationManager.IMPORTANCE_LOW));
-        manager.createNotificationChannel(new NotificationChannel(MESSAGES_CHANNEL,
-                getString(R.string.channel_messages), NotificationManager.IMPORTANCE_DEFAULT));
-        line = getString(R.string.starting);
+        channels(this);
     }
 
     @Override
@@ -84,18 +127,25 @@ public class LoquaxService extends Service implements Events.Listener {
             end();
             return START_NOT_STICKY;
         }
-        try {
-            if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(SESSION_ID, persistent(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
-            } else {
-                startForeground(SESSION_ID, persistent());
+        if (foreground != this) {
+            // The notice is posted here once; later posts come only from
+            // a change of its sentence (show). A start after the Stop
+            // began is a new foreground, as before.
+            try {
+                if (Build.VERSION.SDK_INT >= 34) {
+                    startForeground(SESSION_ID, persistent(),
+                            ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
+                } else {
+                    startForeground(SESSION_ID, persistent());
+                }
+            } catch (RuntimeException refused) {
+                // Android 12 and later refuse a start from the background
+                // without an exemption; the app's next start asks again.
+                stopSelf();
+                return START_NOT_STICKY;
             }
-        } catch (RuntimeException refused) {
-            // Android 12 and later refuse a start from the background
-            // without an exemption; the app's next start asks again.
-            stopSelf();
-            return START_NOT_STICKY;
+            shown = state;
+            foreground = this;
         }
         Events.service(this);
         if (!running) {
@@ -128,6 +178,7 @@ public class LoquaxService extends Service implements Events.Listener {
         }
         if (Core.bool(answer, "ok")) {
             running = true;
+            want(this, true);
             linkUp = Core.bool(answer, "link");
             here = Core.bool(answer, "here");
             Events.start();
@@ -146,8 +197,7 @@ public class LoquaxService extends Service implements Events.Listener {
         // The words of the failure are the log's; the line says what the
         // service does about it (walk finding 19).
         Log.i(PhotoView.TAG, "start failed: " + Core.str(answer, "error"));
-        line = getString(R.string.not_connected);
-        show();
+        show(Notice.State.AWAY);
         retryLater();
     }
 
@@ -170,6 +220,9 @@ public class LoquaxService extends Service implements Events.Listener {
         }
         stopping = true;
         running = false;
+        // Stopped, by its button or for want of a join: a reboot leaves it so.
+        want(this, false);
+        foreground = null;
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -183,6 +236,9 @@ public class LoquaxService extends Service implements Events.Listener {
 
     @Override
     public void onDestroy() {
+        if (foreground == this) {
+            foreground = null;
+        }
         if (network != null) {
             network.stop();
             network = null;
@@ -216,8 +272,7 @@ public class LoquaxService extends Service implements Events.Listener {
             // builds a fresh one.
             running = false;
             Log.i(PhotoView.TAG, "session ended: " + Core.str(event, "detail"));
-            line = getString(R.string.not_connected);
-            show();
+            show(Notice.State.AWAY);
             if (!stopping) {
                 retryLater();
             }
@@ -225,9 +280,10 @@ public class LoquaxService extends Service implements Events.Listener {
     }
 
     /**
-     * The conversations again: the unread count for the persistent
-     * notification, and a message notification for each conversation
-     * whose unread grew since the last look.
+     * The conversations again: a message notification for each
+     * conversation whose unread grew since the last look. The persistent
+     * notification carries no count, so this posts it only when the link
+     * or the mailbox's place changed with it (1345).
      */
     private void look(boolean tell) {
         Map<String, Object> answer = Core.conversations(null);
@@ -236,7 +292,6 @@ public class LoquaxService extends Service implements Events.Listener {
         }
         List<Map<String, Object>> rows = Core.list(answer, "conversations");
         Map<String, Long> now = new HashMap<>();
-        long total = 0;
         boolean sharing = false;
         NotificationManager manager = getSystemService(NotificationManager.class);
         for (Map<String, Object> row : rows) {
@@ -244,7 +299,6 @@ public class LoquaxService extends Service implements Events.Listener {
             sharing |= Core.bool(row, "sharing");
             long count = Core.num(row, "unread");
             now.put(peer, count);
-            total += count;
             Long before = unread == null ? null : unread.get(peer);
             if (count == 0) {
                 manager.cancel(peer, 0);
@@ -255,36 +309,45 @@ public class LoquaxService extends Service implements Events.Listener {
             }
         }
         unread = now;
-        this.total = total;
         ShareService.look(this, sharing);
         describe();
     }
 
-    /** The persistent notification's line: the link, then the unread count. */
+    /** The persistent notification's sentence from the link and the mailbox's place. */
     private void describe() {
         if (!running) {
             return;
         }
-        if (here) {
-            // The screens' link is a loopback one: the mailbox itself is
-            // what the line names.
-            line = total == 0 ? getString(R.string.here_running)
-                    : getString(R.string.here_running_unread, total);
-        } else if (!linkUp) {
-            // No address on the line (walk finding 19): the profile's
-            // Advanced lists the servers and which one is up.
-            line = getString(R.string.connecting);
-        } else if (total == 0) {
-            line = getString(R.string.connected);
-        } else {
-            line = getString(R.string.connected_unread, total);
-        }
-        show();
+        // The screens' link to a mailbox here is a loopback one: the
+        // mailbox itself is what the line names. No address on the line
+        // (walk finding 19): the profile's Advanced lists the servers.
+        show(Notice.of(running, here, linkUp));
     }
 
-    private void show() {
-        if (!stopping) {
-            getSystemService(NotificationManager.class).notify(SESSION_ID, persistent());
+    /**
+     * The notice says `now`: posted again only when that is a change
+     * (Notice.posts), so a swipe on Android 14 and later holds until the
+     * next one, and before startForeground nothing is posted.
+     */
+    private void show(Notice.State now) {
+        state = now;
+        if (stopping || shown == null || !Notice.posts(shown, now)) {
+            return;
+        }
+        shown = now;
+        getSystemService(NotificationManager.class).notify(SESSION_ID, persistent());
+    }
+
+    private String line() {
+        switch (state) {
+            case HERE:
+                return getString(R.string.here_running);
+            case CONNECTED:
+                return getString(R.string.connected);
+            case AWAY:
+                return getString(R.string.not_connected);
+            default:
+                return getString(R.string.starting);
         }
     }
 
@@ -299,7 +362,7 @@ public class LoquaxService extends Service implements Events.Listener {
         return new Notification.Builder(this, SESSION_CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setContentTitle(getString(R.string.app_name))
-                .setContentText(line)
+                .setContentText(line())
                 .setContentIntent(opening)
                 .setOngoing(true)
                 .setShowWhen(false)

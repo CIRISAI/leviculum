@@ -320,7 +320,7 @@ last cursor:
 5. Known identities (contacts' keys), as 1281 moves them.
 
 The 1164 watch (`loquax/src/store.rs:1651` `data_version`, `WATCH_PATH`
-in `loquax/src/home.rs:106`) wakes the devices of each home when the
+in `loquax/src/home.rs:153`) wakes the devices of each home when the
 sync wrote.
 
 ### 2.6 Conflict rules

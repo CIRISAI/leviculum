@@ -221,7 +221,7 @@ Settings
   Profile         the profile behind the avatar (1187), below
   Mailbox         where it lives, connected since, join another
   Appearance      app theme; Map: like the phone / light / dark
-  Notifications   on/off, sound, per chat muting
+  Notifications   on/off, sound, per chat muting, the connection notice
   Privacy         read receipts (1233, first), blocked contacts, positions shared
   Maps            regions with sizes, delete, automatic download on/off
   Backup          back up the mailbox, restore
@@ -230,6 +230,20 @@ Settings
 
 "Load area" becomes the Maps entry: management, not an action on the
 map. Help is its own entry in the three dot menu, not a settings page.
+
+The connection notice (1345) is the foreground service's notification,
+"Connected to your mailbox", which Android does not let a service run
+without. It carries no unread count (each conversation's notification
+has its own), and it is posted again only when its sentence changes
+(connected, not connected, the mailbox on this phone), so a swipe on
+Android 14 and later holds until the next change. Notifications,
+"Connection notice" opens the channel's system page, where the user
+picks minimised or off; on Android 13 and earlier, where the notice
+cannot be swiped, that is the way to quiet it. The app cannot set the
+channel below LOW itself: Android lifts a foreground service's channel
+to LOW unless the user lowered it (`LoquaxService.channels`). After a
+reboot `BootReceiver` starts the service again when the user had it
+running, that is, it ran and was not ended by its Stop.
 
 ## The profile
 

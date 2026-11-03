@@ -286,8 +286,9 @@ pub fn folded(conversation: &Conversation, index: usize) -> bool {
 
 /// `── was Alice, now announces Ally ──`, centred and muted: a peer's name
 /// changed, said once where it happened (`loquax-mailbox.md`, the naming
-/// decision, 2). Cut to the pane with `…` when it is wider.
-fn note_line(text: &str, width: usize, tokens: &Tokens) -> RLine {
+/// decision, 2). Cut to the pane with `…` when it is wider. The M9's chat
+/// draws a group's own lines with it (1356).
+pub fn note_line(text: &str, width: usize, tokens: &Tokens) -> RLine {
     let text = truncate_to_cols(&format!("── {text} ──"), width.saturating_sub(2));
     centred(&text, width, painted(tokens.muted))
 }
@@ -302,7 +303,8 @@ fn centred(text: &str, width: usize, st: RStyle) -> RLine {
 
 /// `── Saturday 24 October ──`, centred: the dashes muted, the label with a
 /// space either side on the date pill (decided 2026-10-26, part 6, 3).
-fn date_line(label: &str, width: usize, tokens: &Tokens) -> RLine {
+/// The M9's chat draws its day lines with it (1356).
+pub fn date_line(label: &str, width: usize, tokens: &Tokens) -> RLine {
     let text = format!("── {label} ──");
     let pad = width.saturating_sub(text.chars().count()) / 2;
     let muted = painted(tokens.muted);

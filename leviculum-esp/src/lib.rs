@@ -31,16 +31,21 @@
 
 #![no_std]
 
+extern crate alloc;
+
 pub mod boards;
 pub mod sx1262;
 
+use core::alloc::{GlobalAlloc, Layout};
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use embedded_alloc::LlffHeap as Heap;
 use esp_hal::{
     clock::CpuClock,
     peripherals::{Peripherals, USB_DEVICE},
     time::{Duration, Instant},
+    uart::Uart,
     usb::usb_serial_jtag::UsbSerialJtag,
     Blocking,
 };
@@ -77,8 +82,62 @@ pub const FW_BUILD_STAMP: &str = concat!(
 // Heap
 // ---------------------------------------------------------------------
 
+/// The allocator, counted: what is live now and the most that was since
+/// [`heap_reset_peak`]. The count is what a board's census reads
+/// (`heap-budget`-style, order 1361); two atomics per call, against a
+/// linked-list search that costs far more.
+struct CountedHeap {
+    heap: Heap,
+    live: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+// SAFETY: every call goes to the inner allocator unchanged; the counts are
+// bookkeeping beside it and never decide what is handed out.
+unsafe impl GlobalAlloc for CountedHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's contract, passed through.
+        let ptr = unsafe { self.heap.alloc(layout) };
+        if !ptr.is_null() {
+            let live = self.live.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+            self.peak.fetch_max(live, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.live.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: the caller's contract, passed through.
+        unsafe { self.heap.dealloc(ptr, layout) }
+    }
+}
+
 #[global_allocator]
-static HEAP: Heap = Heap::empty();
+static HEAP: CountedHeap = CountedHeap {
+    heap: Heap::empty(),
+    live: AtomicUsize::new(0),
+    peak: AtomicUsize::new(0),
+};
+
+/// Bytes allocated and not yet freed.
+pub fn heap_live() -> usize {
+    HEAP.live.load(Ordering::Relaxed)
+}
+
+/// The most [`heap_live`] has been since the last [`heap_reset_peak`].
+pub fn heap_peak() -> usize {
+    HEAP.peak.load(Ordering::Relaxed)
+}
+
+/// Start a new peak at what is live now.
+pub fn heap_reset_peak() {
+    HEAP.peak.store(heap_live(), Ordering::Relaxed);
+}
+
+/// Bytes the allocator still has.
+pub fn heap_free() -> usize {
+    HEAP.heap.free()
+}
 
 /// Bytes reserved for the heap.
 ///
@@ -98,8 +157,22 @@ fn init_heap() {
     // `addr_of!` avoids forming a reference to the `static mut`.
     unsafe {
         let heap_start = core::ptr::addr_of!(HEAP_MEM) as usize;
-        HEAP.init(heap_start, HEAP_SIZE);
+        HEAP.heap.init(heap_start, HEAP_SIZE);
     }
+}
+
+/// Give the allocator `size` bytes at `start` instead of the [`HEAP_SIZE`]
+/// array: a board whose heap lives elsewhere, the M9's UI in PSRAM (order
+/// 1361), calls this after [`init_soc`] and before anything allocates.
+///
+/// # Safety
+///
+/// Called once, instead of [`init`]'s heap, before any allocation; the
+/// region is mapped, writable, and used by nothing else for as long as the
+/// image runs.
+pub unsafe fn init_heap_at(start: usize, size: usize) {
+    // SAFETY: the caller's contract.
+    unsafe { HEAP.heap.init(start, size) }
 }
 
 // ---------------------------------------------------------------------
@@ -120,9 +193,15 @@ fn init_heap() {
 /// pretending otherwise with a lower number would be a decision without a
 /// measurement behind it.
 pub fn init() -> Peripherals {
-    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+    let peripherals = init_soc();
     init_heap();
     peripherals
+}
+
+/// [`init`]'s first step alone: the SoC, its clocks and watchdogs, and no
+/// heap. For a board that places its heap itself with [`init_heap_at`].
+pub fn init_soc() -> Peripherals {
+    esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()))
 }
 
 /// Milliseconds since boot, the stamp every log line carries.
@@ -232,22 +311,146 @@ impl<'d> UsbLog<'d> {
     }
 }
 
+/// The debug log of a board behind a USB-UART bridge (the ThinkNode M9's
+/// CH340K on UART0): the same line shape as [`UsbLog`], plus the raw lines
+/// a host reads by their own first word (`KB`, `KBRAW`, the `PBM` dump),
+/// which carry no ` t=` stamp because their readers parse them whole, and
+/// HDLC frames for the control envelope's answers.
+///
+/// The bridge always drains the UART at the line rate, host or no host, so
+/// a write here blocks for the bytes' wire time and never longer.
+///
+/// One byte stream carries all three, so the rules of
+/// `leviculum-nrf/serial-mux` apply: a line is written whole and never
+/// inside a frame, and text never carries a raw 0x7E, 0x7D, 0x11 or 0x13.
+/// Every line this crate writes is formatted ASCII from fixed words and
+/// numbers; [`UartLog::line`] escapes what a formatted argument could
+/// still bring.
+pub struct UartLog<'d> {
+    uart: Uart<'d, Blocking>,
+}
+
+impl<'d> UartLog<'d> {
+    /// Log over `uart`, already configured and pinned.
+    pub fn new(uart: Uart<'d, Blocking>) -> Self {
+        Self { uart }
+    }
+
+    /// One line, shaped by [`leviculum_log_line::format_line`] as
+    /// [`UsbLog::line`] shapes it.
+    pub fn line(&mut self, prefix: &str, args: core::fmt::Arguments) {
+        let mut buf = [0u8; LINE_MAX];
+        let line = leviculum_log_line::format_line(&mut buf, prefix, args, uptime_ms());
+        let mut out = [0u8; 4 * LINE_MAX];
+        let mut n = 0;
+        for byte in line {
+            match byte {
+                0x7E | 0x7D | 0x11 | 0x13 => {
+                    for (i, b) in [b'\\', b'x', hex_digit(byte >> 4), hex_digit(byte & 0xF)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        out[n + i] = b;
+                    }
+                    n += 4;
+                }
+                _ => {
+                    out[n] = *byte;
+                    n += 1;
+                }
+            }
+        }
+        self.write_all(&out[..n]);
+    }
+
+    /// One raw line, `text` and a line end, as it is: for the lines read
+    /// whole by their first word. `text` must be plain ASCII.
+    pub fn raw(&mut self, text: &str) {
+        self.write_all(text.as_bytes());
+        self.write_all(b"\r\n");
+    }
+
+    /// One HDLC frame of `payload`, flags included (`leviculum_core`'s
+    /// codec), between lines.
+    pub fn frame(&mut self, payload: &[u8]) {
+        let mut framed = alloc::vec::Vec::new();
+        leviculum_core::framing::hdlc::frame(payload, &mut framed);
+        self.write_all(&framed);
+    }
+
+    /// All of `bytes`: esp-hal's `write` places what fits in the FIFO and
+    /// says how much. A TX error drops the rest of the write, never the
+    /// boot.
+    fn write_all(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            match self.uart.write(bytes) {
+                Ok(n) => bytes = &bytes[n..],
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// The bytes the host sent that have arrived, without waiting: how many
+    /// went into `buf`.
+    pub fn read_ready(&mut self, buf: &mut [u8]) -> usize {
+        self.uart.read_buffered(buf).unwrap_or(0)
+    }
+
+    /// `[FW_BUILD]` and `[BOARD]`, as [`UsbLog::identify`] says them, for a
+    /// board described by its name, tag and heap rather than a
+    /// [`BoardConfig`].
+    pub fn identify(&mut self, log_prefix: &str, board_name: &str, heap: usize) {
+        self.line("[FW_BUILD] ", format_args!("{FW_BUILD_STAMP}"));
+        self.line(
+            "[BOARD] ",
+            format_args!("id={log_prefix} name={board_name} heap={heap}"),
+        );
+    }
+}
+
+fn hex_digit(nibble: u8) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble,
+        _ => b'a' + nibble - 10,
+    }
+}
+
 // ---------------------------------------------------------------------
 // Panic
 // ---------------------------------------------------------------------
 
-/// Halt on panic.
+/// The UART0 rate a panic is said at, 0 for none: set by a board whose
+/// debug log is UART0 ([`say_panics_on_uart0`]).
+static PANIC_UART0_BAUD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Have a panic say its message on UART0 at `baud` before the board stops:
+/// a board whose debug log is UART0 behind a bridge (the M9) calls this
+/// once its log is up.
+pub fn say_panics_on_uart0(baud: u32) {
+    PANIC_UART0_BAUD.store(baud, Ordering::Relaxed);
+}
+
+/// Halt on panic, after saying why where a board asked for it.
 ///
-/// Deliberately the whole of it at this step. The nRF crate's handler
-/// writes the message into `.uninit` RAM, counts the panic across resets
-/// and replays it on the next boot; every one of those depends on machinery
-/// this crate does not have yet (a noinit section, a persistent counter, a
-/// boot-time replay). A handler that pretended to do any of it would be a
-/// handler nobody could trust, so this one does the one thing it can do
-/// honestly: stop, and leave the board visibly dead rather than quietly
-/// wrong.
+/// The nRF crate's handler writes the message into `.uninit` RAM, counts
+/// the panic across resets and replays it on the next boot; every one of
+/// those depends on machinery this crate does not have yet (a noinit
+/// section, a persistent counter, a boot-time replay), so this one does not
+/// pretend to. What it can do honestly: on a board that named UART0 as its
+/// log ([`say_panics_on_uart0`]), one `[PANIC]` line on a fresh driver,
+/// then stop, and leave the board visibly dead rather than quietly wrong.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let baud = PANIC_UART0_BAUD.load(Ordering::Relaxed);
+    if baud != 0 {
+        // SAFETY: the panicking context owns nothing any more; a fresh
+        // driver on UART0, whose pins the board routed at boot, is the only
+        // way left to say why.
+        let uart0 = unsafe { esp_hal::peripherals::UART0::steal() };
+        if let Ok(uart) = Uart::new(uart0, esp_hal::uart::Config::default().with_baudrate(baud)) {
+            UartLog::new(uart).line("[PANIC] ", format_args!("{info}"));
+        }
+    }
     loop {
         core::hint::spin_loop();
     }

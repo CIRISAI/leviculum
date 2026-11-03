@@ -5,6 +5,9 @@
 //! again, not "Pull failed" with the library's words; the chat menu's
 //! Refresh is gone; the contact screen speaks of the name they chose and of
 //! no hash; Advanced says "Relay" for the propagation node.
+//!
+//! Every translatable string has its German (1345): the session channel's
+//! name showed English on a German phone because `values-de` lacked it.
 
 use std::path::PathBuf;
 
@@ -152,4 +155,125 @@ fn advanced_says_relay_for_the_propagation_node() {
             "{dir}: Advanced's summary {summary:?}"
         );
     }
+}
+
+/// Each `<string>` and `<plurals>` of one resource file by name: its
+/// attributes after the name, and its text.
+fn entries(xml: &str) -> Vec<(String, String, String)> {
+    let mut found = Vec::new();
+    let mut rest = xml;
+    while let Some(at) = rest.find('<') {
+        rest = &rest[at + 1..];
+        let kind = if rest.starts_with("string name=\"") {
+            "string"
+        } else if rest.starts_with("plurals name=\"") {
+            "plurals"
+        } else {
+            continue;
+        };
+        let after = &rest[kind.len() + " name=\"".len()..];
+        let Some(quote) = after.find('"') else { break };
+        let name = after[..quote].to_string();
+        let Some(gt) = after.find('>') else { break };
+        let attributes = after[quote + 1..gt].to_string();
+        let close = format!("</{kind}>");
+        let Some(end) = after[gt..].find(&close) else {
+            break;
+        };
+        found.push((name, attributes, after[gt + 1..gt + end].to_string()));
+        rest = &after[gt + end..];
+    }
+    found
+}
+
+/// The format arguments of a text, `%1$d` and the like, sorted.
+fn arguments(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = text
+        .match_indices('%')
+        .filter_map(|(at, _)| {
+            let tail = &text[at + 1..];
+            let digits = tail.chars().take_while(char::is_ascii_digit).count();
+            let rest = &tail[digits..];
+            (digits > 0 && rest.starts_with('$'))
+                .then(|| rest[1..].chars().next())
+                .flatten()
+                .map(|kind| format!("%{}${kind}", &tail[..digits]))
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn every_translatable_string_has_its_german_with_the_same_arguments() {
+    for file in ["strings.xml", "strings_scene.xml"] {
+        let read = |dir: &str| {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("android/res")
+                .join(dir)
+                .join(file);
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        };
+        let en = entries(&read("values"));
+        let de = entries(&read("values-de"));
+        assert!(en.len() > 50, "{file}: only {} entries read", en.len());
+        let german = |name: &str| de.iter().find(|(n, _, _)| n == name);
+        let mut missing = Vec::new();
+        for (name, attributes, text) in &en {
+            let fixed = attributes.contains("translatable=\"false\"");
+            match (fixed, german(name)) {
+                (true, Some(_)) => {
+                    panic!("{file}: {name} is the same everywhere, yet has a German")
+                }
+                (true, None) => {}
+                (false, None) => missing.push(name.clone()),
+                (false, Some((_, _, words))) => assert_eq!(
+                    arguments(words),
+                    arguments(text),
+                    "{file}: {name}'s arguments differ in German"
+                ),
+            }
+        }
+        assert!(missing.is_empty(), "{file}: no German for {missing:?}");
+        for (name, _, _) in &de {
+            assert!(
+                en.iter().any(|(n, _, _)| n == name),
+                "{file}: {name} is German only"
+            );
+        }
+    }
+    let de = resources("values-de");
+    assert_eq!(
+        string(&de, "channel_session").as_deref(),
+        Some("Verbindung zu deinem Postfach")
+    );
+    assert_eq!(
+        string(&de, "connection_notice").as_deref(),
+        Some("Benachrichtigung für die Verbindung")
+    );
+    let en = resources("values");
+    assert_eq!(
+        string(&en, "connection_notice").as_deref(),
+        Some("Connection notice")
+    );
+}
+
+#[test]
+fn the_parity_check_names_a_missing_german_and_a_changed_argument() {
+    // Positive control for the check above: a German file without one
+    // string and with another's argument changed.
+    let en = entries(
+        r#"<resources><string name="a">One %1$d</string><string name="b">Two</string>
+        <string name="c" translatable="false">C</string>
+        <plurals name="p"><item quantity="one">%1$d x</item></plurals></resources>"#,
+    );
+    assert_eq!(en.len(), 4);
+    assert!(en[2].1.contains("translatable=\"false\""));
+    assert_eq!(arguments(&en[0].2), ["%1$d"]);
+    assert_eq!(arguments(&en[3].2), ["%1$d"]);
+    let de = entries(r#"<resources><string name="a">Eins %1$s</string></resources>"#);
+    assert_ne!(arguments(&de[0].2), arguments(&en[0].2));
+    assert!(!de.iter().any(|(n, _, _)| n == "b"));
+    assert_eq!(arguments("100% sure, %2$s and %1$d"), ["%1$d", "%2$s"]);
 }

@@ -3237,6 +3237,37 @@ impl ReticulumNode {
             .map(|l| *l.destination_hash())
     }
 
+    /// Give one link its own keepalive interval in seconds, in place of the
+    /// RTT-derived one or the node-wide override (1346); the stale timeout
+    /// follows it at twice the interval. `false` when the link does not
+    /// exist. Local timing only, as the node-wide override: nothing on the
+    /// wire changes, but the peer has to tolerate the silence, since a
+    /// responder goes stale at twice *its own* interval (Link.py:797). So
+    /// both ends of a link set it, as Loquax does on a device's link to its
+    /// mailbox; a link to a reference peer keeps the default. Takes the
+    /// core lock: never from a `CoreProcessor` hook.
+    pub fn set_link_keepalive(&self, link_id: &LinkId, secs: u64) -> bool {
+        match self.inner.lock_recover().link_mut(link_id) {
+            Some(link) => {
+                link.set_keepalive_override(Some(secs));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The keepalive interval of a link in milliseconds and the keepalive
+    /// round trips it has made (on an initiator the answers it heard, on a
+    /// responder the keepalives it answered), or `None` when the link does
+    /// not exist (1346: the wake counters of a device link). Takes the
+    /// core lock: never from a `CoreProcessor` hook.
+    pub fn link_keepalive(&self, link_id: &LinkId) -> Option<(u64, u64)> {
+        self.inner
+            .lock_recover()
+            .link(link_id)
+            .map(|l| (l.keepalive_ms(), l.keepalives_acked()))
+    }
+
     /// Get the encrypted link MDU (maximum data unit) for a link
     ///
     /// Returns `None` if the link does not exist.
@@ -9531,6 +9562,18 @@ mod tests {
             Some(dest_hash),
             "active link must expose the dialed destination"
         );
+
+        // 4. 1346: one link takes its own keepalive, the RTT measured at
+        //    establishment notwithstanding; an unknown id takes nothing.
+        assert!(!node.set_link_keepalive(&unknown, 230));
+        assert!(node.link_keepalive(&unknown).is_none());
+        let (rtt_derived, _) = node.link_keepalive(&link_id).expect("live link");
+        assert!(
+            rtt_derived < 230_000,
+            "a local pair's RTT gives {rtt_derived} ms"
+        );
+        assert!(node.set_link_keepalive(&link_id, 230));
+        assert_eq!(node.link_keepalive(&link_id), Some((230_000, 0)));
     }
 
     // ---- Codeberg #196: the in-driver core processor seam --------------

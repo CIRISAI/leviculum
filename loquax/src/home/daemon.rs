@@ -57,6 +57,7 @@ use crate::engine::{
 use crate::fanout::Fanout;
 use crate::fetch::{run_fetch, FetchOptions};
 use crate::home::group::{self, Hosted};
+use crate::home::keepalive::Ledger;
 use crate::home::outgoing::{Act, Change, Heard, Leg, Outcome, Outgoing, Policy};
 use crate::home::relation::Relations;
 use crate::home::wake::{Due, Wakes};
@@ -149,6 +150,11 @@ const PUMP: Duration = Duration::from_millis(20);
 /// How often the outbox looks for a due retry or a passed horizon. Both are
 /// counted in seconds.
 const OUTBOX_TICK: Duration = Duration::from_secs(1);
+/// How often the device links' keepalive totals are read (1346): a link
+/// that closes between two readings loses at most this much of its count.
+const COSTS_LOOK: Duration = Duration::from_secs(60);
+/// The window of the `WAKE_SUMMARY` lines, one per device.
+const SUMMARY_EVERY: Duration = Duration::from_millis(super::keepalive::SUMMARY_EVERY_MS);
 /// How often the home node looks whether another process wrote the store
 /// ([`crate::store::Store::data_version`]): the most a watching client
 /// waits for an import on the mailbox before its wake goes. One look is a
@@ -475,6 +481,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         }
     }
     let mut wakes: Wakes<LinkId> = Wakes::default();
+    let mut costs: Ledger<LinkId> = Ledger::default();
+    let mut costs_look = tokio::time::interval(COSTS_LOOK);
+    let mut next_summary = tokio::time::Instant::now() + SUMMARY_EVERY;
     wakes.appended(store.archive_newest_waking().map_err(|e| e.to_string())?);
     let mut outside_version = store.data_version().map_err(|e| e.to_string())?;
 
@@ -524,8 +533,15 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 let (link, remote) = (request.link_id, request.remote);
                 serving.handover =
                     handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
-                let (accepted, watching, gone, (made, added, deleted)) =
+                let (accepted, watching, gone, (made, added, deleted), size) =
                     answer(&node, &mut store, &serving, request).await;
+                if let Some(device) = remote {
+                    // A device's link takes the long keepalive the device
+                    // asks of it (1346), or it goes stale at 20 s.
+                    if costs.asked(link, device, size as u64) {
+                        node.set_link_keepalive(&link, super::keepalive::LINK_KEEPALIVE_SECS);
+                    }
+                }
                 if let Some((address, told)) = deleted {
                     // The owner deleted the group (1307 pass four): its
                     // engine sends the last membership, then refuses all.
@@ -606,6 +622,20 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     );
                     let acts = outgoing.tick(unix_now());
                     sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn, selected_pn);
+                }
+            }
+            _ = costs_look.tick() => {
+                for link in costs.links() {
+                    costs.keepalives(&link, node.link_keepalive(&link).map(|(_, n)| n));
+                }
+            }
+            _ = tokio::time::sleep_until(next_summary) => {
+                next_summary = tokio::time::Instant::now() + SUMMARY_EVERY;
+                for (device, window) in costs.take() {
+                    tracing::info!(
+                        "{}",
+                        super::keepalive::mailbox_line(&crate::address::to_hex(&device), &window)
+                    );
                 }
             }
             _ = outside.tick() => {
@@ -738,7 +768,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 }
                 wakes.appended(sender.newest);
                 for due in wakes.due(now_ms()) {
-                    send_wake(&node, &mut store, &mut wakes, due).await;
+                    send_wake(&node, &mut store, &mut wakes, &mut costs, due).await;
                 }
                 if fetch.is_none() {
                     if let Some(schedule) = &mut schedule {
@@ -1382,6 +1412,7 @@ async fn send_wake(
     node: &ReticulumNode,
     store: &mut Store,
     wakes: &mut Wakes<LinkId>,
+    costs: &mut Ledger<LinkId>,
     due: Due<LinkId>,
 ) {
     let device = crate::address::to_hex(&due.device);
@@ -1399,12 +1430,13 @@ async fn send_wake(
             return;
         }
     }
-    let sent = node
-        .link_handle(&due.link)
-        .try_send(&super::wire::wake(due.newest))
-        .await;
+    let wake = super::wire::wake(due.newest);
+    let sent = node.link_handle(&due.link).try_send(&wake).await;
     match sent {
-        Ok(()) => tracing::info!("HOME wake device={device} newest={}", due.newest),
+        Ok(()) => {
+            costs.woke(due.device, wake.len() as u64);
+            tracing::info!("HOME wake device={device} newest={}", due.newest);
+        }
         Err(leviculum_std::Error::Send(SendError::Busy | SendError::PacingDelay { .. })) => {
             wakes.unsent(&due.link, due.before);
         }
@@ -1465,6 +1497,7 @@ async fn answer(
         Option<([u8; 16], Vec<group::Outgoing>)>,
         Option<([u8; 16], Vec<group::Outgoing>)>,
     ),
+    usize,
 ) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1486,6 +1519,7 @@ async fn answer(
         }
     }
     let bytes = &answer.bytes;
+    let size = request.data.len() + bytes.len();
     let sent = match node
         .send_response(&request.link_id, &request.request_id, bytes)
         .await
@@ -1505,6 +1539,7 @@ async fn answer(
             None,
             false,
             (answer.group, answer.added, answer.deleted),
+            size,
         );
     }
     (
@@ -1512,6 +1547,7 @@ async fn answer(
         answer.watching,
         answer.gone,
         (answer.group, answer.added, answer.deleted),
+        size,
     )
 }
 

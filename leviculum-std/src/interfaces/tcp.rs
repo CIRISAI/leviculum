@@ -171,6 +171,21 @@ impl TcpLiveness {
     }
 }
 
+impl TcpLiveness {
+    /// The longest an idle connection to a peer that stopped answering
+    /// stays up on Linux and Android (1346): the first probe goes out after
+    /// `idle`, then one every `interval`; with a user timeout the kernel
+    /// aborts at the first probe tick at which nothing came for
+    /// `user_timeout` (`tcp_keepalive_timer`, net/ipv4/tcp_timer.c), else
+    /// after `probes` unanswered probes. Today's defaults give 26 s.
+    pub(crate) fn silent_peer_bound(&self) -> Duration {
+        match self.user_timeout {
+            Some(user_timeout) => self.idle.max(user_timeout) + self.interval,
+            None => self.idle + self.interval * self.probes,
+        }
+    }
+}
+
 /// Apply `liveness` to a TCP socket (std or tokio).
 /// Best-effort by contract at the call sites: a socket that cannot take
 /// the options still works, it just falls back to kernel default

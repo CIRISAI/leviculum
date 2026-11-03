@@ -922,7 +922,7 @@ SESSION_NOTIFICATIONS = """\
       uid=10123 userId=0
       extras={
         android.title=String (Loquax)
-        android.text=String (Connected to your mailbox, 3 unread)
+        android.text=String (Connected to your mailbox)
       }
     NotificationRecord(0x0b2c3d4e: pkg=network.leviculum.loquax.debug user=UserHandle{0} id=0 tag=3b5c00112233445566778899aabbccdd importance=4 key=x: Notification(channel=messages))
       extras={
@@ -938,9 +938,13 @@ class SessionLine(unittest.TestCase):
 
     def test_the_untagged_records_text_is_the_line(self):
         line = walk.session_line(SESSION_NOTIFICATIONS, walk.PACKAGE)
-        self.assertEqual(line, "Connected to your mailbox, 3 unread")
+        self.assertEqual(line, "Connected to your mailbox")
         self.assertEqual(walk.session_line_problems(line, self.SERVER), [])
-        self.assertEqual(walk.session_line_problems("Connected to your mailbox", self.SERVER), [])
+        # The count moved to the message notifications (1345): a line with
+        # one is the old notice, posted again on every new message.
+        problems = walk.session_line_problems("Connected to your mailbox, 3 unread", self.SERVER)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("the line says", problems[0])
 
     def test_none_the_old_words_or_the_server_are_named(self):
         self.assertIsNone(walk.session_line(NOTIFICATIONS, walk.PACKAGE))

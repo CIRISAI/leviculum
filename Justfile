@@ -1437,6 +1437,9 @@ tree-clean-selftest:
 # leviculum-core/src/lib.rs`, 4.0 s warm (2026-11-02, with the esp fork).
 # `no-printf-grep-pipes` (1340, #843) is a text scan over the tracked shell
 # files: 0.3 s, no build, no test target (2026-11-02).
+# `m9-render-no-std` (1351, 1363, #232, #473) on the same three grounds: the
+# M9's renderer and client for both firmware triples and one temp copy's checks
+# for their two controls, 7.7 s warm with the esp fork (2026-11-03), most of it those.
 #
 # NOT a tier. Tiers nest (`standard` contains `fast`); `guards` is a strict
 # subset of `fast` and adds nothing to it, so a green `guards` is a cheap
@@ -1554,7 +1557,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1586,7 +1589,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2563,6 +2566,20 @@ loquax-core-no-std:
 lnomad-core-no-std:
     @bash scripts/check-lnomad-core-no-std.sh
 
+# 1351, #232, #473: the M9's renderer (`loquax-m9`) is `no_std` plus `alloc`,
+# so the firmware links the crate the host draws the goldens with
+# (docs/src/concepts/handheld-messenger.md, "The M9 frontend: the plan,
+# measured", slice one). Checked with what it builds on (the loquax core,
+# leviculum-ui-ratatui without `terminal`, ratatui, mousefood) for
+# thumbv7em-none-eabihf and, where the esp fork is installed, the M9's
+# xtensa-esp32s3-none-elf (a SKIP line says when it is not). Positive control
+# first: a `std::fs` call injected into a temp copy of the crate is refused,
+# and one injected into the client the board runs (`loquax::home::ask`,
+# slice five, 1363) as well. In `guards`, see the ledger.
+[doc('Check the M9 renderer and client build no_std for firmware (#232, #473)')]
+m9-render-no-std:
+    @bash scripts/check-m9-render-no-std.sh
+
 # 994, #232: loquax's `tui` feature is off by default, so `cargo test
 # --workspace` and the workspace clippy never compile `loquax tui` or run its
 # tests. This does: clippy over every loquax target with the feature, the
@@ -2590,7 +2607,7 @@ lnomad-core-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile
@@ -2654,3 +2671,28 @@ loquax-name:
 [doc('Check that every Python- or codec-spawning test declares its needs')]
 check-python-test-prerequisites:
     @python3 scripts/check-python-test-prerequisites.py
+
+# The ThinkNode M9's Loquax image (1361, #232, #473): the renderer on the
+# panel, the keyboard over I2C, the frame dump on a control frame, no radio.
+# Builds and packages it and prints its flash and stack headroom the way
+# nrf-flash-budget prints the nRF images' (FLASH_HEADROOM, STACK_HEADROOM),
+# red below 8 KiB of the partition free or a stack under the open chat's
+# census ceilings. About 1.5 min cold, 35 s warm (2026-11-03). Not in a
+# gate: the Xtensa compiler fork is optional per host, as for build-esp32.
+[doc('Build the ThinkNode M9 Loquax image and print its headroom')]
+build-m9:
+    bash scripts/build-m9-image.sh
+
+# Write the image `build-m9` made to an M9 through the ROM loader, at the
+# 230400 baud its CH340K holds (lnflash/src/esp.rs, the bench notes of
+# 2026-10-25), with espflash's default partition table for 16 MB. The port
+# is the bridge's tty; espflash resets the board into the loader and back.
+[doc('Flash the ThinkNode M9 Loquax image over its CH340 (port: the tty)')]
+flash-m9 port:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.cargo/bin:$PATH"
+    elf=leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9
+    test -f "$elf" || { echo "no $elf: run just build-m9 first"; exit 1; }
+    espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
+        --non-interactive --flash-size 16mb "$elf"

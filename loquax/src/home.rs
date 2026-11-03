@@ -7,6 +7,8 @@
 //! to the home node's own destination, `loquax.home`. Fetching never deletes.
 //!
 //! - [`code`]: the admission code `loquax mailbox admit` prints.
+//! - [`ask`]: a client's ask without the waiting, the path ladder and the
+//!   join's steps, which `client` and the M9 drive alike.
 //! - `admit`: opening one, on a computer's mailbox and a phone's alike.
 //! - [`wire`]: the five requests, `/join`, `/sync`, `/send`, `/mark` and
 //!   `/watch`, their answers, and the wake.
@@ -29,8 +31,10 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
 #[cfg(feature = "history")]
 pub mod admit;
+pub mod ask;
 pub mod backup;
 pub mod code;
+pub mod keepalive;
 pub mod outgoing;
 pub mod relation;
 pub mod wake;
@@ -58,6 +62,8 @@ pub mod runner;
 pub mod server;
 #[cfg(feature = "std")]
 pub mod setup;
+#[cfg(feature = "std")]
+pub mod upstream;
 #[cfg(feature = "std")]
 pub mod watch;
 

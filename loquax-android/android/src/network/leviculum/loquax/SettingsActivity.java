@@ -1,8 +1,10 @@
 package network.leviculum.loquax;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -155,8 +157,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
         } else if (page == R.string.settings_chats) {
             chats();
         } else if (page == R.string.settings_notifications) {
-            body.addView(padded(text(getString(R.string.settings_notifications_text), 15,
-                    R.color.text_secondary)));
+            notifications();
         } else if (page == R.string.settings_privacy) {
             privacy();
         } else if (page == R.string.settings_maps) {
@@ -637,6 +638,44 @@ public class SettingsActivity extends Activity implements Events.Listener {
                     R.color.text_secondary));
             body.addView(line);
         }
+    }
+
+    /**
+     * What Loquax notifies of, and the connection notice's row (1345): it
+     * opens the session channel's system page, where the user picks
+     * minimised or off, as ntfy and Conversations do; Android keeps a
+     * foreground service's notice, and only the user may lower its channel
+     * (LoquaxService.channels).
+     */
+    private void notifications() {
+        body.addView(padded(text(getString(R.string.settings_notifications_text), 15,
+                R.color.text_secondary)));
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        row.setBackgroundResource(android.R.drawable.list_selector_background);
+        row.setId(R.id.connection_notice);
+        row.addView(text(getString(R.string.connection_notice), 16, R.color.text));
+        row.addView(text(getString(R.string.connection_notice_text), 14, R.color.text_secondary));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // The channel has to exist for its page; the service makes
+                // it too, but may not have run yet.
+                LoquaxService.channels(SettingsActivity.this);
+                try {
+                    startActivity(new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())
+                            .putExtra(Settings.EXTRA_CHANNEL_ID, LoquaxService.SESSION_CHANNEL));
+                } catch (ActivityNotFoundException none) {
+                    // A system without the channel page: the app's page lists the channels.
+                    startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+                }
+            }
+        });
+        body.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /** The mailbox's backup when it is on this phone. */

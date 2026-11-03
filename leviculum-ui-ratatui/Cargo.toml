@@ -14,16 +14,22 @@ publish = false
 unsafe_code = "forbid"
 
 [features]
+# The terminal: crossterm, the widgets, the shell around them. Without it the
+# crate is the styled-text bridge alone (`style`), `no_std` plus `alloc` over
+# ratatui without its backends, which the M9 draws through mousefood
+# (loquax-m9, docs/src/concepts/handheld-messenger.md, "The M9 frontend").
+default = ["terminal"]
+terminal = ["dep:crossterm", "dep:termbg", "ratatui/default", "leviculum-ui/std"]
 # Inline pictures: the protocol detection, the encoder and the cropped draw.
 # Off by default; a program that shows no pictures does not carry a decoder.
-images = ["dep:ratatui-image", "dep:image"]
+images = ["terminal", "dep:ratatui-image", "dep:image"]
 
 [dependencies]
-leviculum-ui = { path = "../leviculum-ui" }
-ratatui = "0.30.2"
-crossterm = "0.29.0"
+leviculum-ui = { path = "../leviculum-ui", default-features = false }
+ratatui = { version = "0.30.2", default-features = false }
+crossterm = { version = "0.29.0", optional = true }
 unicode-width = "0.2.2"
-termbg = "0.6.2"
+termbg = { version = "0.6.2", optional = true }
 # `default-features = false` is not optional for ratatui-image: the default
 # `chafa-dyn` feature makes the build probe for libchafa via pkg-config, which
 # would put a C library in the path of the musl-static .deb. Without it the

@@ -18,6 +18,9 @@
   <!-- The service that keeps the position coming while a share runs
        (ShareService, 1273). -->
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE_LOCATION'/>
+  <!-- After a reboot the service starts again when the user had it
+       running (BootReceiver, 1345). A normal permission, no question. -->
+  <uses-permission a:name='android.permission.RECEIVE_BOOT_COMPLETED'/>
   <!-- Its notifications: a run time question from Android 13 on (Asks). -->
   <uses-permission a:name='android.permission.POST_NOTIFICATIONS'/>
   <!-- The battery optimisation exemption, asked once and never forced (Asks). -->
@@ -179,6 +182,15 @@
     <service a:name='network.leviculum.loquax.LoquaxService'
              a:exported='false'
              a:foregroundServiceType='remoteMessaging'/>
+
+    <!-- BOOT_COMPLETED comes from the system alone; exported so it reaches
+         the receiver, which acts on nothing but that action. -->
+    <receiver a:name='network.leviculum.loquax.BootReceiver'
+              a:exported='true'>
+      <intent-filter>
+        <action a:name='android.intent.action.BOOT_COMPLETED'/>
+      </intent-filter>
+    </receiver>
 
     <service a:name='network.leviculum.loquax.ShareService'
              a:exported='false'

@@ -25,29 +25,29 @@ on the interface's side of the boundary.
 
 The listener binds and accepts; every accepted connection becomes its
 own `InterfaceHandle` with its own id, drawn from the shared counter
-(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:541`). The
+(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:556`). The
 child is built from the already-connected stream
 (`spawn_tcp_interface_from_stream`,
-`leviculum-std/src/interfaces/tcp.rs:670`), inherits IFAC, mode and
+`leviculum-std/src/interfaces/tcp.rs:685`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
-(`registry`, `leviculum-std/src/driver/mod.rs:5252`).
+(`registry`, `leviculum-std/src/driver/mod.rs:5283`).
 
 The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
 in the reporting inventory instead, where the child registers its
 display identity and its parent link (`add_spawned`,
-`leviculum-std/src/interfaces/tcp.rs:657`; `listener_id`,
-`leviculum-std/src/interfaces/tcp.rs:665`). The split between the
+`leviculum-std/src/interfaces/tcp.rs:672`; `listener_id`,
+`leviculum-std/src/interfaces/tcp.rs:680`). The split between the
 routing map and the reporting inventory is the point of that module
 (`interface_names`, `leviculum-std/src/interfaces/inventory.rs:7`).
 
 Teardown runs through the ordinary disconnect path: the event loop
 notices the channel closed, calls `handle_interface_down`
-(`leviculum-std/src/driver/mod.rs:4859-4860`) to cull the routing entries,
+(`leviculum-std/src/driver/mod.rs:4890-4891`) to cull the routing entries,
 and the child's byte counters are folded into its parent's departed
 totals so the listener's reported traffic does not shrink when a client
-leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4326`).
+leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4357`).
 
 ### AutoInterface, I2P, shared instance: the same shape
 

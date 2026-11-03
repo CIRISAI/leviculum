@@ -20,6 +20,9 @@ members = [
     "leviculum-proxy",
     "lnflash",
     "loquax",
+    # Loquax on the ThinkNode M9 (#232, #473): the scene through mousefood,
+    # `no_std`; the firmware links it, the host draws its goldens.
+    "loquax-m9",
     # The Android app's JNI library (`loquax-android/`), built for Android by
     # the make flow there. Not a default member, like leviculum-ffi: a cdylib
     # the musl default drops.
@@ -58,6 +61,7 @@ default-members = [
     "leviculum-proxy",
     "lnflash",
     "loquax",
+    "loquax-m9",
     "lnpnd",
     "lndecode",
     "vectors-verify",

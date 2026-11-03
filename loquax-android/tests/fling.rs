@@ -9,6 +9,10 @@
 //!
 //! The recorder's level feed (1276), `Levels.java`, runs the same way with
 //! `tests/java/LevelsTest.java`: its windows are the library's.
+//!
+//! The service notice's rules (1345), `Notice.java`, run with
+//! `tests/java/NoticeTest.java`: which change posts the notice again and
+//! when a reboot starts the service.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -117,4 +121,44 @@ fn the_recorders_windows_are_the_librarys() {
             .collect();
         assert_eq!(got, want, "pieces of {piece} bytes");
     }
+}
+
+/// The service notice (1345): `Notice.java` run on the host with
+/// `tests/java/NoticeTest.java`. A change of the sentence (connected, not
+/// connected, the mailbox here) posts the notice again, a same sentence
+/// and an unread change do not, so a swipe on Android 14 holds; a reboot
+/// starts the service only on BOOT_COMPLETED and only when the user had
+/// it running.
+#[test]
+fn the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("notice-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/Notice.java"))
+        .arg(manifest.join("tests/java/NoticeTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.NoticeTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
 }

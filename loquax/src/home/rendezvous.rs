@@ -549,11 +549,16 @@ mod driver {
     }
 
     impl Owed {
+        /// `true` is said once per re-dial for a change, and each one
+        /// counts, also one that comes while the last is not up yet (no
+        /// network, then WLAN back); the share is taken only once.
         fn set(&mut self, owed: bool) {
             match (self.owed, owed) {
-                (false, true) => {
+                (_, true) => {
                     self.redials.fetch_add(1, Ordering::Relaxed);
-                    self.count.fetch_add(1, Ordering::Relaxed);
+                    if !self.owed {
+                        self.count.fetch_add(1, Ordering::Relaxed);
+                    }
                     self.turned.notify_one();
                 }
                 (true, false) => {
@@ -801,11 +806,11 @@ mod driver {
                             let (host, port) = &dial.entries[index];
                             said(host, *port, "down", index);
                         }
+                        owed.set(true);
                         drop_all(&dial.node, &mut ids);
                         rotation.restart();
                         up = false;
                         dial_at = None;
-                        owed.set(true);
                         tell(0, false);
                         if action == Evaluation::Redial {
                             ids = spawn(&dial.node, &dial, 0);

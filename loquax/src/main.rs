@@ -167,6 +167,21 @@ enum SubCommand {
     Mailbox(MailboxCommand),
 }
 
+/// The phones' port of a mailbox on its own node (1354): where a daemon's
+/// `[[Loquax Mailbox TCP]]` section would listen, `0.0.0.0:4243`, since no
+/// daemon serves one. Taken by something else, the port is a loopback one
+/// the system picks: the mailbox then reaches its phones through its entry
+/// servers alone, which its log says.
+#[cfg(feature = "tui")]
+fn own_screens() -> Result<std::net::TcpListener, String> {
+    let port = loquax::home::phone_server::PORT;
+    std::net::TcpListener::bind(("0.0.0.0", port)).or_else(|error| {
+        tracing::warn!("HOME phones' port {port} not taken: {error}");
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("no port for the phones: {error}"))
+    })
+}
+
 /// `loquax mailbox ...` (also `loquax home ...`).
 #[cfg(feature = "tui")]
 #[derive(Subcommand, Debug)]
@@ -1890,9 +1905,21 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         Err(error) => return usage(error),
     };
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
-    // The phones' port, in access point mode, on a new install only: a
-    // config that already runs is never rewritten (1176).
-    if first_start {
+    let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
+    // Beside the daemon or on a node of its own (1354): the config's
+    // `mailbox_upstream`, else whether a daemon answers on its shared
+    // instance, where its own config says it listens.
+    let (way, why) = loquax::home::upstream::decide(&config, || {
+        let reticulum = leviculum_std::daemon_rpc::load_config(&config_dir);
+        reticulum
+            .map(|c| leviculum_std::interfaces::SharedInstanceTransport::from_config(&c.reticulum))
+            .unwrap_or_default()
+            .answers(&instance)
+    });
+    // The phones' port, in access point mode, on a new install beside a
+    // daemon only: a config that already runs is never rewritten (1176).
+    // A mailbox on its own node serves the phones itself ([`own_screens`]).
+    if first_start && way == loquax::home::upstream::Way::Shared {
         let port = loquax::home::phone_server::PORT;
         let added = loquax::home::phone_server::add(&config_dir, port);
         println!(
@@ -1900,7 +1927,6 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
             loquax::home::phone_server::first_start_lines(&added, port)
         );
     }
-    let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
     let storage_dir = match storage_dir(&home) {
         Ok(dir) => dir,
         Err(error) => return failure(error, "no-daemon"),
@@ -1908,34 +1934,61 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
     let archive_cap_mb = config
         .archive_cap_mb
         .unwrap_or(loquax::home::DEFAULT_ARCHIVE_CAP_MB);
-    let mailbox: loquax::home::daemon::MailboxSource = {
-        let (home, config_dir, instance) = (home.clone(), config_dir.clone(), instance.clone());
-        Box::new(move || {
-            let (home, config_dir, instance) = (home.clone(), config_dir.clone(), instance.clone());
-            Box::pin(async move {
-                mailbox_run(&home, &config_dir, &instance, preferred_pn, Vec::new()).await
-            })
-        })
+    let listed = |list: &[String]| match list.is_empty() {
+        true => "none".to_string(),
+        false => list.join(","),
     };
-    // The rendezvous the phones meet the mailbox on (1196): dialled from
-    // the mailbox's own node, one at a time, as a peer.
-    let (rendezvous, from) = loquax::home::rendezvous::mailbox_list(&config);
-    tracing::warn!(
-        "HOME rendezvous list={} from={from}",
-        match rendezvous.is_empty() {
-            true => "none".to_string(),
-            false => rendezvous.join(","),
+    let upstream = match way {
+        loquax::home::upstream::Way::Shared => {
+            let mailbox: loquax::home::daemon::MailboxSource = {
+                let (home, config_dir, instance) =
+                    (home.clone(), config_dir.clone(), instance.clone());
+                Box::new(move || {
+                    let (home, config_dir, instance) =
+                        (home.clone(), config_dir.clone(), instance.clone());
+                    Box::pin(async move {
+                        mailbox_run(&home, &config_dir, &instance, preferred_pn, Vec::new()).await
+                    })
+                })
+            };
+            // The rendezvous the phones meet the mailbox on (1196): dialled
+            // from the mailbox's own node, one at a time, as a peer.
+            let (rendezvous, from) = loquax::home::rendezvous::mailbox_list(&config);
+            tracing::warn!("HOME upstream shared instance={instance} why={why}");
+            tracing::warn!("HOME rendezvous list={} from={from}", listed(&rendezvous));
+            loquax::home::daemon::DaemonUpstream::Shared {
+                instance,
+                config_dir,
+                mailbox,
+                rendezvous,
+                tcp: config.tcp,
+            }
         }
-    );
+        loquax::home::upstream::Way::Mesh { servers, from } => {
+            let screens = match own_screens() {
+                Ok(listener) => listener,
+                Err(error) => return failure(error, "no-port"),
+            };
+            tracing::warn!(
+                "HOME upstream mesh servers={} from={from} why={why} phones={}",
+                listed(&servers),
+                screens
+                    .local_addr()
+                    .map_or_else(|e| e.to_string(), |a| a.to_string())
+            );
+            // A peer of the entry servers, as the rendezvous dial beside a
+            // daemon is: their keepalive, not a phone's long idle.
+            loquax::home::daemon::DaemonUpstream::Mesh {
+                servers,
+                screens,
+                tcp: config.tcp,
+                timing: loquax::home::rendezvous::Timing::default(),
+            }
+        }
+    };
     let outcome = loquax::home::daemon::run(loquax::home::daemon::DaemonOptions {
         home,
-        upstream: loquax::home::daemon::DaemonUpstream::Shared {
-            instance,
-            config_dir,
-            mailbox,
-            rendezvous,
-            tcp: config.tcp,
-        },
+        upstream,
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),

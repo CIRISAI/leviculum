@@ -590,7 +590,9 @@ impl Here {
             upstream: DaemonUpstream::Mesh {
                 servers: servers(&self.app),
                 screens: listener,
-                tcp: config.tcp,
+                // The phone's own mailbox dials from the phone's battery:
+                // the long idle, as the screens' leaf has (1346).
+                tcp: config.tcp.for_device(),
                 timing: loquax::home::rendezvous::Timing::default(),
             },
             storage_dir,

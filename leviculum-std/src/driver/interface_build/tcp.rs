@@ -264,6 +264,30 @@ mod tests {
         );
     }
 
+    /// 1346: a silent peer is noticed after the probe idle plus one probe
+    /// interval when the user timeout is shorter than the idle, and the
+    /// defaults keep today's 26 s.
+    #[test]
+    fn a_silent_peer_is_dropped_after_the_idle_and_one_probe() {
+        assert_eq!(
+            parsed("").tcp_silent_peer_bound(),
+            Ok(Duration::from_secs(26))
+        );
+        assert_eq!(
+            parsed("    tcp_keepalive_idle_secs = 240\n").tcp_silent_peer_bound(),
+            Ok(Duration::from_secs(242))
+        );
+        assert_eq!(
+            parsed("    tcp_keepalive_idle_secs = 240\n    tcp_user_timeout_secs = 0\n")
+                .tcp_silent_peer_bound(),
+            Ok(Duration::from_secs(240 + 2 * 12)),
+            "no user timeout: the probes count"
+        );
+        assert!(parsed("    tcp_keepalive_idle_secs = 0\n")
+            .tcp_silent_peer_bound()
+            .is_err());
+    }
+
     /// A value the kernel would refuse stops the start with the section's
     /// name, instead of failing silently at the socket.
     #[test]

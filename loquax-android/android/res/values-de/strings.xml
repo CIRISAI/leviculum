@@ -1,7 +1,19 @@
 <?xml version='1.0' encoding='utf-8'?>
-<!-- The chat's and the list's times, words and icons' names in German
-     (1129, 1130), and the long press with its picker (1137); every other string falls back to values/strings.xml. -->
+<!-- Every translatable string of values/strings.xml in German (1129, 1130,
+     1137; complete since 1345, tests/strings.rs holds it so); the ones
+     marked translatable="false" there are the same in every language. -->
 <resources>
+    <!-- The first screen, the service and its channels (1345). -->
+    <string name="starting">Startet…</string>
+    <string name="joining">Verbinde mit deinem Postfach…</string>
+    <string name="code_label">Der Code, den dein Postfach zeigt, von loquax mailbox setup auf dem Computer</string>
+    <string name="server_label">Die Adresse deines Postfachs: Host:Port seines lnsd-TCP-Servers</string>
+    <string name="join">Beitreten</string>
+    <string name="address_hint">Adresse einer neuen Unterhaltung</string>
+    <string name="stopped">Beendet.</string>
+    <string name="channel_session">Verbindung zu deinem Postfach</string>
+    <string name="channel_messages">Neue Nachrichten</string>
+    <string name="stop">Beenden</string>
     <string name="back">Zurück</string>
     <string name="menu">Mehr</string>
     <string name="emoji">Emoji</string>
@@ -195,10 +207,7 @@
     <string name="propagation_node">Relais</string>
     <string name="propagation_node_text">Solange dein Postfach offline ist, wartet Post für dich bei einem Relais im Netz, das Loquax selbst wählt.</string>
     <string name="here_running">Dein Postfach läuft auf diesem Telefon</string>
-    <string name="here_running_unread">Dein Postfach läuft auf diesem Telefon, %1$d ungelesen</string>
-    <string name="connecting">Nicht verbunden, neuer Versuch läuft</string>
     <string name="connected">Mit deinem Postfach verbunden</string>
-    <string name="connected_unread">Mit deinem Postfach verbunden, %1$d ungelesen</string>
     <string name="not_connected">Nicht verbunden, neuer Versuch läuft</string>
     <string name="scan_code">Code scannen</string>
     <string name="scan_backup">Papiersicherung scannen</string>
@@ -214,8 +223,10 @@
     <string name="settings_appearance">Darstellung</string>
     <string name="settings_appearance_summary">Karte: wie das Telefon, hell oder dunkel</string>
     <string name="settings_notifications">Benachrichtigungen</string>
-    <string name="settings_notifications_summary">Neue Nachrichten, stumme Chats</string>
+    <string name="settings_notifications_summary">Neue Nachrichten, stumme Chats, Verbindungshinweis</string>
     <string name="settings_notifications_text">Loquax meldet jede neue Nachricht. Um einen Chat stumm zu schalten, halte ihn in der Liste gedrückt, dann Stumm. Ton und Vibration stehen in Androids Einstellungen für Loquax.</string>
+    <string name="connection_notice">Benachrichtigung für die Verbindung</string>
+    <string name="connection_notice_text">In Androids Einstellungen minimieren oder ausschalten; Loquax bleibt verbunden.</string>
     <string name="settings_chats">Chats</string>
     <string name="settings_chats_summary">Fotogröße</string>
     <string name="settings_privacy">Privatsphäre</string>

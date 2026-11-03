@@ -426,7 +426,7 @@ another firmware's header.
   the map measurement), 16 MB flash. How much SRAM is free beside the
   radio stack — and later WiFi or BLE — is unmeasured ("Open"). The
   `leviculum-esp` heap is a 64 KiB placeholder today (`HEAP_SIZE`,
-  `leviculum-esp/src/lib.rs:92`); the UI budgets on the messenger page
+  `leviculum-esp/src/lib.rs:151`); the UI budgets on the messenger page
   say what has to replace it.
 - **Radio.** The LR1110 through `leviculum-lr11xx`, usable ceiling about
   +17 dBm ("What the community port measured"). For the UI it is the
@@ -646,10 +646,13 @@ compared with the T1000-E's numbers.
 
 ## Not yet built
 
-All of it, apart from the driver: the `Board` constant, a board file and
-binary, the keyboard, the display UI, the menu, the rig's ESP32 flashing
-and device profile, the gates for the ESP32 recipes, and the acceptance
-runs.
+All of it, apart from the driver and the Loquax image of 1361 (a board
+file and binary that light the panel, read the keyboard controller and
+draw the messenger's fixture screens, nothing on the air; [A messenger
+whose core runs anywhere](handheld-messenger.md), "Slice four, host
+half"): the `Board` constant for the radio, the node on the board, the
+menu, the rig's ESP32 flashing and device profile, the gates for the
+ESP32 recipes, and the acceptance runs.
 
 ## See also
 
