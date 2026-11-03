@@ -259,9 +259,9 @@ impl App {
         let icon = match tab.id {
             TabId::Chats => Icon::Chats,
             TabId::Map => Icon::Map,
-            // The window has no Browse tab (lnomad is its own program on a
-            // PC, 1337); should one be enabled, it borrows the chats' icon.
-            TabId::Browse => Icon::Chats,
+            // The Browse tab (1369): the shared icons have no globe yet,
+            // and a page is what one looks for.
+            TabId::Browse => Icon::Search,
         };
         let badge = tab.badge.map(|count| {
             chrome::badge(count, size::BADGE_TEXT - 2.0, size::BADGE_CORNER, p).padding([0, 5])
@@ -285,6 +285,7 @@ impl App {
         let active = match self.screen {
             super::Screen::Chats | super::Screen::Settings => TabId::Chats,
             super::Screen::Map => TabId::Map,
+            super::Screen::Browse => TabId::Browse,
         };
         let items = tabs
             .items

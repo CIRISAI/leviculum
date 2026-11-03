@@ -21,6 +21,8 @@
 //! (`loquax/src/send.rs`, `EXIT_PROPAGATED`).
 
 #[cfg(any(feature = "tui", feature = "gui"))]
+mod browsing;
+#[cfg(any(feature = "tui", feature = "gui"))]
 mod desktop;
 mod front;
 #[cfg(feature = "gui")]

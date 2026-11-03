@@ -254,6 +254,9 @@ pub(crate) struct Shell {
     /// The desktop's microphone (1276): the system's recorder, run on the
     /// model's recording effects and pumped on every poll.
     mic: crate::mic::Mic,
+    /// The Browse tab's fetch and what the browser asks of the desktop
+    /// (1369).
+    pub(crate) browsing: crate::browsing::Browsing,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -286,8 +289,32 @@ impl Shell {
     /// comes back.
     pub(crate) fn apply(&mut self, event: UiEvent) {
         let effects = update(&mut self.model, event);
+        self.run(effects);
+    }
+
+    /// Fold one of lnomad's own events into the hosted browser (1369): a
+    /// picture's, which no event of Loquax's carries.
+    fn apply_app(&mut self, event: lnomad::AppEvent) {
+        let effects = loquax::ui::browse::app(&mut self.model, event);
+        self.run(effects);
+    }
+
+    /// The browser's events the desktop has for it: the fetch's, and what
+    /// its effects answered at once.
+    fn fold_browsed(&mut self, browsed: Vec<crate::browsing::Folded>) {
+        for folded in browsed {
+            match folded {
+                crate::browsing::Folded::Ui(event) => self.apply(event),
+                crate::browsing::Folded::App(event) => self.apply_app(event),
+            }
+        }
+    }
+
+    /// Write what a fold changed to the store, and run what came back.
+    fn run(&mut self, effects: Vec<UiEffect>) {
         self.persist();
         let mut answers = Vec::new();
+        let mut browsed = Vec::new();
         for effect in effects {
             match effect {
                 UiEffect::Store(read) => answers.extend(self.read(read)),
@@ -309,10 +336,16 @@ impl Shell {
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
                 UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
-                // The terminal and the window enable no Browse tab (1337):
-                // lnomad is its own program on a PC, and the model drops a
-                // browser verb while the tab is off.
-                UiEffect::Browse(_) => {}
+                // The Browse tab (1369): the fetch, the clipboard, the
+                // downloads and the tab's files; what the browser is told
+                // at once is folded after this fold.
+                UiEffect::Browse(effect) => {
+                    browsed.extend(self.browsing.effect(
+                        &mut self.model,
+                        effect,
+                        &mut self.outputs,
+                    ));
+                }
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
                 UiEffect::MapDrawing(n) => self.outputs.push(Output::MapDrawing(n)),
@@ -460,6 +493,7 @@ impl Shell {
         for answer in answers {
             self.apply(answer);
         }
+        self.fold_browsed(browsed);
         self.start_next();
     }
 
@@ -729,6 +763,8 @@ impl Shell {
         self.map_steps(steps);
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
         self.listen();
+        let browsed = self.browsing.told(&self.model);
+        self.fold_browsed(browsed);
     }
 
     /// The microphone's windows since the last poll, as levels, and the
@@ -818,6 +854,10 @@ impl Shell {
         }
         *clocks = read;
         self.apply(UiEvent::Tick);
+        // The browser's spinner and its toast's age, while it is shown.
+        if self.model.browse.showing() {
+            self.apply(UiEvent::Browse(loquax::ui::browse::BrowseEvent::Tick));
+        }
     }
 
     /// The schedule's clock: tokio's, which on Linux stands still in
@@ -1342,6 +1382,9 @@ pub(crate) async fn start(
         None => identity.public_key_bytes(),
     };
     let device = identity.clone();
+    // The identity a NomadNet node is shown when the reader identifies to
+    // it from the Browse tab: the one this node runs on, as on the phone.
+    let browse_identity = identity.clone();
     let role = match client {
         Some(_) => Role::Client { address },
         None => Role::Messenger,
@@ -1406,6 +1449,15 @@ pub(crate) async fn start(
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     model.reading.on = config.read_receipts.unwrap_or(true);
     model.photo_size = config.photo_size.unwrap_or_default();
+    // The Browse tab (1369), behind the config's `browse_tab` as on the
+    // phone: off unless the file says on. On, its fetch runs over the
+    // node attached above; off, the node is lent to nobody, as before.
+    let browse_tab = config.browse_tab.unwrap_or(false);
+    crate::browsing::set_up(&mut model, &home, browse_tab);
+    let browsing = match browse_tab {
+        true => crate::browsing::Browsing::start(&attached, browse_identity, &home),
+        false => crate::browsing::Browsing::off(),
+    };
     // The microphone (1276): the system's recorder, where it has one; the
     // window offers the microphone only then.
     let mic = crate::mic::Mic::of_process();
@@ -1520,6 +1572,7 @@ pub(crate) async fn start(
         watching: false,
         fallback: Fallback::default(),
         mic,
+        browsing,
     };
     Ok((shell, config))
 }

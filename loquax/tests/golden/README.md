@@ -80,3 +80,18 @@ so one file pins both languages. Compared line for line; a scene that
 moved is left in the temp dir as `loquax-golden/<name>`, and
 `LOQUAX_WRITE_GOLDEN=1` writes the goldens for a change that means to move
 them.
+
+`gui-browse-list.png`, `gui-browse-page.png`: the window's Browse tab
+(1369), lnomad's window view beside the rail, drawn off screen by
+`gui::tests::the_browse_tab_is_lnomads_window_beside_the_rail`, 1100 x
+640 in the light theme: the places list the tab opens on with two
+NomadNet nodes, then lnomad's sample page (`lnomad/tests/fixtures/sample.mu`)
+with a picture link under it and its picture, a gradient made by the test,
+drawn by lnomad's picture code. Compared pixel for pixel as above; the page
+is set in Fira Mono as lnomad embeds it.
+
+`tui-browse-list.txt`, `tui-browse-page.txt`: the terminal's Browse tab
+(1369), lnomad's terminal view over the whole 80 x 24 screen, the same two
+screens without the picture, drawn by
+`tui::tests::the_browse_tab_is_lnomads_terminal_screen`. Compared as
+text; one that moved is left in the temp dir likewise.

@@ -25,9 +25,9 @@
 //! palette's `read receipts` write it (1233). `photo_size`, `small`,
 //! `phone` (the default) or `original` (1220): how far a photo is scaled
 //! before it goes (`crate::photo`), which the settings' Chats page
-//! writes. `browse_tab`, `off` (the default) or `on` (1337): whether
-//! the phone shows its Browse tab, held back until the tab's fetch has
-//! been seen on a device. And one key a terminal context for the map's
+//! writes. `browse_tab`, `off` (the default) or `on` (1337, 1369):
+//! whether the phone, the window and the terminal show the Browse tab,
+//! held back until the tab's fetch has been seen on a device. And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`
@@ -173,9 +173,10 @@ pub struct Config {
     pub map_fling: Option<bool>,
     /// `read_receipts`, when the file sets it; unset is on.
     pub read_receipts: Option<bool>,
-    /// `browse_tab`, when the file sets it; unset is off (1337 pass two):
-    /// the phone's Browse tab, held back until its fetch has landed on a
-    /// device, and switched on by this key alone meanwhile.
+    /// `browse_tab`, when the file sets it; unset is off (1337 pass two,
+    /// 1369): the Browse tab of the phone, the window and the terminal,
+    /// held back until its fetch has landed on a device, and switched on
+    /// by this key alone meanwhile.
     pub browse_tab: Option<bool>,
     /// `photo_size`, when the file sets it; unset is `phone`.
     pub photo_size: Option<crate::ui::photos::PhotoSize>,

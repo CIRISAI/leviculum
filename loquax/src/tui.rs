@@ -225,6 +225,7 @@ async fn run_terminal(
     // its answer on stdin, which raw mode would hand to the key handler. The
     // keyboard query likewise. Asked only under `auto`.
     shell.model.theme = resolve_theme(detect_background(theme), theme);
+    browse_like_the_terminal(&mut shell.model);
     let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     if enhanced {
         // Runs before install_panic_hook's restore, which leaves the screen.
@@ -354,7 +355,7 @@ async fn run_terminal(
         // picture (1118).
         match unwound(|| {
             draw_synced(&mut terminal, |frame| {
-                draw(frame, &view, Some(&mut painter))
+                draw_screen(frame, &shell.model, &view, Some(&mut painter))
             })
         }) {
             Ok(Ok(_)) => {}
@@ -1212,6 +1213,7 @@ async fn run_script(
         PathBuf::from(path)
     };
     let mut styles: Option<std::fs::File> = None;
+    browse_like_the_terminal(&mut shell.model);
     let (width, height) = options.size;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).map_err(|e| e.to_string())?;
     shell.apply(UiEvent::Resize { width, height });
@@ -1230,7 +1232,7 @@ async fn run_script(
         };
         let view = ui::view(model);
         let drawn = terminal
-            .draw(|frame| draw(frame, &view, Some(painter)))
+            .draw(|frame| draw_screen(frame, model, &view, Some(painter)))
             .map_err(|e| e.to_string())?;
         count += 1;
         let text = frame_text(drawn.buffer);
@@ -1258,7 +1260,7 @@ async fn run_script(
             Step::Styles(label) => {
                 let view = ui::view(&shell.model);
                 terminal
-                    .draw(|frame| draw(frame, &view, Some(&mut painter)))
+                    .draw(|frame| draw_screen(frame, &shell.model, &view, Some(&mut painter)))
                     .map_err(|e| e.to_string())?;
                 let map = styles_text(terminal.backend(), shell.model.tokens());
                 let file = match styles.as_mut() {
@@ -1354,6 +1356,41 @@ async fn run_script(
         }
     }
     Ok(())
+}
+
+/// One frame of the messenger: the Browse tab in front is lnomad's own
+/// screen, drawn by lnomad's terminal view over the whole terminal (1369),
+/// with its help, its in-page search and its places list; else Loquax's
+/// panes. The tab draws no pictures: the map owns the terminal's picture
+/// protocol, and the tab asks for none ([`lnomad::Model::no_images`]).
+pub fn draw_screen(
+    frame: &mut Frame,
+    model: &Model,
+    view: &View,
+    painter: Option<&mut map::MapPainter>,
+) {
+    match model.browse.showing() {
+        true => lnomad::tui::view(
+            &model.browse.model,
+            &lnomad::tui::ImageStore::default(),
+            frame,
+        ),
+        false => draw(frame, view, painter),
+    }
+}
+
+/// The hosted browser as the terminal draws it: the messenger's theme and
+/// colours, no pictures.
+pub(crate) fn browse_like_the_terminal(model: &mut Model) {
+    let browser = &mut model.browse.model;
+    browser.theme = model.theme;
+    browser.no_color = model.tier == Tier::Mono;
+    browser.depth = match model.tier {
+        Tier::Ansi16 => lnomad::ColorDepth::Ansi16,
+        Tier::Ansi256 => lnomad::ColorDepth::Ansi256,
+        Tier::Mono | Tier::Truecolor => lnomad::ColorDepth::Truecolor,
+    };
+    browser.no_images = true;
 }
 
 /// Bold for the focused pane's border and title.
@@ -1615,6 +1652,128 @@ mod tests {
     use loquax::send::SendError;
     use loquax::store::Store;
     use loquax::ui::update;
+
+    /// A terminal golden under `tests/golden`: the frame's text, compared
+    /// whole; one that moved is left in the temp dir as
+    /// `loquax-golden/<name>` for a look.
+    fn same_text(name: &str, text: &str) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden")
+            .join(name);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+            let dir = std::env::temp_dir().join("loquax-golden");
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            std::fs::write(dir.join(name), text).expect("write");
+            panic!("{name} moved; this run's is {}", dir.join(name).display());
+        }
+    }
+
+    /// The screen as the terminal's loop draws it, 80 by 24.
+    fn whole_screen(model: &Model) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let view = ui::view(model);
+        let drawn = terminal
+            .draw(|frame| draw_screen(frame, model, &view, None))
+            .expect("draw");
+        frame_text(drawn.buffer)
+    }
+
+    /// 1369: the Browse tab in the terminal is lnomad's own screen, drawn
+    /// by lnomad's terminal view over the whole terminal: the list it
+    /// opens on (two NomadNet nodes the announces named) and a page from
+    /// the first, lnomad's sample fixture, each the golden. `q` leaves it
+    /// for the messenger's panes; a terminal whose config leaves the tab
+    /// off draws those for `B` (the control).
+    #[test]
+    fn the_browse_tab_is_lnomads_terminal_screen() {
+        use lnomad::DiscoveredNode;
+        use loquax::ui::browse::BrowseEvent;
+        const MARCEL: [u8; 16] = [0x5a; 16];
+        let node = |dest_hash, name: &str, hops| DiscoveredNode {
+            dest_hash,
+            name: Some(name.to_string()),
+            first_seen: 1_800_000_000,
+            last_seen: 1_800_000_000,
+            hops: Some(hops),
+        };
+        let mut model = Model::new(&[]);
+        model.browse.enabled = true;
+        model.browse.model.clock = Some(1_800_000_060);
+        browse_like_the_terminal(&mut model);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        for found in [
+            node(MARCEL, "Marcel's node", 2),
+            node([0x7c; 16], "Relay Süd", 1),
+        ] {
+            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+        }
+        let off = model.clone();
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE)),
+        );
+        assert!(model.browse.showing());
+        let list = whole_screen(&model);
+        assert!(list.contains("Marcel's node"), "{list}");
+        same_text("tui-browse-list.txt", &list);
+
+        // Enter on Marcel's row, as the reader picks it.
+        let row = lnomad::app::places(&model.browse.model)
+            .iter()
+            .position(
+                |p| matches!(p, lnomad::app::Place::Node { dest_hash, .. } if *dest_hash == MARCEL),
+            )
+            .expect("Marcel's row");
+        let effects = update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Intent(lnomad::Intent::Activate(
+                lnomad::app::scene::NodeId::Place(row),
+            ))),
+        );
+        assert!(matches!(
+            &effects[..],
+            [loquax::ui::UiEffect::Browse(lnomad::Effect::Navigate(_))]
+        ));
+        let micron = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../lnomad/tests/fixtures/sample.mu"),
+        )
+        .expect("lnomad's sample page");
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Loaded {
+                micron,
+                title: "Marcel's node".to_string(),
+            }),
+        );
+        let page = whole_screen(&model);
+        same_text("tui-browse-page.txt", &page);
+
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+        );
+        assert!(!model.browse.showing());
+        assert_eq!(
+            whole_screen(&model),
+            whole_screen(&off),
+            "the messenger's panes again"
+        );
+
+        let mut off = off;
+        off.browse.enabled = false;
+        update(
+            &mut off,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE)),
+        );
+        assert!(!off.browse.open);
+        assert!(!whole_screen(&off).contains("Marcel's node"), "the control");
+    }
 
     #[test]
     fn a_script_parses_every_step_kind() {

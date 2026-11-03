@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::advanced::image::{FilterMethod, Handle};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
-use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor};
+use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor, Space};
 use iced::{
     keyboard, mouse, window, Color, Element, Length, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
@@ -59,6 +59,7 @@ use loquax::keys::{self, MapCmd};
 use loquax::mapframe::{hold, onto, Ask, Frames};
 use loquax::picture::map_theme;
 use loquax::tiles::Motion;
+use loquax::ui::browse::BrowseEvent;
 use loquax::ui::compose::Sheet;
 use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
@@ -70,6 +71,9 @@ use loquax::when::WallTime;
 use crate::desktop;
 use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 
+/// The tabs' bar under a narrow window, in logical pixels: what the Browse
+/// tab's page leaves it (1369).
+const COMPACT_TABS: f32 = 72.0;
 /// The list of peers on the left, in logical pixels.
 const LIST_WIDTH: f32 = 260.0;
 /// The window's size when it opens.
@@ -107,6 +111,45 @@ pub struct Seen {
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
+    /// The Browse tab while it is in front (1369): the browser the model
+    /// hosts, drawn by lnomad's window code.
+    pub browse: Option<Browsed>,
+    /// The newest text the browser copied, with its serial (1369): a new
+    /// one goes to the window's clipboard.
+    pub copied: Option<(u64, String)>,
+}
+
+/// The hosted browser as the window draws it (1369): lnomad's model as
+/// the shell holds it, its scene, and the pictures the shell's half of
+/// lnomad's picture code took for it.
+#[derive(Clone)]
+pub struct Browsed {
+    pub model: Arc<lnomad::Model>,
+    pub scene: lnomad::app::scene::Scene,
+    pub pictures: crate::browsing::Pictures,
+    /// Moves with every picture taken, so a picture is drawn when it lands.
+    pub epoch: u64,
+}
+
+impl PartialEq for Browsed {
+    /// What the window draws moved: the scene, a picture, the pictures'
+    /// slots, the help's scroll, the theme.
+    fn eq(&self, other: &Self) -> bool {
+        self.scene == other.scene
+            && self.epoch == other.epoch
+            && self.model.images == other.model.images
+            && self.model.help_scroll == other.model.help_scroll
+            && self.model.theme == other.model.theme
+    }
+}
+
+impl std::fmt::Debug for Browsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Browsed")
+            .field("title", &self.model.title)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Seen {
@@ -122,6 +165,16 @@ impl Seen {
             now: shell.model.now,
             receipts: shell.model.reading.on,
             photo: None,
+            browse: match (shell.model.browse.showing(), &shell.browsing.pictures) {
+                (true, Some(pictures)) => Some(Browsed {
+                    model: Arc::new(shell.model.browse.model.clone()),
+                    scene: shell.model.browse.model.scene(),
+                    pictures: Arc::clone(pictures),
+                    epoch: shell.browsing.epoch,
+                }),
+                _ => None,
+            },
+            copied: shell.browsing.copied.clone(),
         }
     }
 }
@@ -161,6 +214,9 @@ pub async fn run(options: ShellOptions) -> ExitCode {
     // The desktop's portal is the window's picker (1341): Gallery and
     // File in the plus, as on the phone.
     shell.model.bar.abilities.picker = true;
+    // The Browse tab's pictures (1369): lnomad's window code holds them in
+    // the shell, which the window draws them from.
+    shell.browsing.pictures = Some(Arc::default());
     let frames = Frames::new(shell.maps.clone());
     let (seen_tx, seen_rx) = unbounded();
     let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -219,6 +275,13 @@ async fn drive(
                     }
                 },
                 shell::Output::File(path) => path,
+                // A page's link out of NomadNet, from the Browse tab (1369).
+                shell::Output::Open(url) => {
+                    if let Err(error) = open::that(&url) {
+                        tracing::warn!("could not open {url}: {error}");
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             if let Err(error) = open::that(&path) {
@@ -313,6 +376,9 @@ fn window(taken: Option<(Frames, UnboundedReceiver<Seen>, Asks)>, probe: bool) -
         App::view,
     )
     .title("Loquax")
+    // The Browse tab's page face (1369), as lnomad's own window loads it.
+    .font(lnomad::gui::MONO_BYTES)
+    .font(lnomad::gui::MONO_BOLD_BYTES)
     .subscription(App::subscription)
     .theme(App::theme)
     .window(iced::window::Settings {
@@ -401,6 +467,9 @@ pub enum Message {
     CodePicked(Result<Option<std::path::PathBuf>, String>),
     /// A frame is due while the packaging probe runs ([`probe`]).
     Probed,
+    /// The Browse tab's view said this (1369): lnomad's window message,
+    /// for the browser the model hosts.
+    Browse(lnomad::gui::Message),
 }
 
 impl Message {
@@ -427,6 +496,7 @@ impl Message {
                 | Message::PickCode
                 | Message::CodePicked(_)
                 | Message::Probed
+                | Message::Browse(_)
         )
     }
 }
@@ -438,6 +508,9 @@ pub enum Screen {
     Map,
     /// The settings (1233): one page, "Send read receipts" on it.
     Settings,
+    /// The Browse tab (1369): lnomad's window over the browser the model
+    /// hosts, while the model has it in front.
+    Browse,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -635,6 +708,9 @@ struct App {
     /// The packaging probe's frames so far ([`probe`]); `None` in a window
     /// a person uses.
     probe: Option<u32>,
+    /// The reader left the Browse tab (1369) and the model has not said
+    /// so yet: a [`Seen`] from before still holds the browser.
+    browse_left: bool,
 }
 
 impl App {
@@ -672,6 +748,8 @@ impl App {
                 now: None,
                 receipts: true,
                 photo: None,
+                browse: None,
+                copied: None,
             },
             asks,
             fitted_at: None,
@@ -712,6 +790,7 @@ impl App {
             rec_origin: None,
             rec_over_lock: false,
             probe: None,
+            browse_left: false,
         }
     }
 
@@ -958,6 +1037,10 @@ impl App {
                 }
                 (None, Screen::Settings) if self.maps_asked => self.maps_asked = false,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
+                (None, Screen::Browse) => {
+                    self.leave_browse();
+                    self.screen = Screen::Chats;
+                }
                 // A stacked chat goes back to the list, as its bar's back
                 // does; beside the list Back has nothing to leave.
                 (None, Screen::Chats) => {
@@ -1045,11 +1128,21 @@ impl App {
                 let peer = self.target(peer);
                 return self.intent(Intent::ShowMap { peer });
             }
-            Intent::Tab(TabId::Map) => return self.intent(Intent::ShowMap { peer: None }),
-            Intent::Tab(TabId::Chats) => self.screen = Screen::Chats,
-            // lnomad is its own program on a PC (1337): the window enables
-            // no Browse tab and hosts no browser.
-            Intent::Tab(TabId::Browse) | Intent::Browse(_) => {}
+            Intent::Tab(TabId::Map) => {
+                self.leave_browse();
+                return self.intent(Intent::ShowMap { peer: None });
+            }
+            Intent::Tab(TabId::Chats) => {
+                self.leave_browse();
+                self.screen = Screen::Chats;
+            }
+            // The Browse tab (1369): the model brings it to the front, and
+            // the window follows what it says.
+            Intent::Tab(TabId::Browse) => {
+                self.browse_left = false;
+                self.tell(UiEvent::Tab(TabId::Browse));
+            }
+            Intent::Browse(intent) => self.tell(UiEvent::Browse(BrowseEvent::Intent(intent))),
             Intent::Menu(id) => {
                 self.menu = id;
                 self.deleting = None;
@@ -1225,6 +1318,7 @@ impl App {
         let key = leviculum_ui_iced::key::chord(event)?;
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
+            (Screen::Browse, _) => return None,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
             (Screen::Chats | Screen::Settings, _) => Pane::Conversations,
         };
@@ -1277,6 +1371,118 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // What the Browse tab copied goes to the window's clipboard (1369).
+        let copy = match &message {
+            Message::Seen(seen) if seen.copied.is_some() && seen.copied != self.seen.copied => seen
+                .copied
+                .as_ref()
+                .map(|(_, text)| iced::clipboard::write(text.clone())),
+            _ => None,
+        };
+        let task = self.update_inner(message);
+        self.browse_sync();
+        match copy {
+            Some(copy) => Task::batch([copy, task]),
+            None => task,
+        }
+    }
+
+    /// The window's screen follows the model's Browse tab (1369): in front
+    /// while the model has it so, unless the reader just left it; the
+    /// browser told the window's light or dark and the page's cells.
+    fn browse_sync(&mut self) {
+        match (&self.seen.browse, self.screen) {
+            (None, _) => {
+                self.browse_left = false;
+                if self.screen == Screen::Browse {
+                    self.screen = Screen::Chats;
+                }
+            }
+            (Some(_), Screen::Browse) => {}
+            (Some(_), _) if self.browse_left => {}
+            (Some(_), _) => {
+                self.screen = Screen::Browse;
+                self.menu = None;
+            }
+        }
+        let Some(browsed) = self
+            .seen
+            .browse
+            .as_ref()
+            .filter(|_| self.screen == Screen::Browse)
+        else {
+            return;
+        };
+        let theme = match self.dark() {
+            true => lnomad::Theme::Dark,
+            false => lnomad::Theme::Light,
+        };
+        let mut said = Vec::new();
+        if browsed.model.theme != theme {
+            said.push(BrowseEvent::Theme(theme));
+        }
+        let (cols, rows) = self.browse_cells();
+        if browsed.model.size != (cols, rows) {
+            said.push(BrowseEvent::Resize { cols, rows });
+        }
+        for event in said {
+            self.tell(UiEvent::Browse(event));
+        }
+    }
+
+    /// The Browse tab's page in cells: the window less the tabs' rail or
+    /// bar, as lnomad's window counts its own.
+    fn browse_cells(&self) -> (u16, u16) {
+        match self.class() {
+            LayoutClass::Wide => {
+                lnomad::gui::cells(self.window.width - chat::RAIL, self.window.height)
+            }
+            LayoutClass::Compact => {
+                lnomad::gui::cells(self.window.width, self.window.height - COMPACT_TABS)
+            }
+        }
+    }
+
+    /// The reader left the Browse tab for another: the model is told, and
+    /// the window does not follow a [`Seen`] from before back into it.
+    fn leave_browse(&mut self) {
+        if self.screen == Screen::Browse || self.seen.browse.is_some() {
+            self.browse_left = true;
+            self.tell(UiEvent::Tab(TabId::Chats));
+        }
+    }
+
+    /// What lnomad's window view said, for the browser the model hosts
+    /// (1369), as lnomad's own window folds it: a press its intent, the
+    /// address field's text and Enter, the wheel's notches and the
+    /// pointer's cell as the model's mouse.
+    fn browse(&self, message: lnomad::gui::Message) {
+        use lnomad::gui::Message as Said;
+        let events = match message {
+            Said::Intent(intent) => vec![UiEvent::Browse(BrowseEvent::Intent(intent))],
+            Said::Address(value) => vec![UiEvent::Browse(BrowseEvent::Address(value))],
+            Said::AddressGo => vec![UiEvent::Browse(BrowseEvent::Intent(lnomad::Intent::Go {
+                url: None,
+            }))],
+            Said::Wheel(lines) => lnomad::gui::wheel_mice(lines)
+                .into_iter()
+                .map(UiEvent::Mouse)
+                .collect(),
+            Said::Pointer(at) => vec![UiEvent::Mouse(lnomad::gui::pointer_mouse(at))],
+            // The view says nothing else: the keys, the size, the frames
+            // and the transfers are the window's and the shell's here.
+            Said::Key(_)
+            | Said::Resized(_)
+            | Said::Outcome(_)
+            | Said::Frame(_)
+            | Said::SystemTheme(_) => Vec::new(),
+        };
+        for event in events {
+            self.tell(event);
+        }
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         // The viewer is over everything: a key is its Esc or nothing.
         if let (Some(viewer), Message::Key(event)) = (&mut self.viewer, &message) {
             if leviculum_ui_iced::key::chord(event).is_some_and(|k| k.code == KeyCode::Esc)
@@ -1343,6 +1549,18 @@ impl App {
                 return Task::none();
             }
             Message::Intent(intent) => return self.intent(intent),
+            Message::Browse(said) => {
+                self.browse(said);
+                return Task::none();
+            }
+            // The Browse tab in front has the keys, as the model routes
+            // them (1369).
+            Message::Key(event) if self.screen == Screen::Browse => {
+                if let Some(key) = leviculum_ui_iced::key::chord(&event) {
+                    self.tell(UiEvent::Key(key));
+                }
+                return Task::none();
+            }
             Message::Settings => {
                 self.screen = Screen::Settings;
                 self.menu = None;
@@ -1654,6 +1872,7 @@ impl App {
         }
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
+            (Screen::Browse, _, _) => self.browse_view(),
             (Screen::Settings, _, _) => self.settings_pane(),
             // A group's screens (1307) take the chat's place, or the
             // whole stack's on a narrow window.
@@ -1672,6 +1891,21 @@ impl App {
             (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
             (None, _) => body,
         }
+    }
+
+    /// The Browse tab (1369): lnomad's window view of the browser the
+    /// model hosts, with the pictures the shell's half of lnomad's picture
+    /// code holds. No second renderer: the page, its bars, its places
+    /// sheet and its help are lnomad's.
+    fn browse_view(&self) -> Element<'_, Message> {
+        let Some(browsed) = &self.seen.browse else {
+            return Space::new().into();
+        };
+        let pictures = browsed
+            .pictures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        lnomad::gui::view(&browsed.model, &pictures).map(Message::Browse)
     }
 
     fn map_view(&self) -> Element<'_, Message> {
@@ -2010,6 +2244,8 @@ mod tests {
             now: None,
             receipts: true,
             photo: None,
+            browse: None,
+            copied: None,
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -2250,6 +2486,8 @@ mod tests {
             now: model.now,
             receipts: model.reading.on,
             photo: None,
+            browse: None,
+            copied: None,
         }
     }
 
@@ -3338,5 +3576,172 @@ mod tests {
         assert!(!app.dark());
         let _ = app.update(Message::SystemTheme(iced::theme::Mode::Light));
         assert!(app.dark());
+    }
+
+    /// A PNG of `w` by `h` pixels, a gradient, for a page's picture.
+    fn png_of(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        let mut writer = e.write_header().expect("header");
+        let data: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).flat_map(move |x| [(x * 255 / w) as u8, (y * 255 / h) as u8, 160]))
+            .collect();
+        writer.write_image_data(&data).expect("data");
+        writer.finish().expect("finish");
+        out
+    }
+
+    /// 1369: the Browse tab in the window is lnomad's window view beside
+    /// the rail, the browser the model hosts with the pictures the shell's
+    /// half of lnomad's picture code holds. The window tells the model its
+    /// light or dark and the page's cells; the list it opens on and a page
+    /// with a picture are the goldens; a press on the page, the wheel and
+    /// the pointer go to the model as lnomad's window folds them; leaving
+    /// for the chats tells the model, and a picture of the model from
+    /// before does not pull the window back (the control: one from after
+    /// leaves it in the chats).
+    #[test]
+    fn the_browse_tab_is_lnomads_window_beside_the_rail() {
+        use lnomad::app::scene::NodeId as Node;
+        use lnomad::DiscoveredNode;
+        const MARCEL: [u8; 16] = [0x5a; 16];
+        lnomad::gui::load_mono();
+        let node = |dest_hash, name: &str, hops| DiscoveredNode {
+            dest_hash,
+            name: Some(name.to_string()),
+            first_seen: 1_800_000_000,
+            last_seen: 1_800_000_000,
+            hops: Some(hops),
+        };
+        let (w, h) = (1100u32, 640u32);
+        let mut model = chat_model();
+        model.browse.enabled = true;
+        model.browse.model.clock = Some(1_800_000_060);
+        for found in [
+            node(MARCEL, "Marcel's node", 2),
+            node([0x7c; 16], "Relay Süd", 1),
+        ] {
+            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+        }
+        let pictures: crate::browsing::Pictures = Arc::default();
+        let seen = |model: &crate::shell::Model, epoch: u64| {
+            let mut seen = seen_of(model);
+            seen.browse = model.browse.showing().then(|| Browsed {
+                model: Arc::new(model.browse.model.clone()),
+                scene: model.browse.model.scene(),
+                pictures: Arc::clone(&pictures),
+                epoch,
+            });
+            Box::new(seen)
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Seen(seen(&model, 0)));
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Browse)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Browse)]);
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        let _ = app.update(Message::Seen(seen(&model, 0)));
+        assert_eq!(app.screen, Screen::Browse);
+        let (cols, rows) = app.browse_cells();
+        let said = told(&mut rx);
+        assert!(
+            said.contains(&UiEvent::Browse(BrowseEvent::Resize { cols, rows })),
+            "{said:?}"
+        );
+        for event in said {
+            update(&mut model, event);
+        }
+        assert_eq!(model.browse.model.theme, lnomad::Theme::Light);
+        let _ = app.update(Message::Seen(seen(&model, 0)));
+        assert_eq!(told(&mut rx), vec![], "nothing more to say");
+        let list = shoot(&app, w, h);
+        map::tests::same_as("gui-browse-list.png", &list, w, h);
+
+        // Marcel's row, pressed: the model's to fold.
+        let row = lnomad::app::places(&model.browse.model)
+            .iter()
+            .position(
+                |p| matches!(p, lnomad::app::Place::Node { dest_hash, .. } if *dest_hash == MARCEL),
+            )
+            .expect("Marcel's row");
+        let press = lnomad::Intent::Activate(Node::Place(row));
+        let _ = app.update(Message::Browse(lnomad::gui::Message::Intent(press.clone())));
+        let said = told(&mut rx);
+        assert_eq!(said, vec![UiEvent::Browse(BrowseEvent::Intent(press))]);
+        for event in said {
+            update(&mut model, event);
+        }
+        let micron = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../lnomad/tests/fixtures/sample.mu"),
+        )
+        .expect("lnomad's sample page");
+        let effects = update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Loaded {
+                micron: format!("{micron}\n`[map.png`:/file/map.png]\n\nUnder the picture."),
+                title: "Marcel's node".to_string(),
+            }),
+        );
+        // The shell's half: the picture asked for, its bytes taken by
+        // lnomad's picture code, its event folded into the model.
+        let requests = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                loquax::ui::UiEffect::Browse(lnomad::Effect::FetchImages(requests)) => {
+                    Some(requests)
+                }
+                _ => None,
+            })
+            .expect("the page's picture asked for");
+        let request = requests[0].clone();
+        let event = {
+            let mut held = pictures.lock().unwrap_or_else(PoisonError::into_inner);
+            let (cached, pending) = held.cached(&model.browse.model, requests);
+            assert!(cached.is_empty() && pending.len() == 1);
+            held.arrived(
+                &model.browse.model,
+                request.link,
+                request.target,
+                lnomad::gui::Picture::Bytes(png_of(240, 96)),
+            )
+        };
+        loquax::ui::browse::app(&mut model, event);
+        let _ = app.update(Message::Seen(seen(&model, 1)));
+        let page = shoot(&app, w, h);
+        assert_ne!(page, list);
+        map::tests::same_as("gui-browse-page.png", &page, w, h);
+
+        // The wheel and the pointer are the model's mouse.
+        let _ = app.update(Message::Browse(lnomad::gui::Message::Wheel(3.0)));
+        let _ = app.update(Message::Browse(lnomad::gui::Message::Pointer(None)));
+        let said = told(&mut rx);
+        assert_eq!(
+            said,
+            vec![
+                UiEvent::Mouse(lnomad::gui::wheel_mice(3.0)[0]),
+                UiEvent::Mouse(lnomad::gui::pointer_mouse(None)),
+            ]
+        );
+
+        // Leaving for the chats tells the model; the window stays there
+        // through a picture from before, and one from after.
+        let before = seen(&model, 1);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Chats)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Chats)]);
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Seen(before));
+        assert_eq!(app.screen, Screen::Chats, "not pulled back");
+        update(&mut model, UiEvent::Tab(TabId::Chats));
+        let _ = app.update(Message::Seen(seen(&model, 1)));
+        assert_eq!(app.screen, Screen::Chats);
+        // A page link in a chat brings it to the front again.
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        let _ = app.update(Message::Seen(seen(&model, 1)));
+        assert_eq!(app.screen, Screen::Browse);
     }
 }

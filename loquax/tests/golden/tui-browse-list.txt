@@ -1,0 +1,24 @@
+lnomad · press : to enter a URL
+NomadNet pages                                                                 █
+                                                                               █
+Tap a node to open its pages, or type an address above.                        █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+    ┌ places ──────────────────────────────────────────────────────────────┐   █
+    │Bookmarks                                                             │   █
+    │  (none)                                                              │   █
+    │                                                                      │   █
+    │Discovered nodes                                                      │   █
+    │  Marcel's node  ·  5a5a5a5a…  ·  2 hops                              │   █
+    │  Relay Süd  ·  7c7c7c7c…  ·  1 hops                                  │   █
+    └──────────────────────────────────────────────────────────────────────┘   █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+Alt-← back │ Alt-→ forward │ R reload │ f hint │ / search │ ? help │ q quit
