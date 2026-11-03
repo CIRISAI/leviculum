@@ -3207,6 +3207,7 @@ dependencies = [
  "iced",
  "leviculum-ui",
  "mundy",
+ "png",
 ]
 
 [[package]]
@@ -3450,11 +3451,13 @@ dependencies = [
  "leviculum-map",
  "leviculum-mapcut",
  "leviculum-mapfill",
+ "leviculum-micron",
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-iced",
  "leviculum-ui-ratatui",
  "libm",
+ "lnomad",
  "lnpnd",
  "open",
  "opus-pure",
@@ -3464,6 +3467,7 @@ dependencies = [
  "rand_core 0.6.4",
  "ratatui",
  "rmp-serde",
+ "rqrr",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3472,6 +3476,7 @@ dependencies = [
  "tracing",
  "tui-input",
  "unicode-segmentation",
+ "zbus",
 ]
 
 [[package]]
@@ -3487,12 +3492,12 @@ dependencies = [
  "leviculum-mapfill",
  "leviculum-std",
  "leviculum-ui",
+ "lnomad",
  "loquax",
  "png",
  "proptest",
  "rand_core 0.6.4",
  "rmp-serde",
- "rqrr",
  "serde",
  "serde_json",
  "tempfile",

@@ -26,7 +26,7 @@ use leviculum_std::{
 };
 
 use lnomad::browser::{print_once, BrowserOptions};
-use lnomad::fetch::{FetchError, Session};
+use lnomad::fetch::{FetchError, LentNode, Session};
 use lnomad::url::parse_url;
 
 const SMALL_PAGE: &[u8] = b"`F222`Bce2>Welcome\n\nThis is a small NomadNet page.\n";
@@ -234,31 +234,7 @@ async fn setup() -> (
     tempfile::TempDir,
     String,
 ) {
-    static SETUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let instance_name = format!(
-        "lnomad-selftest-{}-{}",
-        std::process::id(),
-        SETUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-
-    let daemon_storage = tempfile::tempdir().expect("daemon storage");
-    let mut daemon = ReticulumNodeBuilder::new()
-        .enable_transport(true)
-        .share_instance(true)
-        .instance_name(instance_name.clone())
-        // `:0`: the daemon binds the port itself and reports it below, so no
-        // free-port probe races the bind (Codeberg #221).
-        .add_tcp_server("127.0.0.1:0".parse().unwrap())
-        .storage_path(daemon_storage.path().to_path_buf())
-        .build_sync()
-        .expect("build daemon");
-    daemon.start().await.expect("start daemon");
-    let daemon_tcp: SocketAddr = *daemon
-        .tcp_listen_addrs()
-        .first()
-        .expect("daemon has a TCP listener");
-    // Let the abstract Unix socket listener come up before clients connect.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (daemon, daemon_storage, instance_name, daemon_tcp) = setup_daemon().await;
 
     let responder = PageResponder::start(daemon_tcp).await;
     // Let the responder's TCP link to the daemon establish and its announce
@@ -284,6 +260,112 @@ async fn setup() -> (
         app_dir,
         dest_hex,
     )
+}
+
+/// The shared-instance daemon of [`setup`]: a transport node with a TCP
+/// server, its storage, its instance name and its TCP address.
+async fn setup_daemon() -> (ReticulumNode, tempfile::TempDir, String, SocketAddr) {
+    static SETUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let instance_name = format!(
+        "lnomad-selftest-{}-{}",
+        std::process::id(),
+        SETUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let daemon_storage = tempfile::tempdir().expect("daemon storage");
+    let mut daemon = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .share_instance(true)
+        .instance_name(instance_name.clone())
+        // `:0`: the daemon binds the port itself and reports it below, so no
+        // free-port probe races the bind (Codeberg #221).
+        .add_tcp_server("127.0.0.1:0".parse().unwrap())
+        .storage_path(daemon_storage.path().to_path_buf())
+        .build_sync()
+        .expect("build daemon");
+    daemon.start().await.expect("start daemon");
+    let daemon_tcp: SocketAddr = *daemon
+        .tcp_listen_addrs()
+        .first()
+        .expect("daemon has a TCP listener");
+    // Let the abstract Unix socket listener come up before clients connect.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    (daemon, daemon_storage, instance_name, daemon_tcp)
+}
+
+/// 1337 pass two: a session over a node its host lends it fetches as one
+/// over its own does, through the host's node and the events the host
+/// forwards; it holds the node weakly, so once the host let go of it a
+/// fetch says the node is gone (the control), and closing the session
+/// leaves the host's node running.
+#[tokio::test]
+async fn a_lent_node_fetches_as_its_own_does_and_stays_its_hosts() {
+    let (mut daemon, _daemon_storage, instance, daemon_tcp) = setup_daemon().await;
+    let responder = PageResponder::start(daemon_tcp).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The host: a node of its own on the shared instance, whose events it
+    // reads and forwards, as Loquax's processor tap does.
+    let host_storage = tempfile::tempdir().expect("host storage");
+    let mut node = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .connect_to_shared_instance(&instance)
+        .storage_path(host_storage.path().to_path_buf())
+        .build_sync()
+        .expect("build the host's node");
+    let mut events = node.take_event_receiver().expect("the host's events");
+    node.start().await.expect("start the host's node");
+    let node = Arc::new(node);
+    let (forward, forwarded) = tokio::sync::mpsc::unbounded_channel();
+    let tap = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if forward.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    let lent = LentNode::new(Arc::downgrade(&node), forwarded);
+    let mut session = Session::over(
+        lent,
+        leviculum_std::generate_identity(),
+        lnomad::IdentifyStore::new(),
+    );
+    let url = format!("{}:/page/small.mu", responder.dest_hex);
+    let target = parse_url(&url, None).expect("url");
+    let page = session
+        .fetch(&target, Duration::from_secs(15))
+        .await
+        .expect("the page through the lent node");
+    assert_eq!(page, SMALL_PAGE);
+
+    // Closing the session closes its link and leaves the node to its host.
+    session.close().await.expect("close the session");
+    assert!(
+        node.has_path(&leviculum_std::DestinationHash::new(dest_bytes(
+            &responder.dest_hex
+        ))),
+        "the host's node still runs"
+    );
+
+    // The control: the host stops its node and lets go of it; a session
+    // over it has nothing to fetch through.
+    let (_, gone) = tokio::sync::mpsc::unbounded_channel();
+    let mut orphan = Session::over(
+        LentNode::new(Arc::downgrade(&node), gone),
+        leviculum_std::generate_identity(),
+        lnomad::IdentifyStore::new(),
+    );
+    let mut node = Arc::try_unwrap(node).unwrap_or_else(|_| panic!("the session held no node"));
+    node.stop().await.expect("stop the host's node");
+    drop(node);
+    tap.abort();
+    match orphan.fetch(&target, Duration::from_secs(5)).await {
+        Err(FetchError::Node(why)) => assert!(why.contains("gone"), "{why}"),
+        other => panic!("a fetch over a node let go of: {other:?}"),
+    }
+
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
 }
 
 /// The responder's destination hash as raw bytes, for `set_identify`.

@@ -105,7 +105,7 @@ This runs on machines from a Raspberry Pi upward, which sets a few hard
 numbers.
 
 **Memory.** The whole model plus the visible window, not the whole history.
-`lnomad`'s eager full-page layout (`lnomad/src/app/model.rs:745-769`) is
+`lnomad`'s eager full-page layout (`lnomad/src/app/model.rs:753-777`) is
 acceptable for a page and not for a conversation. Attachments in a
 byte-budgeted cache, not a count-budgeted one
 (`lnomad/src/image_cache.rs:11-14`).

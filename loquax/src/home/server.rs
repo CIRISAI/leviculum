@@ -65,6 +65,9 @@ pub struct Answer {
     /// A `/groupadd` added members (1307 G2): the group, and the new
     /// membership its own engine sends the members that understand groups.
     pub added: Option<([u8; 16], Vec<super::group::Outgoing>)>,
+    /// A `/groupdelete` deleted a group (1307 pass four): the group, and
+    /// the last messages its engine sends before it refuses everything.
+    pub deleted: Option<([u8; 16], Vec<super::group::Outgoing>)>,
 }
 
 /// A group a `/group` made: hosted from now on, and what its own engine
@@ -84,6 +87,7 @@ impl Answer {
             gone: false,
             group: None,
             added: None,
+            deleted: None,
         }
     }
 }
@@ -116,6 +120,7 @@ pub fn answer(
         super::MOVED_PATH => moved(store, home, data, device),
         super::GROUP_PATH => group(store, home, data, device, now),
         super::GROUP_ADD_PATH => group_add(store, home, data, device, now),
+        super::GROUP_DELETE_PATH => group_delete(store, home, data, device, now),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -209,6 +214,7 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
                 gone: false,
                 group: None,
                 added: None,
+                deleted: None,
             }
         }
         Ok(Accepted::Again { id }) => Answer::only(wire::send_answer(&id)),
@@ -343,6 +349,65 @@ fn group(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now:
         gone: false,
         group: Some(NewGroup { hosted, welcome }),
         added: None,
+        deleted: None,
+    }
+}
+
+/// `/groupdelete` (1307 pass four): the home deletes a group it hosts and
+/// its owner is admin of, for everyone ([`super::group::delete`]), and
+/// hands the daemon the last messages for the group's engine. A group it
+/// does not host (deleted before, or never made) answers `Ok`: gone is
+/// gone, so a lost answer asked again is no error. A group whose admin is
+/// someone else is refused.
+fn group_delete(
+    store: &mut Store,
+    home: &Home<'_>,
+    data: &[u8],
+    device: [u8; 16],
+    now: f64,
+) -> Answer {
+    let Ok(request) = wire::read_group_delete_request(data) else {
+        return Answer::only(wire::status_answer(Status::Malformed));
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "group delete") {
+        return Answer::only(refused);
+    }
+    let Some((dir, _)) = home.groups else {
+        tracing::info!("HOME group delete refused: this mailbox hosts no groups");
+        return Answer::only(wire::status_answer(Status::Failed));
+    };
+    let hosted = match super::group::hosted(dir, store) {
+        Ok(hosted) => hosted
+            .into_iter()
+            .find(|h| h.group.address == request.group),
+        Err(error) => {
+            tracing::warn!("HOME group delete: {error}");
+            return Answer::only(wire::status_answer(Status::Failed));
+        }
+    };
+    let Some(hosted) = hosted else {
+        tracing::info!(
+            "HOME group delete: {} is not hosted here (deleted before)",
+            crate::address::to_hex(&request.group)
+        );
+        return Answer::only(wire::status_answer(Status::Ok));
+    };
+    if hosted.group.admin != home.address {
+        tracing::info!(
+            "HOME group delete refused: the owner is not {}'s admin",
+            hosted.group.name
+        );
+        return Answer::only(wire::status_answer(Status::Failed));
+    }
+    match super::group::delete(dir, store, &hosted, now) {
+        Ok(told) => Answer {
+            deleted: Some((hosted.group.address, told)),
+            ..Answer::only(wire::status_answer(Status::Ok))
+        },
+        Err(error) => {
+            tracing::warn!("HOME group delete: {error}");
+            Answer::only(wire::status_answer(Status::Failed))
+        }
     }
 }
 
@@ -438,6 +503,7 @@ fn group_add(
         gone: false,
         group: None,
         added: Some((request.group, told)),
+        deleted: None,
     }
 }
 
@@ -583,6 +649,7 @@ fn seen(
         gone: false,
         group: None,
         added: None,
+        deleted: None,
     }
 }
 
@@ -815,6 +882,7 @@ fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
                 gone: false,
                 group: None,
                 added: None,
+                deleted: None,
             }
         }
         Err(error) => {
@@ -855,6 +923,7 @@ fn key(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
         gone: false,
         group: None,
         added: None,
+        deleted: None,
     }
 }
 
@@ -949,6 +1018,7 @@ fn moved(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> A
                 gone: true,
                 group: None,
                 added: None,
+                deleted: None,
                 ..Answer::only(wire::status_answer(Status::Ok))
             }
         }
@@ -1081,6 +1151,72 @@ mod tests {
         assert_eq!(join(store, LAPTOP, TOKEN), Status::Ok);
     }
 
+    /// 1348: a German admin's phone of 1307 pass six still sends its
+    /// language as a fourth element; the home reads it past, and the
+    /// invitation it signs is the English text, the bytes
+    /// [`super::super::group::invitation_text`] makes for no language at
+    /// all. Control: the same request without the element makes the same
+    /// text for its own group.
+    #[test]
+    fn a_german_admins_invitations_are_english_on_the_wire() {
+        let invited = |legacy_de: bool| {
+            let (dir, mut store) = store();
+            let mut hosting = home();
+            hosting.groups = Some((dir.path(), "Lew"));
+            admitted(&mut store);
+            let mut request = wire::group_request(&wire::GroupRequest {
+                client_id: [7; 16],
+                name: "Familie".into(),
+                members: alloc::vec![([0x44; 16], "Anna".into())],
+            });
+            if legacy_de {
+                request[0] = 0x94;
+                leviculum_lxmf::msgpack::string(&mut request, "de");
+            }
+            let made = answer(
+                &mut store,
+                &hosting,
+                crate::home::GROUP_PATH,
+                &request,
+                Some(LAPTOP),
+                300.0,
+            );
+            let group = wire::read_group_answer(&made.bytes)
+                .expect("answer")
+                .expect("made");
+            let [invitation] = made.accepted.as_slice() else {
+                panic!("one invitation: {:?}", made.accepted.len());
+            };
+            let message = leviculum_lxmf::Message::unpack(
+                &invitation.packed,
+                None,
+                None,
+                DeliveryMethod::Direct,
+            )
+            .expect("unpack");
+            let key = super::super::group::hosted(dir.path(), &store)
+                .expect("hosted")
+                .into_iter()
+                .find(|h| h.group.address == group)
+                .expect("ours")
+                .identity
+                .public_key_bytes();
+            let code = crate::lxma::encode_parts(&group, &key);
+            (
+                alloc::string::String::from_utf8(message.content).expect("text"),
+                super::super::group::invitation_text("Lew", "Familie", &code, true),
+            )
+        };
+        let (german, english) = invited(true);
+        assert_eq!(german, english);
+        assert!(
+            german.starts_with("Lew invited you to Familie: lxma://"),
+            "{german}"
+        );
+        let (plain, english) = invited(false);
+        assert_eq!(plain, english, "control: no fourth element");
+    }
+
     /// 1307 G2, item 6 (study 4.5): `/groupadd` from an admitted device
     /// adds Cara to the owner's group: her invitation goes into the
     /// outbox, the daemon gets the new list for the group's engine.
@@ -1158,6 +1294,85 @@ mod tests {
         assert_eq!(
             wire::read_group_answer(&refused.bytes),
             Ok(Err(Status::NotAdmitted))
+        );
+    }
+
+    /// 1307 pass four, `/groupdelete`: the owner's device deletes its group;
+    /// the daemon gets the last messages for the group's engine and the
+    /// home hosts it no more. Asked again it is `Ok` and sends nothing
+    /// (idempotent: gone is gone). Refused: a device not admitted, and a
+    /// group this home hosts whose admin is someone else (control: it is
+    /// still hosted after).
+    #[test]
+    fn the_owner_deletes_a_group_once_and_nobody_else_can() {
+        let (dir, mut store) = store();
+        let mut hosting = home();
+        hosting.groups = Some((dir.path(), "Lew"));
+        admitted(&mut store);
+        let made = answer(
+            &mut store,
+            &hosting,
+            crate::home::GROUP_PATH,
+            &wire::group_request(&wire::GroupRequest {
+                client_id: [7; 16],
+                name: "Familie".into(),
+                members: alloc::vec![([0x44; 16], "Anna".into())],
+            }),
+            Some(LAPTOP),
+            300.0,
+        );
+        let group = wire::read_group_answer(&made.bytes)
+            .expect("answer")
+            .expect("made");
+        let foreign = super::super::group::create(
+            dir.path(),
+            &mut store,
+            "Verein",
+            ([0x55; 16], "Cara"),
+            &[(HOME, "Lew".into())],
+            300,
+        )
+        .expect("a group someone else administers")
+        .group
+        .address;
+        let ask = |store: &mut Store, device, group| {
+            answer(
+                store,
+                &hosting,
+                crate::home::GROUP_DELETE_PATH,
+                &wire::group_delete_request(&wire::GroupDeleteRequest {
+                    client_id: [9; 16],
+                    group,
+                }),
+                Some(device),
+                400.0,
+            )
+        };
+        let refused = ask(&mut store, [0x77; 16], group);
+        assert_eq!(wire::read_status(&refused.bytes), Ok(Status::NotAdmitted));
+        assert!(store.group(&group).expect("g").is_some());
+
+        let deleted = ask(&mut store, LAPTOP, group);
+        assert_eq!(wire::read_status(&deleted.bytes), Ok(Status::Ok));
+        let (gone, told) = deleted.deleted.expect("the last messages");
+        assert_eq!(gone, group);
+        assert_eq!(
+            told.iter().map(|o| o.destination).collect::<Vec<_>>(),
+            [HOME, [0x44; 16]],
+            "the admin and Anna"
+        );
+        assert_eq!(store.group(&group).expect("g"), None);
+
+        let again = ask(&mut store, LAPTOP, group);
+        assert_eq!(wire::read_status(&again.bytes), Ok(Status::Ok));
+        assert!(again.deleted.is_none(), "nothing sent twice");
+
+        let not_ours = ask(&mut store, LAPTOP, foreign);
+        assert_eq!(wire::read_status(&not_ours.bytes), Ok(Status::Failed));
+        assert!(not_ours.deleted.is_none());
+        assert!(
+            store.group(&foreign).expect("g").is_some(),
+            "control: still hosted"
         );
     }
 

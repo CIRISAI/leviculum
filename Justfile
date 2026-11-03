@@ -2068,10 +2068,10 @@ _require-cargo-deb:
     @cargo deb --version >/dev/null 2>&1 || (echo "cargo-deb not found — run: just _deb-prereqs (or cargo install cargo-deb)" && exit 1)
 
 # Best-effort, idempotent install of the cross-build toolchain the
-# build-deb* recipes need: the three musl rustup targets, cargo-deb, and
-# cargo-zigbuild + ziglang for the arm64 and armhf cross-links. Safe to re-run.
+# build-deb* recipes need: the musl and glibc rustup targets, cargo-deb, and
+# cargo-zigbuild + ziglang for the cross-links and loquax's glibc build. Safe to re-run.
 _deb-prereqs:
-    rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf
+    rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
     cargo install --locked cargo-deb
     cargo install --locked cargo-zigbuild
     @echo "[_deb-prereqs] also ensure ziglang is available for arm64:"

@@ -44,7 +44,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use leviculum_core::{LinkId, RequestError, SendError};
-use leviculum_lxmf::router::MessageState;
+use leviculum_lxmf::router::{AttemptFailure, MessageState};
 use leviculum_std::ReticulumNode;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -57,7 +57,7 @@ use crate::engine::{
 use crate::fanout::Fanout;
 use crate::fetch::{run_fetch, FetchOptions};
 use crate::home::group::{self, Hosted};
-use crate::home::outgoing::{Act, Change, Leg, Outcome, Outgoing, Policy};
+use crate::home::outgoing::{Act, Change, Heard, Leg, Outcome, Outgoing, Policy};
 use crate::home::relation::Relations;
 use crate::home::wake::{Due, Wakes};
 use crate::mailbox_state::{MailboxRun, Stored};
@@ -222,6 +222,11 @@ pub struct DaemonOptions {
     /// re-evaluates on (1298): the phone's mailbox hears the app's;
     /// [`Network::default`](super::rendezvous::Network) elsewhere.
     pub network: super::rendezvous::Network,
+    /// Where the home node's own node is lent once it runs (1337 pass
+    /// two): the phone's Browse tab fetches pages through the mailbox's
+    /// node, which is the phone's way onto the network. `None` lends it to
+    /// nobody, as on a computer, where lnomad has a shared instance.
+    pub lend: Option<tokio::sync::mpsc::UnboundedSender<crate::engine::Lent>>,
 }
 
 /// A source of [`MailboxRun`]s, read once per collection.
@@ -287,6 +292,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         wake,
         stop,
         network,
+        lend,
     } = options;
     if let Some(at) = super::handover::gone_at(&home) {
         return Err(format!(
@@ -411,6 +417,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         mailbox,
     };
     let node = attached.node();
+    if let Some(to) = &lend {
+        // A screen that went away borrows nothing.
+        let _ = to.send(attached.lend());
+    }
     tracing::warn!(
         "HOME up address={} home={} archive_cap={}B outbox={}",
         crate::address::to_hex(&address),
@@ -438,6 +448,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         collecting: sync_bound_ms.is_some(),
         told: std::collections::HashSet::new(),
         newest: 0,
+        nodes: std::collections::HashMap::new(),
+        proven: Vec::new(),
     };
     let mut groups = Vec::new();
     for hosted in group::hosted(&home, &store)? {
@@ -512,8 +524,21 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 let (link, remote) = (request.link_id, request.remote);
                 serving.handover =
                     handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
-                let (accepted, watching, gone, (made, added)) =
+                let (accepted, watching, gone, (made, added, deleted)) =
                     answer(&node, &mut store, &serving, request).await;
+                if let Some((address, told)) = deleted {
+                    // The owner deleted the group (1307 pass four): its
+                    // engine sends the last membership, then refuses all.
+                    if let Some(engine) = groups.iter_mut().find(|g| g.hosted.group.address == address) {
+                        engine.ended = true;
+                        let now = unix_now();
+                        for out in told {
+                            engine.outgoing.add(out.id, out.destination, out.packed, now, false);
+                        }
+                        let acts = engine.outgoing.tick(now);
+                        sender.carry_out(&mut engine.engine, &mut store, &mut engine.outgoing, acts, selected_pn, engine.selected_pn);
+                    }
+                }
                 if let Some((address, told)) = added {
                     // Members added (1307 G2): the new membership goes out
                     // on the group's own engine.
@@ -599,7 +624,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             }
             _ = tokio::time::sleep_until(next_group_announce) => {
                 next_group_announce = tokio::time::Instant::now() + GROUP_ANNOUNCE_EVERY;
-                for hosted in &groups {
+                for hosted in groups.iter().filter(|g| !g.ended) {
                     // A group whose engine went away is said by its pump.
                     let _ = hosted.engine.submit(Command::Announce);
                 }
@@ -652,7 +677,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::PnUnavailable { detail } => {
                             tracing::info!("HOME no propagation node: {detail}");
                         }
-                        OutboxEvent::Announced { destination, name } => {
+                        OutboxEvent::Announced { destination, name, path_response } => {
                             if let Some(name) = name.filter(|_| destination != address) {
                                 heard_name(
                                     &mut store,
@@ -662,11 +687,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                     archive_cap_bytes,
                                 );
                             }
-                            let acts = outgoing.announced(destination, unix_now());
+                            let acts = outgoing.announced(destination, heard(path_response), unix_now());
                             sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn, selected_pn);
                         }
-                        OutboxEvent::Left { message_id, last } => {
-                            let (outcome, reason) = left_outcome(last);
+                        OutboxEvent::Left { message_id, last, failure } => {
+                            let (outcome, reason) = left_outcome(last, failure);
                             sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, reason.as_deref(), selected_pn, selected_pn);
                         }
                         OutboxEvent::State { message_id, state } => {
@@ -769,6 +794,11 @@ struct GroupEngine<O> {
     /// The propagation node this engine has selected: its own, since the
     /// home's engine selecting one selects nothing here (1328).
     selected_pn: Option<[u8; 16]>,
+    /// Its admin deleted it (1307 pass four): the store and the key are
+    /// gone, the engine stays until the daemon stops to send the last
+    /// membership and to prove and drop every later message, as a
+    /// stranger's.
+    ended: bool,
 }
 
 /// Start the engine of one hosted group, announced with the group's name,
@@ -832,6 +862,7 @@ async fn attach_group(
         hosted,
         engine,
         selected_pn: None,
+        ended: false,
     })
 }
 
@@ -848,13 +879,31 @@ fn pump_group<O: Outbox>(
     loop {
         let event = match group.engine.try_next_event() {
             Ok(Some(event)) => event,
-            Ok(None) => return,
+            Ok(None) => {
+                if send_statuses(store, sender, group, selected_pn) {
+                    continue;
+                }
+                return;
+            }
             Err(gone) => {
                 tracing::warn!("GROUP {} engine: {gone}", group.hosted.group.name);
                 return;
             }
         };
         match event {
+            OutboxEvent::Packed {
+                message_id, packed, ..
+            } if group.ended => {
+                // A deleted group keeps nothing and sends nothing on: the
+                // writer's client stops retrying (as for a stranger).
+                tracing::info!(
+                    "GROUP {} ended: refused message={}",
+                    group.hosted.group.name,
+                    crate::address::to_hex(&message_id)
+                );
+                drop(packed);
+                let _ = group.engine.submit(Command::Prove { message_id });
+            }
             OutboxEvent::Packed {
                 message_id, packed, ..
             } => {
@@ -911,8 +960,14 @@ fn pump_group<O: Outbox>(
                     group.selected_pn,
                 );
             }
-            OutboxEvent::Announced { destination, .. } => {
-                let acts = group.outgoing.announced(destination, unix_now());
+            OutboxEvent::Announced {
+                destination,
+                path_response,
+                ..
+            } => {
+                let acts = group
+                    .outgoing
+                    .announced(destination, heard(path_response), unix_now());
                 sender.carry_out(
                     &mut group.engine,
                     store,
@@ -922,8 +977,12 @@ fn pump_group<O: Outbox>(
                     group.selected_pn,
                 );
             }
-            OutboxEvent::Left { message_id, last } => {
-                let (outcome, reason) = left_outcome(last);
+            OutboxEvent::Left {
+                message_id,
+                last,
+                failure,
+            } => {
+                let (outcome, reason) = left_outcome(last, failure);
                 sender.left(
                     &mut group.engine,
                     store,
@@ -961,6 +1020,50 @@ fn pump_group<O: Outbox>(
     }
 }
 
+/// Send the statuses the proofs booked since the last call made due for
+/// `group`'s writers (1307 pass four, [`group::status_after_proof`]).
+/// Whether anything was sent, so the pump looks for events again.
+fn send_statuses<O: Outbox>(
+    store: &mut Store,
+    sender: &mut Sender,
+    group: &mut GroupEngine<O>,
+    selected_pn: Option<[u8; 16]>,
+) -> bool {
+    let address = group.hosted.group.address;
+    let (ours, others): (Vec<_>, Vec<_>) =
+        sender.proven.drain(..).partition(|(g, _)| *g == address);
+    sender.proven = others;
+    if ours.is_empty() || group.ended {
+        return false;
+    }
+    let now = unix_now();
+    let mut sent = false;
+    for (_, original) in ours {
+        match group::status_after_proof(store, &group.hosted, &original, now as f64) {
+            Ok(Some(out)) => {
+                group
+                    .outgoing
+                    .add(out.id, out.destination, out.packed, now, false);
+                sent = true;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!("GROUP {} status: {error}", group.hosted.group.name),
+        }
+    }
+    if sent {
+        let acts = group.outgoing.tick(now);
+        sender.carry_out(
+            &mut group.engine,
+            store,
+            &mut group.outgoing,
+            acts,
+            selected_pn,
+            group.selected_pn,
+        );
+    }
+    sent
+}
+
 /// A group's copies a restart cut off (1307 G2, study 2.4): every copy
 /// sent alone with no proof yet is made again from the archived original,
 /// byte for byte, and handed to the group's outbox with its acceptance
@@ -987,12 +1090,14 @@ fn resume_group<O>(store: &mut Store, group: &mut GroupEngine<O>, now: i64) -> u
     for row in open {
         match group::rebuild(store, &group.hosted, &row) {
             Ok(Some(out)) => {
+                // A copy a node took before the restart is not uploaded
+                // again (1307 pass four, the 1330 side finding).
                 group.outgoing.add(
                     out.id,
                     out.destination,
                     out.packed,
                     row.sent_at.min(now),
-                    false,
+                    row.propagated,
                 );
                 resumed += 1;
             }
@@ -1358,6 +1463,7 @@ async fn answer(
     (
         Option<super::server::NewGroup>,
         Option<([u8; 16], Vec<group::Outgoing>)>,
+        Option<([u8; 16], Vec<group::Outgoing>)>,
     ),
 ) {
     let now = std::time::SystemTime::now()
@@ -1394,13 +1500,18 @@ async fn answer(
         // The outbox has the message whether the answer arrived or not: a
         // client that retries with the same id is answered from it.
         tracing::warn!("HOME answer to {}: {error}", request.path);
-        return (answer.accepted, None, false, (answer.group, answer.added));
+        return (
+            answer.accepted,
+            None,
+            false,
+            (answer.group, answer.added, answer.deleted),
+        );
     }
     (
         answer.accepted,
         answer.watching,
         answer.gone,
-        (answer.group, answer.added),
+        (answer.group, answer.added, answer.deleted),
     )
 }
 
@@ -1417,6 +1528,12 @@ struct Sender {
     told: std::collections::HashSet<[u8; 32]>,
     /// The newest archive sequence a state change took, for the wakes.
     newest: u64,
+    /// The node each propagated leg in flight went to, for its lines
+    /// (1330: "handed-on" did not say to whom).
+    nodes: std::collections::HashMap<[u8; 32], [u8; 16]>,
+    /// The originals a copy's first proof was booked for, by group, whose
+    /// writer's status the group's pump sends when due (1307 pass four).
+    proven: Vec<([u8; 16], [u8; 32])>,
 }
 
 impl Sender {
@@ -1436,9 +1553,13 @@ impl Sender {
         held_pn: Option<[u8; 16]>,
     ) {
         if let Some(leg) = outgoing.in_flight(id) {
+            let node = match leg {
+                Leg::Propagated => self.nodes.remove(id),
+                Leg::Direct => None,
+            };
             tracing::info!(
                 "{}",
-                left_line(leg, outcome, outgoing.unanswered(id), id, reason)
+                left_line(leg, outcome, outgoing.unanswered(id), id, node, reason)
             );
         }
         let acts = outgoing.left(id, outcome, unix_now());
@@ -1490,6 +1611,7 @@ impl Sender {
                     let Some(packed) = outgoing.packed(&id).map(<[u8]>::to_vec) else {
                         continue;
                     };
+                    let mut node_used = None;
                     let started = match leg {
                         Leg::Direct => engine
                             .submit(Command::SendPacked {
@@ -1514,6 +1636,7 @@ impl Sender {
                                             mailbox: None,
                                         })
                                         .is_ok();
+                                node_used = Some(node);
                                 selected
                                     && engine
                                         .submit(Command::SendPacked {
@@ -1546,10 +1669,15 @@ impl Sender {
                         },
                     };
                     if started {
+                        match node_used {
+                            Some(node) => self.nodes.insert(id, node),
+                            None => self.nodes.remove(&id),
+                        };
                         tracing::info!(
-                            "HOME outbox {} message={}",
+                            "HOME outbox {} message={}{}",
                             leg_word(leg),
-                            crate::address::to_hex(&id)
+                            crate::address::to_hex(&id),
+                            node_field(node_used)
                         );
                     } else {
                         acts.extend(outgoing.left(&id, Outcome::Failed, unix_now()));
@@ -1566,7 +1694,12 @@ impl Sender {
         // A group's copy is the group's bookkeeping, not an entry the
         // owner's devices see.
         match group::book(store, id, change, unix_now()) {
-            Ok(true) => {
+            Ok(Some((group, originals))) => {
+                for original in originals {
+                    if !self.proven.contains(&(group, original)) {
+                        self.proven.push((group, original));
+                    }
+                }
                 tracing::info!(
                     "GROUP copy {} message={}",
                     change.word(),
@@ -1574,7 +1707,7 @@ impl Sender {
                 );
                 return;
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(error) => tracing::warn!("GROUP copy record: {error}"),
         }
         match store.outbox_record(id, change, unix_now(), self.cap_bytes) {
@@ -1604,6 +1737,14 @@ fn key_wanted_line(id: &[u8; 32], destination: &[u8; 16]) -> String {
     )
 }
 
+/// The ` pn=` a propagated leg's lines carry: the node's first four bytes,
+/// as `PN_PULL` names it, so the two read side by side (1330).
+fn node_field(node: Option<[u8; 16]>) -> String {
+    node.map_or_else(String::new, |node| {
+        format!(" pn={}", crate::address::to_hex(&node[..4]))
+    })
+}
+
 /// The line a collection from the propagation node leaves (1293): how many
 /// messages it brought, from which node, and when the next one is due, so
 /// the cadence shows in the log when nothing comes.
@@ -1625,6 +1766,7 @@ fn left_line(
     outcome: Outcome,
     unanswered: bool,
     id: &[u8; 32],
+    node: Option<[u8; 16]>,
     reason: Option<&str>,
 ) -> String {
     let id = crate::address::to_hex(id);
@@ -1636,13 +1778,14 @@ fn left_line(
         );
     }
     format!(
-        "HOME outbox {} {} message={id}{}",
+        "HOME outbox {} {} message={id}{}{}",
         leg_word(leg),
         match outcome {
             Outcome::Delivered => "delivered",
             Outcome::Sent => "handed-on",
             Outcome::Failed => "failed",
         },
+        node_field(node),
         reason.map_or_else(String::new, |reason| format!(" reason={reason}"))
     )
 }
@@ -1663,16 +1806,35 @@ fn leg_sign(outgoing: &mut Outgoing, id: &[u8; 32], state: MessageState) {
 /// How a leg the router let go of ended, and why when it failed: the last
 /// state the router reported for it, which tells a propagation node's
 /// refusal (`rejected`) from attempts run out (`failed`) or a call-off
-/// (`cancelled`).
-fn left_outcome(last: Option<MessageState>) -> (Outcome, Option<String>) {
-    match last {
-        Some(MessageState::Delivered) => (Outcome::Delivered, None),
-        Some(MessageState::Sent | MessageState::AwaitingCollection) => (Outcome::Sent, None),
-        Some(state) => (
-            Outcome::Failed,
-            Some(format!("{state:?}").to_ascii_lowercase()),
-        ),
-        None => (Outcome::Failed, Some("no state seen".to_string())),
+/// (`cancelled`), and after it the transport's word on the last failed
+/// attempt (1330: `reason=failed` alone did not say whether the link died
+/// mid-transfer or never came). Attempts run out with no attempt failed
+/// say so: no attempt got a link, since a transfer on one that fails says why.
+fn left_outcome(
+    last: Option<MessageState>,
+    failure: Option<AttemptFailure>,
+) -> (Outcome, Option<String>) {
+    let state = match last {
+        Some(MessageState::Delivered) => return (Outcome::Delivered, None),
+        Some(MessageState::Sent | MessageState::AwaitingCollection) => {
+            return (Outcome::Sent, None)
+        }
+        Some(state) => format!("{state:?}").to_ascii_lowercase(),
+        None => "no state seen".to_string(),
+    };
+    let reason = match (last, failure) {
+        (_, Some(failure)) => format!("{state}: {failure}"),
+        (Some(MessageState::Failed), None) => format!("{state}: no attempt got a link"),
+        (_, None) => state,
+    };
+    (Outcome::Failed, Some(reason))
+}
+
+/// How the router heard a peer, for the outbox (1330).
+fn heard(path_response: bool) -> Heard {
+    match path_response {
+        true => Heard::PathResponse,
+        false => Heard::Announce,
     }
 }
 
@@ -1737,6 +1899,53 @@ impl Collector {
 mod tests {
     use super::*;
 
+    /// 1330, miauhaus 12:15:37: `direct failed ... reason=failed` named
+    /// the router's state and nothing else. A link that died mid-transfer
+    /// says so, a transfer that timed out says so, and attempts run out
+    /// with none failing on a link say that; a call-off stays a call-off.
+    #[test]
+    fn a_failed_legs_reason_says_how_its_last_attempt_failed() {
+        use leviculum_core::{resource::ResourceError, LinkCloseReason};
+        use leviculum_lxmf::{DeliveryFailure, PropagationUploadFailure};
+        let reason = |last, failure| left_outcome(Some(last), failure).1.expect("a reason");
+        assert_eq!(
+            reason(
+                MessageState::Failed,
+                Some(AttemptFailure::Delivery(DeliveryFailure::LinkClosed(
+                    LinkCloseReason::Stale
+                )))
+            ),
+            "failed: delivery link closed (Stale)"
+        );
+        assert_eq!(
+            reason(
+                MessageState::Failed,
+                Some(AttemptFailure::Delivery(DeliveryFailure::Resource(
+                    ResourceError::Timeout
+                )))
+            ),
+            format!("failed: delivery transfer: {}", ResourceError::Timeout)
+        );
+        assert_eq!(
+            reason(
+                MessageState::Failed,
+                Some(AttemptFailure::Upload(
+                    PropagationUploadFailure::PacketTimeout
+                ))
+            ),
+            "failed: upload packet was not acknowledged"
+        );
+        assert_eq!(
+            reason(MessageState::Failed, None),
+            "failed: no attempt got a link"
+        );
+        assert_eq!(reason(MessageState::Cancelled, None), "cancelled");
+        assert_eq!(
+            left_outcome(Some(MessageState::Sent), None),
+            (Outcome::Sent, None)
+        );
+    }
+
     /// 1185: half an hour for a day after the identity moved in, the
     /// ordinary six hours before a move, after the day and for a mark from
     /// the future.
@@ -1762,18 +1971,32 @@ mod tests {
         let id = [0xab; 32];
         let hex = crate::address::to_hex(&id);
         assert_eq!(
-            left_line(Leg::Direct, Outcome::Failed, true, &id, Some("failed")),
+            left_line(
+                Leg::Direct,
+                Outcome::Failed,
+                true,
+                &id,
+                None,
+                Some("failed")
+            ),
             format!(
                 "HOME outbox direct unanswered message={hex}: reason=router: failed, \
                  offering the propagation node"
             )
         );
         assert_eq!(
-            left_line(Leg::Direct, Outcome::Failed, false, &id, Some("failed")),
+            left_line(
+                Leg::Direct,
+                Outcome::Failed,
+                false,
+                &id,
+                None,
+                Some("failed")
+            ),
             format!("HOME outbox direct failed message={hex} reason=failed")
         );
         assert_eq!(
-            left_line(Leg::Direct, Outcome::Delivered, true, &id, None),
+            left_line(Leg::Direct, Outcome::Delivered, true, &id, None, None),
             format!("HOME outbox direct delivered message={hex}")
         );
         assert_eq!(
@@ -1782,9 +2005,10 @@ mod tests {
                 Outcome::Failed,
                 true,
                 &id,
+                Some([0x63, 0x52, 0x98, 0xc8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
                 Some("rejected")
             ),
-            format!("HOME outbox propagated failed message={hex} reason=rejected")
+            format!("HOME outbox propagated failed message={hex} pn=635298c8 reason=rejected")
         );
     }
 
@@ -2091,6 +2315,7 @@ mod tests {
             engine: FakeOutbox::new(vec![arrived.clone()]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
+            ended: false,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2098,6 +2323,8 @@ mod tests {
             collecting: false,
             told: std::collections::HashSet::new(),
             newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
         };
         pump_group(&mut store, &mut sender, &mut engine, None);
         let commands = engine.engine.commands.take();
@@ -2132,6 +2359,7 @@ mod tests {
         engine.engine.events.push_back(OutboxEvent::Left {
             message_id: bob_copy,
             last: Some(MessageState::Delivered),
+            failure: None,
         });
         pump_group(&mut store, &mut sender, &mut engine, None);
         let proven = store.group_copy(&bob_copy).expect("row").expect("copy");
@@ -2205,6 +2433,7 @@ mod tests {
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
+            ended: false,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2212,6 +2441,8 @@ mod tests {
             collecting: true,
             told: std::collections::HashSet::new(),
             newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -2226,6 +2457,7 @@ mod tests {
         engine.engine.events.push_back(OutboxEvent::Left {
             message_id: bobs,
             last: Some(MessageState::Failed),
+            failure: None,
         });
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let commands = engine.engine.commands.take();
@@ -2258,6 +2490,7 @@ mod tests {
         engine.engine.events.push_back(OutboxEvent::Left {
             message_id: lews,
             last: Some(MessageState::Failed),
+            failure: None,
         });
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let commands = engine.engine.commands.take();
@@ -2270,6 +2503,125 @@ mod tests {
                 }]
             ),
             "{commands:?}"
+        );
+    }
+
+    /// 1330, miauhaus 12:15:05-12:19:24: Bob's copy was handed on to the
+    /// node, and every unanswered direct leg after it drew a path response
+    /// to the router's own path request, which the group's pump took for
+    /// Bob and tried direct again, every 100 s. Handed on, a path response
+    /// sends nothing; control: Bob's own announce tries direct.
+    #[test]
+    fn a_path_response_after_a_hand_on_sends_nothing_on_the_groups_engine() {
+        use crate::outbox::fake::FakeOutbox;
+        const PN: [u8; 16] = [0x5a; 16];
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna, bob) = (person(), person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[(anna.1, "Anna".into()), (bob.1, "Bob".into())],
+            100,
+        )
+        .expect("create");
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
+        let original = leviculum_lxmf::Message::create(
+            hosted.group.address,
+            anna.1,
+            &anna.0,
+            1_800_000_000.0,
+            Vec::new(),
+            b"Bin gleich da".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(vec![OutboxEvent::Packed {
+                message_id: original.message_id,
+                packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
+            }]),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: Some(PN),
+            ended: false,
+        };
+        let mut sender = Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: true,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
+        };
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let _ = engine.engine.commands.take();
+        let copies = store
+            .group_copies(&hosted.group.address, &original.message_id)
+            .expect("copies");
+        let bobs = copies.iter().find(|c| c.member == bob.1).expect("bob").copy;
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: bobs,
+            last: Some(MessageState::Failed),
+            failure: None,
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: bobs,
+            last: Some(MessageState::Sent),
+            failure: None,
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let commands = engine.engine.commands.take();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [Command::SendPacked {
+                    via: Via::Propagated,
+                    ..
+                }]
+            ),
+            "handed on: {commands:?}"
+        );
+
+        engine.engine.events.push_back(OutboxEvent::Announced {
+            destination: bob.1,
+            name: None,
+            path_response: true,
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let commands = engine.engine.commands.take();
+        assert!(commands.is_empty(), "a path response: {commands:?}");
+
+        engine.engine.events.push_back(OutboxEvent::Announced {
+            destination: bob.1,
+            name: None,
+            path_response: false,
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let commands = engine.engine.commands.take();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [Command::SendPacked { via: Via::Link, .. }]
+            ),
+            "Bob's announce: {commands:?}"
         );
     }
 
@@ -2328,6 +2680,8 @@ mod tests {
             collecting: false,
             told: std::collections::HashSet::new(),
             newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
         };
         let sends = |commands: Vec<Command>| -> Vec<Vec<u8>> {
             let mut out: Vec<Vec<u8>> = commands
@@ -2349,6 +2703,7 @@ mod tests {
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
+            ended: false,
         };
         let mut first_sender = sender();
         pump_group(&mut store, &mut first_sender, &mut engine, None);
@@ -2363,6 +2718,7 @@ mod tests {
         engine.engine.events.push_back(OutboxEvent::Left {
             message_id: caras,
             last: Some(MessageState::Delivered),
+            failure: None,
         });
         pump_group(&mut store, &mut first_sender, &mut engine, None);
         // Killed: the engine, its outbox and the store go.
@@ -2380,6 +2736,7 @@ mod tests {
                 engine: FakeOutbox::new(Vec::new()),
                 outgoing: Outgoing::new(Policy::default()),
                 selected_pn: None,
+                ended: false,
             };
             if resume {
                 resume_group(store, &mut engine, unix_now());
@@ -2436,6 +2793,7 @@ mod tests {
             engine.engine.events.push_back(OutboxEvent::Left {
                 message_id: copy,
                 last: Some(MessageState::Delivered),
+                failure: None,
             });
         }
         pump_group(&mut store, &mut sender(), &mut engine, None);
@@ -2450,5 +2808,164 @@ mod tests {
             .group_copies_open(&hosted.group.address)
             .expect("open")
             .is_empty());
+    }
+
+    /// 1307 pass four, the 1330 side finding: a group's copy a propagation
+    /// node took is kept so, and after a restart the copy is tried direct
+    /// again but never uploaded a second time; the node answered `dup=true`
+    /// to every such upload before. Control: a copy no node took is handed
+    /// on once its direct leg fails after the restart.
+    #[test]
+    fn a_restart_after_a_hand_on_uploads_nothing_again() {
+        use crate::outbox::fake::FakeOutbox;
+        const PN: [u8; 16] = [0x5a; 16];
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna, bob) = (person(), person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[(anna.1, "Anna".into()), (bob.1, "Bob".into())],
+            100,
+        )
+        .expect("create");
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
+        let original = leviculum_lxmf::Message::create(
+            hosted.group.address,
+            anna.1,
+            &anna.0,
+            1_800_000_000.0,
+            Vec::new(),
+            b"Bin gleich da".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let sender = || Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: true,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
+        };
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(vec![OutboxEvent::Packed {
+                message_id: original.message_id,
+                packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
+            }]),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: Some(PN),
+            ended: false,
+        };
+        let mut first = sender();
+        pump_group(&mut store, &mut first, &mut engine, Some(PN));
+        let copies = store
+            .group_copies(&hosted.group.address, &original.message_id)
+            .expect("copies");
+        let copy_of = |member: [u8; 16]| {
+            copies
+                .iter()
+                .find(|c| c.member == member)
+                .expect("copy")
+                .copy
+        };
+        let (lews, bobs) = (copy_of(lew.1), copy_of(bob.1));
+        // Bob's copy: direct fails, the node takes it.
+        for last in [MessageState::Failed, MessageState::Sent] {
+            engine.engine.events.push_back(OutboxEvent::Left {
+                message_id: bobs,
+                last: Some(last),
+                failure: None,
+            });
+            pump_group(&mut store, &mut first, &mut engine, Some(PN));
+        }
+        assert!(
+            store
+                .group_copy(&bobs)
+                .expect("row")
+                .expect("bob")
+                .propagated,
+            "kept"
+        );
+        assert!(
+            !store
+                .group_copy(&lews)
+                .expect("row")
+                .expect("lew")
+                .propagated
+        );
+        drop(engine);
+        drop(store);
+
+        let mut store = Store::open_in(home.path(), lew.1).expect("store again");
+        let hosted = group::hosted(home.path(), &store)
+            .expect("hosted")
+            .pop()
+            .expect("the group");
+        let mut engine = GroupEngine {
+            hosted,
+            engine: FakeOutbox::new(Vec::new()),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: Some(PN),
+            ended: false,
+        };
+        assert_eq!(resume_group(&mut store, &mut engine, unix_now()), 2);
+        let mut again = sender();
+        let acts = engine.outgoing.tick(unix_now());
+        again.carry_out(
+            &mut engine.engine,
+            &mut store,
+            &mut engine.outgoing,
+            acts,
+            Some(PN),
+            Some(PN),
+        );
+        let _ = engine.engine.commands.take();
+        for id in [lews, bobs] {
+            engine.engine.events.push_back(OutboxEvent::Left {
+                message_id: id,
+                last: Some(MessageState::Failed),
+                failure: None,
+            });
+        }
+        pump_group(&mut store, &mut again, &mut engine, Some(PN));
+        let uploads: Vec<[u8; 32]> = engine
+            .engine
+            .commands
+            .take()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::SendPacked {
+                    packed,
+                    via: Via::Propagated,
+                } => leviculum_lxmf::Message::unpack(
+                    &packed,
+                    None,
+                    None,
+                    leviculum_lxmf::DeliveryMethod::Direct,
+                )
+                .ok()
+                .map(|m| m.message_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uploads, [lews], "Lew's handed on, Bob's not again");
     }
 }

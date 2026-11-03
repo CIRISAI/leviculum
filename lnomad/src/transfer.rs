@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::app::strings::{with, with_args, Arg, StrId, Text as StrText};
 use crate::app::{ImageRequest, Model, ToastKind};
 use crate::browser;
-use crate::fetch::Session;
+use crate::fetch::{NodeLend, Session};
 use crate::url::Target;
 
 /// The result of a background fetch, tagged with the generation that issued it
@@ -50,10 +50,10 @@ pub enum LoadResult {
 /// Start (or restart) a background fetch for `target`. Aborts any in-flight
 /// task, bumps the generation, and spawns a task that locks the session, fetches
 /// and parses the page, resolves the title, and reports the tagged outcome.
-pub fn spawn_fetch(
+pub fn spawn_fetch<N: NodeLend + 'static>(
     inflight: &mut Option<tokio::task::JoinHandle<()>>,
     generation: &mut u64,
-    session: &Arc<Mutex<Session>>,
+    session: &Arc<Mutex<Session<N>>>,
     tx: &mpsc::UnboundedSender<FetchOutcome>,
     timeout: Duration,
     target: Target,
@@ -67,18 +67,14 @@ pub fn spawn_fetch(
     let tx = tx.clone();
     let handle = tokio::spawn(async move {
         let mut guard = session.lock().await;
-        let result = match browser::fetch_document(&mut guard, &target, timeout).await {
-            Ok(doc) => {
-                let name = guard.node_name(&target.dest_hash);
-                let title = browser::page_title(name.as_deref(), &target.dest_hash, &target.path);
-                LoadResult::Ok {
-                    doc,
-                    title,
-                    dest: target.dest_hash,
-                    identifying: guard.is_identifying(&target.dest_hash),
-                }
-            }
-            Err(err) => LoadResult::Err(err.text()),
+        let result = match fetch_page(&mut guard, &target, timeout).await {
+            Ok(page) => LoadResult::Ok {
+                doc: leviculum_micron::parse(&page.micron),
+                title: page.title,
+                dest: page.dest,
+                identifying: page.identifying,
+            },
+            Err(text) => LoadResult::Err(text),
         };
         let _ = tx.send(FetchOutcome {
             generation: generation_now,
@@ -88,15 +84,63 @@ pub fn spawn_fetch(
     *inflight = Some(handle);
 }
 
+/// A page a fetch brought: its micron, decoded as UTF-8 lossily so a page
+/// with stray bytes still renders, the title the frame shows, and the
+/// session's identify answer for its node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Page {
+    pub micron: String,
+    pub title: String,
+    pub dest: [u8; 16],
+    pub identifying: bool,
+}
+
+/// Fetch `target`'s page over `session`: what every frontend's fetch is,
+/// the terminal's and the window's task ([`spawn_fetch`]) and a hosting
+/// messenger's (Loquax's Browse tab), whose core parses the micron itself.
+/// The identify answer is read under the same borrow as the fetch, so it
+/// is the one the page was fetched under.
+pub async fn fetch_page<N: NodeLend>(
+    session: &mut Session<N>,
+    target: &Target,
+    timeout: Duration,
+) -> Result<Page, StrText> {
+    let bytes = session.fetch(target, timeout).await.map_err(|e| e.text())?;
+    let name = session.node_name(&target.dest_hash);
+    Ok(Page {
+        micron: String::from_utf8_lossy(&bytes).into_owned(),
+        title: browser::page_title(name.as_deref(), &target.dest_hash, &target.path),
+        dest: target.dest_hash,
+        identifying: session.is_identifying(&target.dest_hash),
+    })
+}
+
+/// Fetch `target`'s file over `session`: its bytes and the name to save it
+/// under ([`crate::download::choose_name`]: the server's, else the path's).
+/// The terminal saves it into the download directory ([`spawn_download`]);
+/// a phone hands it to the platform.
+pub async fn fetch_file<N: NodeLend>(
+    session: &mut Session<N>,
+    target: &Target,
+    timeout: Duration,
+) -> Result<(String, Vec<u8>), StrText> {
+    let (bytes, server_name) = session
+        .download_file(target, timeout)
+        .await
+        .map_err(|err| StrText::Raw(err.to_string()))?;
+    let name = crate::download::choose_name(server_name.as_deref(), &target.path);
+    Ok((name, bytes))
+}
+
 /// Start a background file download for `target`, sharing the in-flight slot
 /// and generation counter with fetches: starting either supersedes the other.
 /// The spawned task fetches the raw bytes over the session, saves them into
 /// the download directory (`$XDG_DOWNLOAD_DIR`, else `$HOME/Downloads`,
 /// created if missing, existing names de-duplicated), and reports the outcome.
-pub fn spawn_download(
+pub fn spawn_download<N: NodeLend + 'static>(
     inflight: &mut Option<tokio::task::JoinHandle<()>>,
     generation: &mut u64,
-    session: &Arc<Mutex<Session>>,
+    session: &Arc<Mutex<Session<N>>>,
     tx: &mpsc::UnboundedSender<FetchOutcome>,
     timeout: Duration,
     target: Target,
@@ -110,30 +154,27 @@ pub fn spawn_download(
     let tx = tx.clone();
     let handle = tokio::spawn(async move {
         let mut guard = session.lock().await;
-        let fetched = guard.download_file(&target, timeout).await;
+        let fetched = fetch_file(&mut guard, &target, timeout).await;
         drop(guard);
         let result = match fetched {
-            Ok((bytes, server_name)) => {
-                let name = crate::download::choose_name(server_name.as_deref(), &target.path);
-                match crate::download::download_dir() {
-                    Some(dir) => match crate::download::save_to_dir(&dir, &name, &bytes) {
-                        Ok(path) => LoadResult::Downloaded {
-                            name: path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or(name),
-                            bytes: bytes.len(),
-                            dir: dir.to_string_lossy().into_owned(),
-                        },
-                        Err(err) => LoadResult::DownloadErr(with_args(
-                            StrId::CouldNotSave,
-                            vec![Arg::Str(name), Arg::Str(err.to_string())],
-                        )),
+            Ok((name, bytes)) => match crate::download::download_dir() {
+                Some(dir) => match crate::download::save_to_dir(&dir, &name, &bytes) {
+                    Ok(path) => LoadResult::Downloaded {
+                        name: path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or(name),
+                        bytes: bytes.len(),
+                        dir: dir.to_string_lossy().into_owned(),
                     },
-                    None => LoadResult::DownloadErr(StrText::key(StrId::NoDownloadDir)),
-                }
-            }
-            Err(err) => LoadResult::DownloadErr(StrText::Raw(err.to_string())),
+                    Err(err) => LoadResult::DownloadErr(with_args(
+                        StrId::CouldNotSave,
+                        vec![Arg::Str(name), Arg::Str(err.to_string())],
+                    )),
+                },
+                None => LoadResult::DownloadErr(StrText::key(StrId::NoDownloadDir)),
+            },
+            Err(text) => LoadResult::DownloadErr(text),
         };
         let _ = tx.send(FetchOutcome {
             generation: generation_now,
@@ -163,7 +204,9 @@ const DISCOVERY_LOCK_SLICE: Duration = Duration::from_millis(250);
 ///
 /// The returned handle is aborted at teardown (mirroring the in-flight fetch),
 /// dropping this task's session clone so the session can be unwrapped and closed.
-pub fn spawn_discovery(session: &Arc<Mutex<Session>>) -> tokio::task::JoinHandle<()> {
+pub fn spawn_discovery<N: NodeLend + 'static>(
+    session: &Arc<Mutex<Session<N>>>,
+) -> tokio::task::JoinHandle<()> {
     let session = session.clone();
     tokio::spawn(async move {
         loop {
@@ -192,7 +235,7 @@ pub fn spawn_discovery(session: &Arc<Mutex<Session>>) -> tokio::task::JoinHandle
 /// through the lock with [`Session::shutdown`], which needs no ownership, and
 /// the returned line says so. It is printed once the terminal is restored,
 /// because a line written into the alternate screen is lost with it.
-pub async fn close_session(session: Arc<Mutex<Session>>) -> Option<String> {
+pub async fn close_session<N: NodeLend>(session: Arc<Mutex<Session<N>>>) -> Option<String> {
     match Arc::try_unwrap(session) {
         Ok(mutex) => {
             let _ = mutex.into_inner().close().await;
@@ -239,8 +282,8 @@ pub enum ImageResult {
 /// them in parallel would only queue them inside the stack while holding the
 /// session lock longer. Between images the lock is released, so a navigation
 /// the reader starts is served promptly — and it aborts this task anyway.
-pub fn spawn_image_queue(
-    session: &Arc<Mutex<Session>>,
+pub fn spawn_image_queue<N: NodeLend + 'static>(
+    session: &Arc<Mutex<Session<N>>>,
     tx: &mpsc::UnboundedSender<ImageOutcome>,
     timeout: Duration,
     requests: Vec<ImageRequest>,

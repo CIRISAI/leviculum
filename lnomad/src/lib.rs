@@ -77,7 +77,7 @@ pub use discovery::{
     NomadNodeRegistry,
 };
 #[cfg(feature = "std")]
-pub use fetch::{FetchError, Session};
+pub use fetch::{FetchError, LentNode, NodeLend, NodeRef, OwnNode, Session};
 #[cfg(feature = "std")]
 pub use identify::IdentifyStore;
 pub use page_cache::{CacheEntry, PageCache};

@@ -97,6 +97,23 @@ pub enum MessageState {
     Failed = 0xff,
 }
 
+/// Why one delivery attempt failed ([`RouterEvent::AttemptFailed`]): to the
+/// recipient, or an upload to a propagation node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptFailure {
+    Delivery(DeliveryFailure),
+    Upload(crate::propagation_client::PropagationUploadFailure),
+}
+
+impl core::fmt::Display for AttemptFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Delivery(failure) => failure.fmt(f),
+            Self::Upload(failure) => failure.fmt(f),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RouterConfig {
     pub max_outbound: usize,
@@ -298,6 +315,16 @@ pub enum RouterEvent {
         message_id: [u8; 32],
         state: MessageState,
     },
+    /// One delivery attempt of a queued message failed, and the router will
+    /// try it again or, with its attempts run out, fail it. `Failed` itself
+    /// carries no reason (Python's `LXMessage.FAILED` neither); this is the
+    /// only place the transport's says why, so an application that wants to
+    /// tell a link that died mid-transfer from one that never came keeps
+    /// the last one it saw.
+    AttemptFailed {
+        message_id: [u8; 32],
+        reason: AttemptFailure,
+    },
     MessageReceived(Box<Message>),
     InboundRejected {
         method: DeliveryMethod,
@@ -325,9 +352,15 @@ pub enum RouterEvent {
     /// [`DeliveryAnnounce::decode`] on the app data. Emitting the result is
     /// what keeps every client from re-implementing both, and it is the only
     /// path on which a peer's display name reaches an application.
+    ///
+    /// `path_response` is Python's `is_path_response`
+    /// ([`leviculum_core::ReceivedAnnounce::is_path_response`]): the announce
+    /// answered a path request, as a rule from a transport node's cache, and
+    /// says only that the peer announced once, not that it is there now.
     PeerAnnounced {
         destination: DestinationHash,
         announce: DeliveryAnnounce,
+        path_response: bool,
     },
     InvalidSignature([u8; 32]),
     InvalidStamp([u8; 32]),
@@ -1398,6 +1431,7 @@ impl LxmfRouter {
                     output.events.push(RouterEvent::PeerAnnounced {
                         destination: *announce.destination_hash(),
                         announce: decoded,
+                        path_response: announce.is_path_response(),
                     });
                 }
             }
@@ -1546,9 +1580,13 @@ impl LxmfRouter {
                     });
                 }
             }
-            LxmfNodeEvent::DeliveryFailed { message_id, .. } => {
+            LxmfNodeEvent::DeliveryFailed { message_id, reason } => {
                 let mut changed = false;
                 if let Some(entry) = self.outbound.get_mut(&message_id) {
+                    out.push(RouterEvent::AttemptFailed {
+                        message_id,
+                        reason: AttemptFailure::Delivery(reason),
+                    });
                     let next_attempt_ms =
                         entry.next_attempt_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                     changed = entry.set_state(MessageState::Outbound, &mut self.build_epochs)
@@ -3290,6 +3328,7 @@ mod persistence_tests {
                 RouterEvent::PeerAnnounced {
                     destination,
                     announce,
+                    ..
                 } => Some((*destination, announce.clone())),
                 _ => None,
             })
@@ -4004,6 +4043,56 @@ mod persistence_tests {
         });
         assert_eq!(router.outbound.get(&id).unwrap().progress, 0.75);
         assert_eq!(persistence_request_count(&progress), 1);
+    }
+
+    /// 1330: a link that dies mid-transfer fails the attempt, and the
+    /// router says why beside the retry, since `Failed` carries no reason:
+    /// the home node's "direct failed" line read `reason=failed` and could
+    /// not tell this from a link that never came.
+    #[test]
+    fn a_failed_attempt_says_why() {
+        let (mut router, node) = router_and_node(RouterConfig::default());
+        let queued = message(87);
+        let id = queued.message_id;
+        let _ = router.enqueue(&node, queued).unwrap();
+        let entry = router.outbound.get_mut(&id).unwrap();
+        entry.set_state(MessageState::Sending, &mut router.build_epochs);
+        let reason = DeliveryFailure::LinkClosed(leviculum_core::LinkCloseReason::Stale);
+
+        let mut events = Vec::new();
+        router.handle_node_event(
+            LxmfNodeEvent::DeliveryFailed {
+                message_id: id,
+                reason,
+            },
+            5_000,
+            wall(1.0),
+            &mut events,
+        );
+
+        assert_eq!(
+            events,
+            vec![RouterEvent::AttemptFailed {
+                message_id: id,
+                reason: AttemptFailure::Delivery(reason)
+            }]
+        );
+        assert_eq!(
+            router.outbound.get(&id).unwrap().state(),
+            MessageState::Outbound
+        );
+        // Control: a message the router no longer holds says nothing.
+        let mut events = Vec::new();
+        router.handle_node_event(
+            LxmfNodeEvent::DeliveryFailed {
+                message_id: [0xee; 32],
+                reason,
+            },
+            5_000,
+            wall(1.0),
+            &mut events,
+        );
+        assert!(events.is_empty(), "{events:?}");
     }
 
     /// Both values the RCL arm has carried are terminal here.

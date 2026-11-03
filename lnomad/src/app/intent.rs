@@ -65,7 +65,7 @@ use super::scene::NodeId;
 use super::strings::{StrId, Text};
 
 /// What the reader asks of the browser.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Intent {
     // Navigation.
     /// Go where `url` says, or what the address field holds: a URL, or a
@@ -92,6 +92,13 @@ pub enum Intent {
     Hint,
     /// A checkbox or a radio, by its 1-based field index.
     Toggle(usize),
+    /// A text field, by its 1-based index, holds `text`: what a platform's
+    /// own text field (a phone's) hands in, where a terminal types key by
+    /// key (1337).
+    Fill {
+        field: usize,
+        text: String,
+    },
     Scroll(ScrollCmd),
     /// The in-page search field opens, empty.
     Find,
@@ -207,6 +214,7 @@ impl Labelled for Intent {
             Intent::FocusPrev => StrId::PrevField,
             Intent::Hint => StrId::HintMode,
             Intent::Toggle(_) => StrId::Toggle,
+            Intent::Fill { .. } => StrId::Edit,
             Intent::Scroll(_) => StrId::Scroll,
             Intent::Search { .. } => StrId::Search,
             Intent::Match { next: true } => StrId::Next,
@@ -277,6 +285,10 @@ pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
             if (1..=model.field_state.len()).contains(&field) {
                 toggle_field(model, field);
             }
+            Vec::new()
+        }
+        Intent::Fill { field, text } => {
+            fill_field(model, field, &text);
             Vec::new()
         }
         Intent::Scroll(cmd) => {
@@ -619,6 +631,43 @@ mod tests {
     }
 
     /// A tap on a link follows it as Enter on the focused link does.
+    #[test]
+    fn a_fill_sets_a_text_field_as_typing_it_would() {
+        // The phone's editor hands the whole text in; the terminal types it
+        // key by key. Both leave the same field and the same page.
+        let mut typed = model();
+        apply(&mut typed, Intent::Activate(NodeId::Field(1)));
+        for c in "Lew".chars() {
+            update(
+                &mut typed,
+                AppEvent::Key(KeyEvent {
+                    code: KeyCode::Char(c),
+                    modifiers: KeyModifiers::NONE,
+                    kind: KeyEventKind::Press,
+                }),
+            );
+        }
+        let mut filled = model();
+        let fill = |text: &str| Intent::Fill {
+            field: 1,
+            text: text.to_string(),
+        };
+        assert_eq!(apply(&mut filled, fill("Lew")), Vec::new());
+        assert_eq!(filled.field_state[0].input.value(), "Lew");
+        assert_eq!(filled.field_values(), typed.field_values());
+        assert_eq!(filled.scene().page.lines, typed.scene().page.lines);
+        // Off the page, nothing moves (the control).
+        let before = filled.field_values();
+        apply(
+            &mut filled,
+            Intent::Fill {
+                field: 9,
+                text: "x".to_string(),
+            },
+        );
+        assert_eq!(filled.field_values(), before);
+    }
+
     #[test]
     fn activating_a_link_follows_it() {
         let mut by_key = model();

@@ -524,17 +524,21 @@ pub struct Here {
     port: u16,
     /// The platform's word on the network (1298), kept for a restart.
     network: loquax::home::rendezvous::Network,
+    /// Where its node is lent at every start (1337 pass two): the Browse
+    /// tab's fetch, which reaches the network through it.
+    lend: Option<tokio::sync::mpsc::UnboundedSender<loquax::engine::Lent>>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl Here {
     /// Start the home node on `runtime`, its screens' server on a free
-    /// loopback port.
+    /// loopback port, its node lent on `lend` once it runs.
     pub fn start(
         app: &Path,
         runtime: &Handle,
         network: loquax::home::rendezvous::Network,
+        lend: Option<tokio::sync::mpsc::UnboundedSender<loquax::engine::Lent>>,
     ) -> Result<Self, String> {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
             .map_err(|error| format!("no port for the screens: {error}"))?;
@@ -546,6 +550,7 @@ impl Here {
             app: app.to_path_buf(),
             port,
             network,
+            lend,
             stop: None,
             task: None,
         };
@@ -606,6 +611,7 @@ impl Here {
             wake: true,
             stop: Some(stopped),
             network: self.network.clone(),
+            lend: self.lend.clone(),
         };
         self.stop = Some(stop);
         self.task = Some(runtime.spawn(loquax::home::daemon::run(options)));

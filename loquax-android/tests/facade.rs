@@ -1719,6 +1719,7 @@ impl HomeNode {
                 wake: true,
                 stop: Some(stopped),
                 network: Default::default(),
+                lend: None,
             },
         ));
         Self {
@@ -5978,6 +5979,11 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
     let card = &session::rows(&model, lew, Lang::En)[0];
     assert_eq!(card.invite_group, hex(&GROUP));
     assert_eq!(card.invite_title, "Lew invited you to Familie");
+    // 1348: the same message on a German phone, the card from `lev 0x04`.
+    assert_eq!(
+        session::rows(&model, lew, Lang::De)[0].invite_title,
+        "Lew lädt dich zu Familie ein"
+    );
     assert!(card.invite_join);
     assert!(card.invite_trust.contains("Lew could read"));
 
@@ -6012,6 +6018,7 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
                         flags: 4,
                     },
                 ],
+                ended: false,
             }),
             ..Lev::default()
         },
@@ -6029,7 +6036,9 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
             Lev {
                 group_copy: Some(GroupCopy {
                     sender: writer,
-                    sent_ms: 1,
+                    // Each line its writer's own time: a line is shown
+                    // once by writer and time (1307 pass four).
+                    sent_ms: u64::from(id),
                     epoch: 1,
                 }),
                 ..Lev::default()
@@ -6056,6 +6065,44 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
     );
     let row = loquax::ui::scene::row(&model, &GROUP);
     assert_eq!(row.avatar.initials, "3");
+
+    // Lew deletes it (1307 pass four): the home's last membership is a
+    // note row, drawn by Java as a centred line, and no bubble.
+    arrive(
+        &mut model,
+        GROUP,
+        6,
+        "",
+        Lev {
+            members: Some(Members {
+                epoch: 2,
+                members: vec![
+                    Member {
+                        address: LEW,
+                        name: "Lew".into(),
+                        flags: 1 | 2 | 4,
+                    },
+                    Member {
+                        address: ME,
+                        name: "Me".into(),
+                        flags: 1 | 4,
+                    },
+                ],
+                ended: true,
+            }),
+            ..Lev::default()
+        },
+    );
+    let last = session::rows(&model, g, Lang::En).pop().expect("the note");
+    assert!(last.note, "a note row");
+    assert_eq!(last.body, "Lew ended the group.");
+    assert!(
+        session::rows(&model, g, Lang::En)
+            .iter()
+            .filter(|r| !r.note)
+            .all(|r| r.late.is_empty()),
+        "control: no line came late"
+    );
 
     let decoded = |bytes: Vec<u8>| -> Result<Intent, String> {
         let request: schema::Request = schema::decode(&bytes)?;
@@ -6136,6 +6183,29 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
             Verb::Leave {
                 group: Target::Peer(GROUP),
                 confirmed: false,
+            },
+        ),
+        // The admin's Delete group and Start again (1307 pass four).
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("delete")),
+                ("peer", Java::Str(&group)),
+                ("confirmed", Java::Bool(true)),
+            ]),
+            Verb::Delete {
+                group: Target::Peer(GROUP),
+                confirmed: true,
+            },
+        ),
+        (
+            java_map(&[
+                ("t", Java::Str("group")),
+                ("verb", Java::Str("again")),
+                ("peer", Java::Str(&group)),
+            ]),
+            Verb::Again {
+                group: Target::Peer(GROUP),
             },
         ),
     ];

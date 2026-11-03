@@ -1222,6 +1222,8 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                 }
             }
             Effect::Quit => model.quit = true,
+            // Never raised here: the terminal is not hosted by a messenger.
+            Effect::Write(_) => {}
         }
     }
 }
@@ -3373,6 +3375,31 @@ mod tests {
             "toast names the refused scheme: {}",
             toast.text
         );
+    }
+
+    #[test]
+    fn a_hosted_browser_hands_an_lxmf_link_to_its_messenger() {
+        // In Loquax's Browse tab a page's "message the operator" link opens
+        // the chat: the browser asks the host to write, copies nothing and
+        // fetches nothing. Without `hosted` the same link is copied (the
+        // test below), which is the control.
+        let hash = "0ec84236630cea839d80a71c39fb41ce";
+        let mut m = Model {
+            links: vec![RenderedLink {
+                index: 1,
+                label: "Lew Palm".to_string(),
+                target: format!("lxmf@{hash}"),
+                ..RenderedLink::default()
+            }],
+            hosted: true,
+            ..Model::default()
+        };
+        assert_eq!(
+            follow_link(&mut m, 1),
+            vec![Effect::Write(hash.to_string())]
+        );
+        assert!(m.pending.is_none(), "an address must not start a fetch");
+        assert!(m.toast.is_none(), "the chat opening says it all");
     }
 
     #[test]

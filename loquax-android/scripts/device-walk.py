@@ -43,6 +43,7 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -91,6 +92,7 @@ STEPS = [
     "group_create",
     "group_join",
     "group_message",
+    "group_card_join",
     "network_wifi_toggle",
     "network_mobile_switch",
     "flight_mode",
@@ -307,6 +309,8 @@ GROUP_NEW = "new_group"
 GROUP_NEXT = "Next"
 GROUP_CREATE = "Create"
 GROUP_JOINED = "{} joined."
+# The invitation card's Join (the catalogue's group_join), 1307 pass four.
+GROUP_JOIN = "Join"
 
 
 # The pencil (1263, finding 3): its two rows, top to bottom, the fold
@@ -3747,6 +3751,115 @@ class Walk:
             raise StepFailed(f"no tick on {body!r} within 30s; mark={mark!r}")
         tick_ms = int((time.monotonic() - start) * 1000)
         return f"tick_ms={tick_ms} mark={mark!r}"
+
+    def step_group_card_join(self) -> str:
+        """A Loquax member joins by the invitation's card (1307 pass four,
+        study 4.2): a second home on the host ("card", its owner a scripted
+        terminal client) makes a group with the phone in it; the phone
+        lists the group as an invitation, its chat shows the card, and
+        Join is the one tap after opening it: 2 taps. The card home's store
+        must then hold the phone as joined and understanding groups (flags
+        8 and 1 of `group_members`)."""
+        dev = self.need_device()
+        fixture = self.need_fixture()
+        loquax = str(self.args.loquax)
+        phone = fixture.manifest["address"]
+        name = f"Card Group {self.nonce}"
+        card, laptop = fixture.root / "card", fixture.root / "card-laptop"
+        card.mkdir(exist_ok=True)
+        laptop.mkdir(exist_ok=True)
+        env_card = {**os.environ, "LNMSG_HOME": str(card), "NO_COLOR": "1"}
+        env_laptop = {
+            **os.environ,
+            "LNMSG_HOME": str(laptop),
+            "LNMSG_DISPLAY_NAME": f"Card {self.nonce}",
+            "NO_COLOR": "1",
+        }
+        admitted = subprocess.run(
+            [loquax, "home", "admit", "--name", "laptop"],
+            env=env_card,
+            capture_output=True,
+            timeout=30,
+        )
+        code = parse_code(admitted.stdout.decode(errors="replace"))
+        if admitted.returncode != 0 or not code:
+            raise StepFailed(f"card admit exit={admitted.returncode}: {admitted.stderr.decode()[-300:]}")
+        fixture.logs["card"] = fixture.root / "card.log"
+        fixture.procs.append(
+            subprocess.Popen(
+                [loquax, "mailbox", "run", "--config", str(fixture.cfg), "--sync-interval", "off"],
+                env=env_card,
+                stdout=fixture.logs["card"].open("wb"),
+                stderr=subprocess.STDOUT,
+            )
+        )
+
+        def card_log() -> str:
+            return fixture.logs["card"].read_text(errors="replace")
+
+        if not wait_for(lambda: "HOME up address=" in card_log(), 30):
+            raise StepFailed(f"the card home did not come up: {card_log()[-400:]}")
+        joined = subprocess.run(
+            [loquax, "home", "join", code, "--timeout", "40", "--config", str(fixture.cfg)],
+            env=env_laptop,
+            capture_output=True,
+            timeout=90,
+        )
+        if joined.returncode != 0:
+            raise StepFailed(f"card laptop join exit={joined.returncode}: {joined.stderr.decode()[-300:]}")
+        script = laptop / "session.script"
+        script.write_text(
+            "until ready 20\nkey :\ntype new group\nkey enter\n"
+            f"type {phone}\nkey enter\nkey enter\ntype {name}\nkey enter\n"
+            "until groups 1 40\nkey q\n",
+            encoding="utf-8",
+        )
+        made = subprocess.run(
+            [loquax, "tui", "--config", str(fixture.cfg), "--to", phone, "--sync-interval", "15m",
+             "--script", str(script), "--size", "80x24"],
+            env=env_laptop,
+            capture_output=True,
+            timeout=120,
+        )
+        if made.returncode != 0:
+            raise StepFailed(f"card tui exit={made.returncode}: {made.stderr.decode()[-300:]}")
+        address = None
+
+        def hosted():
+            nonlocal address
+            address = group_hosted(card_log(), name)
+            return address is not None
+
+        if not wait_for(hosted, 30, every=0.5):
+            raise StepFailed(f"the card home hosts no {name!r}: {card_log()[-400:]}")
+        self.back_to_chats()
+        self.wait_text(name, 90)
+        taps = 0
+        self.open_conversation(name)
+        taps += 1
+        self.tap_text(GROUP_JOIN)
+        taps += 1
+        store = card / "history.sqlite3"
+        flags = 0
+
+        def member_joined():
+            nonlocal flags
+            try:
+                with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as db:
+                    row = db.execute(
+                        "SELECT flags FROM group_members WHERE grp = ? AND address = ?",
+                        (bytes.fromhex(address), bytes.fromhex(phone)),
+                    ).fetchone()
+            except sqlite3.Error:
+                return False
+            flags = row[0] if row else 0
+            return flags & 8 != 0 and flags & 1 != 0
+
+        if not wait_for(member_joined, 60, every=0.5):
+            raise StepFailed(f"the card home never saw the phone join: flags={flags}")
+        if taps != 2:
+            raise StepFailed(f"{taps} taps, not 2")
+        return f"taps={taps} group={address[:8]} flags={flags}"
 
     def network_kind(self) -> str:
         return default_network(self.need_device().shell("dumpsys connectivity", check=False))

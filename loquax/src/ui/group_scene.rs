@@ -119,6 +119,11 @@ pub struct MemberSheet {
     pub leave: Option<Action>,
     /// Add members, the admin's (1307 G2, study 4.5).
     pub add: Option<Action>,
+    /// Delete group, the admin's (1307 pass four): for everyone.
+    pub delete: Option<Action>,
+    /// Start again with the same people, in a group the reader left or
+    /// that ended (study 4.7).
+    pub again: Option<Action>,
     pub ask: Option<AskNode>,
     pub close: Action,
     pub a11y: A11y,
@@ -149,6 +154,22 @@ pub fn badge<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Option<GroupBadge> {
         standing: info.standing,
         words,
     })
+}
+
+/// The line a group its admin deleted shows where its compose bar was
+/// (1307 pass four): "Lew ended the group", the admin as the newest
+/// membership names it. `None` for any other conversation.
+pub fn ended<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Option<Text> {
+    let info = model
+        .group(peer)
+        .filter(|g| g.standing == Standing::Ended)?;
+    let admin = info
+        .members
+        .iter()
+        .find(|m| m.admin)
+        .map(|m| model.member_name(m))
+        .unwrap_or_else(|| admin_name(model, info));
+    Some(Text::Key(StrId::GroupEnded, Vec::from([Arg::Str(admin)])))
 }
 
 /// The admin as the reader knows it: its name for the inviter, else the
@@ -311,7 +332,7 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
                 "left" => StrId::GroupStateLeft,
                 "admin" => StrId::GroupAdmin,
                 "joined" => StrId::GroupStateJoined,
-                _ => StrId::GroupStateInvited,
+                _ => invited_words(model, info, &m.address),
             });
             let id = NodeId::Member(m.address);
             MemberRow {
@@ -366,6 +387,17 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
             }),
             no: verb(Verb::Close),
         },
+        Confirm::Delete => AskNode {
+            words: Text::Key(
+                StrId::GroupDeleteAsk,
+                Vec::from([Arg::Str(info.name.clone())]),
+            ),
+            yes: verb(Verb::Delete {
+                group: Target::Peer(group),
+                confirmed: true,
+            }),
+            no: verb(Verb::Close),
+        },
     });
     let title = Text::Raw(info.name.clone());
     Some(MemberSheet {
@@ -378,20 +410,60 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
             Vec::from([Arg::Int(info.count() as i64)]),
         ),
         rows,
-        leave: (info.standing == Standing::Joined).then(|| {
-            verb(Verb::Leave {
+        // An ended group has nobody to leave: the same place removes it
+        // from the list (1307 pass four), asked as Leave is.
+        leave: match info.standing {
+            Standing::Joined => Some(verb(Verb::Leave {
+                group: Target::Peer(group),
+                confirmed: false,
+            })),
+            Standing::Ended => {
+                let mut remove = verb(Verb::Leave {
+                    group: Target::Peer(group),
+                    confirmed: true,
+                });
+                remove.label_key = StrId::GroupRemoveFromList;
+                Some(remove)
+            }
+            Standing::Invited | Standing::Left => None,
+        },
+        add: (info.ours && info.standing == Standing::Joined).then(|| {
+            verb(Verb::Add {
+                group: Target::Peer(group),
+            })
+        }),
+        delete: (info.ours && info.standing == Standing::Joined).then(|| {
+            verb(Verb::Delete {
                 group: Target::Peer(group),
                 confirmed: false,
             })
         }),
-        add: (info.ours && info.standing == Standing::Joined).then(|| {
-            verb(Verb::Add {
+        again: matches!(info.standing, Standing::Left | Standing::Ended).then(|| {
+            verb(Verb::Again {
                 group: Target::Peer(group),
             })
         }),
         ask,
         close: verb(Verb::Close),
     })
+}
+
+/// An invited member's words in the sheet (1307 pass six): where the
+/// reader's invitation to it stands, from the home's outbox through the
+/// archive. Delivered, it is plainly invited: the member has it and has
+/// not joined. In the admin's own group an invitation not seen yet is
+/// still being delivered; in another's group, the reader knows only that
+/// the member was invited.
+fn invited_words<B>(model: &UiModel<B>, info: &GroupInfo, member: &[u8; 16]) -> StrId {
+    use leviculum_ui::delivery::DeliveryState as D;
+    match model.invitation_delivery(&info.address, member) {
+        Some(D::Delivered | D::Read { .. }) => StrId::GroupStateInvited,
+        Some(D::InMailbox) => StrId::GroupStateWaiting,
+        Some(D::Failed | D::Rejected) => StrId::GroupStateUndelivered,
+        Some(D::Queued | D::Stamping | D::InFlight | D::Sent) => StrId::GroupStateDelivering,
+        None if info.ours => StrId::GroupStateDelivering,
+        None => StrId::GroupStateInvited,
+    }
 }
 
 fn hex(bytes: &[u8]) -> Value {
@@ -403,6 +475,7 @@ fn standing_word(standing: Standing) -> &'static str {
         Standing::Invited => "invited",
         Standing::Joined => "joined",
         Standing::Left => "left",
+        Standing::Ended => "ended",
     }
 }
 
@@ -463,6 +536,13 @@ impl MemberSheet {
         // a member stay the bytes they were.
         if let (Value::Object(map), Some(add)) = (&mut value, &self.add) {
             map.insert("add".into(), add.to_json());
+        }
+        // Delete and Start again (pass four) likewise.
+        if let (Value::Object(map), Some(delete)) = (&mut value, &self.delete) {
+            map.insert("delete".into(), delete.to_json());
+        }
+        if let (Value::Object(map), Some(again)) = (&mut value, &self.again) {
+            map.insert("again".into(), again.to_json());
         }
         value
     }

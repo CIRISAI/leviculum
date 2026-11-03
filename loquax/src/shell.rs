@@ -309,6 +309,10 @@ impl Shell {
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
                 UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
+                // The terminal and the window enable no Browse tab (1337):
+                // lnomad is its own program on a PC, and the model drops a
+                // browser verb while the tab is off.
+                UiEffect::Browse(_) => {}
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
                 UiEffect::MapDrawing(n) => self.outputs.push(Output::MapDrawing(n)),
@@ -409,6 +413,19 @@ impl Shell {
                         }));
                     }
                     None => answers.push(UiEvent::MembersAdded(Err(
+                        "groups live at a mailbox, and this Loquax has none".to_string(),
+                    ))),
+                },
+                UiEffect::DeleteGroup { group } => match self.context.client.clone() {
+                    Some(client) => {
+                        let done = self.done_tx.clone();
+                        let budget = self.context.timeout;
+                        self.mark_tasks.push(tokio::spawn(async move {
+                            let event = runner::delete_group(client, group, budget).await;
+                            let _ = done.send(Finished::Event(event));
+                        }));
+                    }
+                    None => answers.push(UiEvent::GroupDeleted(Err(
                         "groups live at a mailbox, and this Loquax has none".to_string(),
                     ))),
                 },
@@ -655,6 +672,7 @@ impl Shell {
                         OutboxEvent::Announced {
                             destination,
                             name: Some(_),
+                            ..
                         } => Some(*destination),
                         _ => None,
                     };
@@ -744,6 +762,46 @@ impl Shell {
         };
         self.apply(UiEvent::Elapsed(now));
         self.apply(UiEvent::Record { peer, input });
+    }
+
+    /// A file the desktop's chooser picked for `peer`'s chat (1341), sent
+    /// as the phone sends what its picker hands over: a picture scaled and
+    /// stripped at the reader's photo size, any other file whole up to
+    /// what a receiver takes; what will not go is said in the reader's
+    /// words, as the phone's status line says it.
+    #[cfg(feature = "gui")]
+    pub(crate) fn attach(&mut self, peer: [u8; 16], path: &std::path::Path, photo: bool) {
+        let lang = self.model.lang;
+        let event = std::fs::metadata(path)
+            .map_err(|e| format!("{}: {e}", path.display()))
+            .and_then(|meta| {
+                let whole = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+                match loquax::ui::files::refusal(whole).filter(|_| !photo) {
+                    Some(why) => Err(why.resolve(lang)),
+                    None => std::fs::read(path).map_err(|e| format!("{}: {e}", path.display())),
+                }
+            })
+            .and_then(|data| match photo {
+                true => loquax::photo::prepare(&data, self.model.photo_size)
+                    .map(|prepared| UiEvent::SendPhoto {
+                        peer,
+                        format: prepared.format.to_string(),
+                        data: prepared.data,
+                    })
+                    .map_err(|e| format!("{}: {e}", path.display())),
+                false => Ok(UiEvent::SendFile {
+                    peer,
+                    name: path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    data,
+                }),
+            });
+        match event {
+            Ok(event) => self.apply(event),
+            Err(line) => self.apply(UiEvent::Notice(line)),
+        }
     }
 
     /// The clock's tick, every [`TICK_MS`]: the time of day to the model,

@@ -9,24 +9,29 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Terminal LXMF messenger for Reticulum: a send command and a terminal UI"
+description = "LXMF messenger for Reticulum: a window, a terminal UI and a send command"
 
 [lints.rust]
 unsafe_code = "forbid"
 
-# The package ships the binary built with `--features tui` (scripts/build-deb.sh),
-# so plain `loquax` opens the messenger; the CLI alone is what a script needs, the package is
-# what a person installs. The messenger is a client of a running shared
-# instance, like lnomad, and the package brings that instance along (1265).
+# The package ships one binary with both frontends (1342): built against
+# glibc 2.31 with `--features tui,gui` for amd64 and arm64, where plain
+# `loquax` opens the window on a desktop and the terminal view elsewhere,
+# and musl-static with `--features tui` alone for armhf, the `terminal`
+# variant below (scripts/build-deb.sh). The CLI alone is what a script
+# needs, the package is what a person installs. The messenger is a client of
+# a running shared instance, like lnomad, and the package brings that
+# instance along (1265).
 [package.metadata.deb]
 name = "loquax"
 maintainer = "Lew Palm <lp@lew-palm.de>"
 copyright = "2026, Lew Palm"
 license-file = ["../LICENSE", "0"]
 extended-description = """\
-Terminal LXMF messenger for the Reticulum network. Plain `loquax` is the
-interactive messenger with conversations and a compose line, `loquax send`
-delivers one message from a script. It attaches to a local shared RNS
+LXMF messenger for the Reticulum network. Plain `loquax` opens the
+messenger in a window on a desktop and in the terminal elsewhere, with
+conversations, a map and a compose line; `loquax send` delivers one
+message from a script. It attaches to a local shared RNS
 instance, which the leviculum package it depends on provides: lnsd, the
 zero-config Reticulum daemon, enabled and started as lnsd.service. The
 Python rnsd serves it as well.
@@ -38,7 +43,8 @@ switched off; `sudo loquax mailbox enable` switches it on.
 """
 section = "net"
 priority = "optional"
-# musl-static. leviculum is a Depends, not a Recommends as for lnomad and
+# glibc 2.31 is the floor the build links against (cargo zigbuild's
+# `<triple>.2.31`): Debian 11 and Ubuntu 20.04 on. leviculum is a Depends, not a Recommends as for lnomad and
 # lnpnd (1265, walk finding 5 of the ninety percent walk): the package is
 # what a person installs who has never heard of Reticulum, and without a
 # daemon the messenger has nothing to attach to. leviculum's own
@@ -48,7 +54,12 @@ priority = "optional"
 # because postinst creates the mailbox's service user (1153), as lnpnd's
 # does. Asserted by tests/package_metadata.rs and on the built .deb in
 # scripts/verify-deb-packaging.sh.
-depends = "adduser, leviculum"
+depends = "adduser, leviculum, libc6 (>= 2.31)"
+# What the window opens with dlopen, read off the binary's strings: winit's
+# X11 and Wayland clients and its keyboard maps. Recommends, not Depends: the
+# mailbox on a server and the terminal view need none of them, and without
+# them `loquax` starts the terminal view and `loquax gui` says it cannot open.
+recommends = "libwayland-client0, libx11-6, libxcb1, libxi6, libxkbcommon0, libxkbcommon-x11-0"
 # The package was called lnmsg until #232; these two let an install of
 # loquax take the old package's place instead of failing on it.
 replaces = "lnmsg"
@@ -59,6 +70,11 @@ assets = [
     ["target/release/loquax", "usr/bin/", "755"],
     # Rendered from docs/src/man/ by scripts/md2man.py in scripts/build-deb.sh.
     ["../target/man/loquax.1", "usr/share/man/man1/loquax.1", "644"],
+    # The launcher entry and the jackdaw for it (1336): the window, which
+    # `Exec=loquax gui` names explicitly (1342). The PNG is written by
+    # loquax-android/scripts/render-icon.py.
+    ["../packaging/loquax/loquax.desktop", "usr/share/applications/loquax.desktop", "644"],
+    ["../packaging/loquax/loquax.png", "usr/share/icons/hicolor/256x256/apps/loquax.png", "644"],
     ["README.md", "usr/share/doc/loquax/README.md", "644"],
     ["../packaging/lintian/loquax", "usr/share/lintian/overrides/loquax", "644"],
     # Codeberg #288; see leviculum-cli/Cargo.toml.
@@ -66,6 +82,39 @@ assets = [
 ]
 changelog = "../target/deb-changelog/loquax"
 maintainer-scripts = "../packaging/loquax/"
+
+# armhf (1342): the musl-static build with the terminal alone, as before;
+# no desktop runs there. Named explicitly, since cargo-deb 3.7 would call it
+# loquax-terminal; only one of the two is built per architecture, so the
+# name never meets the base package's in target/debian/. The assets are the
+# base's but the launcher entry, which opens the terminal view in a terminal.
+[package.metadata.deb.variants.terminal]
+name = "loquax"
+depends = "adduser, leviculum"
+# Empty, so not the base's window libraries; deb-finalize.sh drops the field.
+recommends = ""
+extended-description = """\
+LXMF messenger for the Reticulum network, the terminal build for 32-bit
+ARM. Plain `loquax` is the interactive messenger with conversations, a map
+and a compose line; `loquax send` delivers one message from a script. It
+attaches to a local shared RNS instance, which the leviculum package it
+depends on provides: lnsd, the zero-config Reticulum daemon, enabled and
+started as lnsd.service. The Python rnsd serves it as well.
+
+The package also carries Loquax Mailbox, the always-on part that keeps
+your mail while your devices are off, as the system service
+loquax-mailbox.service under a dedicated 'loquax' user. It is installed
+switched off; `sudo loquax mailbox enable` switches it on.
+"""
+assets = [
+    ["target/release/loquax", "usr/bin/", "755"],
+    ["../target/man/loquax.1", "usr/share/man/man1/loquax.1", "644"],
+    ["../packaging/loquax/loquax-terminal.desktop", "usr/share/applications/loquax.desktop", "644"],
+    ["../packaging/loquax/loquax.png", "usr/share/icons/hicolor/256x256/apps/loquax.png", "644"],
+    ["README.md", "usr/share/doc/loquax/README.md", "644"],
+    ["../packaging/lintian/loquax", "usr/share/lintian/overrides/loquax", "644"],
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/loquax/THIRD-PARTY-NOTICES", "644"],
+]
 
 # Loquax Mailbox as a system service (1153). Installed disabled and not
 # started: the mailbox answers for a person's identity, and only they decide
@@ -137,12 +186,18 @@ tui = [
     "dep:tui-input",
     "dep:open",
     "qr",
+    "scan",
     "photos",
     "voice",
+    "dep:zbus",
 ]
 # QR codes (`loquax::home::qr`): the admission code in the terminal, and an
 # address for the phone's contact screen to show (1146).
 qr = ["dep:qrcodegen"]
+# The QR decoder (`loquax::scan`, 1152): the phone's camera frames, and on
+# the desktop a picture of a code (1341). In the terminal, the window and
+# the phone; not in the core.
+scan = ["dep:rqrr"]
 # Photos (`loquax::photo`, 1220): a picked picture scaled and stripped
 # before it goes, a received one decoded for its thumbnail and its full
 # view. In the terminal, the window and the phone; not in the core.
@@ -169,8 +224,11 @@ gui = [
     "dep:iced",
     "dep:leviculum-ui-iced",
     "dep:open",
+    "qr",
+    "scan",
     "photos",
     "voice",
+    "dep:zbus",
 ]
 
 [dependencies]
@@ -189,6 +247,14 @@ tokio = { workspace = true, optional = true }
 # key events, the styled lines. `no_std` without its `std` feature, so the
 # model stays core.
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The Browse tab (`ui::browse`, 1337): lnomad's browser core, `no_std` plus
+# `alloc` without its `std` feature (`just lnomad-core-no-std`), hosted as a
+# tab on the phone and the M9 (docs/src/concepts/lnomad-everywhere.md,
+# section 4). Its model, layout, scene, intents and catalogue; the fetch is
+# the host's.
+lnomad = { path = "../lnomad", default-features = false }
+# The tab parses the page a fetch brought, so no platform parses micron.
+leviculum-micron = { path = "../leviculum-micron" }
 # The map's model (`ui::map`): the projection, the viewport, fitting and
 # placing the pins. `no_std` with `alloc` without its `std` feature, held
 # there by `just map-core-no-std`, so the model stays core.
@@ -240,9 +306,19 @@ leviculum-ui-iced = { path = "../leviculum-ui-iced", optional = true }
 # A web or mail link in a message body, clicked, goes to the system's
 # handler as lnomad hands it one (`xdg-open` on Linux).
 open = { version = "5", optional = true }
+# The desktop's file chooser and notifications (`desktop`, 1341): the XDG
+# portal's FileChooser and org.freedesktop.Notifications over the session
+# bus. The version and the reactor the window's theme reader already put
+# in the lock (leviculum-ui-iced, mundy); pure Rust, so the musl-static
+# terminal carries it as well.
+zbus = { version = "5", default-features = false, features = ["async-io"], optional = true }
 # `loquax home admit` prints its code as a QR code too, for a phone to
 # take in one go: Nayuki's encoder, MIT, one file, no dependencies.
 qrcodegen = { version = "1.8.0", optional = true }
+# The scanner's decoder (`scan`, 1152): a pure-Rust port of quirc, without
+# its `image` default, reading a luminance plane. Brings g2p; lru is
+# already in the lock. MIT or Apache-2.0, and ISC for quirc's part.
+rqrr = { version = "0.11", default-features = false, optional = true }
 # Photos (`photo`, 1220): the decoders of what Columba, Sideband and a
 # phone's picker hand over (JPEG, PNG, WebP, GIF), the EXIF orientation
 # they carry, the scaling and the JPEG encoder; the version lnomad's

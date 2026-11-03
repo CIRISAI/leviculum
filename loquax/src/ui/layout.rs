@@ -201,7 +201,9 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         }
         // A group's membership that changed somebody's standing (1307 G2):
         // a line of its own, as a note is.
-        if let Some(text) = super::groups::membership_note(&conversation.messages, index, None) {
+        if let Some(text) =
+            super::groups::membership_note(&conversation.messages, index, None, Lang::En)
+        {
             if last == Last::Block {
                 laid.push(RLine::default());
             }
@@ -278,7 +280,7 @@ pub fn folded(conversation: &Conversation, index: usize) -> bool {
         .messages
         .get(index)
         .is_some_and(Message::is_aside)
-        && super::groups::membership_note(&conversation.messages, index, None).is_none()
+        && super::groups::membership_note(&conversation.messages, index, None, Lang::En).is_none()
         || conversation.report_folded(index)
 }
 

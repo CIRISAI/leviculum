@@ -1,7 +1,8 @@
-//! `loquax` binary: the terminal LXMF messenger described in
-//! `docs/src/concepts/loquax.md`. With no subcommand it is the conversation
-//! view (`tui`, with the `tui` feature); the subcommands are the paths for
-//! scripts:
+//! `loquax` binary: the LXMF messenger described in
+//! `docs/src/concepts/loquax.md`. With no subcommand it is the window
+//! (`gui`, with the `gui` feature) when a graphical session is there, and
+//! the conversation view in the terminal (`tui`, with the `tui` feature)
+//! otherwise ([`front`]); the subcommands are the paths for scripts:
 //!
 //! ```sh
 //! echo "disk 91%" | loquax send <address> --title "backup"
@@ -19,6 +20,9 @@
 //! `--via propagated` return so a script can tell the two successes apart
 //! (`loquax/src/send.rs`, `EXIT_PROPAGATED`).
 
+#[cfg(any(feature = "tui", feature = "gui"))]
+mod desktop;
+mod front;
 #[cfg(feature = "gui")]
 mod gui;
 #[cfg(any(feature = "tui", feature = "gui"))]
@@ -49,6 +53,8 @@ use loquax::send::{
 };
 use loquax::{address, body, display_name, events, identity};
 
+use front::{Ask, Front};
+
 /// Everything after attaching gets this many seconds by default: becoming
 /// ready, learning a route to the destination, queueing, and getting the
 /// message onto the network. A cron job needs to know when the command is
@@ -65,8 +71,16 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
 #[command(
     name = "loquax",
     version = env!("LEVICULUM_VERSION"),
-    about = "the Leviculum messenger; with no arguments it opens the conversation view",
-    long_about = "the Leviculum messenger; with no arguments it opens the conversation view\n\n\
+    about = "the Leviculum messenger; with no arguments it opens the window, or the terminal view \
+             where there is no display",
+    long_about = "the Leviculum messenger; with no arguments it opens the window, or the terminal view \
+                  where there is no display\n\n\
+                  The window opens when a graphical session is there (WAYLAND_DISPLAY or \
+                  DISPLAY set) and this build carries it; otherwise the terminal view \
+                  starts, saying so on stderr when the window could have opened. `loquax \
+                  gui` insists on the window and fails without a display, `loquax tui` \
+                  insists on the terminal view. A flag only the terminal view takes \
+                  (--script, --to, --ascii, ...) asks for it too.\n\n\
                   `send`, `fetch` and `address` are the commands for scripts. \
                   Loquax attaches to a daemon that is already running (lnsd, or \
                   Python's rnsd) the same way lnomad does. It does not start a \
@@ -78,9 +92,10 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
                   LEVICULUM_EVENT_LOG=<path> for the full run as structured \
                   events, including the message id."
 )]
-// No subcommand is the messenger (Lew, 2026-10-26), so the subcommand is an
-// `Option` and the messenger's options sit at the top level; `tui` stays as
-// a subcommand so every script and cell that names it keeps working.
+// No subcommand is the messenger (Lew, 2026-10-26; the window first since
+// 2026-11-02, 1342), so the subcommand is an `Option` and the messenger's
+// options sit at the top level; `tui` stays as a subcommand so every script
+// and cell that names it keeps working.
 // [`parse_args`] keeps the two forms apart: `loquax --to X send` is an
 // argument error, not a send with a stray flag. `--config` alone may go
 // before a subcommand (1119), which clap's `args_conflicts_with_subcommands`
@@ -135,12 +150,12 @@ enum SubCommand {
         /// The directory to write; it must not exist or be empty.
         dir: PathBuf,
     },
-    /// The terminal messenger, as plain `loquax`: conversations, messages and
-    /// a compose line.
+    /// The terminal messenger, as plain `loquax` where there is no display:
+    /// conversations, messages and a compose line.
     #[cfg(feature = "tui")]
     Tui(TuiArgs),
-    /// The messenger in a window, attached as the terminal one is. Its
-    /// first view is the map of every peer with a position.
+    /// The messenger in a window, as plain `loquax` on a desktop, attached as
+    /// the terminal one is. Fails when there is no display.
     #[cfg(feature = "gui")]
     Gui(GuiArgs),
     /// Loquax Mailbox, the always-on part that receives and keeps your
@@ -330,6 +345,11 @@ struct GuiArgs {
     /// `--sync-interval`: `15m` by default, `off` for none.
     #[arg(long, value_name = "DURATION")]
     sync_interval: Option<String>,
+
+    /// Open the window, draw its first frame and exit 0, without attaching
+    /// to a daemon: the check that the window starts on this display.
+    #[arg(long)]
+    exit_after_first_frame: bool,
 }
 
 #[cfg(feature = "tui")]
@@ -763,24 +783,37 @@ async fn read_routes(config_dir: &Path, instance: &str) -> Result<Vec<Route>, St
 
 /// [`Args`] from the command line, refusing a subcommand together with any of
 /// the messenger's own options except `--config`, which every subcommand
-/// takes before it as well as after it (1119).
-fn parse_args() -> Args {
-    use clap::{parser::ValueSource, CommandFactory as _, FromArgMatches as _};
+/// takes before it as well as after it (1119); and, for no subcommand, what
+/// it asks of [`front::front`].
+fn parse_args() -> (Args, Ask) {
+    use clap::{CommandFactory as _, FromArgMatches as _};
 
     let mut command = Args::command();
     let matches = command.get_matches_mut();
+    let ask = ask_of(&command, &matches);
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    (args, ask)
+}
+
+/// What plain `loquax` with these flags asks: the terminal view when one of
+/// them is the terminal's own (anything but [`front::SHARED`]), else
+/// Loquax's choice. Exits on a subcommand given with one of the messenger's
+/// options, as [`parse_args`] says.
+fn ask_of(command: &clap::Command, matches: &clap::ArgMatches) -> Ask {
+    use clap::parser::ValueSource;
+
+    let given = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
     if let Some((name, _)) = matches.subcommand() {
         // The command's own arguments, not `matches.ids()`: that also holds
         // the group id the flattened `TuiArgs` brings, which counts as given.
         let stray = command
             .get_arguments()
             .filter(|arg| arg.get_id() != "config" && arg.get_id() != "verbose")
-            .find(|arg| {
-                matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
-            })
+            .find(|arg| given(arg.get_id().as_str()))
             .map(ToString::to_string);
         if let Some(flag) = stray {
             command
+                .clone()
                 .error(
                     clap::error::ErrorKind::ArgumentConflict,
                     format!("the subcommand '{name}' cannot be used with '{flag}'"),
@@ -788,12 +821,81 @@ fn parse_args() -> Args {
                 .exit();
         }
     }
-    Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+    let terminal = command
+        .get_arguments()
+        .map(|arg| arg.get_id().as_str())
+        .filter(|id| !front::SHARED.contains(id))
+        .any(given);
+    match terminal {
+        true => Ask::Tui,
+        false => Ask::Default,
+    }
+}
+
+/// The frontend [`front::front`] picks for `ask` on this host and build.
+fn pick(ask: Ask) -> Front {
+    front::front(
+        ask,
+        front::has_display(|name| std::env::var_os(name)),
+        cfg!(feature = "gui"),
+    )
+}
+
+/// Plain `loquax`: the window, or the terminal view, as [`pick`] says.
+async fn run_default(args: Args, ask: Ask) -> ExitCode {
+    match pick(ask) {
+        #[cfg(feature = "gui")]
+        Front::Gui => return run_gui(gui_args(&args)).await,
+        Front::Tui(Some(note)) => eprintln!("loquax: {note}"),
+        _ => {}
+    }
+    #[cfg(feature = "tui")]
+    {
+        run_tui(args.tui).await
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = args;
+        eprintln!(
+            "loquax: the messenger needs the `tui` feature, which this build lacks; \
+             see loquax --help for the commands it has"
+        );
+        ExitCode::from(EXIT_USAGE)
+    }
+}
+
+/// The window's options from plain `loquax`'s: the ones both frontends take.
+#[cfg(feature = "gui")]
+fn gui_args(args: &Args) -> GuiArgs {
+    #[cfg(feature = "tui")]
+    {
+        let tui = &args.tui;
+        GuiArgs {
+            pn: tui.pn.clone(),
+            instance: tui.instance.clone(),
+            config: tui.config.clone(),
+            timeout: tui.timeout,
+            sync_interval: tui.sync_interval.clone(),
+            exit_after_first_frame: false,
+        }
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = args;
+        GuiArgs {
+            pn: None,
+            instance: None,
+            config: None,
+            timeout: DEFAULT_TIMEOUT_SECS,
+            sync_interval: None,
+            exit_after_first_frame: false,
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args = parse_args();
+    let (mut args, ask) = parse_args();
     VERBOSE.store(args.verbose, std::sync::atomic::Ordering::Relaxed);
     // Once, before any subcommand resolves the state directory: a first
     // start after the rename must find the address it had as lnmsg.
@@ -837,25 +939,24 @@ async fn main() -> ExitCode {
         })
         .await;
     }
-    let command = match args.command {
+    let command = match args.command.take() {
         #[cfg(feature = "gui")]
-        Some(SubCommand::Gui(gui)) => return run_gui(gui).await,
+        Some(SubCommand::Gui(gui)) => {
+            return match pick(Ask::Gui) {
+                Front::Refuse(why) => {
+                    eprintln!("loquax: {why}");
+                    ExitCode::from(EXIT_FAILURE)
+                }
+                _ => run_gui(gui).await,
+            }
+        }
         #[cfg(feature = "tui")]
         Some(SubCommand::Tui(tui)) => return run_tui(tui).await,
         // Before the subscriber below, as `--daemon`: the mailbox installs
         // its own, which journals its info lines.
         #[cfg(feature = "tui")]
         Some(SubCommand::Mailbox(MailboxCommand::Run(run))) => return run_daemon(run).await,
-        #[cfg(feature = "tui")]
-        None => return run_tui(args.tui).await,
-        #[cfg(not(feature = "tui"))]
-        None => {
-            eprintln!(
-                "loquax: the messenger needs the `tui` feature, which this build lacks; \
-                 see loquax --help for the commands it has"
-            );
-            return ExitCode::from(EXIT_USAGE);
-        }
+        None => return run_default(args, ask).await,
         Some(command) => command,
     };
     leviculum_std::event_log::install_global_subscriber("warn");
@@ -882,6 +983,9 @@ async fn main() -> ExitCode {
 /// `loquax gui`: parse what the shell needs, then hand over.
 #[cfg(feature = "gui")]
 async fn run_gui(args: GuiArgs) -> ExitCode {
+    if args.exit_after_first_frame {
+        return gui::probe();
+    }
     let sync_interval = match args
         .sync_interval
         .as_deref()
@@ -1847,6 +1951,7 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         // A desktop or server mailbox has no platform that says a network
         // change; its connection's keepalive (1176) finds a dead one.
         network: Default::default(),
+        lend: None,
     })
     .await;
     match outcome {
@@ -2668,6 +2773,43 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1342: plain `loquax` with a flag only the terminal view takes asks
+    /// for it, so a key script never opens a window on a desktop; the
+    /// options both frontends take leave the choice to Loquax.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn a_terminal_flag_asks_for_the_terminal_and_a_shared_one_does_not() {
+        use clap::CommandFactory as _;
+        let ask = |line: &[&str]| {
+            let command = Args::command();
+            let matches = command
+                .clone()
+                .try_get_matches_from(line)
+                .expect("the line parses");
+            ask_of(&command, &matches)
+        };
+        assert_eq!(ask(&["loquax"]), Ask::Default);
+        for shared in [
+            &["loquax", "--pn", "00112233445566778899aabbccddeeff"][..],
+            &["loquax", "--instance", "x"],
+            &["loquax", "--config", "/etc/x"],
+            &["loquax", "--timeout", "9"],
+            &["loquax", "--sync-interval", "off"],
+            &["loquax", "--verbose"],
+        ] {
+            assert_eq!(ask(shared), Ask::Default, "{shared:?}");
+        }
+        for terminal in [
+            &["loquax", "--ascii"][..],
+            &["loquax", "--script", "keys"],
+            &["loquax", "--to", "00112233445566778899aabbccddeeff"],
+            &["loquax", "--no-mouse"],
+            &["loquax", "--graphics", "braille"],
+        ] {
+            assert_eq!(ask(terminal), Ask::Tui, "{terminal:?}");
+        }
+    }
 
     /// 1279, walk finding 23: a script still reads the address alone; at a
     /// terminal the contact code follows, the one that adds us.

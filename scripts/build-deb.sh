@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the musl-static Debian packages for one architecture.
+# Build the Debian packages for one architecture: musl-static, but for
+# loquax on amd64 and arm64, which links against glibc to carry its window.
 #
 # Why a script rather than inline commands: this sequence used to be
 # spelled out twice, in the Justfile's build-deb* recipes and in
@@ -34,9 +35,10 @@
 # from one build carries identical version strings even when the two
 # builds straddle midnight UTC.
 #
-# Requires cargo-deb; arm64 and armhf additionally need cargo-zigbuild and a
-# ziglang on PATH (`just _deb-prereqs` installs both), and python3 for
-# the manual pages. Produces target/debian/*_<arch>.deb, which cargo-deb
+# Requires cargo-deb, cargo-zigbuild and a ziglang (`just _deb-prereqs`
+# installs both; cargo-zigbuild finds a pip ziglang by itself), on amd64 as
+# well since loquax's desktop build (1342), and python3 for the manual
+# pages. Produces target/debian/*_<arch>.deb, which cargo-deb
 # also hardlinks under target/<triple>/debian/: one per crate, plus
 # leviculum-heapacct, the instrumented variant of the leviculum package, and
 # lnpnd-heapacct, lnpnd's.
@@ -56,10 +58,27 @@ cd "$ROOT"
 source "$ROOT/scripts/cargo-target-dir.sh"
 TARGET="$(cargo_target_dir "$ROOT")"
 
+# DESKTOP_TRIPLE is loquax's for the package (1342): one binary with the
+# terminal view and the window, and the window needs glibc, because winit
+# opens X11 and Wayland with dlopen, which a musl-static binary cannot. Both
+# go through cargo zigbuild at the glibc floor GLIBC_FLOOR, so the package
+# runs on Debian 11 and Ubuntu 20.04 on whatever this host's glibc is; the
+# arm64 cross link needs no sysroot of its own, zig carries the glibc stubs
+# (measured 2026-11-02 with ziglang 0.16.0: links, highest symbol
+# GLIBC_2.30, runs `--version` under qemu-aarch64). armhf, where no desktop
+# runs, keeps the musl-static terminal build and its `terminal` variant.
+GLIBC_FLOOR=2.31
+DESKTOP_TRIPLE=
 ARCH="${1:-}"
 case "$ARCH" in
-amd64) TRIPLE=x86_64-unknown-linux-musl ;;
-arm64) TRIPLE=aarch64-unknown-linux-musl ;;
+amd64)
+    TRIPLE=x86_64-unknown-linux-musl
+    DESKTOP_TRIPLE=x86_64-unknown-linux-gnu
+    ;;
+arm64)
+    TRIPLE=aarch64-unknown-linux-musl
+    DESKTOP_TRIPLE=aarch64-unknown-linux-gnu
+    ;;
 # armv7 with hard float: Raspberry Pi 2, 3 and Zero 2 under a 32-bit OS
 # (1153). Zig links it as it links arm64; built and run under qemu-arm on
 # 2026-10-30, lnsd on mimalloc included.
@@ -77,8 +96,12 @@ esac
 CRATES=(leviculum-cli lnomad lblogd lnpnd loquax)
 BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd loquax)
 # loquax's terminal frontend is off by default (loquax/Cargo.toml); the package
-# is what a person installs, so plain `loquax` opens the messenger.
+# is what a person installs, so plain `loquax` opens the messenger. The musl
+# loquax is armhf's package and every architecture's static tarball
+# (collect-nightly-debs.sh); amd64's and arm64's packages take the desktop
+# build below.
 FEATURES=(--features loquax/tui)
+DESKTOP_FEATURES=(--features "loquax/tui loquax/gui")
 
 # The .deb is not always named after its crate: leviculum-cli ships as
 # "leviculum". Same mapping as deb-stamp.sh's pkg_name; it is spelled
@@ -140,6 +163,11 @@ for crate in "${CRATES[@]}"; do
     clean_args+=(-p "$crate")
 done
 cargo clean "${clean_args[@]}"
+# `-p` cleans the configured target alone, the musl one; the desktop
+# loquax is its own.
+if [ -n "$DESKTOP_TRIPLE" ]; then
+    cargo clean -p loquax --target "$DESKTOP_TRIPLE"
+fi
 
 # cargo-zigbuild uses Zig as the C compiler/linker — the only way to
 # reach aarch64-musl from an amd64 host without docker-in-docker or a
@@ -151,6 +179,10 @@ for bin in "${BINS[@]}"; do
     bin_args+=(--bin "$bin")
 done
 "${build_cmd[@]}" --release --target "$TRIPLE" "${bin_args[@]}" "${FEATURES[@]}"
+if [ -n "$DESKTOP_TRIPLE" ]; then
+    cargo zigbuild --release --target "${DESKTOP_TRIPLE}.${GLIBC_FLOOR}" -p loquax --bin loquax \
+        "${DESKTOP_FEATURES[@]}"
+fi
 
 # The allocator is read off the bytes, like the heap-accounting marker below:
 # an arm64 binary cannot be run here. lnsd logs `Allocator: mimalloc` at
@@ -187,7 +219,15 @@ require_allocator lnsd
 debs=()
 for crate in "${CRATES[@]}"; do
     version="$(cat ".deb-version-${crate}")"
-    cargo deb -p "$crate" --target "$TRIPLE" --no-build --no-strip \
+    deb_args=(--target "$TRIPLE")
+    if [ "$crate" = loquax ]; then
+        if [ -n "$DESKTOP_TRIPLE" ]; then
+            deb_args=(--target "$DESKTOP_TRIPLE")
+        else
+            deb_args+=(--variant terminal)
+        fi
+    fi
+    cargo deb -p "$crate" "${deb_args[@]}" --no-build --no-strip \
         --deb-version "$version"
     debs+=("$TARGET/debian/$(pkg_name "$crate")_${version}_${ARCH}.deb")
 done

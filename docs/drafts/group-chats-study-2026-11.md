@@ -93,7 +93,7 @@ is **not checked**. Lew's own Columba checkout on this host is from
 | client | groups | evidence |
 |---|---|---|
 | Sideband | **none.** A conversation type `CONV_GROUP = 0x02` is declared (`sbapp/sideband/core.py:107`) and never used: a grep for `CONV_GROUP` over `sbapp` finds only that line; conversations are made `CONV_P2P` (`core.py:2798`) | `grep -rn -E 'FIELD_GROUP\|CONV_GROUP' sbapp` |
-| Columba | **none.** `DestinationType.GROUP` (`rns-backend-py/.../PythonRnsCore.kt:1466`) is the RNS destination type, not a chat; no `FIELD_GROUP`, no group conversation in `app/`, `data/`, `rns-backend-kt/` | `grep -rn -i -E 'group ?chat\|groupconversation\|isGroup\|FIELD_GROUP'` |
+| Columba | **none.** `DestinationType.GROUP` (`rns-backend-py/.../PythonRnsCore.kt:1466`) is the RNS destination type, not a chat; no `FIELD_GROUP`, no group conversation in `app/`, `data/`, `rns-backend-kt/`. What Columba calls a group is the **Group Tracker** ("Group Tracker shares your location with a group host", `app/.../SettingsScreen.kt:749`; the card in `settings/cards/LocationSharingCard.kt:646`): Sideband's telemetry collector under another name, positions sent to one host and fetched back by `FIELD_COMMANDS` 0x01 (`PythonRnsTelemetry.kt:134`), no messages | `grep -rn -i -E 'group ?chat\|groupconversation\|isGroup\|FIELD_GROUP'` |
 | MeshChat | **none found.** The only hits are an interface's `group_id` (`meshchat.py:475`, `AddInterfacePage.vue:1021`) | `grep -rn -i -E 'group ?chat\|FIELD_GROUP\|groups'` over `*.py *.js *.vue`, `node_modules` excluded |
 | NomadNet | **RRC, a live chat over a hub, not LXMF.** "Built-in RRC client for live, many-to-many chat" (`README.md:40`). The client opens an `RNS.Link` to a hub destination (`nomadnet/RRC.py:428`), sends CBOR envelopes as link packets (`RRC.py:595-603`), joins rooms by name (`RRC.py:605`); the protocol constants are copied from `kc1awv/rrcd` (`RRC.py:41`). History is the client's own file per room (`RRC.py:14`). Whether the hub keeps messages for an absent member is the hub's business (`rrcd`, not read here); the client has no store-and-forward path | `grep -rn -i group nomadnet` |
 
@@ -353,7 +353,19 @@ over to the server home when they sync (2.4).
 The invitation is an LXMF message from the admin carrying `0x04`, with
 the content as text for any client that is not Loquax ("Lew invited you
 to Familie: lxma://…; reply /leave to leave"). Loquax shows it as a card,
-"Lew hat dich zu Familie eingeladen", the trust sentence, "Join".
+"Lew lädt dich zu Familie ein", the trust sentence, "Join".
+
+Languages (decided 2026-11-03, 1348): every text a home or a client
+composes without a human typing it is English on the wire, whatever the
+admin's or the reader's language: the invitation, "Lew ended Familie.",
+"Lew removed Anna.", "Anna left.", "You are no longer in Familie.", a
+digest's "Name: " prefixes and its "sent a photo (too large for the
+radio)" line, the stock member's Loquax sentence. Every stock client
+shows that English. A Loquax reader says the same in its own language
+from the `lev` data beside it: the card from `0x04`'s inviter and name,
+the membership lines and the end from `0x05`, a digest's left-out line
+from `0x06`'s fourth element. The `/group` request carries no language
+(the fourth element pass six sent is read past and ignored).
 
 | # | screen | taps |
 |---|---|---|

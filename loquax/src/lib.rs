@@ -103,6 +103,8 @@ pub mod outbox;
 pub mod photo;
 #[cfg(feature = "picture")]
 pub mod picture;
+#[cfg(feature = "scan")]
+pub mod scan;
 #[cfg(feature = "screenmap")]
 pub mod screenmap;
 pub mod seen;

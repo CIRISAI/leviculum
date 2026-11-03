@@ -80,6 +80,29 @@ impl HomeNode {
         }
     }
 
+    /// Wait for the end of `message`'s direct leg to a recipient nobody
+    /// answers for: the answer bound's `unanswered` (1328), or the router's
+    /// own `failed`. For a recipient never heard the router gives up after
+    /// its pathless tries at about the same 60 s (60.05 s measured in 1307
+    /// pass six), so which line comes first is the tick's luck; either
+    /// hands the message on to its next leg.
+    async fn wait_for_direct_end(&self, message: &str, secs: u64) {
+        let unanswered = format!("HOME outbox direct unanswered message={message}");
+        let failed = format!("HOME outbox direct failed message={message}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            let log = self.log();
+            if log.contains(&unanswered) || log.contains(&failed) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the direct leg of {message} did not end within {secs} s:\n{log}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     async fn start(home: &std::path::Path, instance: &str) -> Self {
         Self::start_with(home, instance, &[]).await
     }
@@ -600,13 +623,9 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
     );
 
     // The client is gone. Nobody answers the home node's direct leg within
-    // its answer bound (1328), and with no propagation node configured the
-    // message stays in its outbox.
-    node.wait_for(
-        &format!("HOME outbox direct unanswered message={message_id}"),
-        90,
-    )
-    .await;
+    // its answer bound (1328), or the router gives up on it first, and with
+    // no propagation node configured the message stays in its outbox.
+    node.wait_for_direct_end(&message_id, 90).await;
     node.wait_for(
         &format!("HOME outbox no propagation node message={message_id}"),
         5,
@@ -1344,13 +1363,9 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
     let message_id = sent.enqueued_id();
 
-    // Nobody answers the direct leg within its bound (1328), and the
-    // propagated leg starts.
-    node.wait_for(
-        &format!("HOME outbox direct unanswered message={message_id}"),
-        90,
-    )
-    .await;
+    // Nobody answers the direct leg within its bound (1328), or the router
+    // gives up on it first, and the propagated leg starts.
+    node.wait_for_direct_end(&message_id, 90).await;
     node.wait_for(&format!("HOME outbox propagated message={message_id}"), 5)
         .await;
     // The home has never heard the recipient: the propagated leg cannot be
@@ -1626,8 +1641,23 @@ async fn a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_no
 /// collections did on miauhaus), its router had none, and the copy's leg
 /// failed in one tick, unsent, with nothing at the node. The member comes back as a stock Python
 /// client and collects the line, from the group's address.
+///
+/// 1330: on miauhaus the home said `handed-on` for three copies and the
+/// node's event log had no `PN_ACCEPT` for them, so the two logs must
+/// agree here: the hand-on names the node (`pn=`), and the node's own
+/// accept line names the member as the copy's destination, from an upload,
+/// not a peer's sync.
+///
+/// 1332: on miauhaus the node still had no link, no upload and no accept for
+/// three copies handed on to it. The group's engine, fresh, had no path yet
+/// to the node it was told, heard other nodes announce, and its router moved
+/// the copies to one of those without a word (the journal mined at cost 16,
+/// the reference's default, where the home's node asks 13). So a second node
+/// announces here once the group's engine is up, at that cost, and the copy
+/// must still reach the home's node and not the other.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
+    let events = leviculum_std::test_support::event_log::init_event_log();
     let recipient_peer = PythonPeer::start();
     let mut mesh = Mesh::start(recipient_peer.rns_port).await;
     let pn = lnpnd_node::PropagationNode::start(&mesh.instance, 13).await;
@@ -1698,6 +1728,10 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    // Another node in the neighbourhood, heard by the group's engine, which
+    // has no path to the home's node yet: the miauhaus shape.
+    let other = lnpnd_node::PropagationNode::start(&mesh.instance, 16).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let sent = mesh
         .run(
             "send",
@@ -1725,6 +1759,53 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    let handed_on = node
+        .log()
+        .lines()
+        .find(|line| line.contains("HOME outbox propagated handed-on message="))
+        .map(str::to_string)
+        .expect("the copy's hand-on line");
+    assert!(
+        handed_on.contains(&format!(" pn={}", &pn_hash[..8])),
+        "the hand-on names the home's node: {handed_on}"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let accept = loop {
+        while let Ok(event) = pn.events.try_recv() {
+            seen.push(format!("{event:?}"));
+        }
+        let accept = events.dump().into_iter().find(|line| {
+            line.starts_with("PN_ACCEPT ") && line.contains(&format!(" dst={recipient_address} "))
+        });
+        if let Some(accept) = accept {
+            break accept;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the home handed the copy on ({handed_on}) and the node logged no accept for \
+             {recipient_address}; node events {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        !accept.contains(" via=sync "),
+        "an upload, not a peer's sync: {accept}"
+    );
+    assert!(
+        seen.iter().any(|event| event.starts_with("Accepted")),
+        "the engine's own word agrees: {seen:?}"
+    );
+    let elsewhere: Vec<String> = other
+        .events
+        .try_iter()
+        .map(|event| format!("{event:?}"))
+        .filter(|event| event.starts_with("Accepted"))
+        .collect();
+    assert!(
+        elsewhere.is_empty(),
+        "the copy went to a node nobody named: {elsewhere:?}\nhome node:\n{}",
+        node.log()
+    );
 
     let ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
         &once.path().join("storage"),
@@ -1769,6 +1850,7 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
 
     drop(node);
     drop(pn);
+    drop(other);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 
@@ -2312,6 +2394,8 @@ async fn the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them() 
 /// with the writer in `lev 0x02`. G2: the home is killed with Anna's copy
 /// of a line unproven and, started again, makes it again from the archive
 /// and delivers it; Bob, slow, gets Lew's next two lines as one digest.
+/// Pass six: Bob's invitation says where Loquax is, Anna's (she wrote to
+/// Lew before, as Loquax) does not; Bob's answer reaches Anna too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     use loquax::home::group;
@@ -2343,6 +2427,36 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     // key from it; Anna's home announced at its start.
     peer.lxmf_announce();
 
+    // 1307 pass six: Anna's phone writes to Lew first, as a friend does
+    // before she is put in a group. Her message says bit 1, so Lew's home
+    // knows she runs Loquax; Bob never wrote and is taken for stock.
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &hex::encode(owner),
+        "until ready 20\nkey enter\nkey i\ntype Hallo Lew\nkey enter\nsleep 1000\n\
+         key esc\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    anna_node
+        .wait_for("HOME outbox delivered message=", 60)
+        .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        if group::understands_groups(&store, &anna).expect("archive") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's line never reached Lew's archive:\n{}\nAnna's home:\n{}",
+            node.log(),
+            anna_node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
     // Lew's laptop makes the group: 4 + k steps on the palette, the
     // members pasted as addresses.
     tui(
@@ -2369,6 +2483,85 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     assert_eq!(hosted.group.name, "Familie");
     assert_eq!(hosted.group.admin, owner);
     let group_hex = hex::encode(hosted.group.address);
+
+    // 1307 pass six, item 2: Bob, stock, reads his invitation as a text
+    // with the group's code, how to leave, and once where Loquax shows the
+    // group as a group, under 300 characters. Control: Anna's, a Loquax
+    // member's, is as it was.
+    let code =
+        loquax::lxma::encode_parts(&hosted.group.address, &hosted.identity.public_key_bytes());
+    let plain = format!("Lew invited you to Familie: {code} Reply /leave to leave.");
+    let linked = format!(
+        "{plain} Loquax shows members and names: {}",
+        group::LOQUAX_URL
+    );
+    assert!(linked.chars().count() < 300, "{}", linked.chars().count());
+    received_by(&peer, &linked, 60, &node).await;
+    let invitations: Vec<leviculum_lxmf::Message> = Store::open_in(&home, owner)
+        .expect("the owner's store")
+        .archive_since(0, usize::MAX)
+        .expect("archive")
+        .entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_SENT)
+        .filter_map(|e| {
+            leviculum_lxmf::Message::unpack(
+                &e.packed,
+                None,
+                None,
+                leviculum_lxmf::DeliveryMethod::Direct,
+            )
+            .ok()
+        })
+        .filter(|m| {
+            leviculum_lxmf::lev::Lev::from_fields(&m.fields).is_some_and(|l| l.invite.is_some())
+        })
+        .collect();
+    let invited = |to: [u8; 16]| {
+        invitations
+            .iter()
+            .find(|m| m.destination_hash == to)
+            .map(|m| String::from_utf8_lossy(&m.content).into_owned())
+            .unwrap_or_default()
+    };
+    assert_eq!(invited(bob_address), linked, "Bob's invitation");
+    assert_eq!(invited(anna), plain, "Anna's, a Loquax member's");
+    // 1348: the wire is English, and Anna's Loquax says the card in her
+    // own language from the invitation's `lev 0x04`: the same bytes on a
+    // German reader are "Lew lädt dich zu Familie ein", on an English one
+    // "Lew invited you to Familie"; the body stays the English text.
+    let annas = invitations
+        .iter()
+        .find(|m| m.destination_hash == anna)
+        .expect("Anna's invitation");
+    let card = |lang: loquax::ui::strings::Lang| {
+        let mut model = loquax::ui::UiModel::<leviculum_ui::input::Line>::new(&[]);
+        model.address = Some(anna);
+        model.lang = lang;
+        loquax::ui::update(
+            &mut model,
+            loquax::ui::UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+                message_id: annas.message_id,
+                source: annas.source_hash,
+                title: Vec::new(),
+                body: annas.content.clone(),
+                fields: annas.fields.clone(),
+                verified: true,
+            }),
+        );
+        loquax::ui::group_scene::invite(&model, &hosted.group.address, false)
+            .expect("a card")
+            .title
+            .resolve(lang)
+    };
+    assert_eq!(
+        card(loquax::ui::strings::Lang::De),
+        "Lew lädt dich zu Familie ein"
+    );
+    assert_eq!(
+        card(loquax::ui::strings::Lang::En),
+        "Lew invited you to Familie"
+    );
 
     // Anna's phone pulls the invitation and joins through its card. A
     // scripted terminal keeps no watching link (`shell.rs`, `scripted`), so
@@ -2732,6 +2925,15 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         .expect("Bob")
         .name;
     assert_eq!(kept.content, format!("{bobs_name}: Danke").into_bytes());
+    // 1307 pass six, item 4: Bob, who installed nothing, read "Lew: Brot
+    // ist da" above and answered it; the answer reached every other
+    // member, Anna's home holds it from the group under Bob's name.
+    assert!(
+        from_group
+            .iter()
+            .any(|m| m.content == format!("{bobs_name}: Danke").into_bytes()),
+        "Anna's copy of Bob's answer"
+    );
     let checked = leviculum_lxmf::Message::unpack(
         &page
             .entries
@@ -2775,4 +2977,189 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         "Anna's Join, Lew's line, Bob's reply and Lew's three after it: every message \
          to the group is kept"
     );
+}
+
+/// 1307 pass four, item 8: Lew deletes "Familie" from his laptop's
+/// palette (`delete group`, Enter on its question). The home tells every
+/// present member and forgets the group: Bob, stock, reads "Lew ended
+/// Familie." from the group; Anna's Loquax keeps the group as ended and a
+/// line she types in it goes nowhere; Lew's laptop knows no group any
+/// more; the home hosts nothing and the key file is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_deletes_a_group_and_every_member_is_told() {
+    use loquax::home::group;
+    use loquax::store::{groups, Store};
+
+    let peer = PythonPeer::start();
+    let bob = peer.lxmf_init();
+    let mesh = Mesh::start(peer.rns_port).await;
+    let home = mesh.home.path().to_path_buf();
+    let address_of = |home: &std::path::Path| -> [u8; 16] {
+        let address = local(home, &["address"]);
+        assert_eq!(address.code, Some(0), "{address}");
+        hex::decode(address.stdout.trim())
+            .expect("hex")
+            .try_into()
+            .expect("16 bytes")
+    };
+    let owner = address_of(&home);
+    let anna_home = tempfile::tempdir().expect("Anna's home");
+    let anna = address_of(anna_home.path());
+    let code = admit(&home, "laptop");
+    let anna_code = admit(anna_home.path(), "phone");
+    let node = HomeNode::start_as(&home, &mesh.instance, &[], Some("Lew")).await;
+    let anna_node = HomeNode::start_as(anna_home.path(), &mesh.instance, &[], Some("Anna")).await;
+    let client = joined(&mesh, &node, &code).await;
+    let annas_phone = joined(&mesh, &anna_node, &anna_code).await;
+    peer.lxmf_announce();
+
+    // Anna's phone says bit 1 to Lew first, so Lew's home takes her for a
+    // Loquax; then Lew's laptop makes the group and Anna joins its card.
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &hex::encode(owner),
+        "until ready 20\nkey enter\nkey i\ntype Hallo Lew\nkey enter\nsleep 1000\n\
+         key esc\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        if group::understands_groups(&store, &anna).expect("archive") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's line never reached Lew's archive:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    tui(
+        &mesh,
+        client.path(),
+        &bob,
+        &format!(
+            "until ready 20\nkey :\ntype new group\nkey enter\ntype {}\nkey enter\n\
+             type {bob}\nkey enter\nkey enter\ntype Familie\nkey enter\n\
+             until groups 1 40\nkey q\n",
+            hex::encode(anna)
+        ),
+        &node,
+    )
+    .await;
+    node.wait_for("GROUP hosted name=Familie address=", 20)
+        .await;
+    let hosted = {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        group::hosted(&home, &store)
+            .expect("hosted")
+            .pop()
+            .expect("Familie")
+    };
+    let group_hex = hex::encode(hosted.group.address);
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &hex::encode(owner),
+        "until ready 20\nuntil invited 1 60\nkey :\ntype join group\nkey enter\n\
+         until groups 1 20\nsleep 2000\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        let joined = store
+            .group_members(&hosted.group.address)
+            .expect("members")
+            .iter()
+            .any(|m| m.address == anna && m.flags & groups::MEMBER_JOINED != 0);
+        if joined {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's Join never reached the group:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // Lew deletes it.
+    tui(
+        &mesh,
+        client.path(),
+        &group_hex,
+        "until ready 20\nuntil groups 1 30\nkey :\ntype delete group\nkey enter\n\
+         key enter\nuntil nogroups 40\nkey q\n",
+        &node,
+    )
+    .await;
+    node.wait_for("GROUP Familie deleted address=", 20).await;
+    received_by(&peer, "Lew ended Familie.", 60, &node).await;
+    let bobs = peer
+        .received()
+        .into_iter()
+        .find(|m| {
+            m.get("content").and_then(|v| v.as_str()) == Some(&hex::encode("Lew ended Familie."))
+        })
+        .expect("Bob's");
+    assert_eq!(bobs["source_hash"], group_hex, "from the group: {bobs}");
+    {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        assert!(
+            group::hosted(&home, &store).expect("hosted").is_empty(),
+            "the home hosts nothing"
+        );
+        assert!(store
+            .group_members(&hosted.group.address)
+            .expect("members")
+            .is_empty());
+    }
+    assert!(
+        !group::key_path(&home, &hosted.group.address).exists(),
+        "the group's key is gone"
+    );
+
+    // Anna's Loquax: the group ended, and what she types goes nowhere.
+    tui(
+        &mesh,
+        annas_phone.path(),
+        &group_hex,
+        "until ready 20\nuntil ended 1 60\nkey i\ntype noch da?\nkey enter\nsleep 1500\n\
+         key esc\nkey q\n",
+        &anna_node,
+    )
+    .await;
+    let annas = Store::open_in(annas_phone.path(), anna)
+        .expect("Anna's phone's store")
+        .client_groups()
+        .expect("groups");
+    assert_eq!(
+        annas.get(&hosted.group.address).map(|g| g.standing),
+        Some(loquax::ui::groups::Standing::Ended),
+        "Anna's Loquax keeps Familie as ended"
+    );
+    let typed: Vec<_> = Store::open_in(anna_home.path(), anna)
+        .expect("Anna's home's store")
+        .archive_since(0, usize::MAX)
+        .expect("archive")
+        .entries
+        .into_iter()
+        .filter(|e| e.kind == loquax::home::KIND_SENT)
+        .filter_map(|e| {
+            leviculum_lxmf::Message::unpack(
+                &e.packed,
+                None,
+                None,
+                leviculum_lxmf::DeliveryMethod::Direct,
+            )
+            .ok()
+        })
+        .filter(|m| m.content == b"noch da?")
+        .collect();
+    assert!(typed.is_empty(), "compose is closed: nothing went");
 }

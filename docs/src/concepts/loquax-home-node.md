@@ -132,6 +132,7 @@ Link requests on `loquax.home`, msgpack on the wire:
                                    -> [status, group: bin16]
 /groupadd [client_id: bin16, group: bin16, [[address: bin16, name: str], ...]]
                                    -> [status, group: bin16]
+/groupdelete [client_id: bin16, group: bin16] -> [status]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -155,6 +156,23 @@ again answers the group it made then. A home that archives an invitation
 learns the group's key from it, so a Join from any of its devices goes
 out before the group's announce is heard.
 
+The invitation is a text every client shows, in English whatever the
+admin's language (1348; a phone of 1307 pass six still sends its
+language as a fourth element, which the home reads past and ignores):
+"Lew invited you to Familie: lxma://… Reply /leave to leave." A Loquax
+says the card in its reader's language from the `lev` key `0x04`
+([the `lev` keys](loquax-read-receipts.md)). A member whose newest
+message to the owner did not say it understands groups, or that never
+wrote, is taken for a stock client (Columba, Sideband), and its text
+adds once "Loquax shows members and names:" and the site's address
+(`LOQUAX_URL`, the site's root until its download page is published).
+The whole text stays under 300 characters with its 168-character code;
+names too long for that leave the link out. A Loquax shows the card,
+not the text. The admin's member sheet reads where each invitation
+stands from its delivery in the member's chat: delivering, waiting at
+the propagation node for the member to come online, not delivered, or
+plainly invited once delivered.
+
 `/groupadd` (1307 G2) adds members to a group the home hosts and its
 owner is admin of: each new one gets an invitation from the owner, the
 epoch moves, and every member that understands groups gets the new
@@ -166,7 +184,33 @@ group announces every hour on its own clock beside the announce at its
 engine's start, a member whose last three proofs each took more than
 2 s gets its lines held for 60 s and sent as one digest (`lev` key
 `0x06`), and a reaction goes to the members that understand groups with
-its target rewritten to each one's own copy (stock members get none). A `/sync` answer carries the entries after the cursor, oldest
+its target rewritten to each one's own copy (stock members get none).
+
+The writer's ticks (1307 pass four): the group's proof says the group
+has it, one tick. Once every copy of a line sent alone is proven the
+home sends the writer, when it understands groups, the status `lev`
+key `0x03` with the counts (two ticks once all are proven), again for
+every late copy a digest proves, and once every member that sends read
+receipts read it. A read receipt a member sends the group is booked
+against its copy (`group_fanout.read_at`); a member counts as a reader
+while its newest message to the group said capability bit 0. A copy a
+propagation node took is kept so (`group_fanout.propagated`, schema 13),
+and a restart tries it direct again but does not upload it twice.
+
+`/groupdelete` (1307 pass four) deletes a group the home hosts and its
+owner is admin of, for everyone: every present member gets the last
+membership with the standing ended (a stock member the text "Lew ended
+Familie."), then the home forgets the group's rows, its archived
+conversation and its key file. While the home runs, the group's engine
+proves and drops every later message to the address, as a stranger's;
+after a restart nothing answers at it, since the key is gone. A group
+the home does not host answers `Ok` (deleted before, or never there), so
+a lost answer asked again is no error; a group whose admin is someone
+else is refused. The owner's devices forget the conversation whole when
+the answer or the last membership comes; a member's device keeps the
+history, closed, under the line "Lew ended the group.".
+
+A `/sync` answer carries the entries after the cursor, oldest
 first, up to 64 KiB of messages (one larger entry still goes, alone), and
 `more` when others follow; the client asks again from the last sequence it
 got, over the same link. An answer too large for one packet goes as a
@@ -301,23 +345,36 @@ then and may sleep.
   single link establishment waits 6 s per hop plus the first hop's time)
   is called off in the router, logged as `HOME outbox direct unanswered`,
   and counts as a direct failure: the propagation node is offered the copy
-  on the next tick, before any announce restarts the direct leg (that
-  announce is as a rule the path response the router's own request drew
-  from the cache). The announce and hourly retries go on as before. The
-  bound sits under the router's own end of such a leg: a recipient whose
-  key the home never held fails there after five attempts 12 s apart,
-  60 s, never under 50 s, while the bound, checked on a 1 s tick against
-  a start in whole seconds, fires by 47 s. At 60 s the two met within a
-  second and the daemon's start phase chose the winner (1331). A router
-  that ends an unanswered leg first anyway is the same fact: the line is
+  on the next tick, before any announce restarts the direct leg. The
+  announce and hourly retries go on as before. The bound sits under the
+  router's own end of such a leg: a recipient whose key the home never
+  held fails there after five attempts 12 s apart, 60 s, never under
+  50 s, while the bound, checked on a 1 s tick against a start in whole
+  seconds, fires by 47 s. At 60 s the two met within a second and the
+  daemon's start phase chose the winner (1331). A router that ends an
+  unanswered leg first anyway is the same fact: the line is
   `HOME outbox direct unanswered … reason=router: …` and the copy goes
   to the propagation node at once.
+- **A path response is no announce** (1330). Every direct leg called off
+  or failed ends in a path request of the router's own, which a transport
+  node answers from its cache within a minute. The router reports that
+  answer as it reports an announce, flagged as a path response (Python's
+  `is_path_response`), and the outbox starts nothing on it: taken for the
+  recipient, it tried an offline member direct every 100 s on miauhaus
+  after the copy was on the node. Only the recipient's own announce and
+  the hour try direct again.
 - **Every engine selects its own propagation node** (1328). A hosted
   group's copies go out on the group's engine, which runs no collection:
   the home's engine selecting a node selects nothing there, so before a
   copy's propagated leg the group's engine is told the node the home uses
-  unless it reported holding it. A failed leg's log line carries the
-  engine's reason (`reason=unsent: …`, `reason=rejected`, …).
+  unless it reported holding it. A propagated leg's lines name the node
+  (`pn=`, its first four bytes, as `PN_PULL` does), so a `handed-on` reads
+  beside the node's own `PN_ACCEPT` (1330). A failed leg's log line carries the
+  engine's reason (`reason=unsent: …`, `reason=rejected`, …), and after the
+  router's state the transport's word on the last failed attempt
+  (`reason=failed: delivery link closed (Stale)`, `reason=failed: upload
+  transfer: …`), or `reason=failed: no attempt got a link` when none
+  failed on one (1330).
 - **A leg that never ends is given up** (1293). The outbox starts no leg
   for a message already on one, so a leg whose end the router never
   reports (a link that died mid-leg, a transfer that stalled, a message the

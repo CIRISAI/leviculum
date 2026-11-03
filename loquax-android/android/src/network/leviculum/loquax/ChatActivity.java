@@ -2214,6 +2214,33 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
     }
 
+    /**
+     * A group its admin deleted (1307 pass four): its line where the
+     * compose bar was, and no compose bar; nothing can be written to it.
+     */
+    private void ended(String words) {
+        View row = findViewById(R.id.compose_row);
+        ViewGroup parent = (ViewGroup) row.getParent();
+        TextView line = (TextView) parent.findViewWithTag("ended");
+        if (line == null && words.isEmpty()) {
+            return;
+        }
+        if (line == null) {
+            line = new TextView(this);
+            line.setTag("ended");
+            line.setTextSize(14);
+            line.setGravity(Gravity.CENTER);
+            line.setTextColor(getColor(R.color.text_secondary));
+            line.setPadding(dp(16), dp(12), dp(16), dp(12));
+            parent.addView(line, parent.indexOfChild(row));
+        }
+        line.setText(words);
+        line.setVisibility(words.isEmpty() ? View.GONE : View.VISIBLE);
+        if (!words.isEmpty()) {
+            row.setVisibility(View.GONE);
+        }
+    }
+
     private void refresh() {
         Map<String, Object> answer = Core.messages(peer);
         if (answer.containsKey("error")) {
@@ -2234,6 +2261,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         shareStop.setContentDescription(Core.str(answer, "share_stop"));
         homeClient = Core.bool(answer, "home_client");
         bar(answer);
+        ended(Core.str(answer, "ended"));
         // A group the reader is only invited to (1307): its card, once a visit.
         String invited = Core.str(answer, "invite_title");
         if (!invited.isEmpty() && !invitationShown) {
@@ -2435,9 +2463,41 @@ public class ChatActivity extends Activity implements Events.Listener {
         /**
          * A group's writer above the first bubble of its run, and an
          * invitation's Join under its card (1307); made once per recycled
-         * row, shown when the row has them.
+         * row, shown when the row has them. A group's own line ("Anna
+         * joined.", "Lew ended the group.") is drawn from the row's `note`
+         * as a centred system line in place of the bubble, and a line that
+         * arrived late says so under its bubble (1307 pass four).
          */
         private void group(LinearLayout root, View bubble, Map<String, Object> row) {
+            boolean note = Core.bool(row, "note");
+            TextView line = (TextView) root.findViewWithTag("note");
+            if (line == null) {
+                line = new TextView(ChatActivity.this);
+                line.setTag("note");
+                line.setTextSize(13);
+                line.setGravity(Gravity.CENTER);
+                line.setTextColor(getColor(R.color.text_secondary));
+                line.setPadding(dp(16), dp(6), dp(16), dp(6));
+                root.addView(line, root.indexOfChild(bubble));
+            }
+            line.setText(note ? Core.str(row, "body") : "");
+            line.setVisibility(note ? View.VISIBLE : View.GONE);
+            bubble.setVisibility(note ? View.GONE : View.VISIBLE);
+            if (note) {
+                root.setGravity(Gravity.CENTER_HORIZONTAL);
+            }
+            TextView late = (TextView) root.findViewWithTag("late");
+            if (late == null) {
+                late = new TextView(ChatActivity.this);
+                late.setTag("late");
+                late.setTextSize(11);
+                late.setTextColor(getColor(R.color.text_secondary));
+                late.setPadding(dp(14), 0, dp(14), dp(2));
+                root.addView(late, root.indexOfChild(bubble) + 1);
+            }
+            String lateWords = Core.str(row, "late");
+            late.setText(lateWords);
+            late.setVisibility(lateWords.isEmpty() ? View.GONE : View.VISIBLE);
             TextView writer = (TextView) root.findViewWithTag("writer");
             if (writer == null) {
                 writer = new TextView(ChatActivity.this);

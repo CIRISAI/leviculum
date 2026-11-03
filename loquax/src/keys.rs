@@ -853,6 +853,18 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("add members"),
+        Row::new(
+            "delete the open group for everyone, its admin's, after asking",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("delete group"),
+        Row::new(
+            "make a left or ended group again with the same people",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("start again"),
     ]
 };
 

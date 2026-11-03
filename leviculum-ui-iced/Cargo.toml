@@ -30,6 +30,9 @@ leviculum-ui = { path = "../leviculum-ui" }
 # program's. thread-pool, Loquax's executor: iced refuses to build without one.
 # advanced: the headless render and click (`headless`).
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "x11", "wayland", "thread-pool", "canvas", "advanced"] }
+# The window icon's PNG (`window_icon`), decoded once at the start; the
+# version in the lock through iced and the programs' tests.
+png = "0.18"
 
 # The desktop's light or dark on Linux (`desktop`, 1310): the freedesktop
 # colour scheme over D-Bus, the reader iced's `linux-theme-detection` uses.

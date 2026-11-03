@@ -232,16 +232,21 @@ skip  loquax           tui_snapshot               # spawns loquax tui against an
 skip  loquax           scene_golden               # a golden of the scene built from the ugly store; subject is the code; loquax-tui
 skip  loquax           mailbox_receipts           # read receipts through the mailbox, in process with signed LXMF; subject is the code; loquax-tui
 skip  loquax           wire_props                 # property tests of the home wire's codecs; subject is the code; loquax-tui
+skip  loquax-android   browse                     # the Browse tab's verbs and scene through the facade in Java's bytes (1337); subject is the code
+skip  loquax-android   browse_census              # counts the Browse tab's heap with a global allocator (1337); subject is the code
+skip  loquax-android   browse_fetch               # the Browse tab's fetch through the phone's own node against an in-process transport and page node over loopback TCP (1337); subject is the code
 skip  loquax-android   device_walk_script         # starts python3 on the device walk's parser tests; subject is the script's code
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
 skip  loquax-android   fling                      # starts javac and java on Fling.java and its host test; subject is the code
 skip  loquax-android   glyph                      # Glyph.java against the core's mark shapes, and the shapes rasterised; subject is the code
 skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
+skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
 skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
 run   loquax-android   strings                    # reads the app's res/values*/strings.xml and asserts the words of walk findings 27 to 30 (1283)
+run   loquax-android   icon                       # reads the icon PNGs, the adaptive icon, the manifest and the deb's desktop entry and asserts their sizes and names (1336)
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer

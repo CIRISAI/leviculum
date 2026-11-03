@@ -132,6 +132,7 @@ use leviculum_lxmf::Field;
 
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
+pub mod browse;
 pub mod chat;
 pub mod compose;
 pub mod contacts;
@@ -854,6 +855,8 @@ pub struct UiModel<B> {
     /// The groups whose state changed since the store last learned it
     /// (1307 G2): written by [`UiModel::take_writes`].
     groups_changed: BTreeSet<[u8; 16]>,
+    /// The Browse tab and the browser in it (1337).
+    pub browse: browse::Browse,
     /// The language the model's own sentences from the catalogue are said
     /// in ([`strings::StrId`]): English unless the shell knows better, as
     /// the phone does.
@@ -959,6 +962,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             group_draft: None,
             group_sheet: None,
             groups_changed: BTreeSet::new(),
+            browse: browse::Browse::default(),
             lang: strings::Lang::En,
         };
         for peer in peers {
@@ -1604,6 +1608,15 @@ pub enum UiEvent {
     /// The home's answer to [`UiEffect::AddMembers`] (1307 G2): the
     /// group's address, or why nobody was added.
     MembersAdded(Result<[u8; 16], String>),
+    /// The home's answer to [`UiEffect::DeleteGroup`] (1307 pass four):
+    /// the group, or why not.
+    GroupDeleted(Result<[u8; 16], String>),
+    /// A tab of the bar was chosen (1337): the Browse tab comes to the
+    /// front, or leaves it for the chats or the map.
+    Tab(scene::TabId),
+    /// What the hosted browser of the Browse tab is told (1337): a verb,
+    /// the page a fetch brought, a NomadNet node an announce named.
+    Browse(browse::BrowseEvent),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1650,6 +1663,11 @@ pub enum UiEffect {
     Redraw,
     /// Put this text on the clipboard (OSC 52 in the terminal).
     Copy(String),
+    /// What the hosted browser of the Browse tab asks of the platform
+    /// (1337): a fetch, a download, the clipboard, its stores. Never
+    /// [`lnomad::Effect::Write`] or [`lnomad::Effect::Quit`], which the
+    /// core does itself ([`browse::effects_of`]).
+    Browse(lnomad::Effect),
     /// Make the contacts file say this about its peer, its other lines kept
     /// ([`crate::names::save_contact`]).
     Contact(Contact),
@@ -1705,7 +1723,8 @@ pub enum UiEffect {
     PauseVoice { peer: [u8; 16], key: u64 },
     /// Ask the home to make the group `name` with `members`, each under
     /// the name the reader knows it by (1307, `/group`); answered with
-    /// [`UiEvent::GroupMade`].
+    /// [`UiEvent::GroupMade`]. The invitations are English on the wire,
+    /// whatever the reader's language (1348).
     CreateGroup {
         name: String,
         members: Vec<([u8; 16], String)>,
@@ -1716,6 +1735,9 @@ pub enum UiEffect {
         group: [u8; 16],
         members: Vec<([u8; 16], String)>,
     },
+    /// Ask the home to delete its group `group` for everyone (1307 pass
+    /// four, `/groupdelete`); answered with [`UiEvent::GroupDeleted`].
+    DeleteGroup { group: [u8; 16] },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.
     Recording {
@@ -1754,6 +1776,8 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
 
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
+        UiEvent::Tab(tab) => browse::tab(model, tab),
+        UiEvent::Browse(event) => browse::fold(model, event),
         UiEvent::MapSetup(setup) => {
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
@@ -1885,6 +1909,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Group(verb) => model.group_verb(verb),
         UiEvent::GroupMade(made) => model.group_made(made),
         UiEvent::MembersAdded(added) => model.members_added(added),
+        UiEvent::GroupDeleted(deleted) => model.group_deleted(deleted),
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -3005,7 +3030,8 @@ fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16)
 
 /// A link in a body, followed as lnomad follows one ([`classify_link`]): a
 /// web or mail URL goes to the system's handler, an `lxmf@` address opens
-/// its conversation for writing, a NomadNet page is copied for a browser.
+/// its conversation for writing, a NomadNet page opens in the Browse tab
+/// where the host has one (1337) and is copied for lnomad where not.
 fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec<UiEffect> {
     match classify_link(target) {
         LinkKind::External(url) => {
@@ -3025,6 +3051,7 @@ fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec
             }
             Err(_) => Vec::new(),
         },
+        LinkKind::Rns if model.browse.enabled => browse::open_page(model, target.to_string()),
         LinkKind::Rns => {
             model.toast(
                 ToastKind::Info,
@@ -3598,6 +3625,41 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             }
             effects
         }
+        // 1307 pass four: the admin's delete asks in the palette, as leave
+        // does; start again opens the name, Enter keeps the old one.
+        PaletteCommand::DeleteGroup => match model
+            .conversations
+            .get(model.selected)
+            .map(|c| c.peer)
+            .filter(|p| model.groups.get(p).is_some_and(|g| g.ours))
+        {
+            Some(group) => {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::DeleteGroup(group)),
+                    ..Palette::default()
+                });
+                Vec::new()
+            }
+            None => {
+                model.toast(
+                    ToastKind::Info,
+                    "only the group's admin deletes it".to_string(),
+                );
+                Vec::new()
+            }
+        },
+        PaletteCommand::StartAgain => {
+            let effects = model.group_verb(groups::Verb::Again {
+                group: intent::Target::Open,
+            });
+            if model.group_draft.is_some() {
+                model.palette = Some(Palette {
+                    ask: Some(contacts::Ask::GroupName),
+                    ..Palette::default()
+                });
+            }
+            effects
+        }
         PaletteCommand::RemoveMember => model.group_verb(groups::Verb::Remove {
             group: intent::Target::Open,
             member: None,
@@ -3653,6 +3715,18 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
         return effects;
     }
     if body.trim().is_empty() {
+        return Vec::new();
+    }
+    // A group its admin deleted takes nothing more (1307 pass four): its
+    // compose is closed, and a frontend that still offers one is told.
+    if let Some(ended) = model
+        .conversations
+        .get(model.selected)
+        .and_then(|c| model.groups.get(&c.peer))
+        .filter(|g| g.standing == groups::Standing::Ended)
+    {
+        let line = format!("{} ended; nothing can be written to it", ended.name);
+        model.toast(ToastKind::Info, line);
         return Vec::new();
     }
     let Some(conversation) = model.conversations.get_mut(model.selected) else {
@@ -3780,6 +3854,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         OutboxEvent::Left {
             message_id,
             last: Some(state),
+            ..
         } => apply_state(model, message_id, state),
         OutboxEvent::MeshPosition {
             identity,
@@ -3788,7 +3863,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         } => model.mesh_position(identity, location, name.as_deref(), 0),
         // Our own announce, echoed back, names nobody.
         OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
-        OutboxEvent::Announced { destination, name } => {
+        OutboxEvent::Announced {
+            destination, name, ..
+        } => {
             // Said once, in the conversation, where the reader has one with
             // the peer: a peer nobody wrote to has nothing to compare with.
             if let Heard::Changed { was, now } = model.names.heard(destination, name.as_deref()) {
@@ -3885,8 +3962,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let mut effects = take_telemetry(model, index, message_id);
             effects.extend(model.take_lev(source, lev.as_ref()));
             // A group's state (1307) is kept and stored, and asks for no
-            // attention: no unread, no toast, no cursor.
+            // attention: no unread, no toast, no cursor. A group the
+            // reader deleted leaves this device with it (pass four).
             if state {
+                model.forget_deleted_groups();
                 return effects;
             }
             // A reaction: kept and stored, drawn under its target, and the
@@ -4267,13 +4346,25 @@ impl<B> UiModel<B> {
 }
 
 fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
-    let shown = delivery_of(state);
+    let delivered = delivery_of(state);
     let now = model.now;
     let running = model.sending.clone();
     let changed = &mut model.changed;
+    let groups = &model.groups;
     for (c, conversation) in model.conversations.iter_mut().enumerate() {
+        // In a group (1307 pass four) the group's proof is one tick: the
+        // group has it. The two come with its status, once every member's
+        // copy is proven, and a late proof does not take them back.
+        let group = groups.contains_key(&conversation.peer);
+        let shown = match delivered {
+            DeliveryState::Delivered if group => DeliveryState::InMailbox,
+            other => other,
+        };
         for (m, message) in conversation.messages.iter_mut().enumerate() {
             if !message.outbound || message.id != Some(id) {
+                continue;
+            }
+            if group && message.delivery == Some(DeliveryState::Delivered) {
                 continue;
             }
             if gives_up(shown) && running.contains(&(c, m)) {
@@ -4286,11 +4377,15 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
             }
             if message.unproven
                 && !matches!(shown, DeliveryState::Delivered | DeliveryState::Rejected)
+                && !(group && delivered == DeliveryState::Delivered)
             {
                 continue;
             }
             if message.delivery != Some(shown) {
-                let words = ledger_words(shown);
+                let words = match group && delivered == DeliveryState::Delivered {
+                    true => "the group has it: proof received",
+                    false => ledger_words(shown),
+                };
                 let line = match message.last_leg {
                     Some(leg) => format!("{words} ({})", leg_words(leg)),
                     None => words.to_string(),
@@ -4864,6 +4959,9 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
     ];
     if let Some(why) = no_read_words(model, conversation, message, &who) {
         rows.push(why);
+    }
+    if let (true, Some(id)) = (message.outbound, message.id) {
+        rows.extend(model.group_detail_rows(&conversation.peer, &id));
     }
     let received = message.at.map(|at| at.unix_secs);
     let sensors = telemetry::detail_rows(&conversation.peer, &message.fields, offset, received);
@@ -6647,6 +6745,7 @@ pub(crate) mod tests {
             OutboxEvent::Left {
                 message_id: ID,
                 last: Some(MessageState::Failed),
+                failure: None,
             },
         );
         assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
@@ -8869,6 +8968,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_page_link_in_a_chat_opens_the_browse_tab_where_the_host_has_one() {
+        let node = to_hex(&OTHER);
+        let body = format!("my node: {node}:/page/index.mu");
+        // The terminal has no Browse tab: the link is copied for lnomad
+        // (the control).
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        receive(&mut model, PEER, 1, &body);
+        let link = cell_of(&model, &node[..8], 0);
+        assert_eq!(
+            press(&mut model, link),
+            [UiEffect::Copy(format!("{node}:/page/index.mu"))]
+        );
+        assert!(!model.browse.open);
+        // The phone has one: the tab comes to the front at that page.
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.browse.enabled = true;
+        receive(&mut model, PEER, 1, &body);
+        let link = cell_of(&model, &node[..8], 0);
+        assert_eq!(
+            press(&mut model, link),
+            [UiEffect::Browse(lnomad::Effect::Navigate(lnomad::Target {
+                dest_hash: OTHER,
+                path: "/page/index.mu".to_string(),
+                fields: Vec::new(),
+                is_file: false,
+            }))]
+        );
+        assert!(model.browse.open);
+        assert_eq!(
+            model.scene(scene::LayoutClass::Compact).screen,
+            scene::ScreenId::Browse
+        );
+    }
+
+    #[test]
     fn the_mouse_switch_turns_capture_off_and_the_model_deaf_to_it() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         assert_eq!(
@@ -9202,6 +9336,7 @@ pub(crate) mod tests {
             OutboxEvent::Announced {
                 destination: peer,
                 name: Some(name.to_string()),
+                path_response: false,
             },
         );
     }

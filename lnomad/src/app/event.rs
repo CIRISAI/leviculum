@@ -380,8 +380,17 @@ pub(crate) fn plan_images(model: &mut Model) -> Vec<Effect> {
 /// `lnomad` is started without a URL. A real micron document rather than
 /// hand-drawn chrome, so it goes through the same parse/layout/render path as a
 /// fetched page and re-wraps on a resize or a theme change for free.
-pub(crate) fn start_page(lang: Lang) -> String {
+pub(crate) fn start_page(lang: Lang, hosted: bool) -> String {
     let w = |id: StrId| id.text(lang);
+    if hosted {
+        // A messenger's tab on a touch screen (1337): no keys to name, one
+        // sentence over the places list the tab opens with.
+        return format!(
+            ">{}\n\n{}",
+            w(StrId::StartHostedTitle),
+            w(StrId::StartHosted)
+        );
+    }
     format!(
         ">lnomad\n\n{}\n\n{}\n\n`!d`! {}   `!:`! {}   `!?`! {}   `!q`! {}",
         w(StrId::StartTagline),
@@ -406,7 +415,7 @@ pub(crate) const START_TITLE: &str = "lnomad";
 pub fn show_start_screen(model: &mut Model) {
     apply_loaded(
         model,
-        leviculum_micron::parse(&start_page(model.lang)),
+        leviculum_micron::parse(&start_page(model.lang, model.hosted)),
         START_TITLE.to_string(),
     );
     model.show_places = true;
@@ -503,6 +512,22 @@ pub(crate) fn type_field(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
         model.clamp_scroll(vp);
     }
     Vec::new()
+}
+
+/// Set text field `fi` (1-based) to `text`, as a platform's own editor
+/// hands it in, and lay the page out again around the new width, keeping
+/// the scroll. A checkbox, a radio or an index off the page is left alone.
+pub(crate) fn fill_field(model: &mut Model, fi: usize, text: &str) {
+    let Some(fe) = fi.checked_sub(1).and_then(|i| model.field_state.get_mut(i)) else {
+        return;
+    };
+    if fe.kind != FieldKind::Text {
+        return;
+    }
+    fe.input.set_value(text);
+    let (w, vp) = (model.width, model.viewport());
+    model.relayout(w);
+    model.clamp_scroll(vp);
 }
 
 /// Activate field `fi` (1-based): a checkbox toggles its checked state, a radio
@@ -1488,6 +1513,12 @@ pub(crate) fn follow_link(model: &mut Model, index: usize) -> Vec<Effect> {
         // send. Anything is better than the "malformed URL" this used to
         // produce, which read as a broken page rather than an unsupported
         // action.
+        // Hosted in a messenger (a tab of Loquax), there is a composer: the
+        // address goes to it, as NomadNet's does.
+        LinkKind::Lxmf(hash) if model.hosted => {
+            model.dismiss_toast();
+            vec![Effect::Write(hash)]
+        }
         LinkKind::Lxmf(hash) => {
             model.say(ToastKind::Info, with(StrId::LxmfCopied, hash.clone()));
             vec![Effect::Copy(hash)]

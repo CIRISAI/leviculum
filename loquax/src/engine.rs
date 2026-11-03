@@ -52,13 +52,14 @@ use core::future::Future;
 use core::pin::pin;
 use core::task::Poll;
 
+use leviculum_core::constants::RANDOM_HASHBYTES;
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
 use leviculum_core::{Clock as CoreClock, DestinationHash, NodeCore, Storage};
 use leviculum_lxmf::propagation_client::PropagationTransport;
 use leviculum_lxmf::router::{
-    LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
+    AttemptFailure, LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
     PropagationStampRequest, RouterConfig, RouterError, RouterEvent, RouterOutput,
     PATH_REQUEST_WAIT_MS,
 };
@@ -82,7 +83,7 @@ pub(crate) use shell::tcp_section;
 pub use shell::{
     attach, attach_as, attach_leaf, attach_mesh, locale, parse_server, start_command,
     start_command_here, AttachConfig, AttachError, Attached, HomeRequest, InProcessOutbox,
-    LeafConfig, MeshConfig, Role, LNSD_UNITS,
+    LeafConfig, Lent, MeshConfig, Role, LNSD_UNITS,
 };
 
 /// How soon the engine asks the driver to come back.
@@ -305,6 +306,9 @@ pub struct Engine {
     /// forgets a message the moment it reaches a terminal state, so without
     /// this the removal could not be attributed.
     tracked: BTreeMap<[u8; 32], Option<MessageState>>,
+    /// Why the last failed attempt of a tracked message failed, for its
+    /// [`OutboxEvent::Left`] (1330).
+    failures: BTreeMap<[u8; 32], AttemptFailure>,
     /// Stamps being mined, so a re-offer does not queue a second mine for the
     /// same work behind the first. Keyed by kind as well as id: a propagated
     /// message can need a recipient stamp and a node stamp in one run.
@@ -336,6 +340,12 @@ pub struct Engine {
     /// with the recipient and when to say so next (1305). See
     /// [`OutboxEvent::KeyWanted`].
     key_wanted: BTreeMap<[u8; 32], ([u8; 16], u64)>,
+    /// The recipients of packed messages this run sent, each with the random
+    /// hash of the last announce heard from it. See [`Engine::replayed`].
+    recipients: BTreeMap<[u8; 16], Option<[u8; RANDOM_HASHBYTES]>>,
+    /// The recipient whose announce the event being handled repeats, set
+    /// for the length of one [`Engine::on_event`].
+    replayed: Option<[u8; 16]>,
 }
 
 impl Engine {
@@ -355,6 +365,7 @@ impl Engine {
             state,
             resolves: Vec::new(),
             tracked: BTreeMap::new(),
+            failures: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
             pending_selection: None,
@@ -363,6 +374,8 @@ impl Engine {
             undecryptable: 0,
             says_home: false,
             key_wanted: BTreeMap::new(),
+            recipients: BTreeMap::new(),
+            replayed: None,
         }
     }
 
@@ -534,6 +547,11 @@ impl Engine {
                     self.emit(OutboxEvent::State { message_id, state });
                 }
             }
+            RouterEvent::AttemptFailed { message_id, reason } => {
+                if self.tracked.contains_key(&message_id) {
+                    self.failures.insert(message_id, reason);
+                }
+            }
             RouterEvent::StampPending(request) => {
                 self.dispatch_stamp(StampJob::Delivery(request, Arc::default()));
             }
@@ -578,10 +596,13 @@ impl Engine {
             RouterEvent::PeerAnnounced {
                 destination,
                 announce,
+                path_response,
             } => {
+                let destination = destination.into_bytes();
                 self.emit(OutboxEvent::Announced {
-                    destination: destination.into_bytes(),
+                    destination,
                     name: announce.display_name(),
+                    path_response: path_response || self.replayed == Some(destination),
                 });
             }
             RouterEvent::PropagationSyncComplete(result) => {
@@ -650,9 +671,11 @@ impl Engine {
             .collect();
         for id in gone {
             let last = self.tracked.remove(&id).flatten();
+            let failure = self.failures.remove(&id);
             self.emit(OutboxEvent::Left {
                 message_id: id,
                 last,
+                failure,
             });
         }
     }
@@ -744,6 +767,9 @@ impl Engine {
             Via::Propagated => DeliveryMethod::Propagated,
             Via::Direct | Via::Link => DeliveryMethod::Direct,
         };
+        self.recipients
+            .entry(message.destination_hash)
+            .or_insert(None);
         // A recipient whose key this node does not hold (a group's engine
         // started again after a kill, 1307 G2, keeps no known identities):
         // ask its path, as a stock app does before it writes to an address
@@ -937,6 +963,7 @@ impl Engine {
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),
+                    path_response: false,
                 }),
                 Command::HomePetname {
                     destination,
@@ -1860,6 +1887,13 @@ impl Engine {
         let Some(mut ready) = self.take_ready(core) else {
             return out;
         };
+        self.replayed = match event {
+            NodeEvent::AnnounceReceived { announce, .. } => self.replayed(
+                announce.destination_hash().into_bytes(),
+                announce.random_hash(),
+            ),
+            _ => None,
+        };
         if let (Some(pending), NodeEvent::AnnounceReceived { announce, .. }) =
             (&mut self.pending_selection, event)
         {
@@ -1896,8 +1930,35 @@ impl Engine {
         self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
         self.poll_unheard(&mut ready, core, now_ms, &mut out);
         self.report_departures(&ready);
+        self.replayed = None;
         self.state = State::Ready(ready);
         out
+    }
+
+    /// Whether an announce from `destination` with `random` repeats the
+    /// last one heard from it, for a recipient this run sent to: `Some` of
+    /// it if so, and the announce becomes the last one heard either way.
+    ///
+    /// A repeat is a cache's copy, which says nothing of whether the
+    /// recipient is there (1332). The router asks a recipient's path again
+    /// whenever a direct link to it closes with a message still waiting
+    /// (`leviculum-lxmf/src/router.rs`, `needs_direct_link`), and a shared
+    /// instance forwards the network's answer to its client as a plain
+    /// announce, as the reference does (`Transport.py:1910-1930`, cited at
+    /// the pending forward in `leviculum-core/src/transport.rs`), so the
+    /// `PATH_RESPONSE` context 1330 reads is gone by then. On miauhaus every
+    /// copy handed on was tried direct again some 46 s after each attempt
+    /// nobody answered. Only a recipient that announces again sends a new
+    /// random hash.
+    fn replayed(
+        &mut self,
+        destination: [u8; 16],
+        random: &[u8; RANDOM_HASHBYTES],
+    ) -> Option<[u8; 16]> {
+        let last = self.recipients.get_mut(&destination)?;
+        let repeat = last.as_ref() == Some(random);
+        *last = Some(*random);
+        repeat.then_some(destination)
     }
 
     /// The periodic slot: commands, finished stamps, resolves and the
@@ -2187,6 +2248,84 @@ mod tests {
         let mut bytes = [0u8; 512];
         let len = packet.pack(&mut bytes).expect("pack");
         bytes[..len].to_vec()
+    }
+
+    /// 1332: an announce from a recipient this run sent to that repeats the
+    /// last one heard from it is a cache's copy, reported as heard from a
+    /// cache however it came; the recipient's next own announce is live. A
+    /// peer nothing was sent to is reported as the wire says.
+    #[test]
+    fn a_repeat_of_a_recipients_announce_is_reported_as_heard_from_a_cache() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let member = leviculum_std::generate_identity();
+        let address = delivery_address(&member).expect("address");
+        let sender = leviculum_std::generate_identity();
+        let packed = leviculum_lxmf::Message::create(
+            address,
+            delivery_address(&sender).expect("address"),
+            &sender,
+            1_793_500_000.0,
+            Vec::new(),
+            b"Brot ist da".to_vec(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message")
+        .pack();
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Link,
+        });
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+
+        let hear = |engine: &mut Engine, core: &mut StdNodeCore, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(core, event);
+            }
+            drain(engine)
+                .into_iter()
+                .filter_map(|event| match event {
+                    OutboxEvent::Announced {
+                        destination,
+                        path_response,
+                        ..
+                    } if destination == address => Some(path_response),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let once = announce_bytes(&member, "lxmf", &["delivery"], b"");
+        assert_eq!(
+            hear(&mut engine, &mut core, &once),
+            [false],
+            "first heard: live"
+        );
+        // A direct link that fails its handshake expires the path, and the
+        // router asks it again: a transport node's copy comes back, one hop
+        // further, the same announce.
+        assert!(core.remove_path(&address));
+        let mut replay = once.clone();
+        replay[1] = replay[1].saturating_add(1);
+        assert_eq!(
+            hear(&mut engine, &mut core, &replay),
+            [true],
+            "the same announce again"
+        );
+        let again = announce_bytes(&member, "lxmf", &["delivery"], b"");
+        assert_eq!(
+            hear(&mut engine, &mut core, &again),
+            [false],
+            "the member announced"
+        );
     }
 
     /// 1302: a `lev.position` announce the core heard reaches the screen's
@@ -3130,6 +3269,71 @@ mod tests {
                 .any(|event| matches!(event, OutboxEvent::Left { .. })),
             "a message still in the outbound queue has not left it: {seen:?}"
         );
+    }
+
+    /// 1330: the home's "direct failed" line said `reason=failed`, the
+    /// router's state, which does not tell a link that died mid-transfer
+    /// from one that never came. A failed attempt's reason is kept until the
+    /// message leaves, and goes with it; control: a message whose attempts
+    /// never failed leaves with none.
+    #[test]
+    fn a_message_leaves_with_why_its_last_attempt_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let queue = |engine: &mut Engine, core: &mut _, destination| {
+            engine.submit(Command::Send(Box::new(SendRequest {
+                destination,
+                title: Vec::new(),
+                body: vec![b'x'; 2_000],
+                fields: Vec::new(),
+                via: Via::Direct,
+            })));
+            let now_ms = leviculum_core::node::NodeCore::now_ms(core);
+            let _ = engine.on_tick(core, now_ms);
+            drain(engine)
+                .into_iter()
+                .find_map(|event| match event {
+                    OutboxEvent::Queued { message_id } => Some(message_id),
+                    _ => None,
+                })
+                .expect("queued")
+        };
+        let died = queue(&mut engine, &mut core, [0x33; 16]);
+        let quiet = queue(&mut engine, &mut core, [0x34; 16]);
+        let reason = AttemptFailure::Delivery(leviculum_lxmf::DeliveryFailure::LinkClosed(
+            leviculum_core::LinkCloseReason::Stale,
+        ));
+        let ready = engine.take_ready(&mut core).expect("ready");
+        engine.report(
+            &ready,
+            &core,
+            RouterEvent::AttemptFailed {
+                message_id: died,
+                reason,
+            },
+        );
+        engine.state = State::Ready(ready);
+
+        engine.submit(Command::Cancel { message_id: died });
+        engine.submit(Command::Cancel { message_id: quiet });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let left: Vec<_> = drain(&mut engine)
+            .into_iter()
+            .filter_map(|event| match event {
+                OutboxEvent::Left {
+                    message_id,
+                    failure,
+                    ..
+                } => Some((message_id, failure)),
+                _ => None,
+            })
+            .collect();
+        assert!(left.contains(&(died, Some(reason))), "{left:?}");
+        assert!(left.contains(&(quiet, None)), "{left:?}");
     }
 
     /// A short status line must not pay for a link handshake; a body that

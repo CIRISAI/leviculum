@@ -259,6 +259,9 @@ impl App {
         let icon = match tab.id {
             TabId::Chats => Icon::Chats,
             TabId::Map => Icon::Map,
+            // The window has no Browse tab (lnomad is its own program on a
+            // PC, 1337); should one be enabled, it borrows the chats' icon.
+            TabId::Browse => Icon::Chats,
         };
         let badge = tab.badge.map(|count| {
             chrome::badge(count, size::BADGE_TEXT - 2.0, size::BADGE_CORNER, p).padding([0, 5])
@@ -433,6 +436,11 @@ impl App {
                 .on_input(Message::NewAddress)
                 .on_submit(Message::NewGo);
             pane = pane.push(container(new).padding([0, 12]));
+            // A contact code as a picture, the desktop's camera (1341).
+            pane = pane.push(
+                container(link(super::code_title(self.lang), Message::PickCode, t))
+                    .padding([0, 12]),
+            );
             // "New group" at the top of the new chat (1307, study 4.1).
             pane = pane.push(
                 container(link(
@@ -493,7 +501,20 @@ impl App {
         if let Some(invite) = &open.invite {
             pane = pane.push(container(self.invite_card(invite, false, t)).padding([8, 12]));
         }
-        pane.push(self.compose_bar(open, t))
+        // A group its admin deleted (1307 pass four): its line where the
+        // compose bar was; nothing can be written to it.
+        let bottom: Element<'_, Message> = match &open.ended {
+            Some(ended) => container(
+                text(ended.resolve(self.lang))
+                    .size(15)
+                    .color(colour(t.text_secondary)),
+            )
+            .center_x(Length::Fill)
+            .padding([14, 12])
+            .into(),
+            None => self.compose_bar(open, t),
+        };
+        pane.push(bottom)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -632,12 +653,30 @@ impl App {
                         t,
                     ));
                 }
+                // Start again with the same people (1307 pass four), in a
+                // group the reader left or that ended.
+                if let Some(again) = &sheet.again {
+                    pane = pane.push(link(
+                        self.word(again.label_key),
+                        Message::Intent(again.intent.clone()),
+                        t,
+                    ));
+                }
                 if let Some(leave) = &sheet.leave {
                     pane = pane.push(flat(
                         text(self.word(leave.label_key))
                             .size(15)
                             .color(colour(t.failed_mark_on_panel)),
                         Message::Intent(leave.intent.clone()),
+                    ));
+                }
+                // The admin's Delete group (pass four), under Leave.
+                if let Some(delete) = &sheet.delete {
+                    pane = pane.push(flat(
+                        text(self.word(delete.label_key))
+                            .size(15)
+                            .color(colour(t.failed_mark_on_panel)),
+                        Message::Intent(delete.intent.clone()),
                     ));
                 }
             }
@@ -819,6 +858,14 @@ impl App {
             };
             list = list.push(Space::new().height(gap));
             list = list.push(self.bubble(open, node, width, t));
+            // A line that came after newer ones (1307 pass four).
+            if node.bubble.late {
+                list = list.push(
+                    text(self.word(StrId::GroupArrivedLate))
+                        .size(size::META)
+                        .color(colour(t.text_secondary)),
+                );
+            }
             if self.menu == Some(node.id) {
                 list = list.push(self.actions(node, t));
             }
@@ -1119,6 +1166,44 @@ impl App {
                 .align_y(Alignment::Center),
             );
         }
+        // The plus's sheet or the position sheet (1270), over the bar as
+        // the phone's bottom sheet: its title, a row a line, Dismiss.
+        if let Some(sheet) = &self.scene.sheet {
+            let mut rows = column![row![
+                text(sheet.title.resolve(self.lang))
+                    .size(15)
+                    .color(colour(t.text))
+                    .width(Length::Fill),
+                link(
+                    self.word(Intent::CloseSheet.label()),
+                    Message::Intent(Intent::CloseSheet),
+                    t
+                ),
+            ]
+            .align_y(Alignment::Center)]
+            .spacing(6);
+            if let Some(whereabouts) = &self.scene.whereabouts {
+                rows = rows.push(
+                    text(whereabouts.words.resolve(self.lang))
+                        .size(14)
+                        .color(colour(t.text_secondary)),
+                );
+            }
+            for action in sheet.actions.iter().filter(|a| a.enabled) {
+                rows = rows.push(link(
+                    self.word(action.label_key),
+                    Message::Intent(action.intent.clone()),
+                    t,
+                ));
+            }
+            bar = bar.push(container(rows).padding([8, 12]).width(Length::Fill).style(
+                move |_: &Theme| container::Style {
+                    background: Some(Background::Color(colour(t.bar))),
+                    border: border::rounded(size::COMPOSE_CORNER),
+                    ..container::Style::default()
+                },
+            ));
+        }
         if self.emoji {
             let picks = SIGNAL_QUICK.iter().fold(row![].spacing(6), |picks, e| {
                 picks.push(
@@ -1142,7 +1227,8 @@ impl App {
         )
         .padding(6);
         // The scene's buttons in the field's right edge (1270): those the
-        // window can do; today it has none of them, so none show.
+        // window can do, the microphone where a recorder is found; no
+        // camera and no position, which a desktop does not read.
         let tail = open
             .compose
             .buttons
@@ -1173,8 +1259,8 @@ impl App {
                 }
             });
         // The round one: the plus while there is nothing to send, Send
-        // once there is (the scene's rule); the window's plus has no row
-        // yet, so the round button is Send.
+        // once there is (the scene's rule); the plus opens the sheet with
+        // the desktop chooser's Gallery and File (1341).
         let plus = open
             .compose
             .buttons

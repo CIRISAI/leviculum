@@ -395,6 +395,72 @@ and `leviculum-esp/README.md` on that branch.
   output). This page keeps the question open until a schematic or a
   probe decides it.
 
+## The board as the UI sees it
+
+*Written for the messenger UI plan (1343; [A messenger whose core runs
+anywhere](handheld-messenger.md), "The M9 frontend: the plan, measured").*
+One place for the facts a UI slice builds on. Everything here is measured
+on our unit or carried from the sourced sections above; the schematic is
+still missing ("Bring-up plan", step 1), and nothing below rests on
+another firmware's header.
+
+- **Display.** ST7789, 320 wide and 240 high as mounted (landscape; the
+  community port's MADCTL 0xB0, the map-fill observation under
+  "Display"), RGB565, no touch. A full frame is 153,600 bytes, and its
+  flush over the shared 40 MHz SPI bus with DMA was measured at 30.8 ms
+  from SRAM and 31.5 ms from PSRAM, 99.8 % of the line rate
+  (`docs/drafts/map-measurement-2026-10.md`, "Device rows, measured
+  2026-10-26"). So a full-frame UI can never exceed about 32 Hz, and the
+  bus is saturated: the lever is partial updates, which the ST7789's
+  column/row address window gives for free. The bus is shared with the
+  LR1110 and the SD card, so a long flush and a radio interrupt contend;
+  what that costs is measured on the board, not assumed.
+- **Input.** The 37-key QWERTY behind the I2C controller at 0x6D (V1.1,
+  "Two hardware revisions") is the whole input: no touch, no encoder.
+  The INT line does not fire per key, so the firmware polls while the
+  panel is lit, and the keyboard light does nothing on a version-2 board
+  (both: "The keypad"). Key-repeat and layers (where `!` and umlauts
+  live) are unread; the first keyboard slice documents the controller's
+  register map as far as the port and our own probing carry it.
+- **Memory.** 512 KB SRAM, 8 MB PSRAM (came up with 8,388,608 bytes in
+  the map measurement), 16 MB flash. How much SRAM is free beside the
+  radio stack — and later WiFi or BLE — is unmeasured ("Open"). The
+  `leviculum-esp` heap is a 64 KiB placeholder today (`HEAP_SIZE`,
+  `leviculum-esp/src/lib.rs:92`); the UI budgets on the messenger page
+  say what has to replace it.
+- **Radio.** The LR1110 through `leviculum-lr11xx`, usable ceiling about
+  +17 dBm ("What the community port measured"). For the UI it is the
+  link the messenger rides; the status screen's facts (mode, announce,
+  duty) are the same as every board's.
+- **GNSS.** An AG3352 with an own fix ("Two conflicts the device
+  settles"). So sharing a position is possible on the M9, which neither
+  desktop target can ([Loquax: one messenger on every
+  target](loquax-targets.md), "GNSS on the desktop").
+- **Battery facts the UI shows.** Voltage on GPIO13 through the 2:1
+  divider; the charger ends at 4.35 V, so a gauge that assumes a 4.2 V
+  chemistry misreads a full battery; USB power present is GPIO1 low
+  (all under "Power").
+- **Sound.** A buzzer behind a transistor on GPIO9, nothing else.
+
+What the board lacks, one sentence each, under the all-targets rule
+(every feature moves its platform layer on all targets where technically
+possible; [Loquax: one messenger on every target](loquax-targets.md),
+"The M9" has the per-row list):
+
+- **No microphone, no speaker:** a voice message neither records nor
+  plays here; the M9 shows that one arrived and how long it is, and the
+  buzzer announces it.
+- **No camera:** a contact or admission code is never scanned; it is
+  typed on the 37 keys or written over the USB control link, and the M9
+  shows its own code as a QR on the display for a phone to scan.
+- **No touch:** every intent a sheet or a menu offers must be reachable
+  from the key table; a feature that only a gesture can reach on another
+  target is refused for the scene, the same consistency rule the
+  navigation page applies to views.
+- **No file system a user can reach:** attachments are listed and small
+  photos drawn, but "open with" and "save to" have no meaning; a file is
+  fetched by a paired device instead.
+
 ## Decided
 
 - **The full stack, in the two modes of [Operating
@@ -457,7 +523,7 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      step for either.
    - The host toolchain pin stays at 1.97.1 until esp-rs ships a
      non-prerelease Xtensa toolchain of the same generation (decided
-     2026-10-05, `scripts/install-ci.sh:420-424`, `rust-toolchain.toml:17`).
+     2026-10-05, `scripts/install-ci.sh:430-434`, `rust-toolchain.toml:17`).
    - **2026-10-25, how the rig should recognise an M9 (#473).** USB
      cannot: the CH340K publishes `1a86:7522`, no manufacturer string and
      no serial number, so it looks like every other CH340, and periculum's

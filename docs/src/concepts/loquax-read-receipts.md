@@ -126,7 +126,7 @@ the codec is `leviculum-lxmf/src/lev.rs`.
 ### The group keys
 
 Group chats (`docs/drafts/group-chats-study-2026-11.md`, built from 1307)
-add capability bit 1, "I understand groups", and four keys; a reader
+add capability bit 1, "I understand groups", and five keys; a reader
 that knows only the keys above skips them. A copy a group's home sends a
 member that understands groups, writer `11…11`, its clock
 1700000000123 ms, epoch 1 (`VEC-MSG-LEV-GROUP-COPY`, 33 bytes of map):
@@ -145,11 +145,45 @@ sends itself alone, flagged left (`VEC-MSG-LEV-GROUP-LEAVE`), and the
 admin removes a member by sending the group that member alone, flagged
 left. Every Loquax client sets bit 1 on every message it sends, with
 read receipts off too (`{0x00: 2}`). `0x06` is the digest
-`[[bin16 writer, uint64 ms, str text], ...]` a group's home sends a slow
-member in place of one copy a line (`VEC-MSG-LEV-GROUP-DIGEST`); its text
-is the same lines as `"Name: text"`, one a line, which is all a stock
-member gets. Key `0x03` (group status) is the study's and not written
-yet.
+`[[bin16 writer, uint64 ms, str text, uint left_out?], ...]` a group's
+home sends a slow member in place of one copy a line
+(`VEC-MSG-LEV-GROUP-DIGEST`); its text is the same lines as
+`"Name: text"`, one a line, which is all a stock member gets. A line that
+stands for what the home left out carries a fourth element: 1 a photo,
+2 a voice message, 3 a file, each too large for the radio, 4 a message
+no longer there; its text is then the English sentence ("sent a photo
+(too large for the radio)", the caption after `": "`). Every other line
+keeps three elements, and a reader before it reads the first three.
+
+Wire text is English. Localisation happens on the reader from the lev
+data. The invitation's text, "Lew invited you to Familie: lxma://…
+Reply /leave to leave.", is English whatever the admin's language, and
+so is every other text a home or a client composes without a human
+typing it (the group's own lines, a digest's prefixes and left-out
+lines); a stock client shows that English. A Loquax reader renders the
+card from `0x04`'s admin's name and group name in its own catalogue
+("Lew lädt dich zu Familie ein" on a German phone), the membership lines
+and the end from `0x05` ("Anna ist beigetreten."), and a left-out digest
+line from `0x06`'s fourth element; the English text stays the message's
+body, archived for search and for every other client.
+
+`0x03` is the group status a home sends the writer of one message
+`[bin32 original, uint delivered, uint read, uint members, uint
+readers]` (`VEC-MSG-LEV-GROUP-STATUS`): the writer's own message id, how
+many copies their members proved, how many a member said it read, how
+many were made, and how many of those members send read receipts. The
+study wrote four elements; `readers` is appended so "read by N of M"
+counts only the members whose receipts are on, and a member with them
+off is never waited for. The home sends it, empty with the pair alone,
+once the last copy is proven (the writer's two ticks), again when a late
+copy is proven after a digest, and when the last reader read it (the
+writer's read mark). A status of four elements is no status.
+
+A deleted group's last membership carries a third element, the standing
+`1` (ended): `[uint epoch, [[...], ...], 1]`, every member flagged left
+(`VEC-MSG-LEV-GROUP-ENDED`). A membership without it is a live group's,
+so every membership written before keeps its bytes; a reader that does
+not know the element skips it, as for any appended one.
 
 ### What other clients do with it
 

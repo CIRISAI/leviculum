@@ -84,9 +84,9 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:1004-1041`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:1012-1049`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1031-1041`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1039-1049`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
@@ -546,7 +546,7 @@ method before the entry disappears. "The propagation node refused this message" 
 different fixes.
 
 **Handle the restart discontinuity honestly.** `restore` resets every
-queued message to `Outbound` (`leviculum-lxmf/src/router.rs:2270-2273`). So
+queued message to `Outbound` (`leviculum-lxmf/src/router.rs:2308-2311`). So
 after a restart, a message that was "sending" is "queued" again, and the UI
 must show that rather than a frozen progress bar. NomadNet's equivalent,
 forcing a stale mid-flight message to `FAILED` on load (NomadNet's

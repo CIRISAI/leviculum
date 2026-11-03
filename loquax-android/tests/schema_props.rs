@@ -376,11 +376,18 @@ fn invite_parts() -> BoxedStrategy<InviteParts> {
     (text(), text(), text(), text(), text(), any::<bool>()).boxed()
 }
 
+/// A group's line parts (1307 pass four): the note line's flag and the
+/// late words, boxed on their own as the others are.
+fn line_parts() -> BoxedStrategy<(bool, String)> {
+    (any::<bool>(), text()).boxed()
+}
+
 /// A chat's and a row's group parts (1307), boxed the same way.
-type GroupParts = (u32, String, String, bool);
+/// Pass four adds a chat's ended line.
+type GroupParts = (u32, String, String, bool, String);
 
 fn group_parts() -> BoxedStrategy<GroupParts> {
-    (u32s(), text(), text(), any::<bool>()).boxed()
+    (u32s(), text(), text(), any::<bool>(), text()).boxed()
 }
 
 /// The rows are boxed: with the scene's fields (1217) their tuples together
@@ -401,7 +408,11 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         (text(), u32s()),
         (any::<(bool, bool, bool, bool)>(), text(), text()),
         (text(), u32s(), u32s(), u32s(), text()),
-        (prop::collection::vec(file_row(), 0..3), invite_parts()),
+        (
+            prop::collection::vec(file_row(), 0..3),
+            invite_parts(),
+            line_parts(),
+        ),
         voice_parts(),
     )
         .prop_map(
@@ -417,6 +428,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (
                     files,
                     (writer, invite_group, invite_title, invite_trust, invite_state, invite_join),
+                    (note, late),
                 ),
                 (
                     voice_mode,
@@ -473,6 +485,8 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 invite_trust,
                 invite_state,
                 invite_join,
+                note,
+                late,
             },
         )
         .boxed()
@@ -515,7 +529,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 (announced, petname, others, verified, receipts),
                 (liveness, cadence_s, last_fix_at),
                 (ring, draft, draft_reply),
-                (group_members, invite_title, invite_trust, _),
+                (group_members, invite_title, invite_trust, _, ended),
                 bar,
                 (share, share_stop),
             )| Messages {
@@ -560,6 +574,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 group_members,
                 invite_title,
                 invite_trust,
+                ended,
             },
         )
         .boxed()
@@ -734,7 +749,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (liveness, cadence_s, last_fix_at),
                 (live, ring, pin, pin_label, draft),
                 sharing,
-                (group_members, group_words, _, group_invited),
+                (group_members, group_words, _, group_invited, _),
             )| ConversationRow {
                 peer,
                 name,

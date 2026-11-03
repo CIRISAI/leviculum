@@ -46,8 +46,8 @@ pub struct BrowserOptions {
 ///
 /// Public so the TUI shell (`main`) can fetch a page once and lay it out into a
 /// [`crate::app::Model`], sharing the exact fetch/parse path the print sink uses.
-pub async fn fetch_document(
-    session: &mut Session,
+pub async fn fetch_document<N: crate::fetch::NodeLend>(
+    session: &mut Session<N>,
     target: &Target,
     timeout: Duration,
 ) -> Result<MicronDocument, FetchError> {

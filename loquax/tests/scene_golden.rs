@@ -243,6 +243,7 @@ fn the_group_screens_are_the_golden_scenes() {
                     flags: flags[2],
                 },
             ],
+            ended: false,
         }),
         ..Lev::default()
     };
@@ -313,4 +314,72 @@ fn the_group_screens_are_the_golden_scenes() {
         "scene-group-new-name.json",
         &model.scene(LayoutClass::Compact),
     );
+}
+
+/// 1337: the Browse tab as the phone and the M9 get it, lnomad's scene
+/// inside Loquax's: the list it opens on (two NomadNet nodes the announces
+/// named), a page from the first, and the same page with its form field
+/// taking text. The page is lnomad's sample fixture, laid out on the M9's
+/// 53 by 24 cells.
+#[test]
+fn the_browse_tab_is_the_golden_scene() {
+    use lnomad::app::scene::NodeId;
+    use lnomad::{DiscoveredNode, Intent};
+    use loquax::ui::browse::BrowseEvent;
+    use loquax::ui::scene::TabId;
+
+    const MARCEL: [u8; 16] = [0x5a; 16];
+    const RELAY: [u8; 16] = [0x7c; 16];
+    let node = |dest_hash, name: &str, hops| DiscoveredNode {
+        dest_hash,
+        name: Some(name.to_string()),
+        first_seen: 1_800_000_000,
+        last_seen: 1_800_000_000,
+        hops: Some(hops),
+    };
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    model.browse.enabled = true;
+    for found in [
+        node(MARCEL, "Marcel's node", 2),
+        node(RELAY, "Relay Süd", 1),
+    ] {
+        update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+    }
+    update(&mut model, UiEvent::Tab(TabId::Browse));
+    check("scene-browse-list.json", &model.scene(LayoutClass::Compact));
+
+    let row = lnomad::app::places(&model.browse.model)
+        .iter()
+        .position(
+            |p| matches!(p, lnomad::app::Place::Node { dest_hash, .. } if *dest_hash == MARCEL),
+        )
+        .expect("Marcel's row");
+    let browse = |model: &mut UiModel<Line>, intent| {
+        update(model, UiEvent::Browse(BrowseEvent::Intent(intent)))
+    };
+    browse(&mut model, Intent::Activate(NodeId::Place(row)));
+    let micron = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../lnomad/tests/fixtures/sample.mu"),
+    )
+    .expect("lnomad's sample page");
+    update(
+        &mut model,
+        UiEvent::Browse(BrowseEvent::Loaded {
+            micron,
+            title: "Marcel's node".to_string(),
+        }),
+    );
+    check("scene-browse-page.json", &model.scene(LayoutClass::Compact));
+
+    // The phone's editor over the field hands its text in.
+    browse(&mut model, Intent::Activate(NodeId::Field(1)));
+    browse(
+        &mut model,
+        Intent::Fill {
+            field: 1,
+            text: "Lew".to_string(),
+        },
+    );
+    check("scene-browse-form.json", &model.scene(LayoutClass::Compact));
 }

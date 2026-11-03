@@ -135,6 +135,13 @@
              above it (1201), a tapped friend's card at the bottom
              (MapPane, 1200), and the empty map's line and "Share my
              position" in the middle while nobody is on it (1201). -->
+        <!-- The Browse tab's pane (1337): BrowsePane fills it in code. -->
+        <FrameLayout
+            android:id="@+id/pane_browse"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
         <FrameLayout
             android:id="@+id/pane_map"
             android:layout_width="match_parent"
@@ -418,6 +425,31 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/map"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- The Browse tab (1337): lnomad's browser hosted in Loquax. -->
+        <LinearLayout
+            android:id="@+id/tab_browse"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackground"
+            android:contentDescription="@string/tab_browse"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <ImageView
+                android:id="@+id/tab_browse_icon"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:importantForAccessibility="no" />
+
+            <TextView
+                android:id="@+id/tab_browse_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tab_browse"
                 android:textSize="12sp" />
         </LinearLayout>
     </LinearLayout>

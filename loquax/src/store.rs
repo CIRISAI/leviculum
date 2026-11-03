@@ -83,8 +83,9 @@
 //! outbox, schema 6 the two provenance columns of imported messages, schema 7
 //! a conversation's mute, archive and verification, schema 8 the drafts,
 //! schema 9 the two read-receipt columns, schema 10 the shares, schema 11
-//! the groups a home hosts and schema 12 a copy's digest and the groups a
-//! device knows, nothing else, so
+//! the groups a home hosts, schema 12 a copy's digest and the groups a
+//! device knows and schema 13 whether a copy waits at a propagation node,
+//! nothing else, so
 //! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
@@ -126,7 +127,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 12;
+pub const SCHEMA_VERSION: i32 = 13;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -377,6 +378,13 @@ CREATE TABLE client_groups(
     PRIMARY KEY (identity, address));
 ";
 
+/// What schema 13 adds to schema 12 (1307 pass four): whether a group's
+/// copy waits at a propagation node (`group_fanout.propagated`, 1 once a
+/// node took it), so a restart does not upload it again.
+const SCHEMA_V13: &str = "
+ALTER TABLE group_fanout ADD COLUMN propagated INTEGER NOT NULL DEFAULT 0;
+";
+
 pub mod groups;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -555,7 +563,7 @@ impl Store {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
-             {SCHEMA_V12} PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V12} {SCHEMA_V13} PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -702,7 +710,10 @@ impl Store {
                 if version < 11 {
                     batch.push_str(SCHEMA_V11);
                 }
-                batch.push_str(SCHEMA_V12);
+                if version < 12 {
+                    batch.push_str(SCHEMA_V12);
+                }
+                batch.push_str(SCHEMA_V13);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -864,6 +875,7 @@ impl Store {
                 0 => Standing::Invited,
                 1 => Standing::Joined,
                 2 => Standing::Left,
+                3 => Standing::Ended,
                 _ => return Err(corrupt("standing")),
             };
             out.insert(
@@ -1846,6 +1858,48 @@ impl Store {
     pub fn data_version(&self) -> Result<i64, StoreError> {
         self.conn
             .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(|e| self.failed(e))
+    }
+
+    /// The newest message the archive received from `peer`, packed as it
+    /// came (1307 pass six): what that peer's client last said of itself.
+    /// An LXMF message packs its destination, then its source.
+    pub fn archive_newest_from(&self, peer: &[u8; 16]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 17, 16) = ?3 ORDER BY seq DESC LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_RECEIVED),
+                    &peer[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Forget every archived message of the conversation with `group`
+    /// (1307 pass four, its admin deleted it): the members' lines to it,
+    /// what the owner's devices sent it and what it sent the owner. The
+    /// count removed. Devices that pulled them keep theirs until the
+    /// group's last membership tells them it ended.
+    pub fn archive_forget_group(&mut self, group: &[u8; 16]) -> Result<usize, StoreError> {
+        // An LXMF message packs its destination, then its source.
+        self.conn
+            .execute(
+                "DELETE FROM archive WHERE identity = ?1 AND ( \
+                 (kind IN (?3, ?4) AND substr(packed, 1, 16) = ?2) \
+                 OR (kind = ?5 AND substr(packed, 17, 16) = ?2))",
+                params![
+                    &self.identity[..],
+                    &group[..],
+                    i64::from(crate::home::KIND_GROUP),
+                    i64::from(crate::home::KIND_SENT),
+                    i64::from(crate::home::KIND_RECEIVED)
+                ],
+            )
             .map_err(|e| self.failed(e))
     }
 
@@ -2957,6 +3011,7 @@ fn apply(
                         Standing::Invited => 0,
                         Standing::Joined => 1,
                         Standing::Left => 2,
+                        Standing::Ended => 3,
                     },
                     group.members_bytes()
                 ],

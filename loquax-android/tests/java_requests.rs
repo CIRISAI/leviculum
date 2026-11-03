@@ -521,6 +521,39 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
                 at: 1_793_475_600,
             },
         ),
+        // The Browse tab (1337): `Core.browse` and `Core.browseSize`.
+        (
+            "browse",
+            java_map(&[
+                ("t", Java::Str("browse")),
+                ("verb", Java::Str("activate")),
+                ("node", Java::Str("link_3")),
+                ("text", Java::Str("")),
+            ]),
+            Request::Browse {
+                verb: s("activate"),
+                node: s("link_3"),
+                text: String::new(),
+                cols: 0,
+                rows: 0,
+            },
+        ),
+        (
+            "browseSize",
+            java_map(&[
+                ("t", Java::Str("browse")),
+                ("verb", Java::Str("size")),
+                ("cols", Java::Long(53)),
+                ("rows", Java::Long(22)),
+            ]),
+            Request::Browse {
+                verb: s("size"),
+                node: String::new(),
+                text: String::new(),
+                cols: 53,
+                rows: 22,
+            },
+        ),
     ]
 }
 
@@ -856,6 +889,11 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             java_map(&[("t", Java::Str("messages")), ("peer", Java::Str(PEER))]),
             Query::Messages { peer: s(PEER) },
         ),
+        (
+            "browseScreen",
+            java_map(&[("t", Java::Str("browse"))]),
+            Query::Browse,
+        ),
     ]
 }
 
@@ -889,8 +927,19 @@ fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
     // The microphone's gestures and levels (1276) are the platform's
     // input, not intents: `Core.record`'s rows, named by their input.
     let glue = [
-        "link", "unlink", "notNow", "relink", "press", "slide", "release", "cancel", "level",
-        "tick", "played",
+        "link",
+        "unlink",
+        "notNow",
+        "relink",
+        "press",
+        "slide",
+        "release",
+        "cancel",
+        "level",
+        "tick",
+        "played",
+        "browse",
+        "browseSize",
     ];
     let mut wrong = Vec::new();
     for (name, bytes, _) in commands() {

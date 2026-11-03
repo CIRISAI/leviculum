@@ -449,6 +449,10 @@ pub enum Effect {
         /// `true` to identify, `false` to go anonymous.
         on: bool,
     },
+    /// Write to this `lxmf@` address (32 lowercase hex): a page's link to
+    /// its operator, followed where a messenger hosts the browser
+    /// ([`Model::hosted`]). The standalone browser copies it instead.
+    Write(String),
     /// Quit the UI.
     Quit,
 }
@@ -527,6 +531,10 @@ pub struct Model {
     pub footer_hover: Option<usize>,
     /// The characters typed so far in hint mode, narrowing the visible labels.
     pub hint_input: String,
+    /// Whether a messenger hosts the browser (the Browse tab of Loquax on
+    /// the phone and the M9): an `lxmf@` link then asks the host to write
+    /// ([`Effect::Write`]) rather than copying the address.
+    pub hosted: bool,
     /// The language the browser speaks: its catalogue's
     /// ([`super::strings`]) English unless the shell names another.
     pub lang: Lang,

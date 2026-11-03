@@ -393,12 +393,14 @@ dropped, not queued. The request's timebase is read but does not change
 the answer: a node keeps no history, so the current reading is the
 answer to every timebase.
 
-Sideband's own source is not vendored under `reference/`, so the
-command id (0x01) and the value shape (a list of command maps,
-`[{0x01: <timebase>}]`) are a **documented assumption** — recorded at
-`COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:790`) —
-to be verified against a captured Columba/Sideband request and then
-pinned as a fixture.
+The command id is 0x01 and the value is a list of command maps. Sideband
+reads it as `Commands.TELEMETRY_REQUEST` (`Sideband/sbapp/sideband/core.py:1357`),
+and Columba writes it the same way in its collector request,
+`[{0x01: [<timebase>, <is collector request>]}]` with the timebase in
+unix seconds (`columba/rns-backend-py/src/main/kotlin/network/columba/app/rns/backend/py/PythonRnsTelemetry.kt:134`).
+Neither source is vendored under `reference/`. The reader is
+`COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:790`),
+which takes the timebase alone or as the first element of that list.
 
 On the host side, `lnsd` neither registers an `lxmf.delivery`
 destination nor runs a telemetry policy today, so there is nothing for

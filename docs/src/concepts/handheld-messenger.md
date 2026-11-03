@@ -40,9 +40,9 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:424`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:434`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`loquax/Cargo.toml:183`, `loquax/Cargo.toml:187`), since 2026-10-25 behind its `std` feature,
+  (`loquax/Cargo.toml:241`, `loquax/Cargo.toml:245`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
   993; the pass order is in [Loquax: architecture](loquax-architecture.md),
   "Plan: the Loquax core without std").
@@ -63,7 +63,7 @@ map as decided on 2026-10-25, and what is open.
   still carries the fetch layer (`leviculum-std`, tokio), so a firmware
   frontend still needs the core as a `no_std` crate of its own.
 - **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:38`):
-  - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:462`);
+  - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:495`);
   - propagation nodes, both the client and the node
     (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:934`);
   - stamps (`CooperativeStamper`, `leviculum-lxmf/src/stamp.rs:269`).
@@ -211,6 +211,195 @@ take it and stay terminal-free; `leviculum-ui-ratatui` is the ratatui half
 and `leviculum-ui` builds `no_std` without its `std` feature, so the
 messenger core holds the same types a board will.
 
+## The M9 frontend: the plan, measured (1343)
+
+Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
+place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
+it"; the frontend renders the scene the other three targets already
+render (`Scene`, `loquax/src/ui/scene.rs:960`), and this section records
+what was measured for the plan, the budgets, and the slices. The host
+numbers below are 64-bit figures from a counting allocator, upper bounds
+for the 32-bit board (the 1337 pattern); the spike code ran under
+`/home/lew/scratch/1343/` on the rig host and is not in the tree — what
+is in the tree is the census test that pins the scene numbers
+(`loquax-android/tests/m9_scene_census.rs`).
+
+### The renderer, measured
+
+Two ways to draw the chat list screen at 320x240 were built against a
+Rgb565 framebuffer on the host, both fed from the scene the ugly store's
+model builds: a scene-driven pixel renderer over `embedded-graphics`
+(the drawing crate the firmware already uses for the T114's panel,
+`leviculum-nrf/screen/Cargo.toml:10`), and ratatui through mousefood
+0.5.3, the 2026-10-25 decision ([A GUI toolkit for the desktop and the
+M9](gui-toolkit.md), "Decision"). Code sizes are the deltas of
+`xtensa-esp32s3-none-elf` binaries at `opt-level = "s"` with fat LTO
+over an esp-hal-plus-alloc baseline (`.text` 2,147 B); heap and time are
+the host harness's.
+
+| | pixel over embedded-graphics | ratatui through mousefood |
+|---|---|---|
+| flash: `.text` delta | +10,704 B | +57,508 B |
+| flash: `.rodata` delta | +6,664 B (three ISO 8859-1 fonts) | +48,772 B (the Unicode 6x10 atlas) |
+| heap to construct | none: it draws into the caller's frame | 281,536 B (mousefood's default `framebuffer` holds a second 153,600 B frame; the terminal's cell buffers and glyph state are the rest) |
+| heap per draw, peak | 48 B | 7,946 B on the first draw, then none |
+| one draw on the host, median of 50 | 0.089 ms | 0.090 ms (unchanged frame), 0.095 ms (selection moves) |
+| rows on screen | 6 at 36 px each | 11 at two cells each, on the 53x24 grid |
+
+Both drew the list correctly, umlauts included. Neither host time is a
+board time; the bound on the board is the measured 31 ms full-frame
+flush, and the map firmware's host-to-device factor of roughly twenty
+puts both renderers' CPU cost in the low single-digit milliseconds —
+slice 1 measures it on the board before anything is claimed.
+
+**The decision of 2026-10-25 stands: ratatui through mousefood.** The
+spike adds the price tag: about 90 KB more flash of 16 MB and about
+280 KB of heap, which goes to PSRAM. What it buys is the terminal's
+widget model and the scene renderer shared rather than written a second
+time per node — a pixel renderer per scene node beside the cell one is
+exactly the duplication the no-duplication rule forbids where one
+renderer can serve. Two findings the spike settles beyond the choice:
+
+- **The delivery glyphs need the ASCII fallback.** The mousefood `fonts`
+  atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
+  Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
+  U+2714 or U+25F7 — the tick ladder does not render. The model already
+  carries the switch (`ascii`, `loquax/src/ui.rs:688`); the M9 frontend
+  sets it, which closes gui-toolkit's open glyph question without a
+  custom font.
+- **mousefood's own frame is redundant on the M9.** Its `framebuffer`
+  feature holds a full Rgb565 frame on the heap beside the panel's; with
+  the feature off, cells draw straight into the `DrawTarget`. Which of
+  the two the SPI driver wants (DMA out of one PSRAM frame against
+  per-cell writes) is a slice 1 measurement, not a decision here.
+
+### Memory budgets, measured
+
+The census test (`loquax-android/tests/m9_scene_census.rs`) builds the
+ugly store's model — 20 conversations, 800 messages, the store shaped
+like a year of use — and each screen's scene at the M9's Compact class,
+counting every allocation. Held is what the scene keeps until the next
+one replaces it; peak is the build's high-water mark above its start.
+The asserted ceilings are about double these figures, so growth is
+caught while it is still a review question.
+
+| what | held | peak |
+|---|---:|---:|
+| the restored model (the state everything draws from) | 447,639 B | |
+| chats list scene | 26,532 B | 26,816 B |
+| open chat scene (40 messages, the `LOAD_WINDOW` cap is 200, `loquax/src/ui/history.rs:41`) | 111,184 B | 145,638 B |
+| fresh group's chat scene | 654 B | 28,748 B |
+| group member sheet | 2,233 B | 30,168 B |
+| scene build time, host median | 0.034 ms (list), 0.065 ms (chat) | |
+| renderer (mousefood, constructed once) | 281,536 B | |
+| the panel's frame | 153,600 B | |
+
+The map screen is not a scene: its pixels come from the map renderer,
+measured on this board already — 153,600 B frame in SRAM or PSRAM,
+edge slots and vertices in `.bss`, 90 to 177 ms per full draw plus the
+31 ms flush (`docs/drafts/map-measurement-2026-10.md`, "Device rows,
+measured 2026-10-26").
+
+**The rule that follows.** Model plus one scene plus renderer plus two
+frames is about 1.1 MB on the 64-bit host, so at most that on the
+board: the UI lives in PSRAM. The 64 KiB placeholder heap
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:92`) becomes a measured
+two-region allocation — SRAM for the node, the radio and the flush
+path, PSRAM for the UI heap — sized in slice 1 by exactly this census
+run on the board, with the firmware asserting its budget the way the
+nRF heap does. What stays stage 2, by the same numbers: the browser's
+full cell page (1,286,124 B for the README as cells, 1337's census)
+waits for the runs layout or lives in PSRAM
+([lnomad everywhere](lnomad-everywhere.md), section 2.2), and the map
+stays the separate renderer it is.
+
+### The input model
+
+One table. The M9's keyboard feeds the same resolver the terminal uses:
+a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:885`)
+through the shared rows (`ROWS`, `loquax/src/keys.rs:216`, over
+`leviculum_ui::keymap`'s scroll rows), and the action becomes a scene
+intent (`Intent::from_action`, `loquax/src/ui/intent.rs:484`). Nothing
+M9-specific enters the model; what the platform layer owns is the I2C
+controller's scancodes to `KeyEvent`, including layers and repeat,
+which the first keyboard slice measures on the device. The one-button
+grammar keeps its designated key in stage one ([One
+button](one-button.md), the gesture table: short status, double
+announce, 2 s mode, 8 s sleep); once the messenger UI runs, those
+gestures stay on that key while the other 36 drive the scene, so the
+board remains operable like every other board.
+
+### Networking: a client of a home, over LoRa
+
+The M9 is a full node in Mesh mode (the propagation-node decision on
+[The ThinkNode M9](thinknode-m9.md), "Decided") and a Loquax client of
+a home. What that needs, measured against the code:
+
+- **The wire is ready.** The five requests and their answers are
+  `no_std` (`wire`, `loquax/src/home.rs:37`), as are the admission
+  code's codec (`code`), the archive relation and the wake rules.
+- **The client's ask loop is not.** `home::client` is gated `std`
+  (`loquax/src/home.rs:39`): it waits on tokio time and drives
+  `leviculum_std::ReticulumNode`'s link API
+  (`loquax/src/home/client.rs:10`). The board port is the same request
+  flow over `leviculum-core`'s links and the firmware's clock — a seam
+  cut like the store's (`StoreWrite`, `loquax/src/ui/history.rs:112`)
+  and (`StoreRead`, `loquax/src/ui/history.rs:167`): the
+  retry ladder and budgets move down to `no_std`, the waiting stays
+  with the platform. Rendezvous over TCP does not exist here and is not
+  needed: over LoRa the client reaches the home destination through the
+  mesh by path request, the way every destination is reached.
+- **The home's address gets onto the board** as the admission code: 140
+  typeable characters (`lqxh1…`, `loquax/src/home/code.rs`), entered on
+  the 37 keys for the first pairing, or written over the USB control
+  link by lnflash as a control fact beside the radio settings — the
+  envelope exists, the fact does not yet. The reverse direction is the
+  display: the M9 shows its own code as a QR for a phone to scan, since
+  it has a screen and no camera.
+- **The RAM of a client session** is bounded by the pull batch — a
+  `/sync` answer carries the messages themselves — and is not measured
+  yet; the pairing slice runs the census on the board with a real pull
+  before the batch size is fixed.
+
+### The test plan
+
+Everything below runs without a human at the bench
+(`feedback_reviewer_operate_rig_autonomously`).
+
+1. **Host pixel goldens.** The scene fixtures drawn by the mousefood
+   renderer into the 320x240 framebuffer, pinned as PNGs, compared in
+   bytes; the positive control shifts one timestamp and must break the
+   grouping, as the scene goldens do today.
+2. **Census asserts.** `m9_scene_census` holds the scene budgets on the
+   host now; slice 1 adds the firmware's heap-budget assert on the
+   board.
+3. **The framebuffer over the wire.** On the rig, a control frame asks
+   the board to dump its frame as PBM over the debug CDC; periculum
+   compares it against the same golden the host pinned. Key presses go
+   down as control frames, so a scripted walk (open, type, send) runs
+   without fingers.
+4. **End-to-end cells (`needs: rig`).** A message to and from a home on
+   the rig's lnsd; join a group; a position on the map. Each against
+   the same lnsd the drop-in tests already drive.
+5. **Boot proof as for the LNodes**: the `[FW_BUILD]` banner before any
+   slice lands, the rule the bring-up plan already states.
+
+### The slices, in order
+
+Stage one (the M9 as a board like the others) and the rig's ESP32
+flashing are prerequisites from the order of work above, not slices of
+this plan. One pass is a coder batch; the estimates carry the usual
+uncertainty of firmware bring-up.
+
+| # | slice | passes | acceptance (one line) | leaves out |
+|---|---|---:|---|---|
+| 1 | the renderer landed as a crate: the scene cell renderer on mousefood, `no_std`, host goldens, the two-region heap sized by the census on the board | 3 | the fixture scene's PNG golden equal on host and board dump, heap census printed from the board | every live screen |
+| 2 | chat list and chat live: the model on the board, store in flash behind the store seam, scenes drawn, scrolling | 3–4 | the walk reads real rows from a flash store after a reboot | writing |
+| 3 | compose with keys: the keyboard slice (scancodes, layers, repeat), typed text through `Intent`, send over the mesh | 2–3 | a message typed on the board arrives at the rig lnsd, and one arrives back | pairing |
+| 4 | home pairing: the `no_std` client seam, the admission code typed and flashed, the archive pulled, session census | 3 | the board joins a rig home and shows its history | groups |
+| 5 | groups: join, member sheet, the group verbs the scene already carries | 2 | the board joins a group made by the phone and reads the digest | the map |
+| 6 | the map, last: the map renderer behind a tab, positions from telemetry, region storage decided (SD against flash) | 3–4 | a position shared by the board shows on the phone's map and the reverse, frame time measured | routing/zoom niceties of the desktop |
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice
@@ -219,12 +408,18 @@ messenger core holds the same types a board will.
 - **Whether the M9 frontend and the terminal share a text layout
   engine.** Since 2026-10-25 the rule for answering it is "One
   interaction model" above: shared where it is the same problem.
+  Answered by the plan of 1343: the M9 renders the terminal's scene
+  through mousefood, so the layout is the one the terminal has.
 
 ## Not yet built
 
-All of it: the `no_std` core crate, a firmware frontend, LXMF on the C
-surface, the tile tool, the tile format, and the map view. Since
-2026-10-25 also the desktop GUIs of the messenger and the browser.
+The M9 frontend: all six slices of "The slices, in order" above, and
+the `no_std` client seam they need. Of the 2026-10-21 list that stood
+here, the rest has landed since: the core builds `no_std`
+(`just loquax-core-no-std`), the desktop window ships beside the
+terminal, Android went through the JNI facade rather than the C
+surface, and the map, its region format and its tooling are built
+([Loquax: the map](loquax-map.md)).
 
 ## See also
 

@@ -27,6 +27,7 @@ use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
+use loquax::ui::browse::BrowseEvent;
 use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
@@ -40,6 +41,9 @@ use crate::mailbox;
 use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
 
+/// The folder under the app's received files (`loquax::file_save::DIR`)
+/// the Browse tab's downloads are kept in.
+pub const DOWNLOADS: &str = "browse";
 /// The file under the app's directory that keeps the home node's address.
 pub const SERVER_FILE: &str = "home-server";
 /// How long a join, a send or a mark may take; a pull gets twice this.
@@ -145,6 +149,18 @@ struct Inner {
     /// The phone's language: the scene's words are said in it (1217).
     lang: Lang,
     sends: VecDeque<([u8; 16], String, Vec<Field>)>,
+    /// What the Browse tab asked of the platform (1337), oldest first: the
+    /// fetches, downloads and stores of lnomad's [`lnomad::Effect`]. The
+    /// fetch through the mailbox's node is slice 3 of
+    /// `docs/src/concepts/lnomad-everywhere.md`; until it lands they wait
+    /// here and the page says it is loading.
+    browse_owed: Vec<lnomad::Effect>,
+    /// The fetch they go to, over the phone's own node (1337 pass two).
+    fetching: Option<crate::browse_fetch::Fetching>,
+    /// What the tab hands Java once, with the next [`schema::Query::Browse`]:
+    /// a text for the clipboard, and a downloaded file's path and name.
+    browse_copy: Option<String>,
+    browse_file: Option<(String, String)>,
     sending: bool,
     pull_owed: bool,
     pulling: bool,
@@ -238,8 +254,12 @@ impl Session {
         // The platform's word on the network (1298), heard by the leaf's
         // rotation and the phone's own mailbox's alike.
         let network = loquax::home::rendezvous::Network::new();
+        // The node the Browse tab fetches through (1337 pass two): the
+        // phone's mailbox's when it is here, else the leaf's.
+        let (lend, lends) = tokio::sync::mpsc::unbounded_channel();
         let (start, here) = if start.here || mailbox::is_here(&home) {
-            let (start, here) = Self::start_here(start, &home, runtime.handle(), &network)?;
+            let (start, here) =
+                Self::start_here(start, &home, runtime.handle(), &network, lend.clone())?;
             (start, Some(here))
         } else {
             (start.clone(), None)
@@ -334,6 +354,17 @@ impl Session {
             Role::Client { address },
         ));
         let attached = attached.map_err(|error| StartError::other(error.to_string()))?;
+        // The mailbox here lends its own node; the screens' leaf reaches
+        // nothing past it. A mailbox elsewhere is reached through a
+        // rendezvous, which carries the leaf's links on.
+        let browse_identity = match &here {
+            Some(_) => mailbox::identity(&home).map_err(StartError::other)?,
+            None => {
+                let _ = lend.send(attached.lend());
+                device.clone()
+            }
+        };
+        drop(lend);
         let client = HomeClient {
             node: attached.node(),
             public_key,
@@ -404,6 +435,15 @@ impl Session {
         let mut inner = inner;
         inner.redials_seen = network.redials();
         inner.network = network.clone();
+        inner.fetching = Some(crate::browse_fetch::start(
+            runtime.handle(),
+            crate::browse_fetch::Options {
+                lends,
+                identity: browse_identity,
+                identify: home.join(crate::browse_fetch::IDENTIFY_FILE),
+            },
+            Arc::clone(&wake),
+        ));
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
@@ -452,6 +492,7 @@ impl Session {
         home: &Path,
         runtime: &tokio::runtime::Handle,
         network: &loquax::home::rendezvous::Network,
+        lend: tokio::sync::mpsc::UnboundedSender<loquax::engine::Lent>,
     ) -> Result<(schema::Start, mailbox::Here), StartError> {
         let lang = Lang::of_tag(start.lang.as_deref().unwrap_or_default());
         if let Some(text) = start.moving.as_deref() {
@@ -524,8 +565,8 @@ impl Session {
                     .encode(),
             ),
         };
-        let here =
-            mailbox::Here::start(home, runtime, network.clone()).map_err(StartError::other)?;
+        let here = mailbox::Here::start(home, runtime, network.clone(), Some(lend))
+            .map_err(StartError::other)?;
         let start = schema::Start {
             server: Some(here.server()),
             code,
@@ -1144,6 +1185,10 @@ impl Session {
                 self.lock().apply(UiEvent::Record { peer, input });
                 Ok(())
             }
+            Platform::Browse(event) => {
+                self.lock().apply(event);
+                Ok(())
+            }
             Platform::Unlink { peer } => self.lock().unlink(peer),
             Platform::NotNow { peer } => {
                 let mut inner = self.lock();
@@ -1343,6 +1388,17 @@ impl Session {
                     name,
                 }));
             }
+            // The Browse tab (1337), with what it hands Java once.
+            schema::Query::Browse => {
+                let mut inner = self.lock();
+                let mut screen = crate::browser::screen(&inner.model, inner.lang, VERSION);
+                screen.copy = inner.browse_copy.take().unwrap_or_default();
+                if let Some((path, name)) = inner.browse_file.take() {
+                    screen.file = path;
+                    screen.file_name = name;
+                }
+                return Ok(schema::encode(&screen));
+            }
             // The recording bar (1276): the effects are handed out once.
             schema::Query::Recording { peer } => {
                 let peer = parse_peer(&peer)?;
@@ -1461,6 +1517,7 @@ impl Session {
             | schema::Query::Staged { .. }
             | schema::Query::SaveFile { .. }
             | schema::Query::Recording { .. }
+            | schema::Query::Browse
             | schema::Query::Voice { .. } => return Err("answered above".to_string()),
             // The viewer's zoom needs no session: `lib.rs` answers it.
             schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
@@ -1575,6 +1632,10 @@ impl Inner {
         model.lang = lang;
         model.home_client = true;
         model.list_apart = true;
+        // The phone hosts lnomad as its Browse tab (1337), behind the
+        // config's `browse_tab` until the fetch through the phone's own
+        // node (pass two) has been seen on a device: off in the APK.
+        model.browse.enabled = config.browse_tab.unwrap_or(false);
         model.reading.on = config.read_receipts.unwrap_or(true);
         model.photo_size = config.photo_size.unwrap_or_default();
         model.bar.abilities = compose::Abilities::phone(camera);
@@ -1618,6 +1679,10 @@ impl Inner {
             offset,
             lang,
             sends: VecDeque::new(),
+            browse_owed: Vec::new(),
+            fetching: None,
+            browse_copy: None,
+            browse_file: None,
             sending: false,
             pull_owed: false,
             pulling: false,
@@ -1650,6 +1715,81 @@ impl Inner {
 
     /// One turn of the pump: what the engine said, what the runners
     /// finished, the clock. `false` once the session is over.
+    /// The Browse tab's turn (1337 pass two): what the fetch brought goes
+    /// to the hosted browser, and what the browser asked of the platform
+    /// goes to the fetch, the clipboard or the downloads.
+    fn browse(&mut self) {
+        while let Some(told) = self
+            .fetching
+            .as_mut()
+            .and_then(|fetching| fetching.told.try_recv().ok())
+        {
+            match told {
+                crate::browse_fetch::Told::Browse(event) => self.apply(UiEvent::Browse(event)),
+                crate::browse_fetch::Told::File { name, bytes } => {
+                    let event = self.keep_download(&name, &bytes);
+                    self.apply(UiEvent::Browse(event));
+                }
+            }
+        }
+        for effect in std::mem::take(&mut self.browse_owed) {
+            let ask = match effect {
+                lnomad::Effect::Navigate(target) => crate::browse_fetch::Ask::Navigate(target),
+                lnomad::Effect::Download(target) => crate::browse_fetch::Ask::Download(target),
+                lnomad::Effect::SetIdentify { dest, on } => {
+                    crate::browse_fetch::Ask::Identify { dest, on }
+                }
+                lnomad::Effect::Cancel => crate::browse_fetch::Ask::Cancel,
+                // The browser said "copied" already; Java writes it.
+                lnomad::Effect::Copy(text) => {
+                    self.browse_copy = Some(text);
+                    self.dirty = true;
+                    continue;
+                }
+                // Not on the phone yet: a page's pictures, an external
+                // link, and the bookmarks and pins kept past the session.
+                lnomad::Effect::FetchImages(_)
+                | lnomad::Effect::SaveImage { .. }
+                | lnomad::Effect::OpenImage { .. }
+                | lnomad::Effect::OpenExternal(_)
+                | lnomad::Effect::SaveBookmarks
+                | lnomad::Effect::SavePins
+                | lnomad::Effect::Write(_)
+                | lnomad::Effect::Quit => continue,
+            };
+            if let Some(fetching) = &self.fetching {
+                // A fetch that ended has nothing more to bring either.
+                let _ = fetching.asks.send(ask);
+            }
+        }
+    }
+
+    /// A downloaded file kept under the app's files, as a bubble's file is
+    /// (`loquax::file_save`), for Java to open or share; what the browser
+    /// is told of it.
+    fn keep_download(&mut self, name: &str, bytes: &[u8]) -> BrowseEvent {
+        let dir = self.home.join(loquax::file_save::DIR).join(DOWNLOADS);
+        match lnomad::download::save_to_dir(&dir, name, bytes) {
+            Ok(path) => {
+                let kept = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| name.to_string());
+                self.browse_file = Some((path.display().to_string(), kept.clone()));
+                self.dirty = true;
+                BrowseEvent::Downloaded {
+                    name: kept,
+                    bytes: bytes.len(),
+                    // The reader sees the app, not its private folder.
+                    dir: "Loquax".to_string(),
+                }
+            }
+            Err(error) => BrowseEvent::DownloadFailed(lnomad::app::strings::Text::Raw(format!(
+                "{name}: {error}"
+            ))),
+        }
+    }
+
     fn pump(&mut self) -> bool {
         if self.gone {
             return false;
@@ -1665,6 +1805,7 @@ impl Inner {
                         OutboxEvent::Announced {
                             destination,
                             name: Some(_),
+                            ..
                         } => Some(*destination),
                         _ => None,
                     };
@@ -1698,6 +1839,7 @@ impl Inner {
                 Finished::Event(event) => self.apply(event),
             }
         }
+        self.browse();
         self.look_at_link();
         self.look_at_network();
         let elapsed = self.elapsed_ms();
@@ -1909,6 +2051,7 @@ impl Inner {
             match effect {
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
+                UiEffect::Browse(effect) => self.browse_owed.push(effect),
                 // Every rotation of the session hears it (1298).
                 UiEffect::Network { kind, changed } => self.network.say(kind, changed),
                 UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
@@ -1956,6 +2099,16 @@ impl Inner {
                     let wake = Arc::clone(&self.wake);
                     self.runtime.spawn(async move {
                         let event = runner::add_members(client, group, members, BUDGET).await;
+                        let _ = done.send(Finished::Event(event));
+                        wake.notify_one();
+                    });
+                }
+                UiEffect::DeleteGroup { group } => {
+                    let client = self.client.clone();
+                    let done = self.finished_tx.clone();
+                    let wake = Arc::clone(&self.wake);
+                    self.runtime.spawn(async move {
+                        let event = runner::delete_group(client, group, BUDGET).await;
                         let _ = done.send(Finished::Event(event));
                         wake.notify_one();
                     });
@@ -2303,6 +2456,16 @@ impl Inner {
                 .as_ref()
                 .map(|a| a.label_key.text(lang).to_string())
                 .unwrap_or_default(),
+            delete: sheet
+                .delete
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
+            again: sheet
+                .again
+                .as_ref()
+                .map(|a| a.label_key.text(lang).to_string())
+                .unwrap_or_default(),
             ask: sheet
                 .ask
                 .as_ref()
@@ -2436,12 +2599,6 @@ impl Inner {
             index.and_then(|c| chat::latest_appearance(&self.model.conversations[c].messages));
         let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c, self.lang));
         let link = self.book.links.get(&peer);
-        let heard = index.is_some_and(|c| {
-            self.model.conversations[c]
-                .messages
-                .iter()
-                .any(|m| !m.outbound)
-        });
         let names = &self.model.names;
         let liveness = self.model.liveness(&peer);
         // The field opens with the scene's compose (1219).
@@ -2466,8 +2623,10 @@ impl Inner {
             linked: link.is_some(),
             lookup: link.map(|link| link.lookup.clone()),
             contact_id: link.map(|link| link.contact_id),
+            // A group is not a person (1307 pass six): only a person who
+            // wrote is offered for the phone's contacts.
             ask_link: link.is_none()
-                && heard
+                && self.model.heard_from_a_person(&peer)
                 && !self.book.not_now.contains(&peer)
                 && !self.just_added.contains(&peer),
             announced: names.announced(&peer).map(str::to_string),
@@ -2512,6 +2671,9 @@ impl Inner {
                 .unwrap_or_default(),
             invite_trust: invite
                 .map(|i| i.trust.resolve(self.lang))
+                .unwrap_or_default(),
+            ended: loquax::ui::group_scene::ended(&self.model, &peer)
+                .map(|t| t.resolve(self.lang))
                 .unwrap_or_default(),
         }
     }
@@ -2742,7 +2904,11 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                 _ => String::new(),
             };
             let invite = node.invite.clone();
+            let late = node.bubble.late;
             let mut row = row(node.bubble);
+            if late {
+                row.late = StrId::GroupArrivedLate.text(lang).to_string();
+            }
             row.writer = writer;
             if let Some(invite) = invite {
                 row.invite_group = loquax::address::to_hex(&invite.group);
@@ -2864,6 +3030,8 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         invite_trust: String::new(),
         invite_state: String::new(),
         invite_join: false,
+        note: bubble.note,
+        late: String::new(),
     }
 }
 
@@ -2977,6 +3145,9 @@ pub enum Platform {
         peer: [u8; 16],
         input: Input,
     },
+    /// A verb of the Browse tab (1337), as the model's event: lnomad's
+    /// intent carried, the tab switch, or the page view's size.
+    Browse(UiEvent),
 }
 
 /// `request` as an intent, with its addresses and ids parsed: every
@@ -3082,6 +3253,16 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             }))
         }
         R::Relink { rows } => return Ok(Decoded::Platform(Platform::Relink { rows })),
+        R::Browse {
+            verb,
+            node,
+            text,
+            cols,
+            rows,
+        } => {
+            return crate::browser::event(&verb, &node, &text, cols, rows)
+                .map(|event| Decoded::Platform(Platform::Browse(event)))
+        }
         R::Rename { peer, name } => Intent::Rename {
             peer: Target::Peer(parse_peer(&peer)?),
             name: Some(name),
@@ -3154,6 +3335,11 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
                     confirmed,
                 },
                 "add" => Verb::Add { group: group()? },
+                "delete" => Verb::Delete {
+                    group: group()?,
+                    confirmed,
+                },
+                "again" => Verb::Again { group: group()? },
                 "close" => Verb::Close,
                 other => return Err(format!("no group verb {other:?}")),
             })

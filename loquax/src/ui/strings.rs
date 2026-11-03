@@ -41,6 +41,7 @@ leviculum_ui::catalogue! {
     TabChats = "tab_chats", "Chats", "Chats";
     TabChatsUnread = "tab_chats_unread", "Chats, %1$d with unread messages", "Chats, %1$d mit ungelesenen Nachrichten";
     Map = "map", "Map", "Karte";
+    TabBrowse = "tab_browse", "Browse", "Seiten";
     Settings = "settings", "Settings", "Einstellungen";
     MailboxConnected = "mailbox_connected", "You. Your mailbox is connected.", "Du. Dein Postfach ist verbunden.";
     MailboxNotConnected = "mailbox_not_connected", "You. Your mailbox is not connected.", "Du. Dein Postfach ist nicht verbunden.";
@@ -158,7 +159,7 @@ leviculum_ui::catalogue! {
     GroupPicked = "group_picked", "%1$d selected", "%1$d ausgewählt";
     GroupTrustCreate = "group_trust_create", "%1$s is kept on your mailbox. Messages in the group can be read there.", "%1$s liegt auf deinem Postfach. Dort sind die Nachrichten der Gruppe lesbar.";
     GroupTrustJoin = "group_trust_join", "%1$s is kept on %2$s's mailbox. %2$s could read the group's messages.", "%1$s liegt auf dem Postfach von %2$s. %2$s könnte die Nachrichten der Gruppe lesen.";
-    GroupInvited = "group_invited", "%1$s invited you to %2$s", "%1$s hat dich zu %2$s eingeladen";
+    GroupInvited = "group_invited", "%1$s invited you to %2$s", "%1$s lädt dich zu %2$s ein";
     GroupYouInvited = "group_you_invited", "You invited them to %1$s", "Du hast eingeladen zu %1$s";
     GroupJoin = "group_join", "Join", "Beitreten";
     GroupJoined = "group_joined_card", "You joined %1$s", "Du bist %1$s beigetreten";
@@ -177,9 +178,33 @@ leviculum_ui::catalogue! {
     GroupAdmin = "group_admin", "admin", "Admin";
     GroupStateJoined = "group_state_joined", "joined", "beigetreten";
     GroupStateInvited = "group_state_invited", "invited", "eingeladen";
+    // The member sheet says where an invitation of the reader's stands (1307 pass six).
+    GroupStateDelivering = "group_state_delivering", "invited, delivering", "eingeladen, wird zugestellt";
+    GroupStateWaiting = "group_state_waiting", "invited, waiting for them to come online", "eingeladen, wartet, bis das Mitglied online ist";
+    GroupStateUndelivered = "group_state_undelivered", "invited, not delivered", "eingeladen, nicht zugestellt";
     GroupStateLeft = "group_state_left", "left", "ausgetreten";
     GroupHomeTooOld = "group_home_too_old", "Your home cannot host groups yet. Update it.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.";
     GroupYouLeft = "group_you_left", "You left %1$s", "Du hast %1$s verlassen";
+    GroupDelete = "group_delete", "Delete group", "Gruppe löschen";
+    GroupDeleteAsk = "group_delete_ask", "Delete %1$s for everyone?", "%1$s für alle löschen?";
+    GroupRemoveFromList = "group_remove_from_list", "Remove from list", "Aus der Liste entfernen";
+    GroupAgain = "group_again", "Start again with the same people", "Mit denselben Leuten neu starten";
+    GroupEnded = "group_ended", "%1$s ended the group", "%1$s hat die Gruppe beendet";
+    GroupArrivedLate = "group_arrived_late", "arrived late", "kam verspätet";
+    // A group's own lines and a digest's left-out lines, said from the `lev` data in the reader's language (1348): the wire carries the English.
+    GroupNoteJoined = "group_note_joined", "%1$s joined.", "%1$s ist beigetreten.";
+    GroupNoteLeft = "group_note_left", "%1$s left.", "%1$s ist ausgetreten.";
+    GroupNoteAdded = "group_note_added", "%1$s was added.", "%1$s wurde hinzugefügt.";
+    GroupNoteYouJoined = "group_note_you_joined", "You joined.", "Du bist beigetreten.";
+    GroupNoteYouLeft = "group_note_you_left", "You left.", "Du bist ausgetreten.";
+    GroupNoteYouAdded = "group_note_you_added", "You were added.", "Du wurdest hinzugefügt.";
+    GroupNoteEnded = "group_note_ended", "%1$s ended the group.", "%1$s hat die Gruppe beendet.";
+    GroupNoteYouEnded = "group_note_you_ended", "You ended the group.", "Du hast die Gruppe beendet.";
+    GroupNoteAdminEnded = "group_note_admin_ended", "The admin ended the group.", "Der Admin hat die Gruppe beendet.";
+    GroupLeftOutPhoto = "group_left_out_photo", "sent a photo (too large for the radio)", "hat ein Foto geschickt (zu groß für Funk)";
+    GroupLeftOutVoice = "group_left_out_voice", "sent a voice message (too large for the radio)", "hat eine Sprachnachricht geschickt (zu groß für Funk)";
+    GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für Funk)";
+    GroupLeftOutGone = "group_left_out_gone", "a message (no longer here)", "eine Nachricht (nicht mehr da)";
     MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";
