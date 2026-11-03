@@ -39,6 +39,8 @@ pub(crate) mod validation;
 mod expiry_cost;
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod walk_cost;
 
 pub use validation::reprice_stored_values;
 

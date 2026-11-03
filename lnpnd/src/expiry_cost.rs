@@ -11,9 +11,8 @@
 use std::cell::Cell;
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::Arc;
 
-use leviculum_lxmf::propagation_store::{StoredMessage, MIN_BODY_LEN};
+use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::{
     PropagationNode, PropagationNodeConfig, PropagationStore, TransientId, MAX_EXPIRED_PER_TICK,
@@ -21,7 +20,7 @@ use leviculum_lxmf::{
 };
 use leviculum_std::FilePropagationStore;
 
-use crate::test_support::{next_random, NoFsync};
+use crate::test_support::spread_store;
 
 /// A synthetic "now" the stores are filled around.
 const NOW: u64 = 1_790_000_000;
@@ -83,29 +82,6 @@ impl PropagationStore for Counted {
     }
 }
 
-/// A file store in `dir` holding at least `messages` entries received at
-/// random over the `days` before [`NOW`], with random transient ids and
-/// sizes around the field's mean of 330 bytes; a reopen tops it up. Runs
-/// the production writer, as lnpnd does.
-fn spread_store(dir: &Path, messages: usize, days: u64) -> FilePropagationStore {
-    let fsync: Arc<dyn leviculum_std::durable::Fsync> = Arc::new(NoFsync);
-    let mut store =
-        FilePropagationStore::open_with(dir, u64::MAX / 2, fsync).expect("a store directory");
-    let mut state = 0x6a09_e667_f3bc_c908 ^ store.len() as u64;
-    while store.len() < messages {
-        let mut transient_id = [0u8; 32];
-        for chunk in transient_id.chunks_mut(8) {
-            chunk.copy_from_slice(&next_random(&mut state).to_le_bytes());
-        }
-        let received_at = NOW - next_random(&mut state) % (days * DAY);
-        let len = MIN_BODY_LEN + 200 + (next_random(&mut state) % 260) as usize;
-        store
-            .append(&transient_id, received_at, 13, &vec![0x5a; len])
-            .expect("the store has room");
-    }
-    store.write_behind().expect("the store's writer")
-}
-
 fn node_over(store: FilePropagationStore, indexed: bool) -> PropagationNode<Counted> {
     PropagationNode::new(
         Counted {
@@ -139,7 +115,7 @@ fn older_than_expiry(store: &FilePropagationStore, now: u64) -> Vec<TransientId>
 fn an_expiry_tick_reads_what_expired_not_the_store() {
     for indexed in [true, false] {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = spread_store(dir.path(), 400, 40);
+        let store = spread_store(dir.path(), 400, 40, NOW);
         let due = older_than_expiry(&store, NOW);
         assert!(
             due.len() > 40 && due.len() < 200,
@@ -207,7 +183,7 @@ fn expiry_tick_cost_over_a_field_sized_store() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(300_000);
     let filled = Instant::now();
-    let store = spread_store(Path::new(&dir), messages, 40);
+    let store = spread_store(Path::new(&dir), messages, 40, NOW);
     println!(
         "BENCH_STORE dir={dir} messages={} open_ms={}",
         store.len(),

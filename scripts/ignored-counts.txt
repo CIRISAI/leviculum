@@ -203,4 +203,13 @@
 # an_expiry_tick_reads_what_expired_not_the_store, which runs in the suite.
 # Run by hand with LNPND_BENCH_DIR (lnpnd/src/expiry_cost.rs, the test's
 # docs) whenever the expiry sweep or the file store's indexes change.
-3    -p lnpnd --lib
+# 3 -> 5 (2026-11-03, order 1370, #478): two more of the same kind.
+# processed_and_eviction_cost_at_field_scale prices the processed-id cache at
+# 1 M and 10 M ids (bytes per id, the daily prune, a lookup) and make_room over
+# a full 2 GB store of about 6 M messages; it holds about 1.5 GB of RAM at its
+# peak, which no tier should spend per run (lnpnd/src/walk_cost.rs).
+# unhandled_cost_over_a_field_sized_store prices the per-peer unhandled count
+# and the rotation's count over a file store of 320 000 messages, the same
+# fill as the two above (lnpnd/src/peering.rs). Run both by hand, the
+# commands are in the tests' docs, whenever those paths change.
+5    -p lnpnd --lib

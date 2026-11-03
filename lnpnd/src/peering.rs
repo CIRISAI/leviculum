@@ -2643,4 +2643,75 @@ mod tests {
             }
         }
     }
+
+    /// Order 1370, leviculum#478: what the per-peer unhandled count costs
+    /// the core hook over a store of `LNPND_BENCH_STORED` messages (320 000,
+    /// miauhaus's count on 2026-11-02): one peer's count, as `--status`
+    /// asks it for every peer of the table on every request, and the
+    /// rotation's count for the whole table of 20, cursors spread over the
+    /// store. A measurement: it asserts only that the two counts agree. The
+    /// store lives in `LNPND_BENCH_DIR` and is kept, so a second run only
+    /// reopens it:
+    ///
+    /// ```text
+    /// LNPND_BENCH_DIR=/home/lew/scratch/1370/store \
+    ///   cargo test --release -p lnpnd --lib unhandled_cost -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a store of hundreds of thousands of files"]
+    fn unhandled_cost_over_a_field_sized_store() {
+        use std::time::Instant;
+
+        let dir = std::env::var("LNPND_BENCH_DIR").expect("LNPND_BENCH_DIR names the store");
+        let messages: usize = std::env::var("LNPND_BENCH_STORED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(320_000);
+        let filled = Instant::now();
+        let store = file_store_with(std::path::Path::new(&dir), messages);
+        println!(
+            "BENCH_STORE dir={dir} messages={} open_ms={}",
+            store.len(),
+            filled.elapsed().as_millis()
+        );
+        let newest = store.newest_sequence().expect("newest");
+        let p = MAX_PEERS_DEFAULT as u64;
+        let cursors: Vec<u64> = (0..p).map(|k| k * newest / p).collect();
+        let runtime = runtime_with_cursors(&cursors);
+        let node = PropagationNode::new(store, leviculum_lxmf::PropagationNodeConfig::default());
+        let peers = runtime.peers();
+
+        let (mut per_peer, mut status) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let request = Instant::now();
+            for peer in &peers {
+                let one = Instant::now();
+                runtime.unhandled_toward(&node, peer).expect("a known peer");
+                per_peer.push(one.elapsed().as_micros());
+            }
+            status.push(request.elapsed().as_micros());
+        }
+        let mut rotation = Vec::new();
+        for _ in 0..5 {
+            let pass = Instant::now();
+            let counts = runtime.unhandled_counts(&node);
+            rotation.push(pass.elapsed().as_micros());
+            for peer in &peers {
+                assert_eq!(
+                    counts.get(peer).copied().unwrap_or(0) as usize,
+                    runtime.unhandled_toward(&node, peer).expect("a known peer")
+                );
+            }
+        }
+        let (peer_median, peer_max) = median_and_max(per_peer);
+        let (status_median, status_max) = median_and_max(status);
+        let (rotation_median, rotation_max) = median_and_max(rotation);
+        println!(
+            "BENCH_UNHANDLED messages={} peers={p} per_peer_us_median={peer_median} \
+             per_peer_us_max={peer_max} status_us_median={status_median} \
+             status_us_max={status_max} rotation_us_median={rotation_median} \
+             rotation_us_max={rotation_max}",
+            node.store().len(),
+        );
+    }
 }
