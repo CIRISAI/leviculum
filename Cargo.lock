@@ -3468,6 +3468,7 @@ dependencies = [
  "leviculum-mapcut",
  "leviculum-mapfill",
  "leviculum-micron",
+ "leviculum-rrc",
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-iced",

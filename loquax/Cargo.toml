@@ -267,6 +267,9 @@ leviculum-ui = { path = "../leviculum-ui", default-features = false }
 lnomad = { path = "../lnomad", default-features = false }
 # The tab parses the page a fetch brought, so no platform parses micron.
 leviculum-micron = { path = "../leviculum-micron" }
+# The Rooms (1379, #232): Reticulum Relay Chat's envelope and a client's
+# link state, `no_std` plus `alloc`, so the model and the M9 carry it.
+leviculum-rrc = { path = "../leviculum-rrc" }
 # The map's model (`ui::map`): the projection, the viewport, fitting and
 # placing the pins. `no_std` with `alloc` without its `std` feature, held
 # there by `just map-core-no-std`, so the model stays core.

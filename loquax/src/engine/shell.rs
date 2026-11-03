@@ -49,9 +49,38 @@ struct Processor {
 /// lend ended.
 const LEND_LET_GO: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The tap of a lent node: the lent end's events, and its end's signal.
-/// Empty while nothing is lent; emptied when the lend ends.
-type Tap = Arc<std::sync::Mutex<Option<(UnboundedSender<NodeEvent>, oneshot::Sender<()>)>>>;
+/// One lent end: its events, and its end's signal. Empty while nothing is
+/// lent; emptied when the lend ends.
+type Slot = Option<(UnboundedSender<NodeEvent>, oneshot::Sender<()>)>;
+
+/// Who a node is lent to. Each has its own slot, so the Browse tab and the
+/// Rooms (1379) hold the node side by side and neither's lend ends the
+/// other's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lender {
+    /// The Browse tab's page fetch.
+    Browse,
+    /// The Rooms' hub links (`crate::rooms_link`).
+    Rooms,
+}
+
+/// The taps of a lent node, one slot per [`Lender`].
+#[derive(Default)]
+struct Taps {
+    browse: Slot,
+    rooms: Slot,
+}
+
+impl Taps {
+    fn of(&mut self, lender: Lender) -> &mut Slot {
+        match lender {
+            Lender::Browse => &mut self.browse,
+            Lender::Rooms => &mut self.rooms,
+        }
+    }
+}
+
+type Tap = Arc<std::sync::Mutex<Taps>>;
 
 /// The engine's node lent to a page fetch beside the engine (1337 pass
 /// two, `docs/src/concepts/lnomad-everywhere.md` slice 3): the Browse tab
@@ -79,11 +108,29 @@ fn lends(event: &NodeEvent) -> bool {
     }
 }
 
-/// The tap's slot, poisoned or not: what it holds is a channel's end, and
-/// no panic leaves one half-written.
-fn slot(
-    tap: &Tap,
-) -> std::sync::MutexGuard<'_, Option<(UnboundedSender<NodeEvent>, oneshot::Sender<()>)>> {
+/// Whether the Rooms read `event`: their links coming up and closing, and
+/// the plain packets on links, where a hub's envelopes arrive. Each hub
+/// link keeps the packets of its own link id.
+fn rooms_read(event: &NodeEvent) -> bool {
+    match event {
+        NodeEvent::LinkEstablished { is_initiator, .. }
+        | NodeEvent::LinkClosed { is_initiator, .. } => *is_initiator,
+        NodeEvent::LinkDataReceived { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether `lender` reads `event`.
+fn reads(lender: Lender, event: &NodeEvent) -> bool {
+    match lender {
+        Lender::Browse => lends(event),
+        Lender::Rooms => rooms_read(event),
+    }
+}
+
+/// The taps, poisoned or not: what they hold is a channel's end, and no
+/// panic leaves one half-written.
+fn slot(tap: &Tap) -> std::sync::MutexGuard<'_, Taps> {
     tap.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -160,13 +207,16 @@ impl Processor {
     /// An event a lent node's fetch reads goes to it. A lend whose end
     /// went away is over.
     fn forward_lent(&self, event: &NodeEvent) {
-        if !lends(event) {
-            return;
-        }
-        let mut slot = slot(&self.lend);
-        let gone = matches!(&*slot, Some((events, _)) if events.send(event.clone()).is_err());
-        if gone {
-            *slot = None;
+        let mut taps = slot(&self.lend);
+        for lender in [Lender::Browse, Lender::Rooms] {
+            if !reads(lender, event) {
+                continue;
+            }
+            let slot = taps.of(lender);
+            let gone = matches!(&*slot, Some((events, _)) if events.send(event.clone()).is_err());
+            if gone {
+                *slot = None;
+            }
         }
     }
 
@@ -518,9 +568,15 @@ impl Attached {
     /// Lend the node to a page fetch beside the engine ([`Lent`]). A lend
     /// before ends: one fetch reads the events at a time.
     pub fn lend(&self) -> Lent {
+        self.lend_to(Lender::Browse)
+    }
+
+    /// Lend the node to `lender` ([`Lent`]). A lend before to the same
+    /// lender ends; the other lender's goes on.
+    pub fn lend_to(&self, lender: Lender) -> Lent {
         let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (end, ended) = oneshot::channel();
-        *slot(&self.lend) = Some((events, end));
+        *slot(&self.lend).of(lender) = Some((events, end));
         Lent {
             node: Arc::downgrade(&self.node),
             events: events_rx,
@@ -592,7 +648,13 @@ impl Attached {
         // A lent node's fetch lets go of it once told; one in the middle
         // of a call holds it for that call.
         let node = self.node;
-        if slot(&self.lend).take().is_some() {
+        let lent = {
+            let mut taps = slot(&self.lend);
+            let browse = taps.browse.take().is_some();
+            let rooms = taps.rooms.take().is_some();
+            browse || rooms
+        };
+        if lent {
             let deadline = tokio::time::Instant::now() + LEND_LET_GO;
             while Arc::strong_count(&node) > 1 && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -966,6 +1028,36 @@ mod tests {
         assert!(!lends(&link(false)), "a link a peer opened");
         assert!(!lends(&closed(false)), "a link a peer opened");
         assert!(!lends(&NodeEvent::InterfaceDown(0)));
+    }
+
+    /// 1379: the Rooms hear their links and the plain packets a hub sends
+    /// on them; a page fetch's answers and a peer's link are not theirs,
+    /// and a page fetch hears no packets (the controls).
+    #[test]
+    fn the_rooms_hear_their_links_and_the_hubs_packets() {
+        let link_id = LinkId::new([0x11; 16]);
+        let destination_hash = DestinationHash::new([0x22; 16]);
+        let link = |is_initiator| NodeEvent::LinkEstablished {
+            link_id,
+            is_initiator,
+            destination_hash,
+        };
+        let data = NodeEvent::LinkDataReceived {
+            link_id,
+            data: vec![0xa0],
+        };
+        assert!(reads(Lender::Rooms, &link(true)));
+        assert!(reads(Lender::Rooms, &data));
+        assert!(!reads(Lender::Rooms, &link(false)));
+        assert!(!reads(
+            Lender::Rooms,
+            &NodeEvent::RequestTimedOut {
+                link_id,
+                request_id: [0x33; 16],
+            }
+        ));
+        assert!(!reads(Lender::Browse, &data));
+        assert!(reads(Lender::Browse, &link(true)));
     }
 
     #[test]
