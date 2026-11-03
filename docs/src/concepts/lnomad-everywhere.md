@@ -791,6 +791,87 @@ two).** Slice 3's network seam: one node, lent, not a second one.
   nodes, with the node absent before its announce as the control. With
   the tap silenced the leaf's run goes red in 60 s with no node listed.
 
+**The tab on the desktop, built 2026-11-03 (1369).** The all-targets
+rule (Lew, 2026-11-02) reopened section 4's second question: where the
+tab is technically possible it moves, and on a PC it is. The standalone
+`lnomad` stays as it is (its suite is the control); the window and the
+terminal of Loquax get the tab beside it, behind the same `browse_tab`
+as the phone, off by default until Lew flips it.
+
+- **One fetch, three hosts.** The phone's task moved from the Android
+  crate into Loquax (`loquax/src/browse_fetch.rs`, feature `browse`,
+  which `tui`, `gui` and the phone's build carry). It gained a page's
+  pictures (`Ask::Images`, `loquax/src/browse_fetch.rs:257`, lnomad's
+  `spawn_image_queue`; `Shot`, `loquax/src/browse_fetch.rs:79`). The
+  desktop shell lends the node it attached to its daemon
+  (`Browsing::start`, `loquax/src/browsing.rs:106`), the identity a
+  node is shown on identify being the one that node runs on, as on the
+  phone. With the tab off nothing is lent.
+- **The effects.** `Browsing::effect` (`loquax/src/browsing.rs:128`):
+  the network's to the fetch, the clipboard to the terminal's OSC 52 and
+  the window's clipboard, a link out of NomadNet to the system's handler,
+  a download into `$XDG_DOWNLOAD_DIR` or `~/Downloads`
+  (`lnomad::download::download_dir`, the standalone's; the 1341 portal is
+  a chooser and offers no download folder, so the tab saves where the
+  desktop's own download folder is, `keep`, `loquax/src/browsing.rs:274`),
+  the bookmarks and pins to their files. A write and a quit stay the
+  core's (`effects_of`).
+- **The keys.** While the tab is in front the core hands keys and the
+  mouse to the browser (`loquax/src/ui.rs:1801`, `loquax/src/ui.rs:1840`),
+  so lnomad's whole key table works, its `q` leaves the tab, and the
+  terminal's screen size is the page's (`loquax/src/ui.rs:1838`). `B` and
+  the palette's `browse` bring the tab to the front
+  (`loquax/src/keys.rs:590`, `browse::open`, `loquax/src/ui/browse.rs:231`);
+  with the tab off they say how to switch it on.
+- **The terminal** draws the tab with lnomad's terminal view over the
+  whole screen (`draw_screen`, `loquax/src/tui.rs:1366`), in the
+  messenger's theme and colour depth (`loquax/src/tui.rs:1384`). It asks
+  for no pictures (`no_images`): the map owns the terminal's picture
+  protocol, and two pickers on one terminal is a later question.
+- **The window** draws it with lnomad's window view beside the rail
+  (`browse_view`, `loquax/src/gui.rs:1900`; `lnomad::gui::view`,
+  `lnomad/src/gui.rs:681`). The pictures are lnomad's window code too:
+  `Pictures` (`lnomad/src/gui.rs:272`), moved out of lnomad's `Window`
+  so a host keeps it beside a model it hosts; the shell holds it and the
+  window draws from it. What lnomad's view says is folded as lnomad's
+  window folds it (`App::browse`, `loquax/src/gui.rs:1459`, with
+  `wheel_mice` and `pointer_mouse`, `lnomad/src/gui.rs:414` and
+  `lnomad/src/gui.rs:433`, and `type_address`,
+  `lnomad/src/app/event.rs:428`, which lnomad's own window now calls as
+  well). The window tells the browser its light or dark and the page's
+  cells (`browse_sync`, `loquax/src/gui.rs:1393`). The tab's icon
+  borrows the search glass; the shared icons have no globe yet.
+- **What the standalone has that the tab lacked (1337's list), and what
+  the desktop tab has now.** Inline pictures: the window, yes; the
+  terminal, no (above); the phone, no. An external link opened: the
+  window and the terminal, yes. Bookmarks and pins kept past the
+  session: the window and the terminal, yes, in
+  `browse-bookmarks.toml` and `browse-pins.toml` under Loquax's home
+  (`set_up`, `loquax/src/browsing.rs:44`), the tab's own and not the
+  standalone's; files beside the store rather than tables in it, since
+  lnomad's own load and save are the code that keeps them. The help
+  overlay: the window and the terminal, yes, lnomad's own, drawn by
+  lnomad's views. In-page search: the window and the terminal, yes, its
+  `/` reaches the browser (`the_tab_in_front_has_the_keys_and_the_mouse`).
+  The history list: as the standalone. The phone keeps 1337's list.
+- **Still open.** The hosted start page is the phone's one sentence ("Tap
+  a node..."), since `hosted` both picks it and makes an `lxmf@` link
+  write; on a desktop it should name keys. The toast's age counts the
+  shell's 250 ms tick, not lnomad's 100 ms one, so a toast stays longer.
+  The window's narrow class takes the tab bar as 72 pixels high for the
+  page's cells.
+- **Tests.** The core: keys, mouse, search and quit in front with the
+  tab behind as the control, the terminal's size with a host without
+  the tab as the control, the palette's `browse` both ways, the window's
+  field and theme (`loquax/src/ui/browse.rs`). The shell's effects and
+  what the fetch brings, with the tab off and no download folder as the
+  controls (`loquax/src/browsing.rs`). The goldens: the terminal's list
+  and page (`loquax/tests/golden/tui-browse-{list,page}.txt`,
+  `the_browse_tab_is_lnomads_terminal_screen`) and the window's list and
+  a page with a picture (`loquax/tests/golden/gui-browse-{list,page}.png`,
+  `the_browse_tab_is_lnomads_window_beside_the_rail`). lnomad's suite
+  and `just lnomad-gui` unchanged, its window goldens byte identical.
+
 ## 6. What not to do
 
 - **No micron renderer per target.** One layout, runs in the scene

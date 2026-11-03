@@ -95,7 +95,7 @@ Rows marked (1341) were MISSING before this pass and are closed by it.
 | 40 | Backup | `BackupActivity.java:117` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:421` | MISSING | `loquax/src/ui.rs:3446` |
 | 42 | Settings | `SettingsActivity.java` | `loquax/src/gui.rs:1346` | palette (`loquax/src/ui.rs:3678`, `loquax/src/ui.rs:3478`) |
-| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | off (`loquax/src/gui.rs:1052`) | off (`loquax/src/shell.rs:315`) |
+| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | `loquax/src/gui.rs:1900`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1366`, behind `browse_tab` (1369) |
 | 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:236`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:408`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:324` (1341) | n/a |
 
@@ -106,9 +106,10 @@ Rows marked (1341) were MISSING before this pass and are closed by it.
 | Window | 20 | 15 |
 | Terminal | 15 | 14 |
 
-Counted are the MISSING cells of the table; the Browse tab (row 43) is
-off on both desktop targets by decision, not counted, and "CLI" and "n/a"
-are no gaps.
+Counted are the MISSING cells of the table; "CLI" and "n/a" are no gaps.
+The Browse tab (row 43) was off on both desktop targets until 1369 and was
+not counted; since 1369 it is built on all three, behind the same
+`browse_tab` switch, which stays off until Lew flips it.
 
 ## What 1341 brought, and how
 
@@ -155,11 +156,18 @@ is not built yet.
 
 ## The Browse tab
 
-1337b's fetch through the phone's own node landed, but in the Android
-crate (`loquax-android/src/browse_fetch.rs`); the desktop shell has no
-fetch of its own and drops the browser's effects (`loquax/src/shell.rs:315`). The
-tab stays off in the window and the terminal until the fetch moves into
-the shared shell; on a PC lnomad remains its own program meanwhile.
+Before 1369, 1337b's fetch through the phone's own node lived in the
+Android crate and the desktop shell dropped the browser's effects. 1369
+moved the fetch into the shared crate (`loquax/src/browse_fetch.rs`,
+feature `browse`), which the phone, the terminal and the window now run
+alike over the node each already has; the desktop shell drains the
+browser's effects (`loquax/src/browsing.rs:128`) as the phone's session
+does. The window draws the tab with lnomad's window view
+(`lnomad/src/gui.rs:681`), pictures included, and the terminal with
+lnomad's terminal view (`loquax/src/tui.rs:1366`); neither has a renderer
+of its own. The switch is the phone's, `browse_tab`, off by default on
+all three until Lew flips it. Details in
+`lnomad-everywhere.md`, "The tab on the desktop".
 
 ## The remaining gaps, with their reason
 
