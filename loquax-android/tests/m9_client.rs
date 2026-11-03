@@ -1,0 +1,645 @@
+//! The M9 as a client of its home, on the host (slice five, host half,
+//! 1363; `docs/src/concepts/handheld-messenger.md`, "Slice five, host
+//! half"): the `no_std` client (`loquax::home::ask`) performed by the
+//! host's executor (`client::run_ask`) against a real mailbox on its own
+//! node, through a transport node that carries the device link, the way
+//! the board reaches its home over the mesh. The pairing starts at the
+//! keyboard: scan frames through the board's driver and its provisional
+//! layout to key events, the typed code, the join, `HOME admitted`.
+//!
+//! Between the board's node and the transport node sits a proxy that
+//! reads the HDLC frames of the TCP link both ways and keeps each
+//! Reticulum packet's length and kind: what the board would put on the
+//! air, packet by packet, since a LoRa interface sends each packet as one
+//! or two frames of its own (`packet_airtime_ms`). The byte and airtime
+//! tables of the page are what this test prints.
+
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
+use leviculum_core::packet::{Packet, PacketContext, PacketType};
+use leviculum_core::rnode::{derive_preamble_symbols, packet_airtime_ms};
+use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
+use leviculum_ui::input::KeyEvent;
+use loquax::home::ask::{Ask, Outcome, Verb, LORA_PAGE_BYTES};
+use loquax::home::client;
+use loquax::home::code::{HomeCode, Typing};
+use loquax::home::watch::{self, WatchEvent};
+use loquax::home::wire;
+use loquax_m9::kbraw::provisional_layout;
+use loquax_m9::keyboard::{Cap, Keyboard, Layout, Scan, COLUMNS, POLL_MS, ROWS};
+use loquax_m9::keys::M9Key;
+use loquax_m9::pair::Pairing;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[path = "../../loquax/tests/support/reach.rs"]
+mod reach;
+
+use reach::{entry, logs, next_watch, Mailbox, Relay};
+
+/// The packet MTU on a LoRa link, `leviculum_core::constants::MTU`.
+const MTU: usize = leviculum_core::constants::MTU;
+
+/// One packet the proxy saw.
+#[derive(Clone, Debug)]
+struct Seen {
+    /// From the board towards its home.
+    up: bool,
+    len: usize,
+    kind: PacketType,
+    context: PacketContext,
+}
+
+impl Seen {
+    fn label(&self) -> String {
+        format!(
+            "{} {:?}/{:?} {}",
+            if self.up { "up" } else { "down" },
+            self.kind,
+            self.context,
+            self.len
+        )
+    }
+}
+
+/// The proxy between the board's node and the transport node.
+struct Proxy {
+    addr: SocketAddr,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+impl Proxy {
+    async fn start(upstream: SocketAddr) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the proxy's port");
+        let addr = listener.local_addr().expect("addr");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((board, _)) = listener.accept().await {
+                let Ok(relay) = tokio::net::TcpStream::connect(upstream).await else {
+                    continue;
+                };
+                let (board_read, board_write) = board.into_split();
+                let (relay_read, relay_write) = relay.into_split();
+                tokio::spawn(pump(board_read, relay_write, true, kept.clone()));
+                tokio::spawn(pump(relay_read, board_write, false, kept.clone()));
+            }
+        });
+        Self { addr, seen }
+    }
+
+    fn mark(&self) -> usize {
+        self.seen.lock().expect("seen").len()
+    }
+
+    fn since(&self, mark: usize) -> Vec<Seen> {
+        self.seen.lock().expect("seen")[mark..].to_vec()
+    }
+}
+
+async fn pump(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    up: bool,
+    seen: Arc<Mutex<Vec<Seen>>>,
+) {
+    let mut deframer = Deframer::with_max_frame(1 << 20);
+    let mut buffer = [0u8; 4096];
+    loop {
+        let n = match from.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        for result in deframer.process(&buffer[..n]) {
+            if let DeframeResult::Frame(frame) = result {
+                if let Ok(packet) = Packet::unpack(&frame) {
+                    seen.lock().expect("seen").push(Seen {
+                        up,
+                        len: frame.len(),
+                        kind: packet.flags.packet_type,
+                        context: packet.context,
+                    });
+                }
+            }
+        }
+        if to.write_all(&buffer[..n]).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Airtime of one packet at our LoRa defaults (BW 125 kHz, SF8, CR 4/5,
+/// the derived preamble), as `announce-cadence.md` reckons it.
+fn ms(len: usize) -> u64 {
+    packet_airtime_ms(len, 125_000, 8, 5, derive_preamble_symbols(8, 5, 125_000))
+}
+
+/// One phase of the walk: its packets, their bytes and airtime.
+struct Phase {
+    name: &'static str,
+    packets: Vec<Seen>,
+}
+
+/// What a phase saw, sorted: the ask's own packets, the wakes the
+/// watching link carried meanwhile (a channel message down and its proof
+/// up), and the announces, which are the nodes' and no client's cost.
+fn sorted(seen: Vec<Seen>) -> (Vec<Seen>, Vec<Seen>, Vec<Seen>) {
+    let (mut own, mut wakes, mut announces) = (Vec::new(), Vec::new(), Vec::new());
+    for packet in seen {
+        match (packet.up, packet.kind, packet.context) {
+            (_, PacketType::Announce, _) => announces.push(packet),
+            (false, PacketType::Data, PacketContext::Channel)
+            | (true, PacketType::Proof, PacketContext::None) => wakes.push(packet),
+            _ => own.push(packet),
+        }
+    }
+    (own, wakes, announces)
+}
+
+impl Phase {
+    fn bytes(&self, up: bool) -> usize {
+        self.packets
+            .iter()
+            .filter(|p| p.up == up)
+            .map(|p| p.len)
+            .sum()
+    }
+
+    fn airtime(&self, up: Option<bool>) -> u64 {
+        self.packets
+            .iter()
+            .filter(|p| up.is_none_or(|up| p.up == up))
+            .map(|p| ms(p.len))
+            .sum()
+    }
+
+    fn row(&self) -> String {
+        format!(
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            self.name,
+            self.packets.len(),
+            self.bytes(true),
+            self.bytes(false),
+            self.airtime(Some(true)),
+            self.airtime(Some(false)),
+            self.packets
+                .iter()
+                .map(Seen::label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+/// The board's node: a plain node with one TCP client, to the proxy.
+async fn board_node(proxy: SocketAddr, dir: &std::path::Path) -> Arc<ReticulumNode> {
+    let mut node = ReticulumNodeBuilder::new()
+        .add_tcp_client(proxy)
+        .storage_path(dir.to_path_buf())
+        .build()
+        .await
+        .expect("the board's node");
+    node.start().await.expect("start the board's node");
+    Arc::new(node)
+}
+
+/// Where a character sits in `layout`, and whether it needs Sym.
+fn cell(layout: &Layout, c: char) -> (usize, usize, bool) {
+    for row in 0..ROWS {
+        for column in 0..COLUMNS {
+            if let Cap::Char { plain, sym, .. } = layout.0[row][column] {
+                if plain == c {
+                    return (row, column, false);
+                }
+                if sym == c {
+                    return (row, column, true);
+                }
+            }
+        }
+    }
+    panic!("no key types {c:?}");
+}
+
+fn key_cell(layout: &Layout, want: Cap) -> (usize, usize) {
+    (0..ROWS)
+        .flat_map(|row| (0..COLUMNS).map(move |column| (row, column)))
+        .find(|&(row, column)| layout.0[row][column] == want)
+        .unwrap_or_else(|| panic!("no {want:?} key"))
+}
+
+/// The scan frames of pressing `cell` once: down three polls, up three,
+/// past the driver's debounce of two.
+fn tap(scans: &mut Vec<Scan>, cell: (usize, usize)) {
+    scans.extend([Scan::of(&[cell]); 3]);
+    scans.extend([Scan::NONE; 3]);
+}
+
+/// The scans that type `text`: a digit is a tapped Sym and its key.
+fn typing_scans(layout: &Layout, text: &str) -> Vec<Scan> {
+    let sym = key_cell(layout, Cap::Sym);
+    let mut scans = Vec::new();
+    for c in text.chars() {
+        let (row, column, needs_sym) = cell(layout, c);
+        if needs_sym {
+            tap(&mut scans, sym);
+        }
+        tap(&mut scans, (row, column));
+    }
+    scans
+}
+
+/// The driver over `scans`, from `*now` on, POLL_MS apart.
+fn keys(keyboard: &mut Keyboard<'_>, now: &mut u32, scans: &[Scan]) -> Vec<KeyEvent> {
+    let mut events = Vec::new();
+    for scan in scans {
+        keyboard.poll(*now, *scan, &mut |event| events.push(event));
+        *now += POLL_MS;
+    }
+    events
+}
+
+/// The pairing walk: the code typed on the board's keys with one stray
+/// character and its Backspace, then Enter. What the board joins with.
+fn typed_code(code: &HomeCode) -> HomeCode {
+    let layout = provisional_layout();
+    let mut keyboard = Keyboard::new(&layout);
+    let mut now = 0;
+    let mut pairing = Pairing::new();
+    let text = code.encode();
+    let mut feed = |pairing: &mut Pairing, scans: Vec<Scan>| {
+        keys(&mut keyboard, &mut now, &scans)
+            .iter()
+            .filter_map(|event| pairing.key(event))
+            .last()
+    };
+    assert_eq!(feed(&mut pairing, typing_scans(&layout, &text[..20])), None);
+    assert_eq!(pairing.typing(), Typing::Short { typed: 20 });
+    // '9' is Sym on 'o': no base32 character, named where it stands.
+    feed(&mut pairing, typing_scans(&layout, "9"));
+    assert_eq!(pairing.typing(), Typing::Stray { at: 20 });
+    let mut scans = Vec::new();
+    tap(&mut scans, key_cell(&layout, Cap::Key(M9Key::Backspace)));
+    feed(&mut pairing, scans);
+    feed(&mut pairing, typing_scans(&layout, &text[20..]));
+    println!("pairing screen: {:?}", pairing.lines());
+    let mut scans = Vec::new();
+    tap(&mut scans, key_cell(&layout, Cap::Key(M9Key::Enter)));
+    feed(&mut pairing, scans).expect("Enter on the complete code joins")
+}
+
+async fn ask(
+    node: &ReticulumNode,
+    device: &leviculum_core::Identity,
+    home: &[u8; 64],
+    verb: Verb,
+) -> Outcome {
+    let ask = Ask::new(home, verb, 0, 30_000).expect("ask");
+    client::run_ask(node, device, ask, |_| {})
+        .await
+        .unwrap_or_else(|error| panic!("ask: {error}"))
+}
+
+fn submission(content: &[u8]) -> wire::Submission {
+    wire::Submission {
+        client_id: client::client_id(),
+        destination: [0x5a; 16],
+        title: Vec::new(),
+        content: content.to_vec(),
+        fields: Vec::new(),
+    }
+}
+
+/// Let the link closes and proofs of a finished ask cross the proxy.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(400)).await;
+}
+
+/// The whole walk over one transport node: pairing from the keys to
+/// `HOME admitted`, a watching link, a send and the wake it brings, a pull
+/// of that one message in LoRa pages, a mark; then the page bound against
+/// its control. Prints the byte table and the airtime table.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_pairs_by_its_keys_and_pulls_sends_and_marks_in_lora_pages() {
+    logs();
+    let relay = Relay::start(&[]).await;
+    let mailbox = Mailbox::start(vec![entry(relay.peer)]).await;
+    let proxy = Proxy::start(relay.peer).await;
+    let dir = tempfile::tempdir().expect("board dir");
+    std::fs::create_dir_all(dir.path().join("storage")).expect("storage");
+    let node = board_node(proxy.addr, &dir.path().join("storage")).await;
+    let device = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let home = mailbox.public_key;
+    let mut phases = Vec::new();
+
+    // Pairing: the code the phone shows, typed on the board's keys.
+    let shown = HomeCode {
+        public_key: home,
+        token: mailbox.token,
+    };
+    let code = typed_code(&shown);
+    assert_eq!(code, shown);
+    let mark = proxy.mark();
+    let join = Pairing::join(&code, 0, 30_000).expect("join");
+    let joined = client::run_ask(&node, &device, join, |_| {}).await;
+    assert_eq!(joined, Ok(Outcome::Joined));
+    settle().await;
+    let (own, _, announces) = sorted(proxy.since(mark));
+    println!(
+        "announces meanwhile, not counted: {:?}",
+        announces.iter().map(Seen::label).collect::<Vec<_>>()
+    );
+    phases.push(Phase {
+        name: "join (path request, link, identify, /join, close)",
+        packets: own,
+    });
+    let address = loquax::home::lxmf_address(&home).expect("address");
+    let devices = loquax::store::Store::open_in(mailbox.dir.path(), address)
+        .expect("the mailbox's store")
+        .devices()
+        .expect("devices");
+    let admitted = devices
+        .iter()
+        .find(|d| d.device == *device.hash())
+        .expect("HOME admitted: the board is a device of the home");
+    // The home keeps the name its owner gave the code (the harness issues
+    // it as "phone"), not the one the board brings (`DEVICE_NAME`).
+    assert_eq!(admitted.name, "phone");
+
+    // The watching link the idle board keeps.
+    let mark = proxy.mark();
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let watching = tokio::spawn(watch::run(
+        watch::Watch {
+            node: node.clone(),
+            public_key: home,
+            device: device.clone(),
+            home: dir.path().to_path_buf(),
+        },
+        tx,
+    ));
+    next_watch(&mut events, 30, |e| *e == WatchEvent::Watching(true)).await;
+    let WatchEvent::Wake(before) =
+        next_watch(&mut events, 5, |e| matches!(e, WatchEvent::Wake(_))).await
+    else {
+        unreachable!()
+    };
+    settle().await;
+    phases.push(Phase {
+        name: "watch (link, identify, /watch, kept)",
+        packets: sorted(proxy.since(mark)).0,
+    });
+
+    // One message out.
+    let mark = proxy.mark();
+    let Outcome::Sent(id) = ask(
+        &node,
+        &device,
+        &home,
+        Verb::Send(submission(b"Gruss vom M9")),
+    )
+    .await
+    else {
+        panic!("not sent");
+    };
+    next_watch(
+        &mut events,
+        30,
+        |e| matches!(e, WatchEvent::Wake(n) if *n > before),
+    )
+    .await;
+    settle().await;
+    // The wake the send caused crosses while the send's link closes.
+    let (own, wakes, _) = sorted(proxy.since(mark));
+    phases.push(Phase {
+        name: "send 12 characters (link, identify, /send, close)",
+        packets: own,
+    });
+    assert_eq!(wakes.len(), 2, "one wake and its proof: {wakes:?}");
+    phases.push(Phase {
+        name: "wake on the watching link (channel message, proof)",
+        packets: wakes,
+    });
+
+    // The one message pulled, in LoRa pages.
+    let mark = proxy.mark();
+    let page_bytes = Some(LORA_PAGE_BYTES as u64);
+    let pulled = ask(
+        &node,
+        &device,
+        &home,
+        Verb::Pull {
+            cursor: before,
+            page_bytes,
+        },
+    )
+    .await;
+    settle().await;
+    let Outcome::Pulled {
+        cursor, entries, ..
+    } = pulled
+    else {
+        panic!("not pulled");
+    };
+    assert_eq!(entries, 1, "the sent message is the one entry");
+    phases.push(Phase {
+        name: "pull one message (link, identify, /sync, close)",
+        packets: sorted(proxy.since(mark)).0,
+    });
+
+    let mark = proxy.mark();
+    let marked = ask(
+        &node,
+        &device,
+        &home,
+        Verb::Mark(wire::Mark {
+            flag: wire::MarkFlag::Read,
+            ids: vec![id],
+        }),
+    )
+    .await;
+    assert_eq!(marked, Outcome::Marked);
+    settle().await;
+    phases.push(Phase {
+        name: "mark one read (link, identify, /mark, close)",
+        packets: sorted(proxy.since(mark)).0,
+    });
+
+    // The bound against its control: four more messages, pulled in LoRa
+    // pages and then in the home's own page.
+    for n in 0..4 {
+        let text = format!("Nachricht {n} an den Briefkasten, etwas laenger als ein Gruss");
+        ask(
+            &node,
+            &device,
+            &home,
+            Verb::Send(submission(text.as_bytes())),
+        )
+        .await;
+    }
+    settle().await;
+    let mark = proxy.mark();
+    let mut pages = Vec::new();
+    let ask_paged = Ask::new(&home, Verb::Pull { cursor, page_bytes }, 0, 30_000).expect("ask");
+    let paged = client::run_ask(&node, &device, ask_paged, |page| {
+        pages.push(page.entries.len())
+    })
+    .await
+    .expect("paged pull");
+    settle().await;
+    let paged_seen = proxy.since(mark);
+    let mark = proxy.mark();
+    let whole = ask(
+        &node,
+        &device,
+        &home,
+        Verb::Pull {
+            cursor,
+            page_bytes: None,
+        },
+    )
+    .await;
+    settle().await;
+    let whole_seen = proxy.since(mark);
+    let responses = |seen: &[Seen]| -> Vec<usize> {
+        seen.iter()
+            .filter(|p| !p.up && p.context == PacketContext::Response)
+            .map(|p| p.len)
+            .collect()
+    };
+    let resource = |seen: &[Seen]| {
+        seen.iter().any(|p| {
+            matches!(
+                p.context,
+                PacketContext::Resource | PacketContext::ResourceAdv
+            )
+        })
+    };
+    println!(
+        "paged pull: {paged:?}, pages {pages:?}, responses {:?}",
+        responses(&paged_seen)
+    );
+    println!(
+        "whole pull: {whole:?}, responses {:?}",
+        responses(&whole_seen)
+    );
+    let (Outcome::Pulled { entries: a, .. }, Outcome::Pulled { entries: b, .. }) = (&paged, &whole)
+    else {
+        panic!("not pulled");
+    };
+    // The mark is an archive entry too: it and the four messages.
+    assert_eq!(
+        (*a, *b),
+        (5, 5),
+        "both pulls bring the mark and the four messages"
+    );
+    assert!(pages.len() > 1, "the bound split the archive: {pages:?}");
+    assert!(
+        responses(&paged_seen).iter().all(|len| *len <= MTU) && !resource(&paged_seen),
+        "every LoRa page is one packet of the default MTU"
+    );
+    assert!(
+        responses(&whole_seen).iter().any(|len| *len > MTU) || resource(&whole_seen),
+        "control: the home's own page does not fit one LoRa packet"
+    );
+
+    println!(
+        "| phase | packets | bytes up | bytes down | airtime up ms | airtime down ms | packets |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|---|");
+    for phase in &phases {
+        println!("{}", phase.row());
+    }
+    for p in paged_seen.iter().chain(&whole_seen) {
+        assert!(
+            p.len <= MTU || !p.up,
+            "the board sent a packet over the MTU: {p:?}"
+        );
+    }
+
+    // The airtime per hour. A link keepalive is 20 bytes each way
+    // (`Link::build_keepalive_packet`: flags, hops, link id, context, one
+    // byte), every LINK_KEEPALIVE_SECS on the watching link.
+    let keepalive = 20;
+    let per_hour = 3600.0 / loquax::home::keepalive::LINK_KEEPALIVE_SECS as f64;
+    let idle = per_hour * 2.0 * ms(keepalive) as f64;
+    let named = |name: &str| {
+        phases
+            .iter()
+            .find(|p| p.name.starts_with(name))
+            .map(|p| p.airtime(None))
+            .unwrap_or_default()
+    };
+    // Every entry the archive gains wakes the watching link, the board's
+    // own too, and every wake past the cursor is a pull: a message in is
+    // its wake, the pull, the mark read and the mark's wake; a message out
+    // is the send, its wake and the pull of its own entry.
+    let wake = named("wake");
+    let incoming = wake + named("pull one") + named("mark") + wake;
+    let outgoing = named("send") + wake + named("pull one");
+    let link = |phase: &str| {
+        phases
+            .iter()
+            .find(|p| p.name.starts_with(phase))
+            .map(|p| {
+                p.packets
+                    .iter()
+                    .filter(|p| {
+                        matches!(
+                            (p.kind, p.context),
+                            (PacketType::LinkRequest, _)
+                                | (PacketType::Proof, PacketContext::Lrproof)
+                                | (_, PacketContext::Lrrtt)
+                                | (_, PacketContext::LinkIdentify)
+                                | (_, PacketContext::LinkClose)
+                        )
+                    })
+                    .map(|p| ms(p.len))
+                    .sum::<u64>()
+            })
+            .unwrap_or_default()
+    };
+    let hour = |ms: f64| format!("{ms:.0} ms/h, {:.3} %", ms / 36_000.0);
+    println!("| per hour, at SF8 BW125 CR4/5 | airtime |");
+    println!("|---|---:|");
+    println!(
+        "| one keepalive exchange, 2 x {keepalive} B | {} ms |",
+        2 * ms(keepalive)
+    );
+    println!("| idle client, {per_hour:.2} exchanges | {} |", hour(idle));
+    println!("| one message in (wake, pull, mark read, its wake) | {incoming} ms |");
+    println!("| one message out (send, its wake, the pull of it) | {outgoing} ms |");
+    println!(
+        "| of which a link of its own per ask (request, proof, rtt, identify, close) | {} ms |",
+        link("pull one")
+    );
+    println!(
+        "| idle + one message in | {} |",
+        hour(idle + incoming as f64)
+    );
+    println!(
+        "| idle + one in + one out | {} |",
+        hour(idle + (incoming + outgoing) as f64)
+    );
+    // The board's own share, what its duty budget is charged.
+    let own = |name: &str| {
+        phases
+            .iter()
+            .find(|p| p.name.starts_with(name))
+            .map(|p| p.airtime(Some(true)))
+            .unwrap_or_default()
+    };
+    let up = 3 * own("wake") + 2 * own("pull one") + own("mark") + own("send");
+    println!(
+        "| the board's own, idle + one in + one out | {} |",
+        hour(idle / 2.0 + up as f64)
+    );
+
+    drop(events);
+    watching.abort();
+    mailbox.stop().await;
+    relay.stop().await;
+}

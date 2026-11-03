@@ -1,13 +1,16 @@
 //! The census the M9's image prints at boot (slice four, 1361), run on the
 //! host over the same fixture model and held to the same budgets
-//! ([`loquax_m9::census`]). Its own test binary, with one test in it, so
-//! nothing else allocates while the allocator counts; here beside
+//! ([`loquax_m9::census`]), and the client session's pull (slice five,
+//! 1363). Its own test binary, its two tests one at a time ([`SERIAL`]),
+//! so nothing else allocates while the allocator counts; here beside
 //! `m9_scene_census.rs` and not in `loquax-m9` for that file's reason: a
 //! counting allocator is `unsafe` code, which `loquax-m9` forbids.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
+use loquax::home::ask::LORA_PAGE_BYTES;
+use loquax::home::wire;
 use loquax_m9::census::{self, Census, Probe, Step};
 use loquax_m9::fixture::Screen;
 use loquax_m9::frame::Frame;
@@ -42,6 +45,9 @@ unsafe impl GlobalAlloc for Counting {
 
 #[global_allocator]
 static GLOBAL: Counting = Counting;
+
+/// One census at a time: the counts are the process's.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The stack a step may take, painted below the caller before it runs.
 const PAINT_LEN: usize = 1 << 20;
@@ -90,6 +96,9 @@ impl Probe for HostProbe {
 /// budgets.
 #[test]
 fn the_two_screens_keep_the_boards_budgets() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut probe = HostProbe { before: 0, low: 0 };
     let mut panel = Frame::new();
     let before = LIVE.load(Ordering::SeqCst);
@@ -112,4 +121,71 @@ fn the_two_screens_keep_the_boards_budgets() {
         );
         assert_eq!(budget.over(&got), None, "{line}");
     }
+}
+
+/// Archive entries as a home keeps them: LXMF messages of `len` bytes.
+fn entries(n: u64, len: usize) -> Vec<wire::Entry> {
+    (1..=n)
+        .map(|seq| wire::Entry {
+            seq,
+            kind: loquax::home::KIND_RECEIVED,
+            at: 1_793_600_000,
+            packed: vec![seq as u8; len],
+        })
+        .collect()
+}
+
+/// The answers a home gives a client that asks LoRa pages, walked by
+/// cursor as the home walks them (`wire::fit_page`).
+fn lora_answers(all: &[wire::Entry]) -> Vec<Vec<u8>> {
+    let mut answers = Vec::new();
+    let mut at = 0;
+    while at < all.len() {
+        let mut page = wire::Page {
+            entries: all[at..].to_vec(),
+            more: false,
+            first: 1,
+        };
+        wire::fit_page(&mut page, LORA_PAGE_BYTES);
+        at += page.entries.len();
+        answers.push(wire::sync_answer(&page));
+    }
+    answers
+}
+
+/// The client session's pull (1363): thirty messages of 200 bytes, a
+/// typical text with its signature and fields, in LoRa pages; then the
+/// same archive as one page of the home's own bound, the positive
+/// control, which the ceiling refuses.
+#[test]
+fn a_client_sessions_pull_keeps_its_budget_in_lora_pages() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut probe = HostProbe { before: 0, low: 0 };
+    let home = leviculum_core::Identity::generate(&mut rand_core::OsRng).public_key_bytes();
+    let all = entries(30, 200);
+    let answers = lora_answers(&all);
+    assert!(answers.iter().all(|answer| answer.len() <= LORA_PAGE_BYTES));
+    let got = census::session(&mut probe, &home, &answers).expect("session");
+    let line = census::SessionLine(&got);
+    println!(
+        "[CENSUS] {line} pages={} entries={}",
+        answers.len(),
+        all.len()
+    );
+    assert!(got.peak > 0 && got.stack > 0, "the probe measured nothing");
+    assert_eq!(line.over(), None, "{line}");
+
+    // Control: the home's own page, 64 KiB of these, in one answer.
+    let all = entries(300, 200);
+    let whole = vec![wire::sync_answer(&wire::Page {
+        entries: all,
+        more: false,
+        first: 1,
+    })];
+    let got = census::session(&mut probe, &home, &whole).expect("session");
+    let line = census::SessionLine(&got);
+    println!("[CENSUS] control {line} answer={} B", whole[0].len());
+    assert_eq!(line.over(), Some("session_peak"), "{line}");
 }
