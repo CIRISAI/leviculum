@@ -432,7 +432,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         );
         let row = &list.conversations[1];
         assert_eq!(row.peer, peer);
-        assert_eq!(row.last, "you reacted \u{1F44D}");
+        assert_eq!(row.last, "You reacted \u{1F44D}");
         assert!(row.ours);
         assert_eq!(row.initials, peer[..2].to_uppercase());
         // The row's mark (1130): ours is last, so a delivery word, a text.
@@ -4411,7 +4411,7 @@ async fn a_photo_travels_both_ways_with_python_lxmf_at_each_size() {
             .expect("listed");
         assert_eq!(
             (listed.last.as_str(), listed.kind.as_str()),
-            ("photo", "photo")
+            ("Photo", "photo")
         );
         let pixels: schema::PhotoPixels = rmp_serde::from_slice(
             &session
@@ -5044,7 +5044,7 @@ async fn a_voice_message_travels_both_ways_with_python_lxmf() {
             .expect("listed");
         assert_eq!(
             (listed.last.as_str(), listed.kind.as_str()),
-            ("voice message 0:02", "voice")
+            ("Voice message, 0:02", "voice")
         );
 
         // The sound is the reference decoder's.

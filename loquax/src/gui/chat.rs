@@ -990,7 +990,7 @@ impl App {
         // A voice message (1222): its length, a press plays it in the
         // system's player.
         if let Some(voice) = &node.voice {
-            let line = text(format!("♪ voice message · {}", voice.duration))
+            let line = text(format!("♪ {}", voice.words.resolve(self.lang)))
                 .size(size::BODY - 2.0)
                 .color(ink);
             let line: Element<'_, Message> = match &voice.toggle {

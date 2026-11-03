@@ -3076,7 +3076,10 @@ mod tests {
         let shown = super::super::update(&mut model, UiEvent::ViewPhoto { peer, key: 2 });
         assert_eq!(shown, alloc::vec![UiEffect::ShowPhoto { peer, key: 2 }]);
         assert!(super::super::update(&mut model, UiEvent::ViewPhoto { peer, key: 1 }).is_empty());
-        assert_eq!(chat::preview(&model.conversations[0].messages[1]), "photo");
+        assert_eq!(
+            chat::preview(&model.conversations[0].messages[1], Lang::En),
+            "Photo"
+        );
         assert_eq!(chat::kind(&model.conversations[0].messages[1]), "photo");
 
         // Sending one: a message of its own, the image field alone, the
@@ -3201,7 +3204,7 @@ mod tests {
         )
         .is_empty());
         assert_eq!(
-            chat::preview(&model.conversations[0].messages[1]),
+            chat::preview(&model.conversations[0].messages[1], Lang::En),
             "report.pdf"
         );
         assert_eq!(chat::kind(&model.conversations[0].messages[1]), "file");
@@ -3305,8 +3308,8 @@ mod tests {
             "Voice message, 0:02, which cannot be played here"
         );
         assert_eq!(
-            chat::preview(&model.conversations[0].messages[1]),
-            "voice message 0:02"
+            chat::preview(&model.conversations[0].messages[1], Lang::En),
+            "Voice message, 0:02"
         );
         assert_eq!(chat::kind(&model.conversations[0].messages[1]), "voice");
 

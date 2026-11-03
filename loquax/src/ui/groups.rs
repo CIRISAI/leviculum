@@ -1975,6 +1975,10 @@ mod tests {
                 .find(|c| c.peer == LEW)
                 .expect("Lew's chat");
             assert_eq!(lew.messages[0].body, wire, "the body stays the wire's");
+            // 1377: the list's row (and the phone's notification) says the
+            // card's title, not the wire's English with the code in it.
+            let row = super::super::chat::list_row(&model, &LEW);
+            assert_eq!(row.last, card.title.resolve(lang), "the row is the card");
             (card.title.resolve(lang), card.trust.resolve(lang))
         };
         let (title, trust) = card(Lang::De);

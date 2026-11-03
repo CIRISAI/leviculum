@@ -91,6 +91,11 @@ leviculum_ui::catalogue! {
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";
     QuoteYou = "quote_you", "You", "Du";
+    // A row's last line for a message without words (1377): the list and
+    // the phone's notification say these in the reader's language.
+    RowPhoto = "row_photo", "Photo", "Foto";
+    RowPositionShared = "row_position_shared", "Position shared", "Position geteilt";
+    RowPositionReport = "row_position_report", "Position report", "Positionsmeldung";
     // The chat: compose, the marks, a bubble's menu.
     ComposeHint = "compose_hint", "Message", "Nachricht";
     Send = "send", "Send", "Senden";

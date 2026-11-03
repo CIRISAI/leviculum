@@ -48,6 +48,9 @@
     <string name="you_reacted">Du hast mit %1$s reagiert</string>
     <string name="run_updates">%1$d Meldungen seit %2$s</string>
     <string name="quote_you">Du</string>
+    <string name="row_photo">Foto</string>
+    <string name="row_position_shared">Position geteilt</string>
+    <string name="row_position_report">Positionsmeldung</string>
     <string name="compose_hint">Nachricht</string>
     <string name="send">Senden</string>
     <string name="state_sending">Wird gesendet</string>

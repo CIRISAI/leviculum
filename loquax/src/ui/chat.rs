@@ -21,6 +21,7 @@ use leviculum_ui::pixel;
 use super::liveness::Liveness;
 use super::reactions;
 use super::replies::Quoted;
+use super::strings::{Arg, Lang, StrId, Text};
 use super::{Message, UiModel};
 use crate::telemetry::Fix;
 use crate::when::WallTime;
@@ -302,32 +303,50 @@ pub fn kind(message: &Message) -> &'static str {
     }
 }
 
-/// The list's line for a conversation's last message.
-pub fn preview(message: &Message) -> String {
-    if let Some(text) = reactions::preview(message) {
-        return text;
+/// The list's line for a conversation's last message, in `lang`: what
+/// the phone's notification says too, so a word Loquax puts there itself
+/// is the catalogue's (1377), never an English one under a German list.
+pub fn preview(message: &Message, lang: Lang) -> String {
+    if let Some((_, content)) = message.reaction() {
+        let id = match message.outbound {
+            true => StrId::YouReacted,
+            false => StrId::Reacted,
+        };
+        return Text::Key(id, Vec::from([Arg::Str(content)])).resolve(lang);
     }
     if message.is_report() {
-        return "position report".to_string();
+        return StrId::RowPositionReport.text(lang).to_string();
     }
     if message.is_position() {
-        return "position shared".to_string();
+        return StrId::RowPositionShared.text(lang).to_string();
     }
     if message.body.trim().is_empty() && super::photos::photo_of(&message.fields).is_some() {
-        return "photo".to_string();
+        return StrId::RowPhoto.text(lang).to_string();
     }
     if message.body.trim().is_empty() {
         if let Some(file) = super::files::files_of(&message.fields).into_iter().next() {
             return file.name;
         }
         if let Some(voice) = super::voice::voice_of(&message.fields) {
-            return alloc::format!(
-                "voice message {}",
-                super::voice::duration_words(voice.duration_ms)
-            );
+            return Text::Key(
+                StrId::Voice,
+                Vec::from([Arg::Str(super::voice::duration_words(voice.duration_ms))]),
+            )
+            .resolve(lang);
         }
     }
     message.body.lines().next().unwrap_or_default().to_string()
+}
+
+/// The list's line for an invitation: the card's title in the reader's
+/// language ("Anna lädt dich zu Verein ein"), not the English sentence
+/// the wire carries for stock clients with the group's code in it (1377).
+fn invitation_line<B>(model: &UiModel<B>, message: &Message) -> Option<String> {
+    let group = leviculum_lxmf::lev::Lev::from_fields(&message.fields)?
+        .invite?
+        .group;
+    let card = super::group_scene::invite(model, &group, message.outbound)?;
+    Some(card.title.resolve(model.lang))
 }
 
 /// One row of the conversation list.
@@ -402,7 +421,7 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         last: last
             .map(|m| match m.is_report() {
                 true => format!("{PIN} {}", liveness.list_words(now)),
-                false => preview(m),
+                false => invitation_line(model, m).unwrap_or_else(|| preview(m, model.lang)),
             })
             .unwrap_or_default(),
         ours: last.is_some_and(|m| m.outbound),
@@ -1052,7 +1071,8 @@ mod tests {
         // A position we shared (1201) is one too, worded as ours.
         let shared = message(true, "", vec![(FIELD_TELEMETRY, vec![0xc0])]);
         assert_eq!(kind(&shared), "position");
-        assert_eq!(preview(&shared), "position shared");
+        assert_eq!(preview(&shared, Lang::En), "Position shared");
+        assert_eq!(preview(&shared, Lang::De), "Position geteilt");
         let thumbs = Reaction {
             to: [7; 32],
             content: "👍".to_string(),
@@ -1060,7 +1080,8 @@ mod tests {
         .encode_field_value();
         let reaction = message(true, "", vec![(FIELD_REACTION, thumbs)]);
         assert_eq!(kind(&reaction), "reaction");
-        assert_eq!(preview(&reaction), "you reacted 👍");
+        assert_eq!(preview(&reaction, Lang::En), "You reacted 👍");
+        assert_eq!(preview(&reaction, Lang::De), "Du hast mit 👍 reagiert");
     }
 
     fn bubble(ours: bool, at: Option<i64>, mark: Option<Mark>) -> Bubble {

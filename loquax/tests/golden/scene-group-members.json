@@ -316,7 +316,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Lew ·4141, Lew invited you to Verein: lxma://…"
+            "raw": "Lew ·4141, Lew invited you to Verein"
           },
           "resource": "row_41414141414141414141414141414141",
           "role": "row",
@@ -337,7 +337,7 @@
         "draft": null,
         "id": "row_41414141414141414141414141414141",
         "kind": "text",
-        "last": "Lew invited you to Verein: lxma://…",
+        "last": "Lew invited you to Verein",
         "live": null,
         "liveness": {
           "cadence_s": null,
