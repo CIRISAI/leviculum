@@ -11,7 +11,10 @@
 #   control   a temp copy of the workspace manifests and Rust sources with a
 #             `std::fs` call injected into the renderer (loquax-m9/src/
 #             screen.rs) is refused by the same `cargo check` for
-#             thumbv7em-none-eabihf, naming the injected line.
+#             thumbv7em-none-eabihf, naming the injected line; and so is
+#             one injected into the client the board runs (loquax/src/home/
+#             ask.rs, slice five, 1363), which the crate builds on with the
+#             pairing screen (loquax-m9/src/pair.rs).
 #   thumbv7em `cargo check -p loquax-m9 --lib --target thumbv7em-none-eabihf`.
 #   esp32s3   the same for xtensa-esp32s3-none-elf, the M9's ESP32-S3, through
 #             the esp-rs compiler fork with `-Z build-std=core,alloc`. The fork
@@ -35,8 +38,11 @@ check_thumb() {
         -p loquax-m9 --lib --target "$THUMB" 2>&1)
 }
 
+# control: one temp copy, the std call injected into the renderer first
+# and checked, then into the client as well and checked again; the second
+# check only rebuilds the loquax core, which fails before the renderer.
 control() {
-    local tmp out dir rc=0
+    local tmp out dir target rc
     # Under the tree's target, not /tmp: the copy is ~20 MB and /tmp is the
     # small tmpfs every lane shares.
     mkdir -p "$ROOT/target/tmp"
@@ -50,7 +56,7 @@ control() {
             --prefix none --target "$THUMB" | sed -n 's/.*(\(\/[^)]*\)).*/\1/p' | sort -u); do
         (cd "$ROOT" && git ls-files -z "${dir#"$ROOT"/}" | xargs -0 -r cp --parents -t "$tmp")
     done
-    # The working tree's crate and manifests, committed or not: the real
+    # The working tree's crates and manifests, committed or not: the real
     # check below reads those too.
     mkdir -p "$tmp/loquax-m9/src"
     cp "$ROOT"/loquax-m9/src/*.rs "$tmp/loquax-m9/src/"
@@ -58,14 +64,19 @@ control() {
     cp "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$tmp/"
     cp "$ROOT/leviculum-ui-ratatui/Cargo.toml" "$tmp/leviculum-ui-ratatui/Cargo.toml"
     cp "$ROOT"/leviculum-ui-ratatui/src/*.rs "$tmp/leviculum-ui-ratatui/src/"
-    printf '%s\n' "$INJECTED" >> "$tmp/loquax-m9/src/screen.rs"
-    out="$(check_thumb "$tmp" --offline)" || rc=$?
-    if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qF 'std::fs::metadata'; then
-        echo "$TAG CONTROL FAIL: a std::fs call injected into the renderer was not refused (exit $rc)"
-        printf '%s\n' "$out" | sed 's/^/  /'
-        return 1
-    fi
-    echo "$TAG control ok: a std::fs call injected into loquax-m9/src/screen.rs is refused for $THUMB"
+    cp "$ROOT"/loquax/src/home/*.rs "$tmp/loquax/src/home/"
+    for target in loquax-m9/src/screen.rs loquax/src/home/ask.rs; do
+        rc=0
+        printf '%s\n' "$INJECTED" >> "$tmp/$target"
+        out="$(check_thumb "$tmp" --offline)" || rc=$?
+        if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qF "$target" \
+                || ! printf '%s\n' "$out" | grep -qF 'std::fs::metadata'; then
+            echo "$TAG CONTROL FAIL: a std::fs call injected into $target was not refused (exit $rc)"
+            printf '%s\n' "$out" | sed 's/^/  /'
+            return 1
+        fi
+        echo "$TAG control ok: a std::fs call injected into $target is refused for $THUMB"
+    done
 }
 
 rustup target add "$THUMB" >/dev/null 2>&1 || true
@@ -75,7 +86,7 @@ if ! out="$(check_thumb "$ROOT" --frozen)"; then
     echo "$TAG FAIL the M9's renderer needs std for $THUMB (above)."
     exit 1
 fi
-echo "$TAG ok   loquax-m9 builds for $THUMB"
+echo "$TAG ok   loquax-m9 (renderer, pairing) and the client it builds on build for $THUMB"
 
 if [ ! -f "$HOME/export-esp.sh" ]; then
     if [ "${M9_NO_STD_REQUIRE_ESP:-0}" = 1 ]; then
@@ -91,4 +102,4 @@ if ! out="$(cd "$ROOT" && bash -c '. ~/export-esp.sh >/dev/null && cargo +esp ch
     echo "$TAG FAIL the M9's renderer does not build for $ESP (above)."
     exit 1
 fi
-echo "$TAG ok   loquax-m9 builds for $ESP"
+echo "$TAG ok   loquax-m9 (renderer, pairing) and the client it builds on build for $ESP"

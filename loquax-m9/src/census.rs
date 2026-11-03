@@ -137,6 +137,93 @@ impl Budget {
     }
 }
 
+/// What a client session may take on the heap while it pulls (1363):
+/// the ask itself, one answer's page read from it, the next request. Over
+/// thirty LoRa pages of one 200-byte message each the 64-bit host
+/// measures a peak of 392 B and nothing held between pages
+/// (`loquax-android/tests/m9_fixture_census.rs`), so the ceilings are
+/// about double that. A page of the home's own bound (64 KiB, 84,576 B
+/// peak) is far over, the host census's positive control. One entry
+/// larger than a page still comes alone and costs its own length; that is
+/// the message, which the store keeps, not the session.
+pub const SESSION_PEAK: usize = 1_000;
+/// What the session may hold between two pages: the ask and its verb.
+pub const SESSION_HELD: usize = 256;
+
+/// A client session's pull, measured: an ask of `/sync` in LoRa pages
+/// from the home whose key this is, fed `answers` one after another as a
+/// link would bring them, each page handed out and dropped as the
+/// platform drops it once it is kept. The answers are made before the
+/// step begins; what the link layer holds is the node's, not counted.
+pub fn session(
+    probe: &mut dyn Probe,
+    home: &[u8; 64],
+    answers: &[alloc::vec::Vec<u8>],
+) -> Result<Step, loquax::home::ask::HomeError> {
+    use loquax::home::ask::{Ask, Step as AskStep, Verb, LORA_PAGE_BYTES};
+    probe.begin();
+    let verb = Verb::Pull {
+        cursor: 0,
+        page_bytes: Some(LORA_PAGE_BYTES as u64),
+    };
+    let mut ask = Ask::new(home, verb, 0, 60_000)?;
+    let mut step = match ask.poll(0, Some(1)) {
+        AskStep::Connect { .. } => match ask.linked(Ok(())) {
+            AskStep::Identify => ask.identified(Ok(())),
+            other => other,
+        },
+        other => other,
+    };
+    for (at, answer) in answers.iter().enumerate() {
+        if !matches!(step, AskStep::Request { .. }) {
+            break;
+        }
+        drop(step);
+        step = match ask.answered(Ok(answer)) {
+            AskStep::Page(page) => {
+                core::hint::black_box(&page);
+                drop(page);
+                ask.poll(at as u64 + 1, Some(1))
+            }
+            other => other,
+        };
+    }
+    drop(step);
+    let measured = probe.end();
+    core::hint::black_box(&ask);
+    drop(ask);
+    Ok(measured)
+}
+
+/// The session census line: what the pull cost and the verdict.
+pub struct SessionLine<'a>(pub &'a Step);
+
+impl SessionLine<'_> {
+    /// The first ceiling the session passes.
+    pub fn over(&self) -> Option<&'static str> {
+        let held = usize::try_from(self.0.held).unwrap_or(0);
+        match (held >= SESSION_HELD, self.0.peak >= SESSION_PEAK) {
+            (true, _) => Some("session_held"),
+            (_, true) => Some("session_peak"),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for SessionLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "session=pull held={} peak={} stack={} ",
+            self.0.held, self.0.peak, self.0.stack
+        )?;
+        match self.over() {
+            None => f.write_str("verdict=ok"),
+            Some(ceiling) => write!(f, "verdict=over over={ceiling}"),
+        }
+    }
+}
+
 /// The census line's words after the screen's name: what both steps cost
 /// and the verdict, `ok` or `over=<ceiling>`.
 pub struct Line<'a> {

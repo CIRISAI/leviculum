@@ -27,6 +27,8 @@
 //! - [`dump`]: the frame as text lines over the debug link, and read back,
 //!   for the rig to compare with the goldens (slice four).
 //! - [`fixture`]: the model the board shows before it has a network.
+//! - [`pair`]: the home code typed on the keys, and the join it makes
+//!   (slice five, 1363).
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
 
 #![no_std]
@@ -42,5 +44,6 @@ pub mod frame;
 pub mod kbraw;
 pub mod keyboard;
 pub mod keys;
+pub mod pair;
 pub mod render;
 pub mod screen;

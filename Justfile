@@ -1422,9 +1422,9 @@ tree-clean-selftest:
 # `lnomad-core-no-std` (#475) is in on (a) to (c) too: two foreign triples and
 # a temp copy's check for its control, 7.4 s standing alone after `touch
 # leviculum-core/src/lib.rs`, 4.0 s warm (2026-11-02, with the esp fork).
-# `m9-render-no-std` (1351, #232, #473) on the same three grounds: the M9's
-# renderer crate for both firmware triples and a temp copy's check for its
-# control, 8.2 s warm with the esp fork (2026-11-03), most of it the control.
+# `m9-render-no-std` (1351, 1363, #232, #473) on the same three grounds: the
+# M9's renderer and client for both firmware triples and one temp copy's checks
+# for their two controls, 7.7 s warm with the esp fork (2026-11-03), most of it those.
 #
 # NOT a tier. Tiers nest (`standard` contains `fast`); `guards` is a strict
 # subset of `fast` and adds nothing to it, so a green `guards` is a cheap
@@ -2558,9 +2558,10 @@ lnomad-core-no-std:
 # leviculum-ui-ratatui without `terminal`, ratatui, mousefood) for
 # thumbv7em-none-eabihf and, where the esp fork is installed, the M9's
 # xtensa-esp32s3-none-elf (a SKIP line says when it is not). Positive control
-# first: a `std::fs` call injected into a temp copy of the crate is refused.
-# In `guards`, see the ledger.
-[doc('Check the M9 renderer builds no_std for firmware (#232, #473)')]
+# first: a `std::fs` call injected into a temp copy of the crate is refused,
+# and one injected into the client the board runs (`loquax::home::ask`,
+# slice five, 1363) as well. In `guards`, see the ledger.
+[doc('Check the M9 renderer and client build no_std for firmware (#232, #473)')]
 m9-render-no-std:
     @bash scripts/check-m9-render-no-std.sh
 
