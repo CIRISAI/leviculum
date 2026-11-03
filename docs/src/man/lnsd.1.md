@@ -84,7 +84,7 @@ The SIGUSR1 dump lists the estimated size of every tracked table, the `=== Total
 
 `=== Mappings ===` buckets the process's anonymous writable mappings by size (under 64 KiB, 64 KiB to 1 MiB, 1 to 8 MiB, 8 to 64 MiB, above) with count and bytes per bucket, then names the ten largest by address. Thread stacks show up as regions of about 2 MiB each, so a growing count in one bucket points at an owner class without a debugger.
 
-The `gap:` line starts from RSS plus swap and subtracts the resident file pages (`RssFile`: the binary's text and libraries, which the kernel drops under memory pressure without swapping them and faults back in), the tracked total, the allocator's free bytes (fordblks + keepcost) and its mmapped bytes (hblkhd) in turn, printing what is left after each. A term the libc cannot report is printed as `n/a` and subtracts nothing; hblkhd counts live large allocations, so it can overlap the tracked total.
+The `gap:` line starts from RSS plus swap and subtracts the resident file pages (`RssFile`: the binary's text and libraries, which the kernel drops under memory pressure without swapping them and faults back in), the resident shared pages (`RssShmem`: where the kernel books a file on tmpfs, which leaves the resident set the same way), the tracked total, the allocator's free bytes (fordblks + keepcost) and its mmapped bytes (hblkhd) in turn, printing what is left after each. A term the libc cannot report is printed as `n/a` and subtracts nothing; hblkhd counts live large allocations, so it can overlap the tracked total.
 
 ## EXAMPLES
 
