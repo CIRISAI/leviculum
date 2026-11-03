@@ -82,3 +82,6 @@ proptest.workspace = true
 # The map's source for a region arriving over a slow link (1291): the
 # loopback server of the map tests, throttled.
 leviculum-mapcut = { path = "../leviculum-mapcut" }
+# The M9's renderer, whose heap and stack the M9 census counts beside the
+# scenes' (tests/m9_scene_census.rs).
+loquax-m9 = { path = "../loquax-m9" }
