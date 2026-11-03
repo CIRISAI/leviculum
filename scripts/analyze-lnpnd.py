@@ -17,7 +17,10 @@ Phases, in the order an operator asks the questions:
 
   1. Volume and span      -- how much log, over what window, what is in it
   2. Uploads              -- accepted and rejected, rejections by reason
-  3. Store                -- utilisation against the limit, and evictions
+  3. Store                -- utilisation against the limit, evictions, and
+                             where the accepted messages went (accepted,
+                             delivered to clients, forwarded to peers,
+                             evicted; the same four `lnpnd --status` prints)
   4. Peers                -- offer and sync rounds per peer, with outcome
   5. Clients              -- mailbox requests served, own mail received
   6. Liveness             -- gaps in the PN_STORE heartbeat
@@ -104,6 +107,7 @@ class Stats:
         self.peers_untracked = 0
         self.offered = 0
         self.wanted = 0
+        self.forwarded = 0
 
         # Phase 5
         self.get_forms = defaultdict(int)
@@ -224,6 +228,9 @@ def consume(stats, line):
             stats.peer_offers[peer][values.get("dir", "?")] += 1
 
     elif name == "PN_SYNC":
+        # Counted for every peer, as the offer totals are.
+        if values.get("dir") == "out" and values.get("result") == "ok":
+            stats.forwarded += as_int(values, "transferred")
         peer = values.get("peer", "?")
         if stats.track(peer):
             direction = values.get("dir", "?")
@@ -314,6 +321,10 @@ def report(stats):
     else:
         out("no PN_STORE line in this log -- store utilisation unknown\n")
     evicted = sum(stats.evicted.values())
+    out(
+        f"flow             {stats.accepted} accepted, {stats.get_served} delivered to clients, "
+        f"{stats.forwarded} forwarded to peers, {evicted} evicted\n"
+    )
     out(f"evicted          {evicted} ({human_bytes(stats.evicted_bytes)})\n")
     for reason, count in sorted(stats.evicted.items(), key=lambda kv: -kv[1]):
         out(f"  {reason:<14} {count}\n")

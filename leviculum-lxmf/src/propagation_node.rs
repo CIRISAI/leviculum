@@ -955,6 +955,9 @@ pub struct PropagationNode<S> {
     /// When [`Self::tick`] next walks `processed`: the oldest entry's expiry
     /// plus [`PROCESSED_ID_PRUNE_SLACK_SECS`], `u64::MAX` while empty.
     processed_prune_at: u64,
+    /// Messages expired or displaced since the role was built, for a host's
+    /// status line ([`Self::evicted_total`]).
+    evicted_total: u64,
     /// Ids that left the store before they expired (a confirmed
     /// collection, an own-mailbox delivery, a displacement), with when,
     /// for a host to persist: `None` unless [`Self::track_departures`]
@@ -996,6 +999,7 @@ impl<S: PropagationStore> PropagationNode<S> {
             config,
             processed: alloc::collections::BTreeMap::new(),
             processed_prune_at: u64::MAX,
+            evicted_total: 0,
             departed: None,
             compute_stamp_value: false,
             calendar_jump_floor: 0,
@@ -1030,6 +1034,13 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// host always, on a board while a peer demands them.
     pub fn compute_stamp_value(&self) -> bool {
         self.config.always_compute_stamp_value || self.compute_stamp_value
+    }
+
+    /// Messages this role removed from its store by expiry or
+    /// displacement since it was built; a collected or delivered message is
+    /// not counted.
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total
     }
 
     pub fn store(&self) -> &S {
@@ -1718,6 +1729,7 @@ impl<S: PropagationStore> PropagationNode<S> {
                 ControlFlow::Continue(())
             });
         expired.retain(|eviction| self.store.purge(&eviction.transient_id).unwrap_or(false));
+        self.evicted_total += expired.len() as u64;
 
         if now_secs >= self.processed_prune_at {
             let mut oldest = u64::MAX;
@@ -1789,6 +1801,7 @@ impl<S: PropagationStore> PropagationNode<S> {
                 evicted.push(eviction);
             }
         }
+        self.evicted_total += evicted.len() as u64;
         evicted
     }
 }

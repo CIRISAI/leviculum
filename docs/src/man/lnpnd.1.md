@@ -62,7 +62,7 @@ The query verbs run as a client against a node's control destination, identifyin
 A node that refuses a query answers the refusal, and the verb exits 204. Python's lxmd registers its control paths behind `ALLOW_LIST`, which sends nothing at all to an identity it refuses; against such a node a refusal is indistinguishable from silence and exits 200, so lnpnd names the possibility on stderr rather than leaving "timed out" as the only account.
 
 **--status**
-:   Print the node's status: store utilisation, costs, peer counts, traffic counters.
+:   Print the node's status: store utilisation, costs, peer counts, traffic counters. Against an lnpnd node one more line, `Flow`, says where the accepted messages went: accepted, delivered to clients, forwarded to peers, and evicted (expired or displaced) since the node started. lnpnd sends the eviction count as an extra `evicted` key in the stats' `messagestore` map, which lxmd's printer does not read; against an lxmd node the line is absent and the output is lxmd's.
 
 **--peers**
 :   Print the peered nodes with their state, costs, sync keys and traffic.

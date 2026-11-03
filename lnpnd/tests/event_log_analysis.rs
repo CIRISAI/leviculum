@@ -164,6 +164,13 @@ fn the_analysis_reads_what_the_writer_writes() {
     let store = field(&report, "last reported");
     assert!(store.contains("20.0 %"), "store utilisation: {store}");
     assert!(field(&report, "evicted ").contains('1'), "{report}");
+    // Order 1295: where the accepted messages went, as `--status` says it.
+    // Only the round that ended ok forwarded anything.
+    assert_eq!(
+        field(&report, "flow "),
+        "flow             3 accepted, 2 delivered to clients, 2 forwarded to peers, 1 evicted",
+        "{report}"
+    );
 
     // Phase 4: per-peer rounds, and a round that ended other than ok.
     assert!(report.contains(&peer_a[..16]), "peer A missing:\n{report}");

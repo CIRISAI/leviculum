@@ -1425,6 +1425,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             messagestore_count: ready.node.store().count().unwrap_or(0) as u64,
             messagestore_bytes: store_bytes,
             messagestore_limit_bytes: Some(ready.store_limit_bytes),
+            messagestore_evicted: Some(ready.node.evicted_total()),
             client_propagation_messages_received: ready.client_received,
             client_propagation_messages_served: ready.client_served,
             unpeered_propagation_incoming: unpeered_incoming,
@@ -3074,6 +3075,11 @@ mod tests {
             panic!("engine must be ready");
         };
         assert_eq!(ready.node.store().count(), Ok(0));
+        assert_eq!(
+            ready.node.evicted_total(),
+            backlog as u64,
+            "the status count follows the evictions"
+        );
         assert_eq!(
             engine.next_maintenance_at,
             start_ms + STORE_MAINTENANCE_SECS * 1000,
