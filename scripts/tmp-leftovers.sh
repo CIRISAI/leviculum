@@ -23,11 +23,24 @@
 # outside TMPDIR: $XDG_RUNTIME_DIR, /run/user/<uid> or /tmp, keyed by uid
 # (leviculum-std/tests/support/port_alloc.rs, state_dir; 778). No exclusion here.
 #
+# A test whose run-time prerequisite is absent on this host is left out by
+# name, as every other runner that selects from the tree leaves it out
+# (scripts/integ-prerequisites.txt, through scripts/with-prerequisites.sh),
+# and printed with the path it lacks. Before 1353 this ran the plain suite:
+# hamster has no codec2, and the pre-push hook's `just fast` failed on the
+# voice round trip's `c2enc: No such file or directory` where its line in
+# that file says a host without the tool leaves it out. This gate's subject
+# is the temp directory, not the codecs; on a host with every prerequisite
+# the command is the plain `cargo test --workspace`, unchanged.
+#
 # Exit 0 = the suite passed and left nothing in its TMPDIR.
 # Exit 1 = it left entries (named), or the suite itself failed.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# shellcheck source=scripts/integ-targets.sh
+. scripts/integ-targets.sh
 
 # Short on purpose: a test that puts a Unix socket under temp_dir() has 108
 # bytes for the whole path.
@@ -67,8 +80,20 @@ fi
 
 before=$(list_tmp)
 
+# The targets with a prerequisite absent here; a whole-target one is refused
+# by the wrapper, naming it, since `--workspace` cannot leave a target out.
+unmet_targets=$(integ_unmet_prerequisites | cut -f1 | sort -u)
+suite=(cargo test --workspace)
+if [ -n "$unmet_targets" ]; then
+    mapfile -t unmet_list <<<"$unmet_targets"
+    suite=(bash scripts/with-prerequisites.sh "${unmet_list[@]}" -- "${suite[@]}")
+fi
+
 status=0
-TMPDIR="$scratch" cargo test --workspace >"$log" 2>&1 || status=$?
+TMPDIR="$scratch" "${suite[@]}" >"$log" 2>&1 || status=$?
+# What the wrapper left out, and why; the rest of its output is the suite's.
+skipped=$(grep -e '^\[with-prerequisites\]' -e '^with-prerequisites:' "$log" || true)
+[ -z "$skipped" ] || echo "$skipped"
 
 after=$(list_tmp)
 outside=$(comm -13 <(echo "$before") <(echo "$after") | grep -v -x -e "${scratch#/tmp/}" -e "${log#/tmp/}" || true)
