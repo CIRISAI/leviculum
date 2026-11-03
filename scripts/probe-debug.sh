@@ -17,6 +17,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$REPO/scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it (scripts/nrf-rustflags.sh, order 1368).
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$REPO/scripts/nrf-rustflags.sh"
+nrf_rustflags_export || exit 1
 ELFDIR="$(cargo_target_dir "$REPO/leviculum-nrf")/$NRF_TARGET/release"
 
 die() { echo "probe-debug: ERROR: $*" >&2; exit 1; }

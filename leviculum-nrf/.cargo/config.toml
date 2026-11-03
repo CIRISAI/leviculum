@@ -36,6 +36,13 @@ linker = "flip-link"
 #                                      alone tunes for a generic v7E-M.
 # `scripts/check-nrf-flash-budget.sh` holds the result: every image keeps
 # 8 KiB free or `just nrf-flash-budget` goes red.
+#
+# The path remap (`--remap-path-prefix`, order 1368) is not here: its values
+# are the building host's paths, which a tracked file cannot name.
+# scripts/nrf-rustflags.sh asks for them at build time and appends them
+# through CARGO_TARGET_THUMBV7EM_NONE_EABIHF_RUSTFLAGS, which cargo merges with
+# this list. A plain `cargo build` without it links the same code with the
+# long paths in its panic strings.
 rustflags = [
     "-C", "link-arg=-Tlink.x", "-D", "warnings",
     "-C", "link-arg=--icf=all",

@@ -58,6 +58,11 @@ check_limit
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$ROOT/scripts/cargo-target-dir.sh"
+# The firmware is built with the checkout's paths remapped, the same way in
+# every script that builds it (scripts/nrf-rustflags.sh, order 1368).
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$ROOT/scripts/nrf-rustflags.sh"
+nrf_rustflags_export || exit 1
 OUT="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 
 # GNU objdump prints the immediate in decimal, llvm-objdump in hex; the
