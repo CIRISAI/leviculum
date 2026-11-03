@@ -209,6 +209,29 @@ pub trait PropagationStore {
         Ok(())
     }
 
+    /// Visit the entries whose [`StoredMessage::received_at`] is below
+    /// `before`, in no promised order, until `visit` breaks: the walk the
+    /// role's expiry sweep reads
+    /// ([`PropagationNode::tick`](crate::PropagationNode::tick)).
+    ///
+    /// The default is one directory pass, so it costs the whole store
+    /// whatever expired. A store that keeps its entries in receive-time
+    /// order overrides it to cost what the visitor reads: the host node
+    /// walked 300 000 entries for it every maintenance tick, under the core
+    /// lock (leviculum#478).
+    fn for_each_received_before(
+        &self,
+        before: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        let mut done = false;
+        self.for_each(&mut |meta| {
+            if !done && meta.received_at < before {
+                done = visit(meta).is_break();
+            }
+        })
+    }
+
     /// Remove one message. Returns whether it was present.
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError>;
 

@@ -35,6 +35,11 @@ pub mod mailbox;
 pub(crate) mod peering;
 pub(crate) mod validation;
 
+#[cfg(test)]
+mod expiry_cost;
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use validation::reprice_stored_values;
 
 /// Where the message store lives under a data directory, and what the start

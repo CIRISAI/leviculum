@@ -25,6 +25,7 @@
 //! it is implemented. The reference pin is 795fdaa (LXMF 1.1.0).
 
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use leviculum_core::constants::RESOURCE_HASHMAP_LEN;
 use leviculum_core::resource::{ResourceSource, SourceError, RESOURCE_RANDOM_HASH_SIZE};
@@ -66,6 +67,21 @@ pub const MESSAGE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 /// six times the message expiry, as the reference prunes its own cache
 /// (`clean_transient_id_caches`, `reference/LXMF/LXMF/LXMRouter.py:1011`).
 pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
+
+/// How long past [`PROCESSED_ID_EXPIRY_SECS`] a processed ID may stay, so
+/// the cache is pruned at most once a day instead of walked on every
+/// maintenance tick. The cache holds every ID accepted in up to 180 days,
+/// about 56 000 a day on the field node (leviculum#478); a day longer only
+/// widens the duplicate window by a day.
+pub const PROCESSED_ID_PRUNE_SLACK_SECS: u64 = 24 * 60 * 60;
+
+/// How many expired messages [`PropagationNode::tick_at_most`]'s caller in
+/// a host hook takes per call: purging one and logging it costs a few
+/// microseconds, so a backlog of tens of thousands (a node back from a long
+/// stop) would hold the core lock for a whole sweep, 113 ms for 74 645 on
+/// the coder host (order 1295's bench). A caller that gets this many back
+/// comes again soon.
+pub const MAX_EXPIRED_PER_TICK: usize = 128;
 
 /// Bytes the request/response envelope adds to a response body on its way
 /// to the wire: msgpack `fixarray(2)` (one byte) plus the 16-byte request
@@ -936,6 +952,9 @@ pub struct PropagationNode<S> {
     /// `has_message` filter tolerates (`message_list_response`,
     /// `reference/LXMF/LXMF/LXMRouter.py:1581`).
     processed: alloc::collections::BTreeMap<TransientId, u64>,
+    /// When [`Self::tick`] next walks `processed`: the oldest entry's expiry
+    /// plus [`PROCESSED_ID_PRUNE_SLACK_SECS`], `u64::MAX` while empty.
+    processed_prune_at: u64,
     /// Ids that left the store before they expired (a confirmed
     /// collection, an own-mailbox delivery, a displacement), with when,
     /// for a host to persist: `None` unless [`Self::track_departures`]
@@ -976,6 +995,7 @@ impl<S: PropagationStore> PropagationNode<S> {
             store,
             config,
             processed: alloc::collections::BTreeMap::new(),
+            processed_prune_at: u64::MAX,
             departed: None,
             compute_stamp_value: false,
             calendar_jump_floor: 0,
@@ -1276,7 +1296,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         if let Err(error) = result {
             return UploadOutcome::StoreFailed(error);
         }
-        self.processed.insert(transient_id, now_secs);
+        self.remember_processed(transient_id, now_secs);
 
         UploadOutcome::Accepted {
             transient_id,
@@ -1556,8 +1576,15 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// Remember an explicit client confirmation only after its exact deletion
     /// has committed, including an independently verified uncertain receipt.
     pub fn note_confirmed_deletion(&mut self, transient_id: &TransientId, now_secs: u64) {
-        self.processed.insert(*transient_id, now_secs);
+        self.remember_processed(*transient_id, now_secs);
         self.note_departure(transient_id, now_secs);
+    }
+
+    fn remember_processed(&mut self, transient_id: TransientId, at_secs: u64) {
+        self.processed.insert(transient_id, at_secs);
+        self.processed_prune_at = self
+            .processed_prune_at
+            .min(at_secs.saturating_add(PROCESSED_ID_EXPIRY_SECS + PROCESSED_ID_PRUNE_SLACK_SECS));
     }
 
     fn note_departure(&mut self, transient_id: &TransientId, now_secs: u64) {
@@ -1600,7 +1627,7 @@ impl<S: PropagationStore> PropagationNode<S> {
             if now_secs.saturating_sub(departed_at) > window {
                 continue;
             }
-            self.processed.insert(transient_id, departed_at);
+            self.remember_processed(transient_id, departed_at);
             self.note_departure(&transient_id, departed_at);
             restored += 1;
         }
@@ -1650,26 +1677,60 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// birth anchor is the build timestamp, which no value test can tell
     /// apart from real time.
     pub fn tick(&mut self, now_secs: u64) -> Vec<Eviction> {
+        self.tick_at_most(now_secs, usize::MAX)
+    }
+
+    /// [`Self::tick`], expiring at most `max_expired` messages, oldest
+    /// first over a store indexed by receive time: a host calls it under
+    /// the core lock, and comes again soon when it got `max_expired` back
+    /// ([`MAX_EXPIRED_PER_TICK`]).
+    ///
+    /// Neither half walks what did not expire. The store hands over only
+    /// the entries received before `now - expiry`
+    /// ([`PropagationStore::for_each_received_before`]); the processed-ID
+    /// cache is walked once its oldest entry is due, at most once a day
+    /// ([`PROCESSED_ID_PRUNE_SLACK_SECS`]). Both walked every entry on every
+    /// tick before, 24.6 ms on the field node's Odroid at 300 000 messages
+    /// (leviculum#478).
+    pub fn tick_at_most(&mut self, now_secs: u64, max_expired: usize) -> Vec<Eviction> {
         let expiry = self.config.message_expiry_secs;
         let floor = self.calendar_jump_floor;
         let mut expired = Vec::new();
-        let _ = self.store.for_each(&mut |meta: &StoredMessage| {
-            if floor > 0 && meta.received_at <= floor && now_secs > floor {
-                return;
-            }
-            if now_secs.saturating_sub(meta.received_at) > expiry {
-                expired.push(Eviction {
-                    transient_id: meta.transient_id,
-                    size: meta.size,
-                    age_secs: now_secs.saturating_sub(meta.received_at),
-                    reason: EvictionReason::Expired,
-                });
-            }
-        });
+        // `now - received_at > expiry` is `received_at < now - expiry`.
+        let before = now_secs.saturating_sub(expiry);
+        let _ = self
+            .store
+            .for_each_received_before(before, &mut |meta: &StoredMessage| {
+                if expired.len() >= max_expired {
+                    return ControlFlow::Break(());
+                }
+                if floor > 0 && meta.received_at <= floor && now_secs > floor {
+                    return ControlFlow::Continue(());
+                }
+                if now_secs.saturating_sub(meta.received_at) > expiry {
+                    expired.push(Eviction {
+                        transient_id: meta.transient_id,
+                        size: meta.size,
+                        age_secs: now_secs.saturating_sub(meta.received_at),
+                        reason: EvictionReason::Expired,
+                    });
+                }
+                ControlFlow::Continue(())
+            });
         expired.retain(|eviction| self.store.purge(&eviction.transient_id).unwrap_or(false));
 
-        self.processed
-            .retain(|_, received| now_secs.saturating_sub(*received) <= PROCESSED_ID_EXPIRY_SECS);
+        if now_secs >= self.processed_prune_at {
+            let mut oldest = u64::MAX;
+            self.processed.retain(|_, received| {
+                let keep = now_secs.saturating_sub(*received) <= PROCESSED_ID_EXPIRY_SECS;
+                if keep {
+                    oldest = oldest.min(*received);
+                }
+                keep
+            });
+            self.processed_prune_at =
+                oldest.saturating_add(PROCESSED_ID_EXPIRY_SECS + PROCESSED_ID_PRUNE_SLACK_SECS);
+        }
         if let Some(departed) = self.departed.as_mut() {
             departed.retain(|_, left| now_secs.saturating_sub(*left) <= expiry);
         }

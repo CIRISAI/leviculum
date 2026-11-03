@@ -1913,3 +1913,42 @@ fn list_pressure_reports_throttling_instead_of_hiding_stored_mail() {
     );
     assert!(node.store().contains(&id).unwrap());
 }
+
+/// Order 1295, leviculum#478: the processed-ID cache is pruned once its
+/// oldest entry is a slack day past the 180-day window, not walked on every
+/// tick, and it still forgets that entry and keeps the younger ones.
+#[test]
+fn the_processed_cache_is_pruned_a_slack_day_after_its_oldest_is_due() {
+    const DAY: u64 = 24 * 60 * 60;
+    let mut node = node(64 * 1024);
+    let old = envelope(7, 1);
+    let young = envelope(7, 2);
+    let start = 1_000;
+    let _ = accepted_id(&node.handle_upload(&old, start, stamp_of_value_zero));
+    let _ = accepted_id(&node.handle_upload(&young, start + 100 * DAY, stamp_of_value_zero));
+    let is_duplicate =
+        |node: &mut PropagationNode<MemoryPropagationStore>, bytes: &[u8], now| match node
+            .handle_upload(bytes, now, stamp_of_value_zero)
+        {
+            UploadOutcome::Accepted { duplicate, .. } => duplicate,
+            other => panic!("{other:?}"),
+        };
+
+    // Due by the window, inside the slack: the store forgot both, the
+    // cache still knows both.
+    let due = start + PROCESSED_ID_EXPIRY_SECS + 10;
+    assert_eq!(
+        node.tick(due).len(),
+        2,
+        "both messages expired from the store"
+    );
+    assert!(is_duplicate(&mut node, &old, due));
+    assert!(is_duplicate(&mut node, &young, due));
+
+    // Past the slack: the old one is forgotten and stored again as new,
+    // the young one is still a duplicate.
+    let pruned = due + PROCESSED_ID_PRUNE_SLACK_SECS;
+    assert!(node.tick(pruned).is_empty());
+    assert!(!is_duplicate(&mut node, &old, pruned));
+    assert!(is_duplicate(&mut node, &young, pruned));
+}

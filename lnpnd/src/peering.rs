@@ -2046,6 +2046,8 @@ mod tests {
     use leviculum_std::driver::{StdClock, StdStorage};
     use leviculum_std::FilePropagationStore;
 
+    use crate::test_support::{next_random, NoFsync};
+
     /// A persisted peer as the file store would hand it back: heard just
     /// now, synced before, alive, offered 10 and took `outgoing`.
     fn record(hash: [u8; 16], outgoing: u64, now: u64) -> PeerRecord {
@@ -2150,14 +2152,6 @@ mod tests {
         assert_eq!(peers.len(), MAX_PEERS_DEFAULT - 2);
         assert!(peers.contains(&static_peer), "a static peer never rotates");
         assert!(!peers.contains(&[5; 16]) && !peers.contains(&[12; 16]));
-    }
-
-    /// A deterministic xorshift64 for the randomised rotation tests.
-    fn next_random(state: &mut u64) -> u64 {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        *state
     }
 
     /// A runtime whose table holds one peer per cursor, as restored from a
@@ -2352,16 +2346,6 @@ mod tests {
         }
         fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
             self.store.contains(transient_id)
-        }
-    }
-
-    /// No device under the store: the benchmark fills hundreds of thousands
-    /// of files, and the walk it prices reads none of them.
-    struct NoFsync;
-
-    impl leviculum_std::durable::Fsync for NoFsync {
-        fn sync(&self, _handle: &std::fs::File) -> std::io::Result<()> {
-            Ok(())
         }
     }
 

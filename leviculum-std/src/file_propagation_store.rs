@@ -75,8 +75,12 @@
 //! last key, and [`PropagationStore::meta`] is a lookup. Without it every
 //! outbound sync tick walked the whole store: 170 ms a tick on the field
 //! node's Odroid at 300 000 messages (leviculum#478).
-//! Both indexes change together, through `index_insert` and `index_remove`
-//! only.
+//! A third copy ordered by receive time serves the expiry sweep
+//! ([`PropagationStore::for_each_received_before`]): it reads what expired,
+//! where it walked the whole store every maintenance tick, 24.6 ms on the
+//! Odroid at about 300 000 messages (order 1171's field profile,
+//! leviculum#478). All three indexes change together, through
+//! `index_insert` and `index_remove` only.
 //!
 //! [`write_behind`]: FilePropagationStore::write_behind
 //! [`writes_issued`]: FilePropagationStore::writes_issued
@@ -111,6 +115,9 @@ pub struct FilePropagationStore {
     /// `index` ordered by `(sequence, transient_id)` (module docs, "The
     /// sequence index").
     by_sequence: BTreeSet<(u64, TransientId)>,
+    /// `index` ordered by `(received_at, transient_id)`, what the expiry
+    /// sweep reads (module docs, "The sequence index").
+    by_received: BTreeSet<(u64, TransientId)>,
     /// Last assigned append sequence; recovered as the maximum on disk.
     last_sequence: u64,
     fsync: Arc<dyn Fsync>,
@@ -313,12 +320,17 @@ impl FilePropagationStore {
             .values()
             .map(|entry| (entry.meta.sequence, entry.meta.transient_id))
             .collect();
+        let by_received = index
+            .values()
+            .map(|entry| (entry.meta.received_at, entry.meta.transient_id))
+            .collect();
         Ok(Self {
             dir,
             capacity,
             used,
             index,
             by_sequence,
+            by_received,
             last_sequence,
             fsync,
             writer: None,
@@ -450,21 +462,27 @@ impl FilePropagationStore {
         }
     }
 
-    /// Put one entry in both indexes, replacing whatever the ID held.
+    /// Put one entry in all three indexes, replacing whatever the ID held.
     fn index_insert(&mut self, transient_id: TransientId, entry: IndexEntry) {
         let sequence = entry.meta.sequence;
+        let received_at = entry.meta.received_at;
         if let Some(previous) = self.index.insert(transient_id, entry) {
             self.by_sequence
                 .remove(&(previous.meta.sequence, transient_id));
+            self.by_received
+                .remove(&(previous.meta.received_at, transient_id));
         }
         self.by_sequence.insert((sequence, transient_id));
+        self.by_received.insert((received_at, transient_id));
     }
 
-    /// Take one entry out of both indexes.
+    /// Take one entry out of all three indexes.
     fn index_remove(&mut self, transient_id: &TransientId) -> Option<IndexEntry> {
         let entry = self.index.remove(transient_id)?;
         self.by_sequence
             .remove(&(entry.meta.sequence, *transient_id));
+        self.by_received
+            .remove(&(entry.meta.received_at, *transient_id));
         Some(entry)
     }
 
@@ -750,6 +768,25 @@ impl PropagationStore for FilePropagationStore {
     ) -> Result<(), StorageError> {
         let above = (Bound::Excluded((cursor, [0xff; 32])), Bound::Unbounded);
         for (_, transient_id) in self.by_sequence.range(above) {
+            let Some(entry) = self.index.get(transient_id) else {
+                continue;
+            };
+            if visit(&entry.meta).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// The receive-time index below `before`, oldest first: what expired,
+    /// not the store (module docs, "The sequence index"). Queued, unconfirmed appends are
+    /// not visited, as `for_each` does not visit them.
+    fn for_each_received_before(
+        &self,
+        before: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        for (_, transient_id) in self.by_received.range(..(before, [0u8; 32])) {
             let Some(entry) = self.index.get(transient_id) else {
                 continue;
             };
@@ -1459,10 +1496,37 @@ mod tests {
                 .unwrap();
             assert_eq!(store.meta(id).unwrap(), walked, "step {step}");
         }
+        let mut received: Vec<u64> = Vec::new();
+        store
+            .for_each(&mut |meta| received.push(meta.received_at))
+            .unwrap();
+        received.sort_unstable();
+        let middle = received.get(received.len() / 2).copied().unwrap_or(0);
+        for before in [0, middle, middle + 1, u64::MAX] {
+            let mut walked = Vec::new();
+            store
+                .for_each(&mut |meta| {
+                    if meta.received_at < before {
+                        walked.push(*meta);
+                    }
+                })
+                .unwrap();
+            let mut indexed = Vec::new();
+            store
+                .for_each_received_before(before, &mut |meta| {
+                    indexed.push(*meta);
+                    ControlFlow::Continue(())
+                })
+                .unwrap();
+            walked.sort_by_key(|meta| meta.transient_id);
+            indexed.sort_by_key(|meta| meta.transient_id);
+            assert_eq!(indexed, walked, "step {step}, received before {before}");
+        }
     }
 
-    /// leviculum#478: the sequence index answers `for_each_above`,
-    /// `newest_sequence`, `count` and `meta` exactly as the whole-store walk
+    /// leviculum#478: the sequence and receive-time indexes answer
+    /// `for_each_above`, `for_each_received_before`, `newest_sequence`,
+    /// `count` and `meta` exactly as the whole-store walk
     /// did, through appends, re-appends of a stored ID, purges, queued
     /// writes the writer has not confirmed, and a reopen; and an ordered
     /// walk that breaks visits no further.

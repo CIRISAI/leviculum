@@ -45,6 +45,7 @@ use leviculum_lxmf::peering::{
 use leviculum_lxmf::propagation::{MessageListResponse, PeerError, PropagationUpload};
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_node::link_idle_past_bound;
+use leviculum_lxmf::MAX_EXPIRED_PER_TICK;
 use leviculum_lxmf::{
     Eviction, EvictionReason, FetchPlan, GetOutcome, Message, PropagationBodyStore,
     PropagationNode, PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome,
@@ -341,6 +342,10 @@ pub struct Engine<S> {
     sync_interval_ms: u64,
     rotation_interval_ms: u64,
     next_maintenance_at: u64,
+    /// The last expiry pass stopped at [`MAX_EXPIRED_PER_TICK`], so the
+    /// next hook takes the next slice instead of waiting a whole
+    /// maintenance period.
+    expiry_backlog: bool,
     /// Stamp validation off the core lock (deliverable 5): the hook
     /// queues, the worker grinds, the drain applies.
     validation: ValidationWorker,
@@ -548,6 +553,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 sync_interval_ms: SYNC_INTERVAL_SECS * 1000,
                 rotation_interval_ms: ROTATION_INTERVAL_SECS * 1000,
                 next_maintenance_at: 0,
+                expiry_backlog: false,
                 validation: ValidationWorker::spawn(),
                 pending: VecDeque::new(),
                 unproven: VecDeque::new(),
@@ -2070,9 +2076,15 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
         }
         self.profile.lap(Section::Announce);
 
-        if now_ms >= self.next_maintenance_at {
-            let evicted = ready.node.tick(unix_secs());
+        let sweep_due = now_ms >= self.next_maintenance_at;
+        if sweep_due || self.expiry_backlog {
+            // A slice a hook, so a backlog (a node back from a long stop)
+            // does not hold the core lock for the whole sweep.
+            let evicted = ready.node.tick_at_most(unix_secs(), MAX_EXPIRED_PER_TICK);
+            self.expiry_backlog = evicted.len() >= MAX_EXPIRED_PER_TICK;
             log_evictions(&evicted, &self.events);
+        }
+        if sweep_due {
             // The store's own line: how full it is against its limit, and
             // -- because it fires on a fixed cadence whether or not any
             // traffic arrived -- the log's liveness heartbeat. A quiet node
@@ -2996,6 +3008,77 @@ mod tests {
             })
             .collect();
         assert_eq!(evicted, vec![1], "one displaced message, one operator line");
+    }
+
+    /// Order 1295: a store holding more expired messages than one slice
+    /// drains them a slice per hook, each slice on the operator line, and
+    /// the hook asks to come back at the poll interval rather than a
+    /// maintenance period later; once drained, nothing is evicted until the
+    /// next sweep. Positive control: the backlog is real, a single
+    /// unbounded tick takes all of it.
+    #[test]
+    fn an_expiry_backlog_drains_a_slice_a_hook() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let backlog = 2 * MAX_EXPIRED_PER_TICK + 44;
+        let received_at = unix_secs() - 40 * 24 * 60 * 60;
+        let mut store = MemoryPropagationStore::new(1_000_000);
+        for n in 0..backlog {
+            let mut transient_id = [0u8; 32];
+            transient_id[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            store
+                .append(&transient_id, received_at, 0, &synced_message(n as u8))
+                .expect("room");
+        }
+        let mut control = leviculum_lxmf::PropagationNode::new(store.clone(), cost_free());
+        assert_eq!(control.tick(unix_secs()).len(), backlog, "positive control");
+
+        let (mut engine, events) = Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: cost_free(),
+            store,
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 1_000_000,
+            delivery_limit_kb: 1000,
+        });
+        let start_ms = core.now_ms();
+        let mut slices = Vec::new();
+        for hook in 0..5u64 {
+            let now_ms = start_ms + hook * POLL_INTERVAL_MS;
+            let out = engine.on_tick(&mut core, now_ms);
+            if hook < 2 {
+                assert!(
+                    out.next_deadline_ms
+                        .is_some_and(|due| due <= now_ms + POLL_INTERVAL_MS),
+                    "hook {hook}: a backlog comes back at the poll interval"
+                );
+            }
+            slices.extend(events.try_iter().filter_map(|event| match event {
+                EngineEvent::Evicted { count } => Some(count),
+                _ => None,
+            }));
+        }
+        assert_eq!(
+            slices,
+            vec![MAX_EXPIRED_PER_TICK, MAX_EXPIRED_PER_TICK, 44],
+            "a slice a hook, then nothing until the next sweep"
+        );
+        let State::Ready(ready) = &engine.state else {
+            panic!("engine must be ready");
+        };
+        assert_eq!(ready.node.store().count(), Ok(0));
+        assert_eq!(
+            engine.next_maintenance_at,
+            start_ms + STORE_MAINTENANCE_SECS * 1000,
+            "the drain does not move the sweep's cadence"
+        );
     }
 
     /// The other two ways the same decision can go wrong, both of which the

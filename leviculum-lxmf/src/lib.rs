@@ -125,8 +125,8 @@ pub use propagation_client::{
 };
 pub use propagation_node::{
     Eviction, EvictionReason, FetchPlan, FetchSource, GetError, GetOutcome, PreparedFetch,
-    PreparedGet, PropagationNode, PropagationNodeConfig, UploadOutcome, MESSAGE_EXPIRY_SECS,
-    PN_META_NAME, STOCK_PEER_MIN_STAMP_VALUE,
+    PreparedGet, PropagationNode, PropagationNodeConfig, UploadOutcome, MAX_EXPIRED_PER_TICK,
+    MESSAGE_EXPIRY_SECS, PN_META_NAME, STOCK_PEER_MIN_STAMP_VALUE,
 };
 pub use propagation_store::{
     ConfirmedPurge, MemoryPropagationStore, PropagationBodyStore, PropagationStore, StoredMessage,

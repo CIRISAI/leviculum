@@ -195,4 +195,12 @@
 # a_sync_round_asks_the_store_without_walking_it, which runs in the suite.
 # Run by hand with LNPND_BENCH_DIR (lnpnd/src/peering.rs, the test's docs)
 # whenever the peering path or the file store's indexes change.
-2    -p lnpnd --lib
+# 2 -> 3 (2026-11-03, order 1295, #478): expiry_tick_cost_over_a_field_sized_store
+# prices one maintenance tick over a file store of 300 000 messages spread
+# over 40 days, the whole-store expiry walk against the receive-time index,
+# idle, at the first backlog and in steady state. Same fill cost as the one
+# above. What it measured is pinned deterministically by
+# an_expiry_tick_reads_what_expired_not_the_store, which runs in the suite.
+# Run by hand with LNPND_BENCH_DIR (lnpnd/src/expiry_cost.rs, the test's
+# docs) whenever the expiry sweep or the file store's indexes change.
+3    -p lnpnd --lib
