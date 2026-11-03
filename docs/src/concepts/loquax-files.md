@@ -106,7 +106,7 @@ pressable. `loquax send --file FILE` sends one from a script.
   does; a tap asks `Query::SaveFile`, gets the path, and starts `ACTION_VIEW`
   with the type from the extension; where nothing opens that kind the
   share sheet is offered, and where nothing takes it either the chat says
-  "No app here opens this file." A long press shares it.
+  "No app on this device opens this file." A long press shares it.
 - `FilesProvider` (authority `<package>.files`, not exported, grants URI
   permissions) serves only files two levels under `files/files/`, read
   only, resolved through canonical paths.

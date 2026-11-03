@@ -2439,7 +2439,7 @@ mod tests {
                     .filter(move |p| p.len() >= 4 && !en.contains(p))
             })
             .collect();
-        assert!(german.contains(&"hat ein Foto geschickt (zu groß für Funk)"));
+        assert!(german.contains(&"hat ein Foto geschickt (zu groß für die Funkstrecke)"));
         for (text, english) in &texts {
             assert_eq!(text, english);
             for word in &german {

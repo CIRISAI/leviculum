@@ -1683,7 +1683,7 @@ impl App {
                 );
             }
             Message::CodePicked(path) => {
-                match path.and_then(|p| p.map(|p| read_code(&p)).transpose()) {
+                match path.and_then(|p| p.map(|p| read_code(&p, self.lang)).transpose()) {
                     Ok(Some(code)) => {
                         self.new_address = Some(code);
                         return self.chat(Message::NewGo);
@@ -2472,28 +2472,25 @@ fn held_pointer(
     }
 }
 
-/// The language the desktop's locale names: the scene's words are said in
-/// it.
 /// The chooser's title for a picture of a code, in the window's words.
 pub(crate) fn code_title(lang: Lang) -> &'static str {
-    match lang {
-        Lang::De => "Code aus einem Bild lesen",
-        Lang::En => "Read a code from a picture",
-    }
+    StrId::CodeFromPicture.text(lang)
 }
 
 /// The first QR code in the picture at `path` (1341), the phone's
 /// scanner's decoder over the file's pixels; a picture without one is
-/// said.
-fn read_code(path: &std::path::Path) -> Result<String, String> {
+/// said in the reader's words, without the file's path (1377).
+fn read_code(path: &std::path::Path, lang: Lang) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     loquax::scan::image_codes(&bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .into_iter()
         .next()
-        .ok_or_else(|| format!("{}: no QR code in this picture", path.display()))
+        .ok_or_else(|| StrId::CodeNotInPicture.text(lang).to_string())
 }
 
+/// The language the desktop's locale names: the scene's words are said in
+/// it.
 fn locale() -> Lang {
     loquax::engine::locale()
 }
@@ -3570,7 +3567,7 @@ mod tests {
             .seen
             .notice
             .as_deref()
-            .is_some_and(|n| n.ends_with("no QR code in this picture")));
+            .is_some_and(|n| n == "There is no code in this picture."));
     }
 
     /// A photo, a file and a voice message without words (1268): each is

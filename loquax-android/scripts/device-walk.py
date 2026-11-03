@@ -255,7 +255,7 @@ SHARE_ENDED = b"\xa5ended\xc3"
 # chat shows where no app on the phone opens the kind.
 ATTACH_FILE = "File"
 FILE_WORDS = re.compile(r"^File (?P<name>.+), \d+(?:\.\d)? (?:B|KB|MB)$")
-FILE_NO_APP = "No app here opens this file."
+FILE_NO_APP = "No app on this device opens this file."
 # A voice message (1222): what a screen reader says for a bubble's player
 # (the catalogue's scene_voice), its two buttons, and the fixture the
 # debug build records instead of the microphone (Voice.FIXTURE).

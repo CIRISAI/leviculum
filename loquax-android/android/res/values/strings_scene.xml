@@ -139,7 +139,7 @@
     <string name="group_state_waiting">invited, waiting for them to come online</string>
     <string name="group_state_undelivered">invited, not delivered</string>
     <string name="group_state_left">left</string>
-    <string name="group_home_too_old">Your home cannot host groups yet. Update it.</string>
+    <string name="group_home_too_old">Your mailbox cannot hold groups yet. Update Loquax there.</string>
     <string name="group_you_left">You left %1$s</string>
     <string name="group_delete">Delete group</string>
     <string name="group_delete_ask">Delete %1$s for everyone?</string>
@@ -191,7 +191,7 @@
     <string name="scene_open_file">Open file</string>
     <string name="file_too_large">This file is %1$s. A message carries at most %2$s.</string>
     <string name="file_unreadable">This file could not be read.</string>
-    <string name="file_no_app">No app here opens this file.</string>
+    <string name="file_no_app">No app on this device opens this file.</string>
     <string name="scene_voice">Voice message, %1$s</string>
     <string name="scene_voice_unplayable">Voice message, %1$s, which cannot be played here</string>
     <string name="scene_play_voice">Play</string>
@@ -220,7 +220,7 @@
     <string name="scene_attach">Attach</string>
     <string name="scene_locate">My position</string>
     <string name="scene_camera">Take a photo</string>
-    <string name="camera_no_app">No camera app here takes a photo.</string>
+    <string name="camera_no_app">There is no camera app on this device.</string>
     <string name="scene_staged">Photo to send, %1$s</string>
     <string name="scene_unstage">Remove photo</string>
     <string name="caption_hint">Add a caption</string>
@@ -246,6 +246,8 @@
     <string name="fix_now">Found just now</string>
     <string name="code_foreign">That is not a Loquax code.</string>
     <string name="code_damaged">This code is damaged. Ask for it again.</string>
+    <string name="code_from_picture">Read a code from a picture</string>
+    <string name="code_not_in_picture">There is no code in this picture.</string>
     <string name="code_is_mailbox">That code is for a mailbox, not for a friend.</string>
     <string name="new_scan">Scan a code</string>
     <string name="new_paste">Paste a code</string>
@@ -266,7 +268,7 @@
     <string name="move_failed">The move did not work. Your old phone still has everything.</string>
     <string name="move_has_address">This phone already has an address. Only a new phone can take one over.</string>
     <string name="moved_away">This phone has moved. Your mailbox is on your new phone now, and this phone sends nothing.</string>
-    <string name="restore_live">This address is in use on another device right now. Restored here too, both lose messages. Move from the old phone instead, or stop Loquax there first.</string>
+    <string name="restore_live">This address is in use on another device right now. If you restore it here too, both devices lose messages. Move from the old phone instead, or stop Loquax there first.</string>
     <string name="details">Details</string>
     <string name="scene_zoom_in">Zoom in</string>
     <string name="scene_zoom_out">Zoom out</string>

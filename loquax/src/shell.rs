@@ -382,7 +382,11 @@ impl Shell {
                         .and_then(|bytes| loquax::scan::image_codes(&bytes));
                     answers.push(match read.map(|codes| codes.into_iter().next()) {
                         Ok(Some(code)) => UiEvent::CodeRead(code),
-                        Ok(None) => UiEvent::Notice(format!("{}: no code in it", path.display())),
+                        Ok(None) => UiEvent::Notice(
+                            loquax::ui::strings::StrId::CodeNotInPicture
+                                .text(self.model.lang)
+                                .to_string(),
+                        ),
                         Err(line) => UiEvent::Notice(line),
                     });
                 }

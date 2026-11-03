@@ -53,12 +53,12 @@ leviculum_ui::catalogue! {
     Archived = "archived", "Archived", "Archiviert";
     Pin = "pin", "Pin", "Fixieren";
     Unpin = "unpin", "Unpin", "Lösen";
-    Mute = "mute", "Mute", "Stumm schalten";
-    Unmute = "unmute", "Unmute", "Ton an";
+    Mute = "mute", "Mute", "Stummschalten";
+    Unmute = "unmute", "Unmute", "Stummschaltung aufheben";
     Archive = "archive", "Archive", "Archivieren";
     Unarchive = "unarchive", "Unarchive", "Aus dem Archiv holen";
-    MarkRead = "mark_read", "Mark as read", "Gelesen";
-    MarkUnread = "mark_unread", "Mark as unread", "Ungelesen";
+    MarkRead = "mark_read", "Mark as read", "Als gelesen markieren";
+    MarkUnread = "mark_unread", "Mark as unread", "Als ungelesen markieren";
     Delete = "delete", "Delete", "Löschen";
     // Times and the liveness words (1209).
     Today = "today", "Today", "Heute";
@@ -166,10 +166,10 @@ leviculum_ui::catalogue! {
     GroupNameHint = "group_name_hint", "Group name", "Name der Gruppe";
     GroupPickTitle = "group_pick_title", "Add members", "Mitglieder hinzufügen";
     GroupPicked = "group_picked", "%1$d selected", "%1$d ausgewählt";
-    GroupTrustCreate = "group_trust_create", "%1$s is kept on your mailbox. Messages in the group can be read there.", "%1$s liegt auf deinem Postfach. Dort sind die Nachrichten der Gruppe lesbar.";
-    GroupTrustJoin = "group_trust_join", "%1$s is kept on %2$s's mailbox. %2$s could read the group's messages.", "%1$s liegt auf dem Postfach von %2$s. %2$s könnte die Nachrichten der Gruppe lesen.";
+    GroupTrustCreate = "group_trust_create", "%1$s is kept on your mailbox. Messages in the group can be read there.", "%1$s liegt in deinem Postfach. Dort sind die Nachrichten der Gruppe lesbar.";
+    GroupTrustJoin = "group_trust_join", "%1$s is kept on %2$s's mailbox. %2$s could read the group's messages.", "%1$s liegt im Postfach von %2$s. %2$s könnte die Nachrichten der Gruppe lesen.";
     GroupInvited = "group_invited", "%1$s invited you to %2$s", "%1$s lädt dich zu %2$s ein";
-    GroupYouInvited = "group_you_invited", "You invited them to %1$s", "Du hast eingeladen zu %1$s";
+    GroupYouInvited = "group_you_invited", "You invited them to %1$s", "Du hast zu %1$s eingeladen";
     GroupJoin = "group_join", "Join", "Beitreten";
     GroupJoined = "group_joined_card", "You joined %1$s", "Du bist %1$s beigetreten";
     GroupInvitation = "group_invitation", "Invitation", "Einladung";
@@ -192,7 +192,7 @@ leviculum_ui::catalogue! {
     GroupStateWaiting = "group_state_waiting", "invited, waiting for them to come online", "eingeladen, wartet, bis das Mitglied online ist";
     GroupStateUndelivered = "group_state_undelivered", "invited, not delivered", "eingeladen, nicht zugestellt";
     GroupStateLeft = "group_state_left", "left", "ausgetreten";
-    GroupHomeTooOld = "group_home_too_old", "Your home cannot host groups yet. Update it.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.";
+    GroupHomeTooOld = "group_home_too_old", "Your mailbox cannot hold groups yet. Update Loquax there.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere Loquax dort.";
     GroupYouLeft = "group_you_left", "You left %1$s", "Du hast %1$s verlassen";
     GroupDelete = "group_delete", "Delete group", "Gruppe löschen";
     GroupDeleteAsk = "group_delete_ask", "Delete %1$s for everyone?", "%1$s für alle löschen?";
@@ -210,9 +210,9 @@ leviculum_ui::catalogue! {
     GroupNoteEnded = "group_note_ended", "%1$s ended the group.", "%1$s hat die Gruppe beendet.";
     GroupNoteYouEnded = "group_note_you_ended", "You ended the group.", "Du hast die Gruppe beendet.";
     GroupNoteAdminEnded = "group_note_admin_ended", "The admin ended the group.", "Der Admin hat die Gruppe beendet.";
-    GroupLeftOutPhoto = "group_left_out_photo", "sent a photo (too large for the radio)", "hat ein Foto geschickt (zu groß für Funk)";
-    GroupLeftOutVoice = "group_left_out_voice", "sent a voice message (too large for the radio)", "hat eine Sprachnachricht geschickt (zu groß für Funk)";
-    GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für Funk)";
+    GroupLeftOutPhoto = "group_left_out_photo", "sent a photo (too large for the radio)", "hat ein Foto geschickt (zu groß für die Funkstrecke)";
+    GroupLeftOutVoice = "group_left_out_voice", "sent a voice message (too large for the radio)", "hat eine Sprachnachricht geschickt (zu groß für die Funkstrecke)";
+    GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für die Funkstrecke)";
     GroupLeftOutGone = "group_left_out_gone", "a message (no longer here)", "eine Nachricht (nicht mehr da)";
     MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
@@ -253,7 +253,7 @@ leviculum_ui::catalogue! {
     OpenFile = "scene_open_file", "Open file", "Datei öffnen";
     FileTooLarge = "file_too_large", "This file is %1$s. A message carries at most %2$s.", "Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.";
     FileUnreadable = "file_unreadable", "This file could not be read.", "Diese Datei ließ sich nicht lesen.";
-    FileNoApp = "file_no_app", "No app here opens this file.", "Keine App hier öffnet diese Datei.";
+    FileNoApp = "file_no_app", "No app on this device opens this file.", "Keine App auf diesem Gerät kann diese Datei öffnen.";
     // Voice messages (1222): the bubble's words, its buttons, the
     // microphone's hint, the slide that cancels, the refusals, and what
     // the phone says without the microphone.
@@ -289,7 +289,7 @@ leviculum_ui::catalogue! {
     Attach = "scene_attach", "Attach", "Anhängen";
     Locate = "scene_locate", "My position", "Meine Position";
     Camera = "scene_camera", "Take a photo", "Foto aufnehmen";
-    CameraNoApp = "camera_no_app", "No camera app here takes a photo.", "Keine Kamera-App hier nimmt ein Foto auf.";
+    CameraNoApp = "camera_no_app", "There is no camera app on this device.", "Auf diesem Gerät gibt es keine Kamera-App.";
     Staged = "scene_staged", "Photo to send, %1$s", "Foto zum Senden, %1$s";
     Unstage = "scene_unstage", "Remove photo", "Foto entfernen";
     CaptionHint = "caption_hint", "Add a caption", "Bildunterschrift hinzufügen";
@@ -320,6 +320,10 @@ leviculum_ui::catalogue! {
     // the palette say for one they cannot take.
     CodeForeign = "code_foreign", "That is not a Loquax code.", "Das ist kein Loquax-Code.";
     CodeDamaged = "code_damaged", "This code is damaged. Ask for it again.", "Dieser Code ist beschädigt. Lass ihn dir noch einmal geben.";
+    // A code read from a picture (1341, 1377): the chooser's title and
+    // what a picture without one says, without the file's path.
+    CodeFromPicture = "code_from_picture", "Read a code from a picture", "Code aus einem Bild lesen";
+    CodeNotInPicture = "code_not_in_picture", "There is no code in this picture.", "In diesem Bild ist kein Code.";
     CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a friend.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
     // The pencil's screen (1263): scan first, paste second, typing under
     // Advanced.
@@ -346,7 +350,7 @@ leviculum_ui::catalogue! {
     MoveFailed = "move_failed", "The move did not work. Your old phone still has everything.", "Der Umzug hat nicht geklappt. Dein altes Handy hat noch alles.";
     MoveHasAddress = "move_has_address", "This phone already has an address. Only a new phone can take one over.", "Dieses Handy hat schon eine Adresse. Nur ein neues Handy kann eine übernehmen.";
     MovedAway = "moved_away", "This phone has moved. Your mailbox is on your new phone now, and this phone sends nothing.", "Dieses Handy ist umgezogen. Dein Postfach ist jetzt auf deinem neuen Handy, und dieses Handy sendet nichts mehr.";
-    RestoreLive = "restore_live", "This address is in use on another device right now. Restored here too, both lose messages. Move from the old phone instead, or stop Loquax there first.", "Diese Adresse ist gerade auf einem anderen Gerät in Betrieb. Hier auch wiederhergestellt, verlieren beide Nachrichten. Zieh lieber vom alten Handy um, oder beende Loquax dort zuerst.";
+    RestoreLive = "restore_live", "This address is in use on another device right now. If you restore it here too, both devices lose messages. Move from the old phone instead, or stop Loquax there first.", "Diese Adresse ist gerade auf einem anderen Gerät in Betrieb. Stellst du sie hier auch wieder her, verlieren beide Geräte Nachrichten. Zieh lieber vom alten Handy um, oder beende Loquax dort zuerst.";
     Details = "details", "Details", "Details";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";

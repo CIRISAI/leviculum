@@ -1587,7 +1587,7 @@ mod tests {
         update(&mut old, UiEvent::GroupMade(Err(NotMade::HomeTooOld)));
         assert_eq!(
             old.current_toast().map(|t| t.text.as_str()),
-            Some("Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.")
+            Some("Dein Postfach kann noch keine Gruppen führen. Aktualisiere Loquax dort.")
         );
         assert!(old.group_draft.is_none(), "nothing to ask again");
         assert_eq!(old.group(&GROUP), None);
@@ -1601,7 +1601,7 @@ mod tests {
         update(&mut english, UiEvent::GroupMade(Err(NotMade::HomeTooOld)));
         assert_eq!(
             english.current_toast().map(|t| t.text.as_str()),
-            Some("Your home cannot host groups yet. Update it.")
+            Some("Your mailbox cannot hold groups yet. Update Loquax there.")
         );
 
         let mut new = asked(Lang::En);
@@ -1985,7 +1985,7 @@ mod tests {
         assert_eq!(title, "Lew lädt dich zu Familie ein");
         assert_eq!(
             trust,
-            "Familie liegt auf dem Postfach von Lew. Lew könnte die Nachrichten der Gruppe lesen."
+            "Familie liegt im Postfach von Lew. Lew könnte die Nachrichten der Gruppe lesen."
         );
         let (title, _) = card(Lang::En);
         assert_eq!(title, "Lew invited you to Familie");
@@ -2624,7 +2624,7 @@ mod tests {
         assert_eq!(
             drawn(Lang::De),
             [
-                "hat ein Foto geschickt (zu groß für Funk): Seht mal",
+                "hat ein Foto geschickt (zu groß für die Funkstrecke): Seht mal",
                 "eine Nachricht (nicht mehr da)",
                 "something new",
             ]
