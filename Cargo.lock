@@ -3145,6 +3145,13 @@ name = "leviculum-queue-budget"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-rrc"
+version = "0.10.0-dev.2"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "leviculum-serial-mux"
 version = "0.1.0"
 dependencies = [

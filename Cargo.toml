@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "leviculum-core",
     "leviculum-micron",
+    # Reticulum Relay Chat (#232, 1379): the envelope codec and a client's
+    # link state, `no_std`, for Loquax's Rooms.
+    "leviculum-rrc",
     "leviculum-mapfill",
     "leviculum-map",
     "leviculum-mapcut",
@@ -47,6 +50,7 @@ members = [
 default-members = [
     "leviculum-core",
     "leviculum-micron",
+    "leviculum-rrc",
     "leviculum-mapfill",
     "leviculum-map",
     "leviculum-mapcut",
