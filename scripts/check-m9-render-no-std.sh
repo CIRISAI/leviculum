@@ -69,8 +69,8 @@ control() {
         rc=0
         printf '%s\n' "$INJECTED" >> "$tmp/$target"
         out="$(check_thumb "$tmp" --offline)" || rc=$?
-        if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qF "$target" \
-                || ! printf '%s\n' "$out" | grep -qF 'std::fs::metadata'; then
+        if [ "$rc" -eq 0 ] || ! grep -qF "$target" <<<"$out" \
+                || ! grep -qF 'std::fs::metadata' <<<"$out"; then
             echo "$TAG CONTROL FAIL: a std::fs call injected into $target was not refused (exit $rc)"
             printf '%s\n' "$out" | sed 's/^/  /'
             return 1
