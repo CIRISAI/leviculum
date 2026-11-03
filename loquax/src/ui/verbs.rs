@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use leviculum_ui::input::InputBuffer;
 use leviculum_ui::toast::ToastKind;
 
-use super::contacts::Ask;
+use super::contacts::{Ask, PathFor};
 use super::intent::{Intent, Switch, Target};
 use super::photos::PhotoSize;
 use super::share::Span;
@@ -280,6 +280,14 @@ impl<B> UiModel<B> {
                 },
                 "or for a while: 15m, 1h, 8h, or until (stopped)".to_string(),
             ],
+            Ask::Path(what) => alloc::vec![
+                match what {
+                    PathFor::Picture(_) => "the picture's path".to_string(),
+                    PathFor::File(_) => "the file's path".to_string(),
+                    PathFor::Code => "the path of a picture of the code".to_string(),
+                },
+                "Enter reads it; ~ is your home".to_string(),
+            ],
             Ask::DeleteAllMaps => alloc::vec![
                 format!(
                     "delete all {} maps? They come back only when you load an area again.",
@@ -352,6 +360,24 @@ impl<B: InputBuffer + Default> UiModel<B> {
         });
     }
 
+    /// The palette's `send picture`, `send file` and `code in a picture`:
+    /// ask for the path.
+    pub(super) fn ask_path(&mut self, picture: bool, code: bool) {
+        let what = match (code, self.conversations.get(self.selected).map(|c| c.peer)) {
+            (true, _) => PathFor::Code,
+            (false, Some(peer)) if picture => PathFor::Picture(peer),
+            (false, Some(peer)) => PathFor::File(peer),
+            (false, None) => {
+                self.toast(ToastKind::Info, "no conversation here".to_string());
+                return;
+            }
+        };
+        self.palette = Some(Palette {
+            ask: Some(Ask::Path(what)),
+            ..Palette::default()
+        });
+    }
+
     /// The palette's `delete all maps`: ask first, as the phone does.
     pub(super) fn ask_delete_all_maps(&mut self) {
         if self.map_setup.regions.is_empty() {
@@ -413,6 +439,20 @@ impl<B: InputBuffer + Default> UiModel<B> {
                 }
             },
             Ask::DeleteAllMaps => alloc::vec![UiEffect::DeleteAllMaps],
+            Ask::Path(_) if typed.is_empty() => Vec::new(),
+            Ask::Path(PathFor::Picture(peer)) => alloc::vec![UiEffect::Attach {
+                peer,
+                path: typed.to_string(),
+                photo: true,
+            }],
+            Ask::Path(PathFor::File(peer)) => alloc::vec![UiEffect::Attach {
+                peer,
+                path: typed.to_string(),
+                photo: false,
+            }],
+            Ask::Path(PathFor::Code) => alloc::vec![UiEffect::ScanCode {
+                path: typed.to_string(),
+            }],
             _ => return None,
         })
     }

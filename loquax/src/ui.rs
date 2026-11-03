@@ -1547,6 +1547,9 @@ pub enum UiEvent {
         peer: intent::Target,
         verb: verbs::PeerVerb,
     },
+    /// A friend's code the shell read from a picture (1371): its
+    /// conversation opens, as a code typed into the palette does.
+    CodeRead(String),
     /// A node announced its position to the mesh (1302,
     /// [`crate::mesh_position`]): `identity` the hash of the identity the
     /// announce proved, `fix` its position, `name` the name a shell knows
@@ -1760,6 +1763,18 @@ pub enum UiEffect {
     /// `delete all maps` once asked): the shell's, which holds the files,
     /// and tells the model the regions left with [`UiEvent::MapSetup`].
     DeleteAllMaps,
+    /// Send the picture (`photo`) or file at `path` to `peer` (1371, the
+    /// terminal's typed path): the shell reads it as the window's chooser
+    /// hands one over, and answers with [`UiEvent::SendPhoto`] or
+    /// [`UiEvent::SendFile`], or a notice.
+    Attach {
+        peer: [u8; 16],
+        path: String,
+        photo: bool,
+    },
+    /// Read the friend's code in the picture at `path` (1371): the shell
+    /// answers with [`UiEvent::CodeRead`], or a notice.
+    ScanCode { path: String },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.
     Recording {
@@ -1906,6 +1921,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::FixAtMapCentre => model.fix_at_map_centre(),
+        UiEvent::CodeRead(code) => model.take_code(&code, false),
         UiEvent::PeerWord { peer, verb } => match model.peer_verb(peer, verb) {
             Some(event) => update(model, event),
             None => Vec::new(),
@@ -3584,6 +3600,18 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
         PaletteCommand::StopSharing => model.stop_share_here(),
         PaletteCommand::DeleteAllMaps => {
             model.ask_delete_all_maps();
+            Vec::new()
+        }
+        PaletteCommand::SendPicture => {
+            model.ask_path(true, false);
+            Vec::new()
+        }
+        PaletteCommand::SendFile => {
+            model.ask_path(false, false);
+            Vec::new()
+        }
+        PaletteCommand::CodeFromPicture => {
+            model.ask_path(false, true);
             Vec::new()
         }
         PaletteCommand::Archive => model.toggle_archive(),
@@ -12775,5 +12803,48 @@ pub(crate) mod tests {
             model.answer_ask(ask, String::new()),
             [UiEffect::DeleteAllMaps]
         );
+    }
+
+    /// `send picture`, `send file` and `code in a picture` ask a path and
+    /// hand it to the shell; an empty one hands nothing over, and a code
+    /// the shell read opens its conversation.
+    #[test]
+    fn a_typed_path_goes_to_the_shell_and_a_read_code_opens_its_chat() {
+        let mut model = two_chats();
+        for (command, photo) in [
+            (PaletteCommand::SendPicture, true),
+            (PaletteCommand::SendFile, false),
+        ] {
+            update(&mut model, UiEvent::Run(command));
+            let ask = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+            assert!(
+                model.answer_ask(ask, "  ".to_string()).is_empty(),
+                "control"
+            );
+            assert_eq!(
+                model.answer_ask(ask, "~/hill.jpg".to_string()),
+                [UiEffect::Attach {
+                    peer: PEER,
+                    path: "~/hill.jpg".to_string(),
+                    photo
+                }]
+            );
+        }
+        update(&mut model, UiEvent::Run(PaletteCommand::CodeFromPicture));
+        let ask = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert_eq!(
+            model.answer_ask(ask, "code.png".to_string()),
+            [UiEffect::ScanCode {
+                path: "code.png".to_string()
+            }]
+        );
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = crate::lxma::encode(&key).expect("a code");
+        let peer = crate::home::lxmf_address(&key).expect("an address");
+        update(&mut model, UiEvent::CodeRead(code));
+        assert_eq!(model.conversations[model.selected].peer, peer);
     }
 }

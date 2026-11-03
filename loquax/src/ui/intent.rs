@@ -808,6 +808,17 @@ impl From<Command> for Intent {
             Command::SharePosition => Intent::ShareFix { peer: [0; 16] },
             Command::StopSharing => Intent::StopShare { peer: [0; 16] },
             Command::DeleteAllMaps => Intent::DeleteAllRegions { confirmed: false },
+            Command::SendPicture => Intent::SendPhoto {
+                peer: [0; 16],
+                data: Vec::new(),
+            },
+            Command::SendFile => Intent::SendFile {
+                peer: [0; 16],
+                name: String::new(),
+                data: Vec::new(),
+                size: 0,
+            },
+            Command::CodeFromPicture => Intent::NewConversation,
         }
     }
 }

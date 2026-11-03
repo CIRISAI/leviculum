@@ -62,6 +62,19 @@ pub enum Ask {
     Share([u8; 16]),
     /// "delete all maps" (1371): `Enter` deletes them.
     DeleteAllMaps,
+    /// A path the shell reads (1371): `Enter` hands it over.
+    Path(PathFor),
+}
+
+/// What a typed path is for (1371): the terminal's picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathFor {
+    /// A picture for `peer`'s chat, scaled at the photo size.
+    Picture([u8; 16]),
+    /// A file for `peer`'s chat, whole.
+    File([u8; 16]),
+    /// A picture of a friend's code: its conversation opens.
+    Code,
 }
 
 impl<B> UiModel<B> {
@@ -282,7 +295,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
     /// open with the cursor in compose, then the name asked for when
     /// `name`. A code that is none is said in a toast, the same sentence
     /// the phone shows.
-    fn take_code(&mut self, typed: &str, name: bool) -> Vec<UiEffect> {
+    pub(super) fn take_code(&mut self, typed: &str, name: bool) -> Vec<UiEffect> {
         let code = match crate::code::read(typed) {
             Ok(code) => code,
             Err(why) => {

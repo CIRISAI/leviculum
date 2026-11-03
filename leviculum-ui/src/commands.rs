@@ -144,6 +144,14 @@ pub enum Command {
     StopSharing,
     /// Delete every map on this device, after asking.
     DeleteAllMaps,
+    /// Send a picture to the open conversation: the palette takes its
+    /// path.
+    SendPicture,
+    /// Send a file to the open conversation: the palette takes its path.
+    SendFile,
+    /// Read a friend's code from a picture of its QR: the palette takes
+    /// the picture's path.
+    CodeFromPicture,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -158,7 +166,7 @@ pub struct PaletteEntry {
 /// The table, in the order the palette lists it unfiltered. A first user's
 /// two commands stand right under `send`, where an open palette shows them
 /// (1263), and the code a friend adds us by right after them (1279).
-pub const COMMANDS: [PaletteEntry; 55] = [
+pub const COMMANDS: [PaletteEntry; 58] = [
     entry("send", Command::Send),
     entry("new conversation", Command::NewConversation),
     entry("add contact", Command::AddContact),
@@ -214,6 +222,9 @@ pub const COMMANDS: [PaletteEntry; 55] = [
     entry("share position", Command::SharePosition),
     entry("stop sharing", Command::StopSharing),
     entry("delete all maps", Command::DeleteAllMaps),
+    entry("send picture", Command::SendPicture),
+    entry("send file", Command::SendFile),
+    entry("code in a picture", Command::CodeFromPicture),
 ];
 
 /// The entry that runs `command`.

@@ -933,6 +933,24 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("delete all maps"),
+        Row::new(
+            "send a picture to the open conversation: type its path",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("send picture"),
+        Row::new(
+            "send a file to the open conversation: type its path",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("send file"),
+        Row::new(
+            "a friend's code from a picture of its QR: type the picture's path",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("code in a picture"),
     ]
 };
 

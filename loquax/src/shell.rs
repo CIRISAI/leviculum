@@ -370,6 +370,22 @@ impl Shell {
                 // The palette's `delete all maps` (1371): the files go, as
                 // the window's settings button deletes them, and the model
                 // learns the regions left.
+                // A path typed into the terminal's palette (1371): read as
+                // the window's chooser hands one over.
+                UiEffect::Attach { peer, path, photo } => {
+                    self.attach(peer, &home_path(&path), photo);
+                }
+                UiEffect::ScanCode { path } => {
+                    let path = home_path(&path);
+                    let read = std::fs::read(&path)
+                        .map_err(|e| format!("{}: {e}", path.display()))
+                        .and_then(|bytes| loquax::scan::image_codes(&bytes));
+                    answers.push(match read.map(|codes| codes.into_iter().next()) {
+                        Ok(Some(code)) => UiEvent::CodeRead(code),
+                        Ok(None) => UiEvent::Notice(format!("{}: no code in it", path.display())),
+                        Err(line) => UiEvent::Notice(line),
+                    });
+                }
                 UiEffect::DeleteAllMaps => {
                     let line = match self.maps.delete_all() {
                         Ok(gone) => format!("deleted {gone} maps"),
@@ -816,7 +832,6 @@ impl Shell {
     /// stripped at the reader's photo size, any other file whole up to
     /// what a receiver takes; what will not go is said in the reader's
     /// words, as the phone's status line says it.
-    #[cfg(feature = "gui")]
     pub(crate) fn attach(&mut self, peer: [u8; 16], path: &std::path::Path, photo: bool) {
         let lang = self.model.lang;
         let event = std::fs::metadata(path)
@@ -1613,5 +1628,13 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => crate::failure(error, "failed"),
+    }
+}
+
+/// A path as typed (1371): a leading `~` is the home directory.
+fn home_path(typed: &str) -> std::path::PathBuf {
+    match (typed.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+        _ => std::path::PathBuf::from(typed),
     }
 }
