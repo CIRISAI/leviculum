@@ -103,7 +103,9 @@ case "$cmd" in
     # gdb sessions SHORT and bounded; if it wedges, run `probe-debug.sh recover`
     # (and physically replug the probe if that is not enough).
     echo "probe-debug: GDB server on :1337. Connect (keep it SHORT):"
-    echo "  gdb-multiarch $ELFDIR/$b -ex 'target extended-remote :1337'"
+    # The ELF's DWARF names sources by their remapped paths (/src, /registry,
+    # scripts/nrf-rustflags.sh); substitute-path points /src back at this tree.
+    echo "  gdb-multiarch $ELFDIR/$b -ex 'set substitute-path /src $REPO' -ex 'target extended-remote :1337'"
     exec "$PROBE_RS" gdb --chip "$CHIP" --probe "$PROBE" --protocol swd ;;
   recover)
     # Re-enumerate the Debug Probe's USB to clear a wedged probe-rs / D-state hang
