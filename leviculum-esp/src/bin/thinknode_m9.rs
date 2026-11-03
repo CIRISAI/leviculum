@@ -5,7 +5,10 @@
 //! SoC up, map the 8 MB PSRAM and give it to the heap, light the ST7789,
 //! draw the chats list of a fixture model (`loquax_m9::fixture`, no
 //! network) with the renderer the host pins its goldens with, and let the
-//! keyboard move through it: open a chat, scroll, type, go back.
+//! keyboard move through it: open a chat, scroll, type, go back, and work
+//! a group's screens with the keys of `loquax_m9::group` (slice six, 1366;
+//! the fixture's groups are reached through `FRAME_DUMP`, nothing is asked
+//! of a home).
 //!
 //! **Nothing is transmitted.** The LR1110's chip select is parked high so
 //! it ignores the panel's traffic on the shared bus; no opcode reaches it.
@@ -22,6 +25,7 @@
 //! [CENSUS] renderer held=<n> budget=220000 verdict=ok t=<ms>
 //! [CENSUS] screen=chats scene_held=... verdict=ok t=<ms>
 //! [CENSUS] screen=chat scene_held=... verdict=ok t=<ms>
+//! [CENSUS] screen=<groups|invite|members|admin|ask|pick|name> ...  (1366)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
 //! KBRAW <ms> <hex>          one per poll, every 10 ms
 //! KB <ms> <14 hex>          one per poll, the scan the table made of it
@@ -29,7 +33,8 @@
 //!
 //! and the banner pair every five seconds. A `FRAME_DUMP` control frame
 //! (`7e a4 a5 18 00 00 7e`, or `7e a4 a5 18 00 01 <screen> 7e`) is acked
-//! and answered with the `PBM` dump of `loquax_m9::dump`.
+//! and answered with the `PBM` dump of `loquax_m9::dump`; `<screen>` is a
+//! byte of `fixture::SCREENS`, 0 to 8.
 //!
 //! The pin handles are moved out of `Peripherals` through the board
 //! module's type aliases, as `heltec_v4.rs` does: a compile-time check that
@@ -60,7 +65,7 @@ use esp_hal::{
 use leviculum_core::envelope::{self, EnvelopeError};
 use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
 use leviculum_esp::{boards::thinknode_m9 as m9, uptime_ms, UartLog};
-use loquax::ui::{update, UiEvent, UiModel};
+use loquax::ui::UiModel;
 use loquax_m9::census::{self, Probe, Step};
 use loquax_m9::field::Field;
 use loquax_m9::fixture::{self, Screen};
@@ -68,7 +73,7 @@ use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
 use loquax_m9::kbraw::{self, Protocol, MAX_ANSWER};
 use loquax_m9::keyboard::{Keyboard, POLL_MS};
 use loquax_m9::render::Renderer;
-use loquax_m9::{dump, screen};
+use loquax_m9::{dump, group, screen};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -245,16 +250,20 @@ fn halt_with_banner(log: &mut UartLog<'_>, heap: usize) -> ! {
     }
 }
 
-/// Draw what `model` shows and send the rows that changed to the panel.
+/// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
+/// and send the rows that changed to the panel.
 fn redraw(
     renderer: &mut Renderer<'_, Frame>,
     panel: &mut Panel<'_>,
     model: &UiModel<Field>,
+    row: usize,
     log: &mut UartLog<'_>,
 ) {
-    if renderer
-        .draw(&screen::scene(model), &screen::Look::of(model))
-        .is_err()
+    let look = screen::Look {
+        row,
+        ..screen::Look::of(model)
+    };
+    if renderer.draw(&screen::scene(model), &look).is_err()
     {
         log.line("[DISP] ", format_args!("draw=failed"));
         return;
@@ -430,7 +439,7 @@ fn main() -> ! {
         ),
     );
 
-    // The census: both screens, built and drawn as the host's census does,
+    // The census: every screen, built and drawn as the host's census does,
     // against the same budgets. Each draw leaves the screen in the frame;
     // the start screen is drawn fresh after them.
     let mut probe = BoardProbe {
@@ -438,9 +447,10 @@ fn main() -> ! {
         low: 0,
         high: 0,
     };
-    for (shown, budget) in [(Screen::Chats, census::CHATS), (Screen::Chat, census::CHAT)] {
-        let model = shown.model();
-        match census::measure(&mut probe, &model, &mut renderer) {
+    for shown in fixture::SCREENS {
+        let budget = shown.budget();
+        let (model, row) = shown.walk();
+        match census::measure_at(&mut probe, &model, row, &mut renderer) {
             Ok(got) => log.line(
                 "[CENSUS] ",
                 format_args!(
@@ -459,7 +469,9 @@ fn main() -> ! {
         }
     }
     let mut model = fixture::model();
-    redraw(&mut renderer, &mut panel, &model, &mut log);
+    // The M9's own cursor over a group's sheet or picker (slice six).
+    let mut row = 0;
+    redraw(&mut renderer, &mut panel, &model, row, &mut log);
 
     let mut deframer = Deframer::new();
     let mut answer = [0u8; MAX_ANSWER];
@@ -483,7 +495,14 @@ fn main() -> ! {
             }
         }
         for data in requests {
-            control(&data, &mut model, &mut renderer, &mut panel, &mut log);
+            control(
+                &data,
+                &mut model,
+                &mut row,
+                &mut renderer,
+                &mut panel,
+                &mut log,
+            );
         }
 
         if now < next_poll {
@@ -511,9 +530,9 @@ fn main() -> ! {
                 keyboard.poll(ms, scan, &mut |event| events.push(event));
                 if !events.is_empty() {
                     for event in events {
-                        update(&mut model, UiEvent::Key(event));
+                        group::press(&mut model, &mut row, &event);
                     }
-                    redraw(&mut renderer, &mut panel, &model, &mut log);
+                    redraw(&mut renderer, &mut panel, &model, row, &mut log);
                 }
             }
             Err(e) => {
@@ -533,6 +552,7 @@ fn main() -> ! {
 fn control(
     data: &[u8],
     model: &mut UiModel<Field>,
+    row: &mut usize,
     renderer: &mut Renderer<'_, Frame>,
     panel: &mut Panel<'_>,
     log: &mut UartLog<'_>,
@@ -567,8 +587,8 @@ fn control(
             Some(screen) => {
                 log.frame(&envelope::encode_ack(envelope::TYPE_FRAME_DUMP));
                 if let Some(shown) = screen.and_then(Screen::of) {
-                    *model = shown.model();
-                    redraw(renderer, panel, model, log);
+                    (*model, *row) = shown.walk();
+                    redraw(renderer, panel, model, *row, log);
                     log.line("[DUMP] ", format_args!("screen={}", shown.name()));
                 }
                 let shown = renderer.panel();
