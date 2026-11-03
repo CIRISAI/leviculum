@@ -4478,6 +4478,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Same rationale as is_link_request_for_us and is_cache_request.
         let is_lrproof_for_us = packet.context == PacketContext::Lrproof
             && self.local_destinations.contains(&packet.destination_hash);
+        // An exempt copy that was seen before passes the gate, and the
+        // hand-off to the node layer reads this when nobody holds its link
+        // (order 1376, `handle_data`).
+        let exempt_copy_seen = packet.flags.packet_type == PacketType::Data
+            && is_dedup_exempt_context
+            && self.storage.has_packet_hash(&full_packet_hash);
         if !is_single_announce
             && !is_local_link_relay
             && !is_local_client_link_request
@@ -4501,15 +4507,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // the #66 note in leviculum-std event_log.rs), but lives on the
             // journey target and carries `ph` so a collector stitching
             // per-packet journeys sees where a duplicate copy died.
-            crate::tracing::debug!(
-                target: PKT_EVENT_TARGET,
-                event = "DEDUP_DROP",
-                ph = %HexShort(&full_packet_hash[..PKT_PH_BYTES]),
-                dst = %HexShort(&packet.destination_hash),
-                iface = %self.iface_name(interface_index),
-                r#type = ?packet.flags.packet_type,
-                context = ?packet.context,
-            );
+            self.dedup_drop_event(&full_packet_hash, &packet, interface_index);
             // Codeberg #346, board half: a duplicate somebody addressed to US
             // for relay is the one dedup case a capture cannot otherwise
             // place — "the relay never heard it" and "the relay heard it
@@ -4554,9 +4552,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.handle_link_request(packet, interface_index, &raw, truncated_hash)
             }
             PacketType::Proof => self.handle_proof(packet, interface_index, full_packet_hash),
-            PacketType::Data => {
-                self.handle_data(packet, interface_index, full_packet_hash, truncated_hash)
-            }
+            PacketType::Data => self.handle_data(
+                packet,
+                interface_index,
+                full_packet_hash,
+                truncated_hash,
+                exempt_copy_seen,
+            ),
         }
     }
 
@@ -4583,6 +4585,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Journey PKT_DROP for a packet dropped inside a handler that already
     /// holds the packet hash (full or truncated — same `ph` prefix). Pair
     /// with `stats.record_drop(reason)` at the call site.
+    /// The `DEDUP_DROP` journey line for a copy of a packet this node has
+    /// already seen.
+    fn dedup_drop_event(&self, hash: &[u8; 32], packet: &Packet, interface_index: usize) {
+        crate::tracing::debug!(
+            target: PKT_EVENT_TARGET,
+            event = "DEDUP_DROP",
+            ph = %HexShort(&hash[..PKT_PH_BYTES]),
+            dst = %HexShort(&packet.destination_hash),
+            iface = %self.iface_name(interface_index),
+            r#type = ?packet.flags.packet_type,
+            context = ?packet.context,
+        );
+    }
+
     fn pkt_drop_event(&self, hash: &[u8], packet: &Packet, iface_in: usize, reason: DropReason) {
         crate::tracing::debug!(
             target: PKT_EVENT_TARGET,
@@ -8914,12 +8930,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         Ok(())
     }
 
+    /// `exempt_copy_seen`: this is a repeat of a packet whose link context
+    /// exempted it from the dedup gate.
     fn handle_data(
         &mut self,
         mut packet: Packet,
         interface_index: usize,
         full_packet_hash: [u8; 32],
         truncated_hash: [u8; TRUNCATED_HASHBYTES],
+        exempt_copy_seen: bool,
     ) -> Result<(), TransportError> {
         let dest_hash = packet.destination_hash;
 
@@ -9299,6 +9318,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // owner is gone. The node layer drops it as `link-data-no-link`.
             // Two daemons claimed a foreign link with a hard-coded
             // `matched=true` here (#407).
+            //
+            // A second copy is a duplicate here even in the link contexts
+            // the dedup gate above exempts (order 1376). The exemption keeps
+            // a held link's keepalives, channel and resource retransmissions
+            // alive; a link nobody here holds has no handler to serve, so
+            // the copy would only be dropped again under the same reason,
+            // and the log read as one drop written twice, byte for byte, on
+            // miauhaus (4a191df3). The reference drops both copies silently
+            // (`Transport.py:2124-2150` finds no active link); what changes
+            // is the line the second one gets.
+            if exempt_copy_seen {
+                self.dedup_drop_event(&full_packet_hash, &packet, interface_index);
+                self.stats.record_drop(DropReason::Duplicate);
+                return Ok(());
+            }
             crate::tracing::debug!(
                 event = "PKT_LOCAL",
                 dst = %HexShort(&dest_hash),
@@ -18771,7 +18805,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7888), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7904), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

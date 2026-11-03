@@ -227,7 +227,7 @@ path a newer emission still wins
 announcing host's clock in whole seconds inside the random hash
 (`reference/Reticulum/RNS/Destination.py:282`). Ours keeps the same rule
 and lets the same emission over fewer hops win a tie
-(`leviculum-core/src/transport.rs:7364-7367`). Hops only decide between
+(`leviculum-core/src/transport.rs:7380-7383`). Hops only decide between
 copies of the same emission. Two homes on one segment therefore flap by
 recency and by their hosts' clocks, which `loquax_homes_flap` shows.
 Hence decision (d).
