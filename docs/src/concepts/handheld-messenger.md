@@ -771,7 +771,7 @@ it, so the page loop exists once.
 | one request and its answer | `request`, std | `Step::Request` and `Ask::answered`; `request` is the host executor's |
 | the join | `Join` | `Ask::join`, `Verb::Join` |
 | the pull and its pages | `pull`, `pages`, std | `Verb::Pull`, `Step::Page`; `pull` runs it, `pages` is gone |
-| send, mark, group | std | `Verb::Send`, `Verb::Mark`, `Verb::Group`; `mark` runs the ask, `send` keeps its own loop, because `send_retrying` already asks three times and would ask nine |
+| send, mark, group | std | `Verb::Send`, `Verb::Mark`, `Verb::Group`; `mark` runs the ask, and since 1371 `send` does too: `send_retrying`, which asked a send three times around a loop of its own and with the ask's retries would have asked nine, is folded into the ask's one policy, `ask::ATTEMPTS` = 3 in all |
 | the client id, the home's key, the cursor | std | still std: the firmware's random source and its flash record are the board half |
 | the old-home probe of `/group` | std | std only: a home before 1307 drops `/group`, and the board's homes are newer |
 

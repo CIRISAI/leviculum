@@ -52,7 +52,7 @@ pub async fn send_home(
         content: body.into_bytes(),
         fields,
     };
-    let accepted = super::client::send_retrying(
+    let accepted = super::client::send(
         &client.node,
         &client.public_key,
         &client.device,

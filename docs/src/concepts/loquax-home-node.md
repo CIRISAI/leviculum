@@ -317,8 +317,8 @@ then and may sleep.
 - **Idempotent by the client's id.** The same id handed in again is
   answered from the outbox with the message it made the first time, also
   after a restart; nothing is signed twice. A client whose answer was lost
-  asks again with the same id, up to three times
-  (`home::client::send_retrying`).
+  asks again with the same id, three times in all (`home::client::send`,
+  the ask's `ATTEMPTS`).
 - **The outbox is a table** (`home_outbox`, schema 5 of the store), one row
   a message: the client's id, the message id, the destination, the packed
   bytes, when it came, whether it is still retried, and whether a

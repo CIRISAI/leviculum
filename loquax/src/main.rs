@@ -1805,7 +1805,7 @@ async fn run_client_send(
         content: message.body,
         fields: message.fields,
     };
-    let accepted = loquax::home::client::send_retrying(
+    let accepted = loquax::home::client::send(
         &node,
         &public_key,
         &device,
