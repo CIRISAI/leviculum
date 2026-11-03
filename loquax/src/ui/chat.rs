@@ -560,7 +560,14 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
         .enumerate()
         .map(|(m, message)| {
             let note = group
-                .then(|| super::groups::membership_note(&conversation.messages, m, model.address))
+                .then(|| {
+                    super::groups::membership_note(
+                        &conversation.messages,
+                        m,
+                        model.address,
+                        model.lang,
+                    )
+                })
                 .flatten();
             (m, message, note)
         })
@@ -653,7 +660,7 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 .filter_map(|line| {
                     let late = once(line.sender, line.sent_ms)?;
                     Some(Bubble {
-                        body: line.text,
+                        body: super::groups::digest_line(&line, model.lang),
                         writer: Some((line.sender, writer_name(&line.sender, ""))),
                         at: Some(WallTime {
                             unix_secs: i64::try_from(line.sent_ms / 1000).unwrap_or(i64::MAX),

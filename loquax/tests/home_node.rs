@@ -2450,6 +2450,42 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     };
     assert_eq!(invited(bob_address), linked, "Bob's invitation");
     assert_eq!(invited(anna), plain, "Anna's, a Loquax member's");
+    // 1348: the wire is English, and Anna's Loquax says the card in her
+    // own language from the invitation's `lev 0x04`: the same bytes on a
+    // German reader are "Lew lädt dich zu Familie ein", on an English one
+    // "Lew invited you to Familie"; the body stays the English text.
+    let annas = invitations
+        .iter()
+        .find(|m| m.destination_hash == anna)
+        .expect("Anna's invitation");
+    let card = |lang: loquax::ui::strings::Lang| {
+        let mut model = loquax::ui::UiModel::<leviculum_ui::input::Line>::new(&[]);
+        model.address = Some(anna);
+        model.lang = lang;
+        loquax::ui::update(
+            &mut model,
+            loquax::ui::UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+                message_id: annas.message_id,
+                source: annas.source_hash,
+                title: Vec::new(),
+                body: annas.content.clone(),
+                fields: annas.fields.clone(),
+                verified: true,
+            }),
+        );
+        loquax::ui::group_scene::invite(&model, &hosted.group.address, false)
+            .expect("a card")
+            .title
+            .resolve(lang)
+    };
+    assert_eq!(
+        card(loquax::ui::strings::Lang::De),
+        "Lew lädt dich zu Familie ein"
+    );
+    assert_eq!(
+        card(loquax::ui::strings::Lang::En),
+        "Lew invited you to Familie"
+    );
 
     // Anna's phone pulls the invitation and joins through its card.
     tui(

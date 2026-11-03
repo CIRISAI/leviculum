@@ -5954,6 +5954,11 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
     let card = &session::rows(&model, lew, Lang::En)[0];
     assert_eq!(card.invite_group, hex(&GROUP));
     assert_eq!(card.invite_title, "Lew invited you to Familie");
+    // 1348: the same message on a German phone, the card from `lev 0x04`.
+    assert_eq!(
+        session::rows(&model, lew, Lang::De)[0].invite_title,
+        "Lew lädt dich zu Familie ein"
+    );
     assert!(card.invite_join);
     assert!(card.invite_trust.contains("Lew could read"));
 

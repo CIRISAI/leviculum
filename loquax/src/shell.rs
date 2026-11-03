@@ -388,17 +388,12 @@ impl Shell {
                 UiEffect::PauseVoice { .. } => {}
                 // A group (1307): the home makes it, so a terminal with no
                 // home says so at once.
-                UiEffect::CreateGroup {
-                    name,
-                    members,
-                    lang,
-                } => match self.context.client.clone() {
+                UiEffect::CreateGroup { name, members } => match self.context.client.clone() {
                     Some(client) => {
                         let done = self.done_tx.clone();
                         let budget = self.context.timeout;
                         self.mark_tasks.push(tokio::spawn(async move {
-                            let event =
-                                runner::create_group(client, name, members, lang, budget).await;
+                            let event = runner::create_group(client, name, members, budget).await;
                             let _ = done.send(Finished::Event(event));
                         }));
                     }
@@ -408,17 +403,12 @@ impl Shell {
                         ),
                     ))),
                 },
-                UiEffect::AddMembers {
-                    group,
-                    members,
-                    lang,
-                } => match self.context.client.clone() {
+                UiEffect::AddMembers { group, members } => match self.context.client.clone() {
                     Some(client) => {
                         let done = self.done_tx.clone();
                         let budget = self.context.timeout;
                         self.mark_tasks.push(tokio::spawn(async move {
-                            let event =
-                                runner::add_members(client, group, members, lang, budget).await;
+                            let event = runner::add_members(client, group, members, budget).await;
                             let _ = done.send(Finished::Event(event));
                         }));
                     }

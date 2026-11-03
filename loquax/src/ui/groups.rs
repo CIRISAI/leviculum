@@ -47,14 +47,15 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
 use leviculum_lxmf::lev::{
-    GroupStatus, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, MEMBER_ADMIN, MEMBER_JOINED,
-    MEMBER_LEFT,
+    DigestLine, GroupStatus, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, LEFT_OUT_FILE,
+    LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_ADMIN, MEMBER_JOINED, MEMBER_LEFT,
 };
 use leviculum_lxmf::Field;
 use leviculum_ui::delivery::DeliveryState;
 
 use super::contacts::Ask;
 use super::intent::Target;
+use super::strings::{Arg, Lang, StrId, Text};
 use super::{Message, Palette, UiEffect, UiModel};
 
 /// The slot of [`UiModel::sending`] a group's state takes (a Join, a
@@ -307,7 +308,9 @@ pub fn copy_of<'a>(body: &'a str, fields: &[Field]) -> Option<([u8; 16], &'a str
 /// The line a membership from the group at `index` of `messages` makes
 /// visible (1307 G2): who joined, left or was added since the membership
 /// before it in the same conversation, `"Anna joined. Bob left."`, with
-/// the names the admin gave (`own`, the reader, is "You"). None for a
+/// the names the admin gave (`own`, the reader, is "You"), in `lang`: the
+/// reader's language, from the membership's data and never from the
+/// text the home put beside it for a stock client (1348). None for a
 /// message that is no membership from the group, for the first one loaded
 /// (nothing to compare it with) and for one that changes nobody's
 /// standing. Read from the messages alone, so every device and every
@@ -316,6 +319,7 @@ pub fn membership_note(
     messages: &[Message],
     index: usize,
     own: Option<[u8; 16]>,
+    lang: Lang,
 ) -> Option<String> {
     let list = |m: &Message| {
         (!m.outbound)
@@ -323,19 +327,20 @@ pub fn membership_note(
             .flatten()
     };
     let now = list(messages.get(index)?)?;
-    let name = |m: &Member| match own == Some(m.address) {
-        true => "You".to_string(),
-        false => m.name.clone(),
+    // The reader's own line has its own words ("Du bist beigetreten.").
+    let said = |m: &Member, theirs: StrId, ours: StrId| match own == Some(m.address) {
+        true => Text::key(ours).resolve(lang),
+        false => Text::Key(theirs, alloc::vec![Arg::Str(m.name.clone())]).resolve(lang),
     };
     // The group's end (1307 pass four) is a line of its own, the first list
     // loaded or not.
     if now.ended {
-        let admin = now
-            .members
-            .iter()
-            .find(|m| m.flags & MEMBER_ADMIN != 0)
-            .map_or_else(|| "The admin".to_string(), name);
-        return Some(alloc::format!("{admin} ended the group."));
+        return Some(
+            match now.members.iter().find(|m| m.flags & MEMBER_ADMIN != 0) {
+                Some(admin) => said(admin, StrId::GroupNoteEnded, StrId::GroupNoteYouEnded),
+                None => Text::key(StrId::GroupNoteAdminEnded).resolve(lang),
+            },
+        );
     }
     let before = messages[..index].iter().rev().find_map(list)?;
     if now.epoch <= before.epoch {
@@ -346,20 +351,64 @@ pub fn membership_note(
         let was = before.members.iter().find(|b| b.address == member.address);
         let left = member.flags & MEMBER_LEFT != 0;
         let joined = member.flags & (MEMBER_JOINED | MEMBER_ADMIN) != 0;
-        let line = match was {
-            Some(was) if left && was.flags & MEMBER_LEFT == 0 => "left",
-            Some(was) if !left && joined && was.flags & (MEMBER_JOINED | MEMBER_ADMIN) == 0 => {
-                "joined"
+        let (theirs, ours) = match was {
+            Some(was) if left && was.flags & MEMBER_LEFT == 0 => {
+                (StrId::GroupNoteLeft, StrId::GroupNoteYouLeft)
             }
-            Some(was) if !left && was.flags & MEMBER_LEFT != 0 => "was added",
+            Some(was) if !left && joined && was.flags & (MEMBER_JOINED | MEMBER_ADMIN) == 0 => {
+                (StrId::GroupNoteJoined, StrId::GroupNoteYouJoined)
+            }
+            Some(was) if !left && was.flags & MEMBER_LEFT != 0 => {
+                (StrId::GroupNoteAdded, StrId::GroupNoteYouAdded)
+            }
             Some(_) => continue,
             None if left => continue,
-            None if joined => "joined",
-            None => "was added",
+            None if joined => (StrId::GroupNoteJoined, StrId::GroupNoteYouJoined),
+            None => (StrId::GroupNoteAdded, StrId::GroupNoteYouAdded),
         };
-        lines.push(alloc::format!("{} {line}.", name(member)));
+        lines.push(said(member, theirs, ours));
     }
     (!lines.is_empty()).then(|| lines.join(" "))
+}
+
+/// The home's English sentence on the wire for a digest line that stands
+/// for what it left out (1348, `lev 0x06`'s fourth element): what a stock
+/// client reads, and what a Loquax reader replaces with its own words
+/// ([`digest_line`]). `None` for a value this build does not know.
+pub fn left_out_wire(left_out: u64) -> Option<&'static str> {
+    left_out_words(left_out).map(|id| id.text(Lang::En))
+}
+
+fn left_out_words(left_out: u64) -> Option<StrId> {
+    match left_out {
+        LEFT_OUT_PHOTO => Some(StrId::GroupLeftOutPhoto),
+        LEFT_OUT_VOICE => Some(StrId::GroupLeftOutVoice),
+        LEFT_OUT_FILE => Some(StrId::GroupLeftOutFile),
+        LEFT_OUT_GONE => Some(StrId::GroupLeftOutGone),
+        _ => None,
+    }
+}
+
+/// A digest line's words as the reader sees them (1348): a line that
+/// stands for what the home left out says so in `lang`, its caption after
+/// it; every other line, and one whose value this build does not know, is
+/// its text.
+pub fn digest_line(line: &DigestLine, lang: Lang) -> String {
+    let (Some(words), Some(wire)) = (
+        line.left_out.and_then(left_out_words),
+        line.left_out.and_then(left_out_wire),
+    ) else {
+        return line.text.clone();
+    };
+    let said = words.text(lang);
+    match line
+        .text
+        .strip_prefix(wire)
+        .and_then(|rest| rest.strip_prefix(": "))
+    {
+        Some(caption) if !caption.trim().is_empty() => alloc::format!("{said}: {caption}"),
+        _ => said.to_string(),
+    }
 }
 
 impl Message {
@@ -1122,11 +1171,7 @@ impl<B: Default> UiModel<B> {
                 (*peer, name)
             })
             .collect();
-        alloc::vec![UiEffect::CreateGroup {
-            name,
-            members,
-            lang: self.lang,
-        }]
+        alloc::vec![UiEffect::CreateGroup { name, members }]
     }
 
     /// The picker's "Add" (1307 G2): the home is asked once to add the
@@ -1153,11 +1198,7 @@ impl<B: Default> UiModel<B> {
                 (*peer, name)
             })
             .collect();
-        alloc::vec![UiEffect::AddMembers {
-            group,
-            members,
-            lang: self.lang,
-        }]
+        alloc::vec![UiEffect::AddMembers { group, members }]
     }
 
     /// The home's answer to "Add" (G2): the picker closes and the member
@@ -1915,6 +1956,37 @@ mod tests {
         );
     }
 
+    /// 1348: one invitation, its text English as every stock client shows
+    /// it, is a card in the reader's language, said from `lev 0x04`'s
+    /// inviter and group name: German on a German reader, English on an
+    /// English one, and the English text stays the message's body for
+    /// search and every other client.
+    #[test]
+    fn the_invitation_card_speaks_the_readers_language() {
+        let wire = "Lew invited you to Familie: lxma://code Reply /leave to leave.";
+        let card = |lang: Lang| {
+            let mut model = reader(&[LEW]);
+            model.lang = lang;
+            arrive(&mut model, LEW, 1, wire, invite("Lew"));
+            let card = super::super::group_scene::invite(&model, &GROUP, false).expect("card");
+            let lew = model
+                .conversations
+                .iter()
+                .find(|c| c.peer == LEW)
+                .expect("Lew's chat");
+            assert_eq!(lew.messages[0].body, wire, "the body stays the wire's");
+            (card.title.resolve(lang), card.trust.resolve(lang))
+        };
+        let (title, trust) = card(Lang::De);
+        assert_eq!(title, "Lew lädt dich zu Familie ein");
+        assert_eq!(
+            trust,
+            "Familie liegt auf dem Postfach von Lew. Lew könnte die Nachrichten der Gruppe lesen."
+        );
+        let (title, _) = card(Lang::En);
+        assert_eq!(title, "Lew invited you to Familie");
+    }
+
     /// 1307 G2, item 6: the hidden membership becomes a visible line when
     /// it changes somebody's standing: "Anna joined.", then "Bob was
     /// added. Anna left."; the window and the phone get it as a note
@@ -1988,19 +2060,40 @@ mod tests {
             .map(|b| b.body)
             .collect();
         assert_eq!(notes, ["Anna joined.", "Anna left. Bob was added."]);
+        // 1348: the same memberships on a German reader say it in German,
+        // from the data; the wire never carried a word of it.
+        model.lang = Lang::De;
+        let notes: Vec<String> = super::super::chat::bubbles(&model, c)
+            .into_iter()
+            .filter(|b| b.note)
+            .map(|b| b.body)
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                "Anna ist beigetreten.",
+                "Anna ist ausgetreten. Bob wurde hinzugefügt."
+            ]
+        );
+        assert_eq!(
+            membership_note(&model.conversations[c].messages, 1, Some(ANNA), Lang::De).as_deref(),
+            Some("Du bist beigetreten."),
+            "the reader's own line has its own words"
+        );
+        model.lang = Lang::En;
         let messages = &model.conversations[c].messages;
         assert_eq!(
-            membership_note(messages, 0, Some(ME)),
+            membership_note(messages, 0, Some(ME), Lang::En),
             None,
             "the first list"
         );
         assert_eq!(
-            membership_note(messages, 2, Some(ME)),
+            membership_note(messages, 2, Some(ME), Lang::En),
             None,
             "the same epoch"
         );
         assert_eq!(
-            membership_note(messages, 4, Some(ME)),
+            membership_note(messages, 4, Some(ME), Lang::En),
             None,
             "nobody changed"
         );
@@ -2486,6 +2579,62 @@ mod tests {
         );
     }
 
+    /// 1348: a digest line the home left out carries its English sentence
+    /// for a stock client and the `lev` value; the reader says it in its
+    /// own language, the caption after it. Controls: an English reader
+    /// shows the wire's words, a value this build does not know shows the
+    /// text as it came.
+    #[test]
+    fn a_left_out_digest_line_is_said_in_the_readers_language() {
+        const T: u64 = 1_800_000_000_000;
+        let wire = left_out_wire(LEFT_OUT_PHOTO).expect("known");
+        assert_eq!(wire, "sent a photo (too large for the radio)");
+        let line = |sent_ms, text: &str, left_out| DigestLine {
+            sender: ANNA,
+            sent_ms,
+            text: text.into(),
+            left_out,
+        };
+        let lines = [
+            line(T, &alloc::format!("{wire}: Seht mal"), Some(LEFT_OUT_PHOTO)),
+            line(T + 1, "a message (no longer here)", Some(LEFT_OUT_GONE)),
+            line(T + 2, "something new", Some(99)),
+        ];
+        let lev = Lev {
+            capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
+            digest: Some(lines.to_vec()),
+            ..Lev::default()
+        };
+        let body = alloc::format!("Anna {wire}: Seht mal\n: a message (no longer here)");
+        let drawn = |lang: Lang| {
+            let mut model = in_familie(false);
+            model.lang = lang;
+            arrive(&mut model, GROUP, 20, &body, lev.clone());
+            let c = group_chat(&model);
+            super::super::chat::bubbles(&model, c)
+                .into_iter()
+                .filter(|b| !b.note && !b.ours)
+                .map(|b| b.body)
+                .collect::<Vec<String>>()
+        };
+        assert_eq!(
+            drawn(Lang::De),
+            [
+                "hat ein Foto geschickt (zu groß für Funk): Seht mal",
+                "eine Nachricht (nicht mehr da)",
+                "something new",
+            ]
+        );
+        assert_eq!(
+            drawn(Lang::En),
+            [
+                "sent a photo (too large for the radio): Seht mal",
+                "a message (no longer here)",
+                "something new",
+            ]
+        );
+    }
+
     fn digest(lines: &[([u8; 16], u64, &str)]) -> Lev {
         Lev {
             capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
@@ -2496,6 +2645,7 @@ mod tests {
                         sender: *sender,
                         sent_ms: *sent_ms,
                         text: (*text).into(),
+                        left_out: None,
                     })
                     .collect(),
             ),
@@ -2725,6 +2875,12 @@ mod tests {
             "{:?}",
             bubbles.iter().map(|b| &b.body).collect::<Vec<_>>()
         );
+        // 1348: the ended line in the reader's language, from the data.
+        member.lang = Lang::De;
+        assert!(super::super::chat::bubbles(&member, c)
+            .iter()
+            .any(|b| b.note && b.body == "Lew hat die Gruppe beendet."));
+        member.lang = Lang::En;
         let chat = super::super::scene::chat(&member, c);
         assert_eq!(
             chat.ended.map(|t| t.resolve(Lang::En)),

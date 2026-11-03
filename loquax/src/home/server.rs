@@ -299,7 +299,7 @@ fn group(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now:
     )
     .and_then(|hosted| {
         let (invitations, welcome) =
-            super::group::opening(home.identity, &hosted, owner_name, request.lang, store, now)?;
+            super::group::opening(home.identity, &hosted, owner_name, store, now)?;
         Ok((hosted, invitations, welcome))
     });
     let (hosted, invitations, welcome) = match made {
@@ -455,21 +455,14 @@ fn group_add(
         .filter(|(member, _)| *member != home.address)
         .cloned()
         .collect();
-    let (invitations, told) = match super::group::add(
-        home.identity,
-        &hosted,
-        owner_name,
-        request.lang,
-        store,
-        &members,
-        now,
-    ) {
-        Ok(added) => added,
-        Err(error) => {
-            tracing::warn!("HOME group add: {error}");
-            return Answer::only(wire::status_answer(Status::Failed));
-        }
-    };
+    let (invitations, told) =
+        match super::group::add(home.identity, &hosted, owner_name, store, &members, now) {
+            Ok(added) => added,
+            Err(error) => {
+                tracing::warn!("HOME group add: {error}");
+                return Answer::only(wire::status_answer(Status::Failed));
+            }
+        };
     let at = now as i64;
     let mut accepted = Vec::new();
     for invitation in invitations {
@@ -1155,6 +1148,72 @@ mod tests {
         assert_eq!(join(store, LAPTOP, TOKEN), Status::Ok);
     }
 
+    /// 1348: a German admin's phone of 1307 pass six still sends its
+    /// language as a fourth element; the home reads it past, and the
+    /// invitation it signs is the English text, the bytes
+    /// [`super::super::group::invitation_text`] makes for no language at
+    /// all. Control: the same request without the element makes the same
+    /// text for its own group.
+    #[test]
+    fn a_german_admins_invitations_are_english_on_the_wire() {
+        let invited = |legacy_de: bool| {
+            let (dir, mut store) = store();
+            let mut hosting = home();
+            hosting.groups = Some((dir.path(), "Lew"));
+            admitted(&mut store);
+            let mut request = wire::group_request(&wire::GroupRequest {
+                client_id: [7; 16],
+                name: "Familie".into(),
+                members: alloc::vec![([0x44; 16], "Anna".into())],
+            });
+            if legacy_de {
+                request[0] = 0x94;
+                leviculum_lxmf::msgpack::string(&mut request, "de");
+            }
+            let made = answer(
+                &mut store,
+                &hosting,
+                crate::home::GROUP_PATH,
+                &request,
+                Some(LAPTOP),
+                300.0,
+            );
+            let group = wire::read_group_answer(&made.bytes)
+                .expect("answer")
+                .expect("made");
+            let [invitation] = made.accepted.as_slice() else {
+                panic!("one invitation: {:?}", made.accepted.len());
+            };
+            let message = leviculum_lxmf::Message::unpack(
+                &invitation.packed,
+                None,
+                None,
+                DeliveryMethod::Direct,
+            )
+            .expect("unpack");
+            let key = super::super::group::hosted(dir.path(), &store)
+                .expect("hosted")
+                .into_iter()
+                .find(|h| h.group.address == group)
+                .expect("ours")
+                .identity
+                .public_key_bytes();
+            let code = crate::lxma::encode_parts(&group, &key);
+            (
+                alloc::string::String::from_utf8(message.content).expect("text"),
+                super::super::group::invitation_text("Lew", "Familie", &code, true),
+            )
+        };
+        let (german, english) = invited(true);
+        assert_eq!(german, english);
+        assert!(
+            german.starts_with("Lew invited you to Familie: lxma://"),
+            "{german}"
+        );
+        let (plain, english) = invited(false);
+        assert_eq!(plain, english, "control: no fourth element");
+    }
+
     /// 1307 G2, item 6 (study 4.5): `/groupadd` from an admitted device
     /// adds Cara to the owner's group: her invitation goes into the
     /// outbox, the daemon gets the new list for the group's engine.
@@ -1174,7 +1233,6 @@ mod tests {
                 client_id: [7; 16],
                 name: "Familie".into(),
                 members: alloc::vec![([0x44; 16], "Anna".into())],
-                lang: crate::ui::strings::Lang::En,
             }),
             Some(LAPTOP),
             300.0,
@@ -1186,7 +1244,6 @@ mod tests {
             client_id: [8; 16],
             group,
             members: alloc::vec![([0x66; 16], "Cara".into()), ([0x44; 16], "Anna".into())],
-            lang: crate::ui::strings::Lang::En,
         };
         let ask = |store: &mut Store, device, request: &wire::GroupAddRequest| {
             answer(
@@ -1257,7 +1314,6 @@ mod tests {
                 client_id: [7; 16],
                 name: "Familie".into(),
                 members: alloc::vec![([0x44; 16], "Anna".into())],
-                lang: crate::ui::strings::Lang::En,
             }),
             Some(LAPTOP),
             300.0,
@@ -1337,7 +1393,6 @@ mod tests {
                 ([0x44; 16], "Anna".into()),
                 ([0x55; 16], "Bob".into())
             ],
-            lang: crate::ui::strings::Lang::En,
         };
         let ask = |store: &mut Store, home: &Home<'_>, device, request: &wire::GroupRequest| {
             let answer = answer(

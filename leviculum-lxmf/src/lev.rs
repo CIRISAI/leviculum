@@ -12,7 +12,7 @@
 //! | `0x03` | `[bin32 original, uint delivered, uint read, uint members, uint readers]` | a group's status of one message, home to its writer: how many copies are proven and read, of how many, and how many members send receipts |
 //! | `0x04` | `[bin16 group, bin64 public key, str name, str admin's name, uint epoch]` | an invitation to a group |
 //! | `0x05` | `[uint epoch, [[bin16 address, str name, uint flags], ...], uint standing]` | a group's membership; a member leaving sends itself alone, flagged [`MEMBER_LEFT`]; the third element is there only when the group [`GROUP_ENDED`] |
-//! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them |
+//! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text, uint left_out?], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them; `left_out` only on a line that stands for what was not sent ([`LEFT_OUT_PHOTO`] and its siblings) |
 //!
 //! Capability bit 1 says "I understand groups": a group's home sends such a
 //! member its copies with key `0x02` and the bare text, and every other
@@ -66,6 +66,19 @@ pub const KEY_GROUP_MEMBERS: i64 = 0x05;
 
 /// The map key of a group's digest for a slow member (study 5.3).
 pub const KEY_GROUP_DIGEST: i64 = 0x06;
+
+/// What a digest line stands for when the home left its message out
+/// (1348): a photo, a voice message or a file too large for a slow member,
+/// or a message no longer there. The line's text is then the home's
+/// English sentence for it, and a reader that knows the value says it in
+/// its own language instead.
+pub const LEFT_OUT_PHOTO: u64 = 1;
+/// See [`LEFT_OUT_PHOTO`].
+pub const LEFT_OUT_VOICE: u64 = 2;
+/// See [`LEFT_OUT_PHOTO`].
+pub const LEFT_OUT_FILE: u64 = 3;
+/// See [`LEFT_OUT_PHOTO`].
+pub const LEFT_OUT_GONE: u64 = 4;
 
 /// Capability bit 0: the sender sends read receipts and wants them.
 pub const CAP_READ_RECEIPTS: u64 = 1;
@@ -199,6 +212,10 @@ pub struct DigestLine {
     pub sender: [u8; 16],
     pub sent_ms: u64,
     pub text: alloc::string::String,
+    /// What the line stands for when the home left its message out
+    /// ([`LEFT_OUT_PHOTO`] and its siblings), written as a fourth element
+    /// only then, so every other line keeps its three.
+    pub left_out: Option<u64>,
 }
 
 /// What the `lev` namespace of one message says.
@@ -321,10 +338,13 @@ impl Lev {
             msgpack::int(&mut data, KEY_GROUP_DIGEST);
             msgpack::array(&mut data, digest.len());
             for line in digest {
-                msgpack::array(&mut data, 3);
+                msgpack::array(&mut data, 3 + usize::from(line.left_out.is_some()));
                 msgpack::bin(&mut data, &line.sender);
                 msgpack::uint(&mut data, line.sent_ms);
                 msgpack::string(&mut data, &line.text);
+                if let Some(left_out) = line.left_out {
+                    msgpack::uint(&mut data, left_out);
+                }
             }
         }
         [(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)]
@@ -478,13 +498,23 @@ fn digest(d: &[u8]) -> Option<Vec<DigestLine>> {
     for _ in 0..count {
         let raw = msgpack::raw(d, &mut p).ok()?;
         let mut q = 0;
-        if msgpack::array_len(raw, &mut q).ok()? < 3 {
+        let len = msgpack::array_len(raw, &mut q).ok()?;
+        if len < 3 {
             return None;
         }
+        let sender = fixed(raw, &mut q)?;
+        let sent_ms = msgpack::read_uint(raw, &mut q).ok()?;
+        let text = text(raw, &mut q)?;
+        // A fourth element of another type says nothing; the text stands.
+        let left_out = match len {
+            3 => None,
+            _ => msgpack::read_uint(raw, &mut q).ok(),
+        };
         lines.push(DigestLine {
-            sender: fixed(raw, &mut q)?,
-            sent_ms: msgpack::read_uint(raw, &mut q).ok()?,
-            text: text(raw, &mut q)?,
+            sender,
+            sent_ms,
+            text,
+            left_out,
         });
     }
     Some(lines)
@@ -728,11 +758,13 @@ mod tests {
                     sender: [0x11; 16],
                     sent_ms: 1_700_000_000_123,
                     text: "Brot".into(),
+                    left_out: None,
                 },
                 DigestLine {
                     sender: [0x55; 16],
                     sent_ms: 7,
                     text: "Danke".into(),
+                    left_out: None,
                 },
             ]),
             ..Lev::default()
@@ -768,6 +800,37 @@ mod tests {
         let read = Lev::from_fields(&[(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)])
             .expect("ours");
         assert_eq!(read.digest, None);
+    }
+
+    /// 1348: a line the home left out carries what it stands for as a
+    /// fourth element, and only that line; a reader before 1348 reads the
+    /// first three (it takes a longer line, see above) and keeps the text.
+    #[test]
+    fn a_left_out_line_says_what_it_stands_for_in_a_fourth_element() {
+        let line = |left_out| DigestLine {
+            sender: [0x11; 16],
+            sent_ms: 7,
+            text: "sent a photo (too large for the radio)".into(),
+            left_out,
+        };
+        let lev = Lev {
+            digest: Some(alloc::vec![line(Some(LEFT_OUT_PHOTO)), line(None)]),
+            ..Lev::default()
+        };
+        let [_, (_, data)] = lev.fields();
+        let h = hex(&data);
+        // [[bin16, 7, str, 1], [bin16, 7, str]].
+        let said = hex(b"sent a photo (too large for the radio)");
+        let head = "c410".to_owned() + &"11".repeat(16) + "07" + "d926" + &said;
+        assert!(
+            h.contains(&("0692".to_owned() + "94" + &head + "01")),
+            "{h}"
+        );
+        assert!(
+            h.ends_with(&("93".to_owned() + &head)),
+            "the second line keeps three: {h}"
+        );
+        assert_eq!(Lev::from_fields(&lev.fields()), Some(lev));
     }
 
     #[test]

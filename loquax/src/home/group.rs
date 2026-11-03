@@ -73,7 +73,7 @@ use leviculum_lxmf::constants::{
 };
 use leviculum_lxmf::lev::{
     DigestLine, GroupCopy, GroupStatus, Invite, Lev, Member, Members, CAP_GROUPS,
-    CAP_READ_RECEIPTS, MEMBER_LEFT,
+    CAP_READ_RECEIPTS, LEFT_OUT_FILE, LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_LEFT,
 };
 use leviculum_lxmf::message::Field;
 use leviculum_lxmf::reaction::Reaction;
@@ -85,7 +85,6 @@ use crate::store::groups::{
     MEMBER_RECEIPTS, MEMBER_SLOW,
 };
 use crate::store::Store;
-use crate::ui::strings::Lang;
 
 /// The directory under the loquax home with the key of every group this
 /// home hosts, one file a group named by its address in hex.
@@ -361,6 +360,31 @@ fn read_receipts(
     Ok(out)
 }
 
+// The group's own texts on the wire (1348): English whatever anyone's
+// language, for the stock client that shows them. A Loquax reader says the
+// same from the `lev` data in its own (`crate::ui::groups::membership_note`)
+// and never shows these.
+
+/// "Lew ended Familie.", to a stock member when the admin deletes the group.
+fn ended_text(admin_name: &str, group_name: &str) -> String {
+    format!("{admin_name} ended {group_name}.")
+}
+
+/// "Lew removed Anna.", to the others when the admin removes a member.
+fn removed_text(admin_name: &str, member_name: &str) -> String {
+    format!("{admin_name} removed {member_name}.")
+}
+
+/// "You are no longer in Familie.", to the member removed.
+fn bye_text(group_name: &str) -> String {
+    format!("You are no longer in {group_name}.")
+}
+
+/// "Anna left.", to the others when a member leaves.
+fn left_text(name: &str) -> String {
+    format!("{name} left.")
+}
+
 /// The admin deletes the group (1307 pass four): every present member is
 /// told, a member that understands groups (the admin among them) with the
 /// last membership, everyone flagged left and the standing ended, a stock
@@ -397,7 +421,7 @@ pub fn delete(
         ended: true,
         ..members_key(epoch, &gone)
     };
-    let text = format!("{admin_name} ended {}.", group.name);
+    let text = ended_text(&admin_name, &group.name);
     let mut out = Vec::new();
     for member in members.iter().filter(|m| m.present()) {
         let mut fields = Vec::new();
@@ -592,33 +616,20 @@ pub fn understands_groups(store: &Store, member: &[u8; 16]) -> Result<bool, Stri
         .is_some_and(|lev| lev.supports_groups()))
 }
 
-/// The text of an invitation (1307 pass six), in the admin's catalogue
-/// language: who invites to what, the group's `lxma://` code, how a stock
-/// member leaves, and for a `stock` member once, where Loquax shows the
-/// group as a group. Where long names would take the text past
-/// [`INVITATION_MAX_CHARS`], the link sentence is left out.
-pub fn invitation_text(
-    admin_name: &str,
-    group_name: &str,
-    code: &str,
-    lang: Lang,
-    stock: bool,
-) -> String {
-    let base = match lang {
-        Lang::En => {
-            format!("{admin_name} invited you to {group_name}: {code} Reply {LEAVE_WORD} to leave.")
-        }
-        Lang::De => format!(
-            "{admin_name} lädt dich zu {group_name} ein: {code} Antworte {LEAVE_WORD} zum Austreten."
-        ),
-    };
+/// The text of an invitation (1307 pass six), English whatever the
+/// admin's language (1348: wire text is English, a Loquax reader says the
+/// card from the `lev` key `0x04` in its own): who invites to what, the
+/// group's `lxma://` code, how a stock member leaves, and for a `stock`
+/// member once, where Loquax shows the group as a group. Where long names
+/// would take the text past [`INVITATION_MAX_CHARS`], the link sentence is
+/// left out.
+pub fn invitation_text(admin_name: &str, group_name: &str, code: &str, stock: bool) -> String {
+    let base =
+        format!("{admin_name} invited you to {group_name}: {code} Reply {LEAVE_WORD} to leave.");
     if !stock {
         return base;
     }
-    let link = match lang {
-        Lang::En => format!(" Loquax shows members and names: {LOQUAX_URL}"),
-        Lang::De => format!(" Loquax zeigt Mitglieder und Namen: {LOQUAX_URL}"),
-    };
+    let link = format!(" Loquax shows members and names: {LOQUAX_URL}");
     match base.chars().count() + link.chars().count() <= INVITATION_MAX_CHARS {
         true => base + &link,
         false => base,
@@ -635,7 +646,6 @@ pub fn invitation(
     admin: &Identity,
     hosted: &Hosted,
     admin_name: &str,
-    lang: Lang,
     member: [u8; 16],
     stock: bool,
     now: f64,
@@ -643,7 +653,7 @@ pub fn invitation(
     let group = &hosted.group;
     let public_key = hosted.identity.public_key_bytes();
     let code = crate::lxma::encode_parts(&group.address, &public_key);
-    let content = invitation_text(admin_name, &group.name, &code, lang, stock);
+    let content = invitation_text(admin_name, &group.name, &code, stock);
     let mut fields = Vec::new();
     Lev {
         capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
@@ -675,7 +685,6 @@ pub fn opening(
     admin: &Identity,
     hosted: &Hosted,
     admin_name: &str,
-    lang: Lang,
     store: &Store,
     now: f64,
 ) -> Result<(Vec<Outgoing>, Vec<Outgoing>), String> {
@@ -688,7 +697,7 @@ pub fn opening(
         .filter(|m| m.address != group.admin)
         .map(|m| {
             let stock = !(m.understands_groups() || understands_groups(store, &m.address)?);
-            invitation(admin, hosted, admin_name, lang, m.address, stock, now)
+            invitation(admin, hosted, admin_name, m.address, stock, now)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let welcome = members
@@ -786,7 +795,7 @@ fn accept_message(
             .group_leave(&group, &removed.address, accepted_at as i64)
             .map_err(failed)?;
         let members = store.group_members(&group).map_err(failed)?;
-        let line = format!("{} removed {}.", writer.name, removed.name);
+        let line = removed_text(&writer.name, &removed.name);
         let mut told = members
             .iter()
             .filter(|m| m.present())
@@ -797,7 +806,7 @@ fn accept_message(
             .find(|m| m.address == removed.address)
             .cloned()
             .unwrap_or(removed);
-        let bye = format!("You are no longer in {}.", hosted.group.name);
+        let bye = bye_text(&hosted.group.name);
         told.push(notice(hosted, &gone, &bye, epoch, &members, accepted_at)?);
         return Ok(Arrival::Left(told));
     }
@@ -805,7 +814,7 @@ fn accept_message(
         let epoch = store
             .group_leave(&group, &sender, accepted_at as i64)
             .map_err(failed)?;
-        let line = format!("{} left.", writer.name);
+        let line = left_text(&writer.name);
         let members = store.group_members(&group).map_err(failed)?;
         let told = members
             .iter()
@@ -1062,20 +1071,16 @@ pub fn due_digests(store: &Store, hosted: &Hosted, now: i64) -> Result<Vec<Diges
                         digest_text(&original),
                     )
                 }
-                None => (
-                    [0; 16],
-                    0,
-                    String::new(),
-                    "a message (no longer here)".to_string(),
-                ),
+                None => ([0; 16], 0, String::new(), left_out(LEFT_OUT_GONE, "")),
             };
             lines.push(line);
         }
         let text = lines
             .iter()
-            .map(|(_, _, name, text)| match text.starts_with(SENT_WORD) {
-                true => format!("{name} {text}"),
-                false => format!("{name}: {text}"),
+            .map(|(_, _, name, (text, left))| match left {
+                // "Lew sent a photo …": the name begins the sentence.
+                Some(LEFT_OUT_PHOTO | LEFT_OUT_VOICE | LEFT_OUT_FILE) => format!("{name} {text}"),
+                _ => format!("{name}: {text}"),
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1086,10 +1091,11 @@ pub fn due_digests(store: &Store, hosted: &Hosted, now: i64) -> Result<Vec<Diges
                 digest: Some(
                     lines
                         .iter()
-                        .map(|(sender, sent_ms, _, text)| DigestLine {
+                        .map(|(sender, sent_ms, _, (text, left))| DigestLine {
                             sender: *sender,
                             sent_ms: *sent_ms,
                             text: text.clone(),
+                            left_out: *left,
                         })
                         .collect(),
                 ),
@@ -1113,28 +1119,36 @@ pub fn due_digests(store: &Store, hosted: &Hosted, now: i64) -> Result<Vec<Diges
 /// A digest for one slow member, and the held copies it carries.
 pub type Digest = (Outgoing, Vec<[u8; 32]>);
 
-/// How a refused attachment's line begins: "Lew sent a photo …".
-const SENT_WORD: &str = "sent a ";
-
-/// The words of `original` in a digest: its text, or for an attachment
-/// above [`SLOW_ATTACHMENT_BYTES`] what it was, with its text after.
-fn digest_text(original: &Message) -> String {
+/// The words of `original` in a digest, and what the line stands for when
+/// the home left the message out: its text, or for an attachment above
+/// [`SLOW_ATTACHMENT_BYTES`] what it was, with its text after (1348: the
+/// English sentence on the wire, the `lev` value for a Loquax reader to
+/// say in its own language).
+fn digest_text(original: &Message) -> (String, Option<u64>) {
     let text = String::from_utf8_lossy(&original.content).into_owned();
     if attachment_bytes(original) <= SLOW_ATTACHMENT_BYTES {
-        return text;
+        return (text, None);
     }
     let has = |key: i64| original.fields.iter().any(|(k, _)| *k == key);
     let what = if has(FIELD_IMAGE) {
-        "photo"
+        LEFT_OUT_PHOTO
     } else if has(FIELD_AUDIO) {
-        "voice message"
+        LEFT_OUT_VOICE
     } else {
-        "file"
+        LEFT_OUT_FILE
     };
-    let said = format!("{SENT_WORD}{what} (too large for the radio)");
-    match text.trim().is_empty() {
-        true => said,
-        false => format!("{said}: {text}"),
+    left_out(what, &text)
+}
+
+/// A digest line that stands for what the home left out: the English
+/// sentence ([`crate::ui::groups::left_out_wire`]), `caption` after it.
+fn left_out(what: u64, caption: &str) -> (String, Option<u64>) {
+    let said = crate::ui::groups::left_out_wire(what)
+        .unwrap_or_default()
+        .to_string();
+    match caption.trim().is_empty() {
+        true => (said, Some(what)),
+        false => (format!("{said}: {caption}"), Some(what)),
     }
 }
 
@@ -1148,7 +1162,6 @@ pub fn add(
     admin: &Identity,
     hosted: &Hosted,
     admin_name: &str,
-    lang: Lang,
     store: &mut Store,
     members: &[([u8; 16], String)],
     now: f64,
@@ -1190,7 +1203,7 @@ pub fn add(
                 .iter()
                 .any(|m| m.address == *address && m.understands_groups());
             let stock = !(flagged || understands_groups(store, address)?);
-            invitation(admin, &current, admin_name, lang, *address, stock, now)
+            invitation(admin, &current, admin_name, *address, stock, now)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let members = store.group_members(&group).map_err(failed)?;
@@ -1856,15 +1869,8 @@ mod tests {
     #[test]
     fn a_new_group_invites_and_tells_its_admin() {
         let scene = scene();
-        let (invitations, welcome) = opening(
-            &scene.lew.0,
-            &scene.hosted,
-            "Lew",
-            Lang::En,
-            &scene.store,
-            7.0,
-        )
-        .expect("opening");
+        let (invitations, welcome) =
+            opening(&scene.lew.0, &scene.hosted, "Lew", &scene.store, 7.0).expect("opening");
         let to: Vec<_> = invitations.iter().map(|i| i.destination).collect();
         assert_eq!(to, [scene.anna.1, scene.bob.1]);
         assert_eq!(welcome.len(), 1);
@@ -1901,11 +1907,13 @@ mod tests {
         assert_eq!(invited_key(&fields), None);
     }
 
-    /// 1307 pass six: a stock member's invitation says once where Loquax
-    /// shows the group as a group, in the admin's language, and stays
-    /// under 300 characters with its `lxma://` code; a Loquax member's is
-    /// as it was. Names too long for the link leave it out, never the
-    /// code.
+    /// 1307 pass six, 1348: a stock member's invitation says once where
+    /// Loquax shows the group as a group, in English whatever the admin's
+    /// language, and stays under 300 characters with its `lxma://` code; a
+    /// Loquax member's is as it was. Names too long for the link leave it
+    /// out, never the code. Control: no German catalogue word reaches the
+    /// wire (the home takes no language; a German phone's legacy request
+    /// is in `server`'s `a_german_admins_invitations_are_english_on_the_wire`).
     #[test]
     fn a_stock_members_invitation_says_where_loquax_is_and_stays_short() {
         let scene = scene();
@@ -1914,7 +1922,7 @@ mod tests {
             &scene.hosted.identity.public_key_bytes(),
         );
         assert_eq!(code.chars().count(), 168);
-        let en = invitation_text("Lew", "Familie", &code, Lang::En, true);
+        let en = invitation_text("Lew", "Familie", &code, true);
         assert_eq!(
             en,
             format!(
@@ -1922,42 +1930,25 @@ mod tests {
                  Loquax shows members and names: https://leviculum.network"
             )
         );
-        let de = invitation_text("Lew", "Familie", &code, Lang::De, true);
-        assert_eq!(
-            de,
-            format!(
-                "Lew lädt dich zu Familie ein: {code} Antworte /leave zum Austreten. \
-                 Loquax zeigt Mitglieder und Namen: https://leviculum.network"
-            )
-        );
-        for text in [&en, &de] {
-            assert!(
-                text.chars().count() < 300,
-                "{}: {text}",
-                text.chars().count()
-            );
-            assert_eq!(text.matches(LOQUAX_URL).count(), 1, "once");
-        }
+        assert!(en.chars().count() < 300, "{}: {en}", en.chars().count());
+        assert_eq!(en.matches(LOQUAX_URL).count(), 1, "once");
         // Control: a Loquax member's text is the one it was.
         assert_eq!(
-            invitation_text("Lew", "Familie", &code, Lang::En, false),
+            invitation_text("Lew", "Familie", &code, false),
             format!("Lew invited you to Familie: {code} Reply /leave to leave.")
         );
-        assert!(!invitation_text("Lew", "Familie", &code, Lang::De, false).contains(LOQUAX_URL));
-        let long = invitation_text("Lew", "Sportverein Hinterdorf e.V.", &code, Lang::De, true);
+        let long = invitation_text(
+            "Lew",
+            "Sportverein Hinterdorf und Umgebung e.V.",
+            &code,
+            true,
+        );
         assert!(long.contains(&code) && !long.contains(LOQUAX_URL), "{long}");
         assert!(long.chars().count() < 300);
 
         // The opening: Anna showed bit 1 to the group, Bob is stock.
-        let (invitations, _) = opening(
-            &scene.lew.0,
-            &scene.hosted,
-            "Lew",
-            Lang::De,
-            &scene.store,
-            7.0,
-        )
-        .expect("opening");
+        let (invitations, _) =
+            opening(&scene.lew.0, &scene.hosted, "Lew", &scene.store, 7.0).expect("opening");
         let text = |to: [u8; 16]| {
             let out = invitations
                 .iter()
@@ -1967,10 +1958,10 @@ mod tests {
                 Message::unpack(&out.packed, None, None, DeliveryMethod::Direct).expect("unpack");
             String::from_utf8(message.content).expect("text")
         };
-        assert_eq!(text(scene.bob.1), de);
+        assert_eq!(text(scene.bob.1), en);
         assert_eq!(
             text(scene.anna.1),
-            invitation_text("Lew", "Familie", &code, Lang::De, false)
+            invitation_text("Lew", "Familie", &code, false)
         );
     }
 
@@ -2033,16 +2024,8 @@ mod tests {
     #[test]
     fn the_invitation_carries_the_code_and_the_card() {
         let scene = scene();
-        let out = invitation(
-            &scene.lew.0,
-            &scene.hosted,
-            "Lew",
-            Lang::En,
-            scene.bob.1,
-            true,
-            7.0,
-        )
-        .expect("invitation");
+        let out = invitation(&scene.lew.0, &scene.hosted, "Lew", scene.bob.1, true, 7.0)
+            .expect("invitation");
         let message = Message::unpack(
             &out.packed,
             None,
@@ -2307,6 +2290,14 @@ mod tests {
                 assert_eq!(lines[0].sender, scene.lew.1);
                 assert_eq!(lines[0].text, "eins");
                 assert_eq!(lines[0].sent_ms, (t * 1000.0) as u64);
+                // 1348: the left-out photo's English sentence, and the value
+                // a Loquax reader says in its own language.
+                assert_eq!(lines[0].left_out, None);
+                assert_eq!(
+                    lines[1].text,
+                    "sent a photo (too large for the radio): zwei"
+                );
+                assert_eq!(lines[1].left_out, Some(LEFT_OUT_PHOTO));
             } else {
                 assert_eq!(lev, None, "text only for the stock member");
             }
@@ -2371,6 +2362,90 @@ mod tests {
         let m = to_group(&scene, &scene.lew, t + 2000.0, "allein", groups_mark());
         let out = accept(&mut scene.store, &hosted, &m, t + 2000.0).expect("line");
         assert!(out.outgoing().iter().any(|o| o.destination == bob));
+    }
+
+    /// 1348: every text the home composes without a human typing it is
+    /// English on the wire, whatever the language of the admin or the
+    /// reader: the invitation (stock and Loquax), "ended", "removed", "no
+    /// longer in", "left", the digest's left-out lines and its name
+    /// prefixes. None of the composers takes a language; the control is
+    /// that no German word of the group catalogue appears in any of them
+    /// (a German catalogue, the words a German reader would see, never
+    /// reaches the wire).
+    #[test]
+    fn every_automatic_group_text_is_english_on_the_wire() {
+        let code = "lxma://code";
+        let message = |fields: Vec<Field>, content: &str| {
+            let (identity, address) = person();
+            Message::create(
+                [1; 16],
+                address,
+                &identity,
+                1.0,
+                Vec::new(),
+                content.as_bytes().to_vec(),
+                fields,
+                DeliveryMethod::Direct,
+            )
+            .expect("message")
+        };
+        let attachment = |key: i64| {
+            let mut value = Vec::new();
+            leviculum_lxmf::msgpack::bin(&mut value, &[7u8; SLOW_ATTACHMENT_BYTES + 1]);
+            vec![(key, value)]
+        };
+        let texts = [
+            (
+                invitation_text("Lew", "Familie", code, true),
+                "Lew invited you to Familie: lxma://code Reply /leave to leave. \
+                 Loquax shows members and names: https://leviculum.network",
+            ),
+            (
+                invitation_text("Lew", "Familie", code, false),
+                "Lew invited you to Familie: lxma://code Reply /leave to leave.",
+            ),
+            (ended_text("Lew", "Familie"), "Lew ended Familie."),
+            (removed_text("Lew", "Anna"), "Lew removed Anna."),
+            (bye_text("Familie"), "You are no longer in Familie."),
+            (left_text("Anna"), "Anna left."),
+            (
+                digest_text(&message(attachment(FIELD_IMAGE), "zwei")).0,
+                "sent a photo (too large for the radio): zwei",
+            ),
+            (
+                digest_text(&message(attachment(FIELD_AUDIO), "")).0,
+                "sent a voice message (too large for the radio)",
+            ),
+            (
+                digest_text(&message(attachment(FIELD_FILE_ATTACHMENTS), "")).0,
+                "sent a file (too large for the radio)",
+            ),
+            (left_out(LEFT_OUT_GONE, "").0, "a message (no longer here)"),
+            (
+                String::from_utf8(prefixed("Anna", b"Brot")).expect("utf-8"),
+                "Anna: Brot",
+            ),
+        ];
+        // The German words of the group's catalogue entries, each a stretch
+        // between two placeholders that the English text does not have.
+        let german: Vec<&str> = crate::ui::strings::CATALOGUE
+            .iter()
+            .filter(|(_, key, _, _)| key.starts_with("group_"))
+            .flat_map(|(_, _, en, de)| {
+                de.split("%1$s")
+                    .flat_map(|p| p.split("%2$s"))
+                    .flat_map(|p| p.split("%1$d"))
+                    .map(str::trim)
+                    .filter(move |p| p.len() >= 4 && !en.contains(p))
+            })
+            .collect();
+        assert!(german.contains(&"hat ein Foto geschickt (zu groß für Funk)"));
+        for (text, english) in &texts {
+            assert_eq!(text, english);
+            for word in &german {
+                assert!(!text.contains(word), "{word:?} in {text:?}");
+            }
+        }
     }
 
     /// Every digest due by `now` goes, booked as sent.
@@ -2510,7 +2585,6 @@ mod tests {
             &scene.lew.0,
             &hosted,
             "Lew",
-            Lang::En,
             &mut scene.store,
             &[(cara.1, "Cara".into()), (scene.anna.1, "Anna".into())],
             ACCEPTED,
@@ -2539,7 +2613,6 @@ mod tests {
             &scene.lew.0,
             &hosted,
             "Lew",
-            Lang::En,
             &mut scene.store,
             &[(scene.anna.1, "Anna".into())],
             ACCEPTED,

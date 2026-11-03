@@ -190,6 +190,10 @@ async fn drive(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pump = tokio::time::interval(Duration::from_millis(PUMP_MS));
     pump.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The window speaks the locale's language (as `App::lang` does), so the
+    // words the model says itself, a group's notes and a digest's
+    // left-out lines among them (1348), are the window's too.
+    shell.model.lang = locale();
     shell.apply(UiEvent::Clock(local_now()));
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
     let mut last: Option<Seen> = None;

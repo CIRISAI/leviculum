@@ -1723,19 +1723,17 @@ pub enum UiEffect {
     PauseVoice { peer: [u8; 16], key: u64 },
     /// Ask the home to make the group `name` with `members`, each under
     /// the name the reader knows it by (1307, `/group`); answered with
-    /// [`UiEvent::GroupMade`]. `lang` is the reader's, the invitations'
-    /// (1307 pass six).
+    /// [`UiEvent::GroupMade`]. The invitations are English on the wire,
+    /// whatever the reader's language (1348).
     CreateGroup {
         name: String,
         members: Vec<([u8; 16], String)>,
-        lang: strings::Lang,
     },
     /// Ask the home to add `members` to its group `group` (1307 G2,
     /// `/groupadd`); answered with [`UiEvent::MembersAdded`].
     AddMembers {
         group: [u8; 16],
         members: Vec<([u8; 16], String)>,
-        lang: strings::Lang,
     },
     /// Ask the home to delete its group `group` for everyone (1307 pass
     /// four, `/groupdelete`); answered with [`UiEvent::GroupDeleted`].

@@ -108,11 +108,13 @@ fn expected(id: &str) -> Lev {
                     sender: SENDER,
                     sent_ms: 1_700_000_000_123,
                     text: "Brot ist da".into(),
+                    left_out: None,
                 },
                 DigestLine {
                     sender: MEMBER,
                     sent_ms: 1_700_000_001_123,
                     text: "Danke".into(),
+                    left_out: None,
                 },
             ]),
             ..Lev::default()

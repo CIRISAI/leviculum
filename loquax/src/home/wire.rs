@@ -17,11 +17,9 @@
 //!                                                 [[seq, kind, id: bin32, at, packed], ...]]
 //! /moved [token: bin16, cursor: uint]         -> [status]
 //! /group [client_id: bin16, name: str,
-//!         [[address: bin16, name: str], ...],
-//!         lang: str?]                         -> [status, group: bin16]
+//!         [[address: bin16, name: str], ...]] -> [status, group: bin16]
 //! /groupadd [client_id: bin16, group: bin16,
-//!         [[address: bin16, name: str], ...],
-//!         lang: str?]                         -> [status, group: bin16]
+//!         [[address: bin16, name: str], ...]] -> [status, group: bin16]
 //!
 //! wake   ["pull", newest: uint]               home node to client, on the
 //!                                             link that asked /watch
@@ -58,7 +56,6 @@
 use alloc::vec::Vec;
 
 use leviculum_lxmf::msgpack;
-use leviculum_ui::strings::Lang;
 
 /// One archive entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,23 +552,22 @@ pub const GROUP_MEMBERS_MAX: usize = 64;
 /// One `/group` (1307, `docs/drafts/group-chats-study-2026-11.md` 4.1): make
 /// a group hosted by the home, its admin the home's owner, and invite the
 /// members, each under the name the admin gives it. The same `client_id`
-/// handed in again is the same group. `lang` is the admin's catalogue
-/// language, the invitations' (1307 pass six).
+/// handed in again is the same group. The invitations are English on
+/// the wire whatever the admin's language (1348), so the request names
+/// none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupRequest {
     pub client_id: [u8; 16],
     pub name: alloc::string::String,
     pub members: Vec<([u8; 16], alloc::string::String)>,
-    pub lang: Lang,
 }
 
 pub fn group_request(request: &GroupRequest) -> Vec<u8> {
     let mut out = Vec::new();
-    msgpack::array(&mut out, 3 + usize::from(request.lang != Lang::En));
+    msgpack::array(&mut out, 3);
     msgpack::bin(&mut out, &request.client_id);
     msgpack::string(&mut out, &request.name);
     members_out(&mut out, &request.members);
-    lang_out(&mut out, request.lang);
     out
 }
 
@@ -585,23 +581,15 @@ fn members_out(out: &mut Vec<u8>, members: &[([u8; 16], alloc::string::String)])
     }
 }
 
-/// The trailing language of a `/group` or a `/groupadd` (1307 pass six):
-/// English is said by leaving it out, so the request reads as it did
-/// before to a home built before it, which takes three elements only.
-fn lang_out(out: &mut Vec<u8>, lang: Lang) {
-    match lang {
-        Lang::En => {}
-        Lang::De => msgpack::string(out, "de"),
+/// A phone of 1307 pass six sends a `/group` or a `/groupadd` its
+/// language as a fourth element, a string; the home reads it past and
+/// takes nothing from it (1348: the invitations are English on the wire),
+/// so such a phone still makes its groups.
+fn legacy_lang(data: &[u8], p: &mut usize, len: usize) -> Result<(), Malformed> {
+    if len == 4 {
+        msgpack::read_str(data, p)?;
     }
-}
-
-/// The language a `/group` or a `/groupadd` of `len` elements, the first
-/// three read, ends with: English when it says none.
-fn lang_in(data: &[u8], p: &mut usize, len: usize) -> Result<Lang, Malformed> {
-    match len {
-        3 => Ok(Lang::En),
-        _ => Ok(Lang::of_tag(msgpack::read_str(data, p)?)),
-    }
+    Ok(())
 }
 
 /// A `/group` as the home reads it: a group with no name, no member or more
@@ -629,34 +617,31 @@ pub fn read_group_request(data: &[u8]) -> Result<GroupRequest, Malformed> {
         let name = msgpack::read_str(data, &mut p)?.trim().into();
         members.push((address, name));
     }
-    let lang = lang_in(data, &mut p, len)?;
+    legacy_lang(data, &mut p, len)?;
     Ok(GroupRequest {
         client_id,
         name,
         members,
-        lang,
     })
 }
 
 /// One `/groupadd` (1307 G2, study 4.5): the admin's home adds `members`
 /// to its group `group`, each invited under the name the admin gives it.
 /// A member already in it is skipped, so the same request again adds
-/// nobody. `lang` as in [`GroupRequest`].
+/// nobody.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupAddRequest {
     pub client_id: [u8; 16],
     pub group: [u8; 16],
     pub members: Vec<([u8; 16], alloc::string::String)>,
-    pub lang: Lang,
 }
 
 pub fn group_add_request(request: &GroupAddRequest) -> Vec<u8> {
     let mut out = Vec::new();
-    msgpack::array(&mut out, 3 + usize::from(request.lang != Lang::En));
+    msgpack::array(&mut out, 3);
     msgpack::bin(&mut out, &request.client_id);
     msgpack::bin(&mut out, &request.group);
     members_out(&mut out, &request.members);
-    lang_out(&mut out, request.lang);
     out
 }
 
@@ -685,12 +670,11 @@ pub fn read_group_add_request(data: &[u8]) -> Result<GroupAddRequest, Malformed>
         let name = msgpack::read_str(data, &mut p)?.trim().into();
         members.push((address, name));
     }
-    let lang = lang_in(data, &mut p, len)?;
+    legacy_lang(data, &mut p, len)?;
     Ok(GroupAddRequest {
         client_id,
         group,
         members,
-        lang,
     })
 }
 
@@ -1016,6 +1000,16 @@ mod tests {
         );
     }
 
+    /// A three-element request as a 1307 pass six phone sent it: its
+    /// language appended as a fourth element.
+    fn legacy(request: &[u8], lang: &str) -> Vec<u8> {
+        assert_eq!(request[0], 0x93, "a three-element array");
+        let mut out = alloc::vec![0x94];
+        out.extend_from_slice(&request[1..]);
+        msgpack::string(&mut out, lang);
+        out
+    }
+
     /// 1307: a `/group` and its answer round trip; a group without a name
     /// or a member, or with one member too many, is malformed.
     #[test]
@@ -1024,21 +1018,27 @@ mod tests {
             client_id: [5; 16],
             name: "Familie".into(),
             members: alloc::vec![([1; 16], "Anna".into()), ([2; 16], "Bob".into())],
-            lang: Lang::En,
         };
         assert_eq!(
             read_group_request(&group_request(&request)),
             Ok(request.clone())
         );
-        // 1307 pass six: English is the three elements a home before it
-        // reads; German rides as a fourth.
+        // 1348: three elements, the language gone; a 1307 pass six phone's
+        // fourth, its language, is read past and changes nothing.
         let mut p = 0;
         assert_eq!(msgpack::array_len(&group_request(&request), &mut p), Ok(3));
-        let german = GroupRequest {
-            lang: Lang::De,
-            ..request.clone()
-        };
-        assert_eq!(read_group_request(&group_request(&german)), Ok(german));
+        assert_eq!(
+            read_group_request(&legacy(&group_request(&request), "de")),
+            Ok(request.clone())
+        );
+        let mut garbled = legacy(&group_request(&request), "de");
+        let at = garbled.len() - 3;
+        garbled[at] = 0xc4; // a bin where the language's string was
+        assert_eq!(
+            read_group_request(&garbled),
+            Err(Malformed),
+            "control: a fourth element that is no string is refused"
+        );
         assert_eq!(read_group_answer(&group_answer(&[9; 16])), Ok(Ok([9; 16])));
         assert_eq!(
             read_group_answer(&status_answer(Status::NotAdmitted)),
@@ -1074,19 +1074,14 @@ mod tests {
             client_id: [3; 16],
             group: [4; 16],
             members: vec![([5; 16], "Cara".into())],
-            lang: Lang::En,
         };
         assert_eq!(
             read_group_add_request(&group_add_request(&add)),
             Ok(add.clone())
         );
-        let german = GroupAddRequest {
-            lang: Lang::De,
-            ..add.clone()
-        };
         assert_eq!(
-            read_group_add_request(&group_add_request(&german)),
-            Ok(german)
+            read_group_add_request(&legacy(&group_add_request(&add), "de")),
+            Ok(add.clone())
         );
         let none = GroupAddRequest {
             members: Vec::new(),
