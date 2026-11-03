@@ -444,6 +444,8 @@ pub enum Message {
     Position(String),
     /// What the row menu's rename field holds now (1371).
     Renaming(String),
+    /// A bubble menu's Forward (1371): pick the conversation.
+    ForwardPick(NodeId),
     NewGo,
     Compose(text_editor::Action),
     /// What the user asks (1218): a press on a scene node raises the
@@ -702,6 +704,9 @@ struct App {
     help: Option<usize>,
     /// "My code" over the window while it is open (1371).
     code_open: bool,
+    /// The bubble whose Forward was pressed (1371): its menu lists the
+    /// conversations to send the copy to.
+    forwarding: Option<NodeId>,
     compose: text_editor::Content,
     /// The message a reply being written answers, with its first line.
     reply: Option<([u8; 32], String)>,
@@ -807,6 +812,7 @@ impl App {
             map_shown: false,
             help: None,
             code_open: false,
+            forwarding: None,
             compose: text_editor::Content::new(),
             reply: None,
             compose_for: None,
@@ -927,6 +933,7 @@ impl App {
             Message::Search(query) => self.search = query,
             Message::NewAddress(typed) => self.new_address = Some(typed),
             Message::Position(typed) => self.position = Some(typed),
+            Message::ForwardPick(id) => self.forwarding = Some(id),
             Message::Renaming(typed) => {
                 if let Some((_, name)) = self.renaming.as_mut() {
                     *name = typed;
@@ -1230,6 +1237,13 @@ impl App {
                 self.menu = id;
                 self.deleting = None;
                 self.renaming = None;
+                self.forwarding = None;
+            }
+            // A copy of the message to the conversation picked (1371).
+            Intent::Forward { from, key, to } => {
+                self.menu = None;
+                self.forwarding = None;
+                self.tell(UiEvent::Forward { from, key, to });
             }
             // A row menu's verbs on a peer (1371): the model's, as the
             // terminal's palette does them; a forget asks once, a rename
@@ -2833,6 +2847,52 @@ mod tests {
         assert_eq!(
             (fix.latitude_e6, fix.longitude_e6),
             (centre.latitude_e6, centre.longitude_e6)
+        );
+    }
+
+    /// 1371: a bubble's menu forwards it: Forward lists the
+    /// conversations, a press on one hands the copy to the model, which
+    /// sends it there. Control: the menu without Forward pressed lists
+    /// none.
+    #[test]
+    fn a_bubble_is_forwarded_to_the_conversation_picked() {
+        let mut model = chat_model();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(900.0, 560.0);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let key = bubble_key(&app, [2; 32]);
+        let bubble = NodeId::Bubble(key);
+        let _ = app.update(Message::Intent(Intent::Menu(Some(bubble))));
+        assert_eq!(app.forwarding, None, "control: no list yet");
+        let _ = app.update(Message::ForwardPick(bubble));
+        assert_eq!(app.forwarding, Some(bubble));
+        let forward = Intent::Forward {
+            from: ANNA,
+            key,
+            to: BERT,
+        };
+        let _ = app.update(Message::Intent(forward));
+        assert_eq!((app.menu, app.forwarding), (None, None));
+        let told = told(&mut rx);
+        assert_eq!(
+            told,
+            [UiEvent::Forward {
+                from: ANNA,
+                key,
+                to: BERT
+            }]
+        );
+        let sent: Vec<_> = told
+            .into_iter()
+            .flat_map(|event| update(&mut model, event))
+            .collect();
+        assert!(
+            sent.iter().any(|e| matches!(
+                e,
+                loquax::ui::UiEffect::Send { to, body, .. } if *to == BERT && body == "Good morning!"
+            )),
+            "{sent:?}"
         );
     }
 

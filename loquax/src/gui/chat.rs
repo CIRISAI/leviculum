@@ -1254,12 +1254,35 @@ impl App {
                 }
             }
         }
+        // Forward (1371): the phone's picker of conversations, here the
+        // list's rows under the menu.
+        actions = actions.push(link(
+            self.word(StrId::ActionForward),
+            Message::ForwardPick(node.id),
+            t,
+        ));
         actions = actions.push(link(
             self.word(StrId::Close),
             Message::Intent(Intent::Menu(None)),
             t,
         ));
-        let panel = container(column![reactions, actions].spacing(4))
+        let mut panel = column![reactions, actions].spacing(4);
+        if let (Some(from), scene::NodeId::Bubble(key), true) = (
+            self.scene.chat.as_ref().map(|c| c.peer),
+            node.id,
+            self.forwarding == Some(node.id),
+        ) {
+            for r in self.listed() {
+                if let scene::NodeId::Row(to) = r.id {
+                    panel = panel.push(link(
+                        &r.row.name,
+                        Message::Intent(Intent::Forward { from, key, to }),
+                        t,
+                    ));
+                }
+            }
+        }
+        let panel = container(panel)
             .padding(8)
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(colour(t.panel))),
