@@ -406,7 +406,7 @@ The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
 `thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
 m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
 positive control). It words the chats list scene in cells
-(`lines`, `loquax-m9/src/screen.rs:69`) and draws them through
+(`lines`, `loquax-m9/src/screen.rs:118`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
 mousefood (`draw`, `loquax-m9/src/render.rs:45`). Mousefood's own
@@ -424,13 +424,13 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:297`).
+  (`narrow`, `loquax-m9/src/screen.rs:349`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:242`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:294`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
-  (`LIST_ROWS`, `loquax-m9/src/keys.rs:39`); a test resolves each through
+  (`LIST_ROWS`, `loquax-m9/src/keys.rs:50`); a test resolves each through
   `keys::resolve` and `Intent::from_action` to `Scroll(LineUp)`,
   `Scroll(LineDown)`, `Focus(Messages)` and `Back`. Which scancode is
   which key stays the keyboard slice's.
@@ -462,6 +462,92 @@ Not yet done of slice one: the board's half, which needs the board code
 this pass left out. The frame dumped from the board equal to the golden,
 the two-region heap and the census printed from the board.
 
+### Slice two done, on the host (1356)
+
+The open chat and the compose line, drawn and typed into on the host. Of
+the table above it takes the host halves of slices 2 and 3: the chat
+drawn from the scene, and typed text through the model's keys. The board
+halves stay: the store in flash, the scancodes, the send over the mesh.
+
+- **The chat in cells** (`lines`, `loquax-m9/src/chat.rs:40`). The
+  scene's chat set as the terminal sets a conversation: a bubble wrapped
+  to three quarters of the 53 cells (`block_cap`,
+  `loquax/src/ui/layout.rs:337`), tinted with a margin cell either side,
+  ours flush right, theirs flush left, the time and the mark's ASCII rung
+  closing its last row, a blank row between two groups. The day line and
+  a group's note line (who joined or left) are the terminal's own
+  (`date_line`, `loquax/src/ui/layout.rs:307`, and `note_line`,
+  `loquax/src/ui/layout.rs:291`, public since this slice). A group's chat
+  names the writer above a group of bubbles, which is how a digest's
+  lines read (each a bubble under its writer, the model's work), and a
+  line that came after newer ones says "arrived late" under it. Quotes,
+  photos, files and voice messages are words (`> …`, `[#] Photo, …`,
+  `[f]`, `[v]`); reactions are not drawn yet. Every row goes through
+  `narrow` first, the store's emoji and Japanese included.
+- **Only the screen is laid out.** The bubbles go from the bottom up,
+  from the newest or, when the cursor stands above the last screen, from
+  the cursor's bubble (`bubbles`, `loquax-m9/src/chat.rs:77`). The window
+  is a function of the scene and the cursor alone; the redraw test moves
+  the cursor nine bubbles, opens the line and types an emoji with one
+  renderer, and must equal a fresh draw.
+- **What the M9 shows of a model** (`scene`,
+  `loquax-m9/src/screen.rs:101`, and `Look::of`,
+  `loquax-m9/src/screen.rs:79`). The Compact scene, which is the open chat
+  alone, with the cursor of the pane the keys are in; and the list while
+  the keys are on the list. The model's back from the chat moves the keys
+  to the list and keeps the chat open, as the terminal's panes do, so a
+  screen of one pane shows the pane the keys are in. That builds the Wide
+  scene and drops its chat: the list's peak then carries the chat's.
+- **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:345`): the
+  hint while empty and not typed into, the text scrolled so the caret
+  shows and the caret's cell reversed while it is. The field is
+  `loquax-m9`'s own (`Field`, `loquax-m9/src/field.rs:20`): the terminal's
+  `tui_input` and its edit table are `std`, the phone's field edits
+  nothing by key. It inserts at the caret, erases with Backspace and
+  Delete, moves with Left, Right, Home and End; the Emacs chords want a
+  Control and an Alt the keyboard has not.
+- **The key table, the chat's rows** (`CHAT_ROWS`,
+  `loquax-m9/src/keys.rs:76`), each resolved in a test through
+  `keys::resolve` and `Intent::from_action`. The M9 binds nothing of its
+  own; a letter is the terminal's letter.
+
+| verb | M9 key | pane | resolves to |
+|---|---|---|---|
+| up / down | Up / Down | chat | `Scroll(LineUp)` / `Scroll(LineDown)` |
+| write | `i` | chat | `Focus(Compose)` |
+| type | any character | compose | nothing: the field's edit |
+| erase | Backspace | compose | nothing: the field's edit |
+| caret left / right | Left / Right | compose | `Edit` |
+| send | Enter | compose | `Send { to: Open }` |
+| cancel | Back | compose | `Back`: the keys to the chat, the text kept as its draft |
+| back | Back | chat | `Back`: the keys to the list |
+
+- **The goldens**: `m9-chat.png` (Enter on the pinned conversation of the
+  ugly store), `m9-chat-cursor.png` (twelve bubbles up, the window
+  moved), `m9-compose.png` (a line typed with an umlaut, the caret two
+  left), `m9-sent.png` (Enter sent it: the field empty, the message on
+  its sending rung) and `m9-group.png` (a digest of two writers, a line of
+  each after it, one late, a member leaving, ours). The group's positive
+  control takes the late mark and the names away; each changes the frame.
+- **The census** (`m9_scene_census`, 64-bit host, debug build), the open
+  chat as the M9 builds and draws it:
+
+| what | held | peak | stack |
+|---|---:|---:|---:|
+| open chat scene (M9) | 111,184 B | 145,638 B | 81,560 B |
+| the list with a chat open (M9) | 26,532 B | 145,638 B | |
+| open chat, first draw | 0 B | 81,056 B | 11,288 B |
+| open chat, cursor moved | 0 B | 80,976 B | 11,312 B |
+| open chat, a line typed | 0 B | 80,456 B | 11,288 B |
+
+  What the M9 may spend on the open chat, from these upper bounds: the
+  model (447,639 B), the renderer (107,584 B) and the panel's frame
+  (153,600 B) stay. On top, the worst moment is building the next scene
+  while the last one is still held, 111,184 B plus a 145,638 B peak; a
+  draw over a held scene is less, 111,184 B plus 81,056 B. That is
+  965,645 B on the 64-bit host, under the 1.1 MB the rule above puts in
+  the PSRAM it gives the UI. The ceilings asserted are about double.
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice
@@ -476,7 +562,8 @@ the two-region heap and the census printed from the board.
 ## Not yet built
 
 The M9 frontend: the six slices of "The slices, in order" above but the
-host half of slice one, and the `no_std` client seam they need. Of the 2026-10-21 list that stood
+host halves of slice one and of slice two (1356, the chat drawn and typed
+into), and the `no_std` client seam they need. Of the 2026-10-21 list that stood
 here, the rest has landed since: the core builds `no_std`
 (`just loquax-core-no-std`), the desktop window ships beside the
 terminal, Android went through the JNI facade rather than the C
