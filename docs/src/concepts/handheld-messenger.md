@@ -647,6 +647,99 @@ path requests and links; the home's key and the device identity written
 to flash on `Done(Ok)`; then `lnflash --home`, a control fact in the
 envelope and its handler, which ends in the same record.
 
+### Slice four, host half (1361)
+
+The first image that boots the renderer on the M9, built and proven on
+the host; nothing was flashed in the pass, the board half is the
+reviewer's rig window. It is M9-only by nature: the panel, the keyboard
+controller and the frame dump exist on no other target, and what it
+draws is the scene the terminal, the window and the phone already draw.
+
+- **The image** is a second binary of the ESP32 class crate,
+  `thinknode_m9` (`leviculum-esp/src/bin/thinknode_m9.rs`), for the M9's
+  ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
+  (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
+  [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:173`),
+  the stack the 312,440 B of internal RAM the linker leaves; the class
+  allocator now counts what is live and its peak for the census. Nothing
+  goes on the air: the LR1110's chip select is parked high.
+- **The panel:** ST7789 over SPI2 at 40 MHz with DMA, landscape. A draw
+  goes through mousefood into `loquax-m9`'s frame, which keeps the band
+  of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:73`), and the
+  board sends only that band through the row window (`flush`,
+  `leviculum-esp/src/bin/thinknode_m9.rs:148`): the full frame's 30.8 ms
+  is the first draw's cost, a moved cursor sends two entries. The
+  redraw test drives one renderer through four keys and must equal a
+  fresh draw, its band flushed into a second frame
+  (`the_boards_redraw_and_its_band_equal_a_fresh_draw`).
+- **The model:** a fixture built in code, `no_std`, 13 conversations with
+  umlauts, Greek and Cyrillic names, a pinned one of 16 messages over every
+  rung of the ladder, the clock standing at 2026-11-03 12:00 CET (`model`,
+  `loquax-m9/src/fixture.rs:237`). The ugly store of the earlier goldens
+  is a store on disk with signed messages, which the board has neither of
+  yet, so the board's two screens have goldens of their own,
+  `m9-fw-chats.png` and `m9-fw-chat.png`, walked to with the board's keys
+  (`Screen::model`, `loquax-m9/src/fixture.rs:294`).
+- **The keyboard:** the controller's answer is read as the community port
+  reads it, register 0x01 of 0x6D, eight bytes a poll, and decoded by a
+  table (`PROVISIONAL`, `loquax-m9/src/kbraw.rs:71`): a bitmap table or a
+  code table, either mapping onto the 5 x 10 matrix. Until a capture
+  reads the controller the board takes the answer as the matrix bit for
+  bit and types with slice three's test layout. Every answer goes out raw
+  before it is decoded, `KBRAW <ms> <hex>`, then the scan as slice three's
+  recording line, `KB <ms> <14 hex>`, one pair a 10 ms poll; `parse_raw`
+  (`loquax-m9/src/kbraw.rs:135`) replays a capture through any other table
+  on the host, so the right table is found without a flash per guess.
+- **The dump:** `FRAME_DUMP`, envelope type 0x18 (`TYPE_FRAME_DUMP`,
+  `leviculum-core/src/envelope.rs:404`), registered as 0x17 was in 1301.
+  Empty, it dumps what is shown; one byte walks a fresh fixture model to a
+  screen first, 0 the chats list, 1 the pinned chat. The board acks it,
+  then writes the frame as text (`encode`, `loquax-m9/src/dump.rs:64`):
+
+  ```text
+  PBM 320 240
+  PBR <y> <x> <run> <run> ...     a run is rrrr or rrrr*n, RGB565 in hex
+  PBE <fnv32>                     FNV-1a over the pixels, little end first
+  ```
+
+  Lines stay under 120 B, plain ASCII, so the dump shares the one UART
+  with the log and the frames. The board's chats list is 65,521 B of dump
+  and its chat 41,520 B, 5.7 s and 3.6 s at 115200 baud. The same encoder
+  and its decoder (`decode`, `loquax-m9/src/dump.rs:139`) now sit in every
+  golden comparison (`loquax-m9/tests/support/mod.rs`): the seven goldens
+  of 1351 and 1356 and the board's two are each compared after a trip
+  through the dump, byte for byte.
+- **The census** (`measure`, `loquax-m9/src/census.rs:49`), one routine
+  for both: build the screen's scene, then draw it, each step's heap held,
+  heap peak and stack below the probe. The budgets are this page's
+  ceilings (`CHATS`, `loquax-m9/src/census.rs:100`; `CHAT`,
+  `loquax-m9/src/census.rs:111`). The board prints a `[CENSUS]` line per
+  screen with its verdict; the host runs the same over the same model
+  (`loquax-android/tests/m9_fixture_census.rs`, 64-bit, debug build):
+
+| screen | scene held | scene peak | scene stack | draw peak | draw stack | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| chats list | 19,551 B | 56,327 B | 66,920 B | 86,184 B | 6,624 B | ok |
+| open chat | 36,745 B | 56,327 B | 66,920 B | 80,976 B | 11,056 B | ok |
+| renderer made | 107,584 B held | | | | | ok (under 220,000 B) |
+
+- **The image's size**, `just build-m9` (`scripts/build-m9-image.sh`):
+  927,520 B of a 16,384,000 B application partition, printed as the nRF
+  budget prints its own, `FLASH_HEADROOM board=thinknode_m9 used=927520
+  free=15456480`, and `STACK_HEADROOM board=thinknode_m9 stack=312440
+  need=184000`, red below 8 KiB free or a stack under the open chat's
+  ceilings. `just flash-m9 <tty>` writes it with espflash at 230400 baud.
+
+The boot lines, in order: `[FW_BUILD]`, `[BOARD] id=M9 ... heap=<psram>`,
+`[HEAP] region=psram`, `[STACK] bytes=`, `[DISP] ST7789 320x240
+madctl=0xb0 spi_mhz=40 state=up`, `[KB] addr=0x6d found=...`, `[CENSUS]`
+for the renderer and for each screen, `[DISP] flush rows=0..239`, then
+`KBRAW` and `KB` every 10 ms and the banner pair every 5 s. Not yet done
+of slice four: everything the board says. Whether the frame on the panel
+reads the right way round, whether the dump equals the golden, what the
+board's census measures, and what the controller's answer is.
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice
@@ -662,8 +755,9 @@ envelope and its handler, which ends in the same record.
 
 The M9 frontend: the six slices of "The slices, in order" above but the
 host halves of slice one, of slice two (1356, the chat drawn and typed
-into) and of slice three (1359, the keyboard driver, the typed code and
-the join's `no_std` steps). Of the client seam, the pull, the sends and
+into), of slice three (1359, the keyboard driver, the typed code and
+the join's `no_std` steps) and of slice four (1361, the image that boots
+the renderer, built, its board half not yet run). Of the client seam, the pull, the sends and
 the client's record in flash are still `std` (the table under "Slice
 three done"). Of the 2026-10-21 list that stood
 here, the rest has landed since: the core builds `no_std`
