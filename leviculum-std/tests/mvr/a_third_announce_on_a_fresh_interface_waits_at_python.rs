@@ -33,6 +33,8 @@
 //! spaces its own announces on a fresh interface
 //! (`leviculum-core/src/transport/fresh_announce_pacing.rs`), and Python
 //! learns both; the third test holds five destinations to the same.
+//! `local_clients_announces_on_a_fresh_interface_reach_python.rs` holds the
+//! announces a shared instance forwards for its clients to the same (1358).
 
 use std::time::Duration;
 

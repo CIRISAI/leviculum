@@ -30294,6 +30294,102 @@ mod tests {
             (buf[..len].to_vec(), dest.hash().into_bytes())
         }
 
+        /// The destinations whose announces the drained actions put on
+        /// `iface`, by a broadcast that does not leave it out or by a send
+        /// addressed to it.
+        fn announces_reaching(actions: &[Action], iface: usize) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+            actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Broadcast {
+                        data,
+                        exclude_iface,
+                        exclude_ifaces,
+                        ..
+                    } if *exclude_iface != Some(InterfaceId(iface))
+                        && !exclude_ifaces.contains(&InterfaceId(iface)) =>
+                    {
+                        Some(data)
+                    }
+                    Action::SendPacket {
+                        iface: to, data, ..
+                    } if to.0 == iface => Some(data),
+                    _ => None,
+                })
+                .filter_map(|data| Packet::unpack(data).ok())
+                .filter(|p| p.flags.packet_type == PacketType::Announce)
+                .map(|p| p.destination_hash)
+                .collect()
+        }
+
+        /// Order 1358: a Python peer counts every announce on its interface,
+        /// not knowing which ones this instance forwards for its local
+        /// clients. A client's announce is stored at hops 0 (the IPC hop is
+        /// undone, `incoming_hop_count`) and fires through `forward_on_all`,
+        /// whose own-announce gate puts it in the fresh network interface's
+        /// pacer: three clients announcing in one instant reach that
+        /// interface a spacing apart. (All three fall due in one poll, so
+        /// they leave in the announce table's order, not the clients'.)
+        #[test]
+        fn local_client_announces_are_paced_on_a_fresh_network_interface() {
+            let mut transport = make_transport_with_local_client();
+            let mut dests = Vec::new();
+            for _ in 0..3 {
+                let (raw, dest) = make_announce_raw(0, PacketContext::None);
+                transport
+                    .process_incoming(LOCAL_CLIENT_IFACE, &raw)
+                    .expect("process_incoming");
+                dests.push(dest);
+            }
+            let mut arrivals = Vec::new();
+            for step in 0..5u64 {
+                transport.poll();
+                for dest in announces_reaching(&transport.drain_actions(), NETWORK_IFACE) {
+                    arrivals.push((step * FRESH_ANNOUNCE_SPACING_MS, dest));
+                }
+                transport.clock().advance(FRESH_ANNOUNCE_SPACING_MS);
+            }
+            let times: Vec<u64> = arrivals.iter().map(|(t, _)| *t).collect();
+            assert_eq!(
+                times,
+                alloc::vec![0, FRESH_ANNOUNCE_SPACING_MS, 2 * FRESH_ANNOUNCE_SPACING_MS],
+            );
+            for dest in &dests {
+                assert!(
+                    arrivals.iter().any(|(_, d)| d == dest),
+                    "a client announce never left"
+                );
+            }
+        }
+
+        /// The other half of order 1358's table: announces relayed from
+        /// another network interface stay unpaced on a fresh one. They are
+        /// transit traffic, as a Python relay would pass them on.
+        #[test]
+        fn relayed_network_announces_are_not_paced_on_a_fresh_interface() {
+            const OTHER_IFACE: usize = 1;
+            let mut transport = make_transport_with_local_client();
+            transport.set_interface_name(OTHER_IFACE, "tcp_client/127.0.0.2".into());
+            let mut dests = Vec::new();
+            for _ in 0..3 {
+                let (raw, dest) = make_announce_raw(0, PacketContext::None);
+                transport
+                    .process_incoming(NETWORK_IFACE, &raw)
+                    .expect("process_incoming");
+                dests.push(dest);
+            }
+            let mut reached = Vec::new();
+            for _ in 0..100 {
+                transport.poll();
+                assert_eq!(transport.fresh_announces_waiting(), 0);
+                reached.extend(announces_reaching(&transport.drain_actions(), OTHER_IFACE));
+                transport.clock().advance(100);
+            }
+            for dest in &dests {
+                assert!(reached.contains(dest), "a relayed announce never left");
+            }
+        }
+
         #[test]
         fn test_local_client_set_and_query() {
             let mut transport = make_transport_with_local_client();

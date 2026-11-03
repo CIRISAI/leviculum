@@ -46,7 +46,8 @@ reference/Reticulum/RNS/__init__.py leviculum-std/rnsd_interop
 # with them, so these go by exact name. Measured on a clone without
 # submodules whose submodule URLs point nowhere, 2026-10-04: these seven, and
 # only these, fail in the whole selection there. The `a_third_announce_*`
-# lines came after (1317, 1320), and spawn the same Python peer.
+# lines came after (1317, 1320), and spawn the same Python peer, as do the
+# `local_clients_announces_*` lines (1358).
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::a_third_announce_on_a_fresh_interface_waits_at_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::control_two_announces_on_a_fresh_interface_both_arrive
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::five_destinations_on_a_fresh_interface_all_arrive_at_python
@@ -54,6 +55,10 @@ reference/Reticulum/RNS/__init__.py leviculum-std/mvr client_wait_for_path_reque
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_restart
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_starts_and_responds
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_register_destination
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::control_one_local_client_announce_reaches_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::five_destinations_from_two_local_clients_all_arrive_at_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::three_local_clients_announces_all_reach_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::two_local_clients_announces_both_reach_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes

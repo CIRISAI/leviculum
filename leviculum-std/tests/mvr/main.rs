@@ -407,6 +407,7 @@ mod lncp_fetch_rust_responder;
 mod lnsd_learns_the_serial_mux_from_the_board;
 #[cfg(feature = "serial")]
 mod local_client_announce_burst_half_duplex;
+mod local_clients_announces_on_a_fresh_interface_reach_python;
 mod lxmf_opportunistic_fallback_threshold;
 mod media_silence_restore_signal;
 #[cfg(feature = "serial")]

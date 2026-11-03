@@ -38,10 +38,42 @@
 //! local interfaces never ingress-limit (`LocalInterface.py:137-138`), and a
 //! client that announces thousands of destinations through its instance
 //! (`lnpnd/tests/status_under_transport_load.rs`) must not wait a spacing
-//! for each. Relayed
-//! announces (hops above 0) are not paced either; a Python transport node
-//! relays a burst as it comes, and holding transit traffic here would make
-//! this node the slower relay without making the peer learn more.
+//! for each.
+//!
+//! ## The paths (orders 1320, 1358)
+//!
+//! Which announces a fresh interface that is not the IPC socket paces. The
+//! gate is "this node speaks for the destination": hops 0 when the announce
+//! leaves.
+//!
+//! | Path | Sender | Paced |
+//! |---|---|---|
+//! | own announce, broadcast | `send_on_all_interfaces` | yes |
+//! | own announce, one interface or peer (#376) | `send_own_announce_on_interface` | yes |
+//! | interface-up re-announce, own destinations and cached client announces | `Node::announce_local_destinations` | yes |
+//! | own announce's second emission | scheduler, `forward_on_all`, hops 0 | yes |
+//! | a local client's announce, forwarded | scheduler, `forward_on_all`, hops 0 | yes |
+//! | a local client's path response for a pending request (#171) | scheduler, `forward_on_all`, hops 0 | yes |
+//! | an announce relayed from a network interface | scheduler, `forward_on_all` or `broadcast_announce_with_caps`, hops above 0 | no |
+//! | a targeted path response | scheduler, `push_announce` | no |
+//! | anything on the IPC socket, either direction | | no |
+//!
+//! A local client's announce counts as the node's own because the Python
+//! peer cannot tell them apart: it counts every arrival on its interface.
+//! The core treats it so already: `incoming_hop_count` undoes the IPC hop,
+//! the announce table stores it at hops 0, and its one emission meets the
+//! hops-0 gate in `forward_on_all` (pins in `transport.rs`,
+//! `local_client_announces_are_paced_on_a_fresh_network_interface`, and the
+//! Python mvr `local_clients_announces_on_a_fresh_interface_reach_python`).
+//!
+//! Relayed announces (hops above 0) are not paced, though the reference's
+//! ingress control counts them the same and would hold a third unknown
+//! destination inside a second on a fresh interface. A Python transport node
+//! relays a burst as it comes and its peer holds it the same way; holding
+//! transit traffic here would make this node the slower relay, and a held
+//! relayed destination is still found by path request. A targeted path
+//! response answers a request: the requester has it in `path_requests` and
+//! skips the ingress check for it (`RNS/Transport.py:1701`).
 //!
 //! Deviation rule: the wire is unchanged (the same announce bytes), the
 //! semantics improve (a Python peer learns every destination, not the first
