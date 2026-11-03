@@ -1,160 +1,27 @@
 //! The Rooms' hub link end to end (1379, #232): Loquax's link task over a
 //! lent node, through a shared-instance daemon, to a hub on `rrc.hub`.
 //!
-//! The hub is a fake written from the RRC specification, with the
-//! envelopes periculum 1378 recorded from the reference hub (rrcd 0.3.2)
-//! as its answers: WELCOME and its PING are the recorded bytes, JOINED,
-//! PARTED and the echo of a line are what the spec and the recording say
-//! rrcd sends. The pinned rrcd itself lives in periculum's netns cells and
-//! needs Python, which this harness does not start.
+//! The hub is the fake of `support/rrc_hub.rs`, written from the RRC
+//! specification with the envelopes recorded from the reference hub.
 //!
 //! ```text
 //! rooms_link ── lent node ── Unix socket ── daemon ── TCP ── fake hub
 //! ```
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use leviculum_rrc::{Envelope, Kind, LineKind, Refusal, Value};
+use leviculum_rrc::{Envelope, Kind, LineKind, Refusal};
 use leviculum_std::driver::ReticulumNodeBuilder;
-use leviculum_std::{
-    Destination, DestinationType, Direction, NodeEvent, ProofStrategy, ReticulumNode,
-};
+use leviculum_std::ReticulumNode;
 use loquax::engine::Lent;
 use loquax::rooms_link::{self, Ask, Down, Told};
 use tokio::sync::Notify;
 
-fn vector(name: &str) -> Vec<u8> {
-    let file: serde_json::Value = serde_json::from_str(include_str!(
-        "../../leviculum-rrc/tests/vectors/envelopes.json"
-    ))
-    .expect("the vectors");
-    let v = file["vectors"]
-        .as_array()
-        .expect("a list")
-        .iter()
-        .find(|v| v["name"] == name)
-        .unwrap_or_else(|| panic!("no vector {name}"));
-    hex::decode(v["cbor"].as_str().expect("cbor")).expect("hex")
-}
-
-/// What the fake hub saw.
-#[derive(Default)]
-struct Seen {
-    /// The identity each link identified with.
-    identified: Vec<[u8; 16]>,
-    /// Every envelope a client sent, decoded.
-    envelopes: Vec<Envelope>,
-}
-
-/// The fake hub: one destination, the spec's answers.
-struct Hub {
-    dest: [u8; 16],
-    seen: Arc<Mutex<Seen>>,
-    task: tokio::task::JoinHandle<()>,
-    _storage: tempfile::TempDir,
-}
-
-impl Hub {
-    async fn start(daemon_tcp: SocketAddr) -> Hub {
-        let storage = tempfile::tempdir().expect("hub storage");
-        let mut node = ReticulumNodeBuilder::new()
-            .enable_transport(false)
-            .add_tcp_client(daemon_tcp)
-            .storage_path(storage.path().to_path_buf())
-            .build_sync()
-            .expect("build the hub");
-        let events = node.take_event_receiver().expect("the hub's events");
-        node.start().await.expect("start the hub");
-        let mut destination = Destination::new(
-            Some(leviculum_std::generate_identity()),
-            Direction::In,
-            DestinationType::Single,
-            leviculum_rrc::HUB_APP,
-            &[leviculum_rrc::HUB_ASPECT],
-        )
-        .expect("the hub destination");
-        destination.set_accepts_links(true);
-        // rrcd sets no proof strategy: PROVE_NONE (the study, 2026-11-03).
-        destination.set_proof_strategy(ProofStrategy::None);
-        let dest = *destination.hash();
-        node.register_destination(destination);
-        // The announce's app data as rrcd's: {"proto": "rrc", "v": 1, "hub": name}.
-        let app_data = Value::Map(vec![
-            (Value::Text("proto".into()), Value::Text("rrc".into())),
-            (Value::Text("v".into()), Value::Uint(1)),
-            (Value::Text("hub".into()), Value::Text("fake".into())),
-        ])
-        .encode();
-        node.announce_destination(&dest, Some(&app_data))
-            .await
-            .expect("announce the hub");
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let task = tokio::spawn(serve(node, events, Arc::clone(&seen)));
-        Hub {
-            dest: *dest.as_bytes(),
-            seen,
-            task,
-            _storage: storage,
-        }
-    }
-}
-
-/// The hub's side, as the spec and the recording say: WELCOME to a
-/// HELLO, then a PING; JOINED to a JOIN (without a nick to the joiner);
-/// a line back to its sender unchanged but for key 4, the link's
-/// identity; PARTED to a PART.
-async fn serve(
-    node: ReticulumNode,
-    mut events: leviculum_std::EventReceiver,
-    seen: Arc<Mutex<Seen>>,
-) {
-    let mut who = std::collections::HashMap::new();
-    while let Some(event) = events.recv().await {
-        match event {
-            NodeEvent::LinkIdentified {
-                link_id,
-                identity_hash,
-            } => {
-                who.insert(link_id, identity_hash);
-                seen.lock().expect("seen").identified.push(identity_hash);
-            }
-            NodeEvent::LinkDataReceived { link_id, data } => {
-                let Ok(mut envelope) = Envelope::decode(&data) else {
-                    continue;
-                };
-                seen.lock().expect("seen").envelopes.push(envelope.clone());
-                let mut answers = Vec::new();
-                match envelope.kind {
-                    Kind::Hello => {
-                        answers.push(vector("welcome_down"));
-                        answers.push(vector("ping_down"));
-                    }
-                    Kind::Join | Kind::Part => {
-                        let name = if envelope.kind == Kind::Join {
-                            "joined_down"
-                        } else {
-                            "parted_down"
-                        };
-                        let mut answer = Envelope::decode(&vector(name)).expect("a vector");
-                        answer.room.clone_from(&envelope.room);
-                        answers.push(answer.encode());
-                    }
-                    Kind::Msg | Kind::Notice | Kind::Action => {
-                        envelope.src = who.get(&link_id).map(|hash: &[u8; 16]| hash.to_vec());
-                        answers.push(envelope.encode());
-                    }
-                    _ => {}
-                }
-                for answer in answers {
-                    let _ = node.send_link_packet(&link_id, &answer).await;
-                }
-            }
-            _ => {}
-        }
-    }
-}
+#[path = "support/rrc_hub.rs"]
+mod rrc_hub;
+use rrc_hub::{vector, Hub};
 
 /// The host: a node of its own on the shared instance whose events it
 /// forwards to the lend, as Loquax's processor tap does.
