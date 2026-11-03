@@ -151,7 +151,11 @@ fn every_group_key_runs_the_action_its_node_offers() {
 #[test]
 fn the_last_key_of_every_group_walk_is_in_its_frame() {
     for shown in SCREENS {
-        if matches!(shown, Screen::Chats | Screen::Chat | Screen::Groups) {
+        // The map's walks are `tests/map.rs`'s.
+        if matches!(
+            shown,
+            Screen::Chats | Screen::Chat | Screen::Groups | Screen::Map | Screen::Pan
+        ) {
             continue;
         }
         let (model, row) = shown.walk();

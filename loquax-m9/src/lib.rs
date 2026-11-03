@@ -32,6 +32,9 @@
 //! - [`group`]: a group's screens, the member sheet and "New group", the
 //!   keys that run their verbs, and what the board asks its home for each
 //!   (slice six, 1366).
+//! - [`map`]: the model's map drawn in pixels under the bar, its pins and
+//!   legend in the atlas, and the keys the M9 has none for (slice seven,
+//!   1375).
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
 
 #![no_std]
@@ -48,6 +51,7 @@ pub mod group;
 pub mod kbraw;
 pub mod keyboard;
 pub mod keys;
+pub mod map;
 pub mod pair;
 pub mod render;
 pub mod screen;

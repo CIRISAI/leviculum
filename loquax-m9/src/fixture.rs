@@ -15,7 +15,10 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use leviculum_lxmf::telemetry::Location;
+use leviculum_map::region::Region;
 use leviculum_ui::delivery::DeliveryState;
+use loquax::telemetry::{Fix, Source};
 use loquax::ui::groups::{GroupInfo, GroupMember, Standing};
 use loquax::ui::history::{Draft, Flags, Restored};
 use loquax::ui::{update, Message, Pane, Signature, UiEvent, UiModel};
@@ -244,8 +247,110 @@ pub fn model() -> UiModel<Field> {
     }
     update(&mut model, UiEvent::Clock(NOW));
     model.restore(restored());
+    map(&mut model);
     model.focus = Pane::Conversations;
     model
+}
+
+/// A place in the map fixture's Florence, degrees times 10^6.
+struct Place {
+    lat_e6: i32,
+    lon_e6: i32,
+}
+
+/// Where the board is, by its GNSS: by the cathedral, 20 s ago.
+const OWN_FIX: Place = Place {
+    lat_e6: 43_773_200,
+    lon_e6: 11_256_000,
+};
+
+/// The positions friends shared (seed, place, seconds before [`NOW`]):
+/// Jürgen five minutes ago, Mum 25 minutes ago, Zoë three hours ago, which
+/// is stale.
+const SHARES: [(u8, Place, i64); 3] = [
+    (
+        0x42,
+        Place {
+            lat_e6: 43_776_500,
+            lon_e6: 11_259_500,
+        },
+        300,
+    ),
+    (
+        0x44,
+        Place {
+            lat_e6: 43_777_800,
+            lon_e6: 11_252_500,
+        },
+        1_500,
+    ),
+    (
+        0x43,
+        Place {
+            lat_e6: 43_774_500,
+            lon_e6: 11_266_500,
+        },
+        3 * 3600,
+    ),
+];
+
+/// A node nearby that announced its position (`lev.position`, 1302), no
+/// contact: its identity, name, place and how long ago it was heard.
+const NEARBY: ([u8; 16], &str, Place, u32) = (
+    [0x77; 16],
+    "Rifugio",
+    Place {
+        lat_e6: 43_775_000,
+        lon_e6: 11_268_500,
+    },
+    600,
+);
+
+fn location(at: &Place, secs_before_now: i64) -> Location {
+    Location::saturating(
+        i64::from(at.lat_e6),
+        i64::from(at.lon_e6),
+        5_000,
+        0,
+        0,
+        500,
+        NOW.unix_secs - secs_before_now,
+    )
+}
+
+/// The map the board shows (slice seven, 1375): the region of
+/// [`crate::map::FIXTURE`], the picture under the bar, and the positions
+/// a pin is made of on every target: the shares the store kept, a node's
+/// `lev.position` announce, the board's own GNSS fix.
+fn map(model: &mut UiModel<Field>) {
+    if let Ok(region) = Region::from_bytes(crate::map::FIXTURE) {
+        update(model, UiEvent::MapSetup(crate::map::setup(region.header())));
+    }
+    model.map_picture = Some(crate::map::PICTURE);
+    let shares = SHARES
+        .iter()
+        .map(|(seed, at, ago)| Fix {
+            peer: peer(*seed),
+            via: peer(*seed),
+            message: None,
+            received_at: Some(NOW.unix_secs - ago),
+            location: location(at, *ago),
+            telemetry: Vec::new(),
+            source: Source::Telemetry,
+        })
+        .collect();
+    model.restore_positions(shares);
+    let (identity, name, at, age) = NEARBY;
+    update(
+        model,
+        UiEvent::MeshPosition {
+            identity,
+            fix: location(&at, i64::from(age)),
+            name: Some(String::from(name)),
+            age,
+        },
+    );
+    update(model, UiEvent::OwnFix(Some(location(&OWN_FIX, 20))));
 }
 
 /// The fixture's groups (slice six, 1366): Jürgen's "Familie" the reader
@@ -392,10 +497,16 @@ pub enum Screen {
     Pick,
     /// "New group", its name typed: payload `08`.
     Name,
+    /// The map of every pin, the first in `Tab` order chosen: payload `09`
+    /// (slice seven, 1375).
+    Map,
+    /// The map zoomed in, the next pin chosen and the view panned east:
+    /// payload `0a`.
+    Pan,
 }
 
 /// Every screen, in payload order.
-pub const SCREENS: [Screen; 9] = [
+pub const SCREENS: [Screen; 11] = [
     Screen::Chats,
     Screen::Chat,
     Screen::Groups,
@@ -405,6 +516,8 @@ pub const SCREENS: [Screen; 9] = [
     Screen::Ask,
     Screen::Pick,
     Screen::Name,
+    Screen::Map,
+    Screen::Pan,
 ];
 
 impl Screen {
@@ -420,8 +533,9 @@ impl Screen {
 
     /// The budget its census is held to ([`crate::census`]).
     pub fn budget(self) -> crate::census::Budget {
-        use crate::census::{CHAT, CHATS, SHEET};
+        use crate::census::{CHAT, CHATS, MAP, SHEET};
         match self {
+            Self::Map | Self::Pan => MAP,
             Self::Chats | Self::Groups => CHATS,
             Self::Chat | Self::Invite => CHAT,
             Self::Members | Self::Admin | Self::Ask | Self::Pick | Self::Name => SHEET,
@@ -440,6 +554,8 @@ impl Screen {
             Self::Ask => "ask",
             Self::Pick => "pick",
             Self::Name => "name",
+            Self::Map => "map",
+            Self::Pan => "pan",
         }
     }
 
@@ -451,6 +567,10 @@ impl Screen {
         match self {
             Self::Chats | Self::Groups => vec![],
             Self::Chat => vec![Enter],
+            // `M` is the terminal's map of every pin; Space is the M9's
+            // `Tab` on the map (`crate::map::key`).
+            Self::Map => vec![Char('M')],
+            Self::Pan => vec![Char('M'), Char('+'), Char(' '), M9Key::Right],
             // Chor is the list's last row: an invitation has no line yet.
             Self::Invite => {
                 let mut keys = vec![Down; 15];
@@ -492,7 +612,7 @@ impl Screen {
     /// with groups.
     fn start(self) -> UiModel<Field> {
         match self {
-            Self::Chats | Self::Chat => model(),
+            Self::Chats | Self::Chat | Self::Map | Self::Pan => model(),
             _ => group_model(),
         }
     }

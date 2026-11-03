@@ -16,6 +16,7 @@ use embedded_graphics::prelude::DrawTarget;
 use loquax::ui::UiModel;
 
 use crate::field::Field;
+use crate::map::{self, Map};
 use crate::render::{DrawError, Renderer};
 use crate::screen::{self, Look};
 
@@ -50,24 +51,43 @@ pub fn measure<D>(
     probe: &mut dyn Probe,
     model: &UiModel<Field>,
     renderer: &mut Renderer<'_, D>,
+    map: &mut Map<'_>,
 ) -> Result<Census, DrawError>
 where
     D: DrawTarget<Color = Rgb565> + 'static,
 {
-    measure_at(probe, model, 0, renderer)
+    measure_at(probe, model, 0, renderer, map)
 }
 
 /// [`measure`] with the M9's cursor over a group's rows on `row`
-/// ([`crate::group`]).
+/// ([`crate::group`]). The map's two steps (slice seven, 1375) are its
+/// view and pins placed, then the whole screen drawn, cells and pixels.
 pub fn measure_at<D>(
     probe: &mut dyn Probe,
     model: &UiModel<Field>,
     row: usize,
     renderer: &mut Renderer<'_, D>,
+    map: &mut Map<'_>,
 ) -> Result<Census, DrawError>
 where
     D: DrawTarget<Color = Rgb565> + 'static,
 {
+    if map::shown(model) {
+        probe.begin();
+        let view = step_view(model);
+        let scene_step = probe.end();
+        core::hint::black_box(&view);
+        drop(view);
+        let look = Look::of(model);
+        probe.begin();
+        let drawn = step_map(renderer, model, &look, map);
+        let draw_step = probe.end();
+        drawn?;
+        return Ok(Census {
+            scene: scene_step,
+            draw: draw_step,
+        });
+    }
     probe.begin();
     let scene = step_scene(model);
     let scene_step = probe.end();
@@ -88,6 +108,29 @@ where
 #[inline(never)]
 fn step_scene(model: &UiModel<Field>) -> loquax::ui::scene::Scene {
     screen::scene(model)
+}
+
+#[inline(never)]
+fn step_view(
+    model: &UiModel<Field>,
+) -> Option<(
+    leviculum_map::viewport::Viewport,
+    alloc::vec::Vec<loquax::ui::map::PinCell>,
+)> {
+    map::view(model)
+}
+
+#[inline(never)]
+fn step_map<D>(
+    renderer: &mut Renderer<'_, D>,
+    model: &UiModel<Field>,
+    look: &Look,
+    map: &mut Map<'_>,
+) -> Result<(), DrawError>
+where
+    D: DrawTarget<Color = Rgb565> + 'static,
+{
+    renderer.show(model, look, map)
 }
 
 #[inline(never)]
@@ -147,6 +190,26 @@ pub const SHEET: Budget = Budget {
     draw_peak: 160_000,
     draw_stack: 18_000,
 };
+
+/// The map (slice seven, 1375): its scene step is the view and the pins
+/// placed in cells, its draw the bar's and legend's cells, the tiles the
+/// view needs borrowed from the region, the filler's cursors and the pins'
+/// text; the filler's own storage is the painter's, made once
+/// ([`PAINTER_HELD`]). Over the fixture the 64-bit host measures 559 B
+/// held, a 2,793 B peak and 8,384 B of stack for the view, and a draw at
+/// most 75,404 B peak in 15,072 B of stack. The ceilings are about double.
+pub const MAP: Budget = Budget {
+    scene_held: 2_000,
+    scene_peak: 6_000,
+    scene_stack: 18_000,
+    draw_peak: 160_000,
+    draw_stack: 32_000,
+};
+
+/// What the map's painter may hold, made once beside the renderer: its
+/// fixed storage, 217,508 B on every target ([`crate::map::Painter`]), and
+/// the region's index read in place, which is none.
+pub const PAINTER_HELD: usize = 230_000;
 
 /// What making the renderer may hold: about double 107,584 B (slice one).
 pub const RENDERER_HELD: usize = 220_000;

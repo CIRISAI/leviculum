@@ -242,7 +242,8 @@ fn new_hit(node: &NewGroupNode, row: usize, code: KeyCode) -> Hit {
 }
 
 /// One key on the M9: a group's key runs its node's action or moves the
-/// cursor `row`; any other goes to the model as the terminal's key. The
+/// cursor `row`; any other goes to the model as the terminal's key, the
+/// map's own keys first made the terminal's ([`crate::map::key`]). The
 /// cursor goes back to the first row when the key opened or closed a
 /// group's screen, not when it answered the sheet's question. What the model hands out, as `update` does.
 pub fn press(model: &mut UiModel<Field>, row: &mut usize, key: &KeyEvent) -> Vec<UiEffect> {
@@ -270,7 +271,7 @@ pub fn press(model: &mut UiModel<Field>, row: &mut usize, key: &KeyEvent) -> Vec
             *row = to;
             Vec::new()
         }
-        None => update(model, UiEvent::Key(*key)),
+        None => update(model, UiEvent::Key(crate::map::key(model, *key))),
     };
     // The question is the sheet's: answering it keeps the cursor where it
     // was.

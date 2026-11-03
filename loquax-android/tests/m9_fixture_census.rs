@@ -14,6 +14,7 @@ use loquax::home::wire;
 use loquax_m9::census::{self, Census, Probe, Step};
 use loquax_m9::fixture::SCREENS;
 use loquax_m9::frame::Frame;
+use loquax_m9::map::{Map, FIXTURE};
 use loquax_m9::render::Renderer;
 
 struct Counting;
@@ -93,8 +94,8 @@ impl Probe for HostProbe {
 }
 
 /// The census the board prints, over the same models, held to the same
-/// budgets: the two screens of slice four and the group's seven of slice
-/// six (1366).
+/// budgets: the two screens of slice four, the group's seven of slice
+/// six (1366) and the map's two of slice seven (1375).
 #[test]
 fn every_screen_keeps_the_boards_budgets() {
     let _serial = SERIAL
@@ -107,10 +108,19 @@ fn every_screen_keeps_the_boards_budgets() {
     let renderer_held = LIVE.load(Ordering::SeqCst) - before;
     println!("renderer made: held {renderer_held} B");
     assert!((renderer_held as usize) < census::RENDERER_HELD);
+    let before = LIVE.load(Ordering::SeqCst);
+    let mut map = Map::new(FIXTURE).expect("the fixture region");
+    let painter_held = LIVE.load(Ordering::SeqCst) - before;
+    println!(
+        "map made: held {painter_held} B, the painter's {} B",
+        map.painter.bytes()
+    );
+    assert!((painter_held as usize) < census::PAINTER_HELD);
     for screen in SCREENS {
         let budget = screen.budget();
         let (model, row) = screen.walk();
-        let got: Census = census::measure_at(&mut probe, &model, row, &mut renderer).expect("draw");
+        let got: Census =
+            census::measure_at(&mut probe, &model, row, &mut renderer, &mut map).expect("draw");
         let line = census::Line {
             screen: screen.name(),
             census: &got,

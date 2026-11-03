@@ -43,6 +43,12 @@ ratatui = { version = "0.30.2", default-features = false }
 # runs): 53 x 24 cells on the 320 x 240 panel. Not `framebuffer`, above.
 mousefood = { version = "0.5.3", default-features = false, features = ["fonts"] }
 embedded-graphics = "0.8"
+# The map (slice seven, 1375): the model's view drawn by the map core's
+# filler straight into the panel, `no_std` both (`just map-core-no-std`).
+leviculum-map = { path = "../leviculum-map" }
+leviculum-mapfill = { path = "../leviculum-mapfill" }
+# The position a fixture's GNSS fix and its friends' shares are read in.
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
 
 [dev-dependencies]
 # The goldens draw the ugly store's model (loquax/tests/support/ugly_store.rs).

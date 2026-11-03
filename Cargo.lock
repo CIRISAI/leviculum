@@ -3521,6 +3521,8 @@ version = "0.1.0"
 dependencies = [
  "embedded-graphics",
  "leviculum-lxmf",
+ "leviculum-map",
+ "leviculum-mapfill",
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-ratatui",
