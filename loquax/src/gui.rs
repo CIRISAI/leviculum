@@ -43,7 +43,9 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::advanced::image::{FilterMethod, Handle};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
-use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor, Space};
+use iced::widget::{
+    button, column, container, row, scrollable, stack, text, text_editor, text_input, Space,
+};
 use iced::{
     keyboard, mouse, window, Color, Element, Length, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
@@ -485,6 +487,9 @@ pub enum Message {
     /// The Browse tab's view said this (1369): lnomad's window message,
     /// for the browser the model hosts.
     Browse(lnomad::gui::Message),
+    /// The Rooms tab said this (1379): the input's text, its Enter, a
+    /// room chosen.
+    Rooms(loquax::ui::rooms::RoomsEvent),
 }
 
 impl Message {
@@ -512,6 +517,7 @@ impl Message {
                 | Message::CodePicked(_)
                 | Message::Probed
                 | Message::Browse(_)
+                | Message::Rooms(_)
         )
     }
 }
@@ -526,6 +532,8 @@ pub enum Screen {
     /// The Browse tab (1369): lnomad's window over the browser the model
     /// hosts, while the model has it in front.
     Browse,
+    /// The Rooms tab (1379), while the model has it in front.
+    Rooms,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -741,6 +749,9 @@ struct App {
     /// The reader left the Browse tab (1369) and the model has not said
     /// so yet: a [`Seen`] from before still holds the browser.
     browse_left: bool,
+    /// The reader left the Rooms tab (1379) and the model has not said so
+    /// yet, as [`App::browse_left`].
+    rooms_left: bool,
 }
 
 impl App {
@@ -829,6 +840,7 @@ impl App {
             rec_over_lock: false,
             probe: None,
             browse_left: false,
+            rooms_left: false,
         }
     }
 
@@ -1126,7 +1138,7 @@ impl App {
                 }
                 (None, Screen::Settings) if self.maps_asked => self.maps_asked = false,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
-                (None, Screen::Browse) => {
+                (None, Screen::Browse | Screen::Rooms) => {
                     self.leave_browse();
                     self.screen = Screen::Chats;
                 }
@@ -1231,6 +1243,11 @@ impl App {
             Intent::Tab(TabId::Browse) => {
                 self.browse_left = false;
                 self.tell(UiEvent::Tab(TabId::Browse));
+            }
+            // The Rooms tab (1379): as the Browse tab, the model brings it.
+            Intent::Tab(TabId::Rooms) => {
+                self.rooms_left = false;
+                self.tell(UiEvent::Tab(TabId::Rooms));
             }
             Intent::Browse(intent) => self.tell(UiEvent::Browse(BrowseEvent::Intent(intent))),
             Intent::Menu(id) => {
@@ -1463,7 +1480,8 @@ impl App {
         let key = leviculum_ui_iced::key::chord(event)?;
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
-            (Screen::Browse, _) => return None,
+            // The Rooms' input field has the keys while it is in front.
+            (Screen::Browse | Screen::Rooms, _) => return None,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
             (Screen::Chats | Screen::Settings, _) => Pane::Conversations,
         };
@@ -1526,6 +1544,7 @@ impl App {
         };
         let task = self.update_inner(message);
         self.browse_sync();
+        self.rooms_sync();
         match copy {
             Some(copy) => Task::batch([copy, task]),
             None => task,
@@ -1594,6 +1613,29 @@ impl App {
         if self.screen == Screen::Browse || self.seen.browse.is_some() {
             self.browse_left = true;
             self.tell(UiEvent::Tab(TabId::Chats));
+        }
+        if self.screen == Screen::Rooms || self.seen.scene.rooms.is_some() {
+            self.rooms_left = true;
+            self.tell(UiEvent::Tab(TabId::Chats));
+        }
+    }
+
+    /// The window follows the model's Rooms tab (1379), but for a [`Seen`]
+    /// from before the reader left it.
+    fn rooms_sync(&mut self) {
+        match (self.seen.scene.rooms.is_some(), self.screen) {
+            (false, _) => {
+                self.rooms_left = false;
+                if self.screen == Screen::Rooms {
+                    self.screen = Screen::Chats;
+                }
+            }
+            (true, Screen::Rooms) => {}
+            (true, _) if self.rooms_left => {}
+            (true, _) => {
+                self.screen = Screen::Rooms;
+                self.menu = None;
+            }
         }
     }
 
@@ -1696,6 +1738,10 @@ impl App {
             Message::Intent(intent) => return self.intent(intent),
             Message::Browse(said) => {
                 self.browse(said);
+                return Task::none();
+            }
+            Message::Rooms(said) => {
+                self.tell(UiEvent::Rooms(said));
                 return Task::none();
             }
             // The Browse tab in front has the keys, as the model routes
@@ -2018,6 +2064,7 @@ impl App {
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
             (Screen::Browse, _, _) => self.browse_view(),
+            (Screen::Rooms, _, _) => self.rooms_view(),
             (Screen::Settings, _, _) => self.settings_pane(),
             // A group's screens (1307) take the chat's place, or the
             // whole stack's on a narrow window.
@@ -2147,6 +2194,96 @@ impl App {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         lnomad::gui::view(&browsed.model, &pictures).map(Message::Browse)
+    }
+
+    /// The Rooms tab (1379): the hub's line, the rooms beside the open
+    /// room, its one line on what a room is not over its lines, and the
+    /// input with what it does under it. Drawn from the scene's Rooms node.
+    fn rooms_view(&self) -> Element<'_, Message> {
+        use loquax::ui::rooms::{RoomLineKind, RoomsEvent};
+        let Some(node) = &self.seen.scene.rooms else {
+            return Space::new().into();
+        };
+        let t = self.tokens();
+        let lang = self.lang;
+        let ink = chat::colour(t.text);
+        let quiet = chat::colour(t.text_secondary);
+        let rows = node
+            .rows
+            .iter()
+            .enumerate()
+            .fold(column![].spacing(2), |list, (i, room)| {
+                let label = match room.unread {
+                    0 => room.name.clone(),
+                    n => format!("{}  {n}", room.name),
+                };
+                // The list's own row, its selection the chats' (1379).
+                list.push(leviculum_ui_iced::chrome::list_item(
+                    container(text(label).size(15).color(ink)).padding([6, 10]),
+                    room.selected,
+                    Message::Rooms(RoomsEvent::Show(Some(i))),
+                    chat::palette(t),
+                ))
+            });
+        let list = container(scrollable(rows))
+            .width(Length::Fixed(200.0))
+            .height(Length::Fill)
+            .padding(8);
+        let room: Element<'_, Message> = match &node.open {
+            Some(open) => {
+                let lines = open.lines.iter().fold(column![].spacing(4), |lines, line| {
+                    let who = line.who.resolve(lang);
+                    let said = line.text.resolve(lang);
+                    let words = match line.kind {
+                        RoomLineKind::Said(leviculum_rrc::LineKind::Msg) => {
+                            format!("{who}: {said}")
+                        }
+                        RoomLineKind::Said(leviculum_rrc::LineKind::Action) => {
+                            format!("* {who} {said}")
+                        }
+                        RoomLineKind::Said(leviculum_rrc::LineKind::Notice) => {
+                            format!("-{who}- {said}")
+                        }
+                        RoomLineKind::Error => format!("! {said}"),
+                        _ => format!("— {said}"),
+                    };
+                    let colour = match line.kind {
+                        RoomLineKind::Said(_) => ink,
+                        _ => quiet,
+                    };
+                    lines.push(text(words).size(15).color(colour))
+                });
+                column![
+                    text(open.name.clone()).size(18).color(ink),
+                    text(open.live.resolve(lang)).size(13).color(quiet),
+                    scrollable(lines).height(Length::Fill),
+                ]
+                .spacing(8)
+                .into()
+            }
+            None => container(text(node.hint.resolve(lang)).size(15).color(quiet))
+                .center(Length::Fill)
+                .into(),
+        };
+        let input = text_input(&node.hint.resolve(lang), &node.input)
+            .on_input(|typed| Message::Rooms(RoomsEvent::Typed(typed)))
+            .on_submit(Message::Rooms(RoomsEvent::Submit))
+            .size(15)
+            .padding(8);
+        let foot = self
+            .seen
+            .notice
+            .clone()
+            .unwrap_or_else(|| node.hint.resolve(lang));
+        column![
+            text(node.hub.resolve(lang)).size(15).color(quiet),
+            row![list, container(room).width(Length::Fill).padding(8)].height(Length::Fill),
+            input,
+            text(foot).size(13).color(quiet),
+        ]
+        .spacing(6)
+        .padding(10)
+        .into()
     }
 
     fn map_view(&self) -> Element<'_, Message> {
@@ -4109,6 +4246,91 @@ mod tests {
     /// for the chats tells the model, and a picture of the model from
     /// before does not pull the window back (the control: one from after
     /// leaves it in the chats).
+    /// 1379: the Rooms tab in the window: the tab press goes to the
+    /// model, the model's Rooms bring the window there, the open room is
+    /// drawn from the scene's Rooms node (the golden), the input's text and
+    /// Enter and a room's press go to the model; leaving for the chats is
+    /// told, and a picture from before does not pull the window back (the
+    /// control: one from after leaves it in the chats).
+    #[test]
+    fn the_rooms_tab_is_the_scenes_rooms_beside_the_rail() {
+        use leviculum_rrc::LineKind;
+        use loquax::ui::rooms::RoomsEvent;
+        let (w, h) = (1100u32, 640u32);
+        let mut model = chat_model();
+        model.rooms.enabled = true;
+        model.rooms.hub = Some([0x07; 16]);
+        let seen = |model: &crate::shell::Model| Box::new(seen_of(model));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Rooms)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Rooms)]);
+        update(&mut model, UiEvent::Tab(TabId::Rooms));
+        for event in [
+            RoomsEvent::Welcomed {
+                name: Some("periculum".into()),
+                body_limit: 350,
+            },
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: None,
+            },
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: Some("bob".into()),
+            },
+            RoomsEvent::Line {
+                room: "#lab".into(),
+                kind: LineKind::Msg,
+                text: "rrc line, thirty-one bytes long".into(),
+                nick: Some("bob".into()),
+                ours: false,
+                ts_ms: 1_793_702_757_876,
+            },
+            RoomsEvent::Line {
+                room: "#lab".into(),
+                kind: LineKind::Msg,
+                text: "hello bob".into(),
+                nick: Some("lew".into()),
+                ours: true,
+                ts_ms: 1_793_702_759_000,
+            },
+        ] {
+            update(&mut model, UiEvent::Rooms(event));
+        }
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Rooms);
+        let room = shoot(&app, w, h);
+        map::tests::same_as("gui-rooms-room.png", &room, w, h);
+
+        let _ = app.update(Message::Rooms(RoomsEvent::Typed("hi".into())));
+        let _ = app.update(Message::Rooms(RoomsEvent::Submit));
+        let _ = app.update(Message::Rooms(RoomsEvent::Show(Some(0))));
+        assert_eq!(
+            told(&mut rx),
+            vec![
+                UiEvent::Rooms(RoomsEvent::Typed("hi".into())),
+                UiEvent::Rooms(RoomsEvent::Submit),
+                UiEvent::Rooms(RoomsEvent::Show(Some(0))),
+            ]
+        );
+
+        // Leaving: told, and a stale picture keeps the window in the chats.
+        let stale = seen(&model);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Chats)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Chats)]);
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Seen(stale));
+        assert_eq!(app.screen, Screen::Chats, "a picture from before");
+        update(&mut model, UiEvent::Tab(TabId::Chats));
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Chats);
+        assert!(app.seen.scene.rooms.is_none());
+    }
+
     #[test]
     fn the_browse_tab_is_lnomads_window_beside_the_rail() {
         use lnomad::app::scene::NodeId as Node;

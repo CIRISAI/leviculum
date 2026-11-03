@@ -257,6 +257,8 @@ pub(crate) struct Shell {
     /// The Browse tab's fetch and what the browser asks of the desktop
     /// (1369).
     pub(crate) browsing: crate::browsing::Browsing,
+    /// The Rooms' hub link (1379), where the config names a hub.
+    rooming: loquax::rooms_link::Rooming,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -346,6 +348,9 @@ impl Shell {
                         &mut self.outputs,
                     ));
                 }
+                // The Rooms (1379): the hub link does it; what the hub says
+                // comes back on the pump.
+                UiEffect::Rooms(ask) => self.rooming.ask(ask),
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
                 UiEffect::MapDrawing(n) => self.outputs.push(Output::MapDrawing(n)),
@@ -796,6 +801,9 @@ impl Shell {
         self.listen();
         let browsed = self.browsing.told(&self.model);
         self.fold_browsed(browsed);
+        for told in self.rooming.told() {
+            self.apply(told);
+        }
     }
 
     /// The microphone's windows since the last poll, as levels, and the
@@ -1430,7 +1438,7 @@ pub(crate) async fn start(
             config_dir: Some(config_dir.clone()),
             storage_dir,
             identity,
-            display_name: display_name.name.into_bytes(),
+            display_name: display_name.name.clone().into_bytes(),
             notices: effects.clone(),
         },
         role,
@@ -1490,8 +1498,20 @@ pub(crate) async fn start(
     let browse_tab = config.browse_tab.unwrap_or(false);
     crate::browsing::set_up(&mut model, &home, browse_tab);
     let browsing = match browse_tab {
-        true => crate::browsing::Browsing::start(&attached, browse_identity, &home),
+        true => crate::browsing::Browsing::start(&attached, browse_identity.clone(), &home),
         false => crate::browsing::Browsing::off(),
+    };
+    // The Rooms (1379): a tab and a hub link where the config names a hub,
+    // over the node attached above, identified with the reader's identity
+    // and shown by the reader's name; without one nothing is lent.
+    model.rooms.hub = config.rooms_hub;
+    model.rooms.enabled = config.rooms_hub.is_some();
+    let rooming = match config.rooms_hub {
+        Some(_) => {
+            let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
+            loquax::rooms_link::Rooming::start(&attached, browse_identity, nick)
+        }
+        None => loquax::rooms_link::Rooming::off(),
     };
     // The microphone (1276): the system's recorder, where it has one; the
     // window offers the microphone only then.
@@ -1608,6 +1628,7 @@ pub(crate) async fn start(
         fallback: Fallback::default(),
         mic,
         browsing,
+        rooming,
     };
     Ok((shell, config))
 }

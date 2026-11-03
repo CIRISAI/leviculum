@@ -590,6 +590,14 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('B'), Mods::Plain, run(C::Browse), COMMAND_PANES)]],
         )
         .palette("browse"),
+        // The Rooms tab (1379): Reticulum Relay Chat on the config's hub.
+        // In the tab its input line has the keys (`crate::ui::rooms::key`).
+        Row::new(
+            "the live rooms on a hub (the Rooms tab)",
+            MAP_GROUP,
+            &[&[key(Char('R'), Mods::Plain, run(C::Rooms), COMMAND_PANES)]],
+        )
+        .palette("rooms"),
         Row::new(
             "this conversation's peer on the map",
             MAP_GROUP,

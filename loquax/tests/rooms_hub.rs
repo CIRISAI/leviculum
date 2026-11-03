@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use leviculum_rrc::{Envelope, Event, Kind, LineKind, Refusal, Value};
+use leviculum_rrc::{Envelope, Kind, LineKind, Refusal, Value};
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::{
     Destination, DestinationType, Direction, NodeEvent, ProofStrategy, ReticulumNode,
@@ -258,24 +258,33 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
     );
 
     link.asks.send(Ask::Open { hub: hub.dest }).expect("ask");
+    assert_eq!(next(&mut link.told, 5).await, Told::Linking);
     assert_eq!(
-        next(&mut link.told, 5).await,
-        Told::Linking { hub: hub.dest }
+        next(&mut link.told, 60).await,
+        Told::Welcomed {
+            name: Some("periculum".into()),
+            body_limit: 350
+        }
     );
-    let Told::Welcomed {
-        hub: at,
-        name,
-        limits,
-    } = next(&mut link.told, 60).await
-    else {
-        panic!("a welcome");
-    };
-    assert_eq!(
-        (at, name.as_deref(), limits.body),
-        (hub.dest, Some("periculum"), 350)
-    );
-    // The hub's PING right after: answered.
-    assert_eq!(next(&mut link.told, 10).await, Told::Event(Event::Pinged));
+
+    // The hub's PING right after WELCOME is answered on the link and
+    // tells the Rooms nothing: wait for the hub to have the PONG, so the
+    // order the hub saw is the order asked.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !hub
+        .seen
+        .lock()
+        .expect("seen")
+        .envelopes
+        .iter()
+        .any(|e| e.kind == Kind::Pong)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no PONG reached the hub"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     link.asks
         .send(Ask::Join {
@@ -285,10 +294,10 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
         .expect("ask");
     assert_eq!(
         next(&mut link.told, 10).await,
-        Told::Event(Event::Joined {
+        Told::Joined {
             room: "#lab".into(),
             nick: None
-        })
+        }
     );
 
     // A line over 350 bytes is refused before it is sent.
@@ -314,14 +323,13 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
             text: "rrc line, thirty-one bytes long".into(),
         })
         .expect("ask");
-    let Told::Event(Event::Line {
+    let Told::Line {
         room,
         text,
         nick,
         ours,
-        src,
         ..
-    }) = next(&mut link.told, 10).await
+    } = next(&mut link.told, 10).await
     else {
         panic!("the echo");
     };
@@ -330,11 +338,6 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
         ("#lab", "rrc line, thirty-one bytes long", Some("lew"))
     );
     assert!(ours, "the hub's echo of our line is ours");
-    assert_eq!(
-        src.as_deref(),
-        Some(&me[..]),
-        "the hub set key 4 to the link's identity"
-    );
 
     link.asks
         .send(Ask::Part {
@@ -343,10 +346,10 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
         .expect("ask");
     assert_eq!(
         next(&mut link.told, 10).await,
-        Told::Event(Event::Parted {
+        Told::Parted {
             room: "#lab".into(),
             nick: None
-        })
+        }
     );
 
     {
@@ -403,10 +406,7 @@ async fn a_hub_without_a_path_is_given_up() {
     );
     // No such destination: no path.
     link.asks.send(Ask::Open { hub: [0x42; 16] }).expect("ask");
-    assert_eq!(
-        next(&mut link.told, 5).await,
-        Told::Linking { hub: [0x42; 16] }
-    );
+    assert_eq!(next(&mut link.told, 5).await, Told::Linking);
     assert_eq!(next(&mut link.told, 45).await, Told::Down(Down::NoPath));
     tap.abort();
     drop(node);

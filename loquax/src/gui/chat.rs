@@ -265,6 +265,9 @@ impl App {
             // The Browse tab (1369): the shared icons have no globe yet,
             // and a page is what one looks for.
             TabId::Browse => Icon::Search,
+            // The Rooms (1379): talk, as the chats, until a room icon is
+            // drawn.
+            TabId::Rooms => Icon::Chats,
         };
         let badge = tab.badge.map(|count| {
             chrome::badge(count, size::BADGE_TEXT - 2.0, size::BADGE_CORNER, p).padding([0, 5])
@@ -289,6 +292,7 @@ impl App {
             super::Screen::Chats | super::Screen::Settings => TabId::Chats,
             super::Screen::Map => TabId::Map,
             super::Screen::Browse => TabId::Browse,
+            super::Screen::Rooms => TabId::Rooms,
         };
         let items = tabs
             .items

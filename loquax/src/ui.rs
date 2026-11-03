@@ -151,6 +151,7 @@ pub mod reactions;
 pub mod receipts;
 pub mod recording;
 pub mod replies;
+pub mod rooms;
 pub mod scene;
 pub mod search;
 pub mod share;
@@ -864,6 +865,8 @@ pub struct UiModel<B> {
     groups_changed: BTreeSet<[u8; 16]>,
     /// The Browse tab and the browser in it (1337).
     pub browse: browse::Browse,
+    /// The Rooms tab: Reticulum Relay Chat on a hub (1379).
+    pub rooms: rooms::Rooms,
     /// The language the model's own sentences from the catalogue are said
     /// in ([`strings::StrId`]): English unless the shell knows better, as
     /// the phone does.
@@ -971,6 +974,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             group_sheet: None,
             groups_changed: BTreeSet::new(),
             browse: browse::Browse::default(),
+            rooms: rooms::Rooms::default(),
             lang: strings::Lang::En,
         };
         for peer in peers {
@@ -1644,6 +1648,9 @@ pub enum UiEvent {
     /// What the hosted browser of the Browse tab is told (1337): a verb,
     /// the page a fetch brought, a NomadNet node an announce named.
     Browse(browse::BrowseEvent),
+    /// What the Rooms are told (1379): what the hub said, and the
+    /// reader's verbs in the Rooms tab.
+    Rooms(rooms::RoomsEvent),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1695,6 +1702,8 @@ pub enum UiEffect {
     /// [`lnomad::Effect::Write`] or [`lnomad::Effect::Quit`], which the
     /// core does itself ([`browse::effects_of`]).
     Browse(lnomad::Effect),
+    /// What the Rooms ask of their hub link (1379, `crate::rooms_link`).
+    Rooms(rooms::RoomAsk),
     /// Make the contacts file say this about its peer, its other lines kept
     /// ([`crate::names::save_contact`]).
     Contact(Contact),
@@ -1819,8 +1828,13 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
 
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
-        UiEvent::Tab(tab) => browse::tab(model, tab),
+        UiEvent::Tab(tab) => {
+            let mut effects = browse::tab(model, tab);
+            effects.extend(rooms::tab(model, tab));
+            effects
+        }
         UiEvent::Browse(event) => browse::fold(model, event),
+        UiEvent::Rooms(event) => rooms::fold(model, event),
         UiEvent::MapSetup(setup) => {
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
@@ -1844,6 +1858,11 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Key(key) if model.browse.showing() => {
             model.touched();
             browse::app(model, lnomad::AppEvent::Key(key))
+        }
+        // The Rooms tab in front: its input line has the keys (1379).
+        UiEvent::Key(key) if model.rooms.showing() => {
+            model.touched();
+            rooms::key(model, key)
         }
         UiEvent::Key(key) => {
             model.touched();
@@ -3634,6 +3653,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             Vec::new()
         }
         PaletteCommand::Browse => browse::open(model),
+        PaletteCommand::Rooms => rooms::open(model),
         PaletteCommand::MapDrawing => {
             if model.map_setup.drawings.is_empty() {
                 model.toast(ToastKind::Info, "the map is drawn one way here".to_string());

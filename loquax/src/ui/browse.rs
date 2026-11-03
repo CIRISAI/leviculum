@@ -180,7 +180,7 @@ pub(super) fn tab<B: InputBuffer + Default>(model: &mut UiModel<B>, tab: TabId) 
     match tab {
         TabId::Browse if model.browse.enabled => model.browse.show(model.lang),
         TabId::Browse => {}
-        TabId::Chats | TabId::Map => model.browse.open = false,
+        TabId::Chats | TabId::Map | TabId::Rooms => model.browse.open = false,
     }
     Vec::new()
 }

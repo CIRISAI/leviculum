@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use leviculum_core::Identity;
-use leviculum_rrc::{Event, Limits, LineKind, Refusal, Session};
+use leviculum_rrc::{Event, Refusal, Session};
 use leviculum_std::{DestinationHash, LinkId, NodeEvent, ReticulumNode};
 use rand_core::RngCore;
 use tokio::sync::{mpsc, Notify};
@@ -34,62 +34,11 @@ const HELLO_TRIES: u32 = 5;
 /// The name and version the client gives in its HELLO.
 pub const CLIENT_NAME: &str = "loquax";
 
-/// What the frontend asks of the hub link.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ask {
-    /// Link to the hub at this `rrc.hub` destination, leaving any other.
-    Open {
-        hub: [u8; 16],
-    },
-    Join {
-        room: String,
-        key: Option<String>,
-    },
-    Part {
-        room: String,
-    },
-    Say {
-        room: String,
-        kind: LineKind,
-        text: String,
-    },
-    /// Leave the hub.
-    Close,
-}
+/// What the frontend asks of the hub link: the model's own words.
+pub use crate::ui::rooms::{Down, RoomAsk as Ask};
 
-/// Why the link to a hub is down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Down {
-    /// No path to the hub, or no announce to verify it by.
-    NoPath,
-    /// The link did not come up, or the hub never welcomed us.
-    NoAnswer,
-    /// The link closed under us.
-    Lost,
-    /// The node the messenger lent is gone.
-    NodeGone,
-    /// The reader left.
-    Left,
-}
-
-/// What the hub link tells the frontend.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Told {
-    /// Linking to the hub.
-    Linking { hub: [u8; 16] },
-    /// The hub welcomed us.
-    Welcomed {
-        hub: [u8; 16],
-        name: Option<String>,
-        limits: Limits,
-    },
-    /// What one of the hub's envelopes meant.
-    Event(Event),
-    /// What the reader asked was not sent, and why.
-    Refused(Refusal),
-    /// The link is down.
-    Down(Down),
-}
+/// What the hub link tells the frontend: the model's own events.
+pub use crate::ui::rooms::RoomsEvent as Told;
 
 /// The ends the frontend holds.
 pub struct Linking {
@@ -136,7 +85,6 @@ impl Teller {
 
 /// The hub we are linked to.
 struct Hub {
-    dest: [u8; 16],
     link_id: LinkId,
     session: Session,
     hellos: u32,
@@ -178,7 +126,11 @@ async fn run(mut options: Options, mut asks: mpsc::UnboundedReceiver<Ask>, telle
             .as_ref()
             .filter(|hub| !hub.session.is_welcomed())
             .map(|hub| hub.next_hello);
+        // Biased, the lend first: the shell lends the node and asks the
+        // first Open before this task runs, and an Open taken before its
+        // lend finds no node.
         tokio::select! {
+            biased;
             lend = options.lends.recv(), if lends_open => match lend {
                 Some(lend) => {
                     if task.hub.take().is_some() {
@@ -281,7 +233,7 @@ impl Task {
 
     async fn open(&mut self, dest: [u8; 16]) {
         self.close().await;
-        self.teller.tell(Told::Linking { hub: dest });
+        self.teller.tell(Told::Linking);
         let Some(node) = self.node() else {
             self.teller.tell(Told::Down(Down::NodeGone));
             return;
@@ -338,7 +290,6 @@ impl Task {
         }
         drop(node);
         self.hub = Some(Hub {
-            dest,
             link_id,
             session,
             hellos: 0,
@@ -391,7 +342,7 @@ impl Task {
         let Some(hub) = self.hub.as_mut() else {
             return;
         };
-        let (ours, dest) = (hub.link_id, hub.dest);
+        let ours = hub.link_id;
         match event {
             NodeEvent::LinkDataReceived { link_id, data } if link_id == ours => {
                 let Ok(received) = hub.session.receive(&data, fresh_id(), now_ms()) else {
@@ -399,15 +350,8 @@ impl Task {
                     // or noise. Nothing to show.
                     return;
                 };
-                match received.event {
-                    Event::Welcome {
-                        hub: name, limits, ..
-                    } => self.teller.tell(Told::Welcomed {
-                        hub: dest,
-                        name,
-                        limits,
-                    }),
-                    event => self.teller.tell(Told::Event(event)),
+                if let Some(told) = told(received.event) {
+                    self.teller.tell(told);
                 }
                 if let Some(reply) = received.reply {
                     let _ = self.send(&ours, &reply).await;
@@ -419,5 +363,94 @@ impl Task {
             }
             _ => {}
         }
+    }
+}
+
+/// What one of the hub's envelopes tells the Rooms; a PING answered, a
+/// PONG and what a client has no use for tell nothing.
+fn told(event: Event) -> Option<Told> {
+    Some(match event {
+        Event::Welcome { hub, limits, .. } => Told::Welcomed {
+            name: hub,
+            body_limit: limits.body,
+        },
+        Event::Joined { room, nick } => Told::Joined { room, nick },
+        Event::Parted { room, nick } => Told::Parted { room, nick },
+        Event::Line {
+            room,
+            kind,
+            text,
+            nick,
+            ours,
+            ts,
+            ..
+        } => Told::Line {
+            room,
+            kind,
+            text,
+            nick,
+            ours,
+            ts_ms: ts,
+        },
+        Event::HubNotice { room, text } => Told::HubNotice { room, text },
+        Event::Error { room, text } => Told::Error { room, text },
+        Event::Pong | Event::Pinged | Event::Ignored(_) => return None,
+    })
+}
+
+/// The Rooms' half of a desktop shell (1379): the hub link over the
+/// attached node, lent to [`crate::engine::Lender::Rooms`], or nothing
+/// while the config names no hub.
+pub struct Rooming {
+    linking: Option<Linking>,
+}
+
+impl Rooming {
+    /// No hub: no tab, nothing lent.
+    pub fn off() -> Self {
+        Rooming { linking: None }
+    }
+
+    /// The hub link over `attached`'s node, identified with `identity`,
+    /// showing `nick`.
+    pub fn start(
+        attached: &crate::engine::Attached,
+        identity: Identity,
+        nick: Option<String>,
+    ) -> Self {
+        let (lend, lends) = mpsc::unbounded_channel();
+        let _ = lend.send(attached.lend_to(crate::engine::Lender::Rooms));
+        let linking = start(
+            &tokio::runtime::Handle::current(),
+            Options {
+                lends,
+                identity,
+                nick,
+            },
+            // The shell reads the link on its own pump; nobody waits on
+            // the wake.
+            Arc::new(Notify::new()),
+        );
+        Rooming {
+            linking: Some(linking),
+        }
+    }
+
+    /// One of the Rooms' asks, handed to the link.
+    pub fn ask(&self, ask: Ask) {
+        if let Some(linking) = &self.linking {
+            let _ = linking.asks.send(ask);
+        }
+    }
+
+    /// What the link said since the last time, as the model's events.
+    pub fn told(&mut self) -> Vec<crate::ui::UiEvent> {
+        let mut out = Vec::new();
+        if let Some(linking) = &mut self.linking {
+            while let Ok(told) = linking.told.try_recv() {
+                out.push(crate::ui::UiEvent::Rooms(told));
+            }
+        }
+        out
     }
 }

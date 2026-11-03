@@ -524,6 +524,7 @@ impl Intent {
             Intent::Tab(TabId::Chats) => StrId::TabChats,
             Intent::Tab(TabId::Map) => StrId::Map,
             Intent::Tab(TabId::Browse) | Intent::Browse(_) => StrId::TabBrowse,
+            Intent::Tab(TabId::Rooms) => StrId::TabRooms,
             Intent::Back => StrId::Back,
             Intent::OpenChat { .. } => StrId::Open,
             Intent::CloseChat => StrId::Close,
@@ -716,6 +717,7 @@ impl From<Command> for Intent {
             Command::LoadMapArea => Intent::LoadMapArea,
             Command::MapDrawing => Intent::MapDrawing,
             Command::Browse => Intent::Tab(TabId::Browse),
+            Command::Rooms => Intent::Tab(TabId::Rooms),
             Command::Rename => Intent::Rename {
                 peer: Target::Open,
                 name: None,

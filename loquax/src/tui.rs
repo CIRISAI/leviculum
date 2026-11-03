@@ -1369,6 +1369,9 @@ pub fn draw_screen(
     view: &View,
     painter: Option<&mut map::MapPainter>,
 ) {
+    if model.rooms.showing() {
+        return draw_rooms(frame, model);
+    }
     match model.browse.showing() {
         true => lnomad::tui::view(
             &model.browse.model,
@@ -1377,6 +1380,115 @@ pub fn draw_screen(
         ),
         false => draw(frame, view, painter),
     }
+}
+
+/// The Rooms tab (1379) over the whole terminal: the hub's line on top,
+/// the rooms on the left, the open room on the right under the one line
+/// that says what a room is not, the input line at the bottom and, under
+/// it, what it does or the toast.
+fn draw_rooms(frame: &mut Frame, model: &Model) {
+    use loquax::ui::rooms::{self, RoomLineKind};
+    use loquax::ui::strings::{StrId, Text as Said};
+    let lang = model.lang;
+    let node = rooms::node(model);
+    let area = frame.area();
+    if area.height < 6 || area.width < 20 {
+        return;
+    }
+    let title = format!(
+        "{} · {}",
+        Said::key(StrId::TabRooms).resolve(lang),
+        node.hub.resolve(lang)
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let body = Rect::new(area.x, area.y + 1, area.width, area.height - 5);
+    let left_width = (area.width / 4).clamp(12, 24);
+    let list = Rect::new(body.x, body.y, left_width, body.height);
+    let room = Rect::new(
+        body.x + left_width,
+        body.y,
+        body.width - left_width,
+        body.height,
+    );
+    let rows: Vec<Line> = node
+        .rows
+        .iter()
+        .map(|row| {
+            let mark = if row.selected { "▸ " } else { "  " };
+            let unread = match row.unread {
+                0 => String::new(),
+                n => format!(" ({n})"),
+            };
+            Line::from(format!("{mark}{}{unread}", row.name))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(rows).block(pane_block(
+            &Said::key(StrId::TabRooms).resolve(lang),
+            node.open.is_none(),
+            Borders::ALL,
+        )),
+        list,
+    );
+    let (name, mut lines) = match &node.open {
+        Some(open) => {
+            let mut lines = vec![Line::from(Span::styled(
+                open.live.resolve(lang),
+                Style::default().add_modifier(Modifier::ITALIC),
+            ))];
+            lines.extend(open.lines.iter().map(|line| {
+                let who = line.who.resolve(lang);
+                let text = line.text.resolve(lang);
+                Line::from(match line.kind {
+                    RoomLineKind::Said(leviculum_rrc::LineKind::Msg) => format!("{who}: {text}"),
+                    RoomLineKind::Said(leviculum_rrc::LineKind::Action) => {
+                        format!("* {who} {text}")
+                    }
+                    RoomLineKind::Said(leviculum_rrc::LineKind::Notice) => {
+                        format!("-{who}- {text}")
+                    }
+                    RoomLineKind::Joined | RoomLineKind::Parted | RoomLineKind::Hub => {
+                        format!("— {text}")
+                    }
+                    RoomLineKind::Error => format!("! {text}"),
+                })
+            }));
+            (open.name.clone(), lines)
+        }
+        None => (String::new(), Vec::new()),
+    };
+    // The newest lines that fit, the room's one line kept on top.
+    let inner = usize::from(room.height.saturating_sub(2));
+    if lines.len() > inner && inner > 1 {
+        let live = lines.remove(0);
+        let keep = lines.split_off(lines.len() - (inner - 1));
+        lines = std::iter::once(live).chain(keep).collect();
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(pane_block(&name, false, Borders::ALL)),
+        room,
+    );
+    let input = Rect::new(area.x, area.y + area.height - 4, area.width, 3);
+    frame.render_widget(
+        Paragraph::new(format!("{}▏", node.input)).block(pane_block("", true, Borders::ALL)),
+        input,
+    );
+    let foot = match model.current_toast() {
+        Some(toast) => toast.text.clone(),
+        None => node.hint.resolve(lang),
+    };
+    frame.render_widget(
+        Paragraph::new(foot),
+        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+    );
 }
 
 /// The hosted browser as the terminal draws it: the messenger's theme and
@@ -1676,6 +1788,112 @@ mod tests {
             .draw(|frame| draw_screen(frame, model, &view, None))
             .expect("draw");
         frame_text(drawn.buffer)
+    }
+
+    /// 1379: the Rooms tab in the terminal: `R` brings it and asks the
+    /// shell to link to the hub; the hub's welcome, a join, Bob's line, his
+    /// action, the hub's notice and the echo of our own line make the
+    /// screen, the golden. A line past the hub's limit stays in the input
+    /// with the sentence under it and asks nothing; a terminal whose config
+    /// names no hub draws no Rooms for `R` (the control).
+    #[test]
+    fn the_rooms_tab_draws_the_open_room_under_its_one_line() {
+        use leviculum_rrc::LineKind;
+        use loquax::ui::rooms::{RoomAsk, RoomsEvent};
+        use loquax::ui::UiEffect;
+        const HUB: [u8; 16] = [0x07; 16];
+        let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let mut model = Model::new(&[]);
+        let off = model.clone();
+        model.rooms.enabled = true;
+        model.rooms.hub = Some(HUB);
+        let effects = update(&mut model, key('R'));
+        assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
+        assert!(model.rooms.showing());
+        for event in [
+            RoomsEvent::Welcomed {
+                name: Some("periculum".into()),
+                body_limit: 350,
+            },
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: None,
+            },
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: Some("bob".into()),
+            },
+            RoomsEvent::Line {
+                room: "#lab".into(),
+                kind: LineKind::Msg,
+                text: "rrc line, thirty-one bytes long".into(),
+                nick: Some("bob".into()),
+                ours: false,
+                ts_ms: 1_793_702_757_876,
+            },
+            RoomsEvent::Line {
+                room: "#lab".into(),
+                kind: LineKind::Action,
+                text: "waves".into(),
+                nick: Some("bob".into()),
+                ours: false,
+                ts_ms: 1_793_702_758_093,
+            },
+            RoomsEvent::HubNotice {
+                room: Some("#lab".into()),
+                text: "room #lab: unregistered; mode=(none); topic=(none)".into(),
+            },
+            RoomsEvent::Line {
+                room: "#lab".into(),
+                kind: LineKind::Msg,
+                text: "hello bob".into(),
+                nick: Some("lew".into()),
+                ours: true,
+                ts_ms: 1_793_702_759_000,
+            },
+        ] {
+            update(&mut model, UiEvent::Rooms(event));
+        }
+        let room = whole_screen(&model);
+        assert!(room.contains("A room is live"), "{room}");
+        assert!(room.contains("you: hello bob"), "{room}");
+        same_text("tui-rooms-room.txt", &room);
+
+        // Typed and sent: the line goes to the room.
+        for c in "hi".chars() {
+            update(&mut model, key(c));
+        }
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(
+            effects,
+            vec![UiEffect::Rooms(RoomAsk::Say {
+                room: "#lab".into(),
+                kind: LineKind::Msg,
+                text: "hi".into(),
+            })]
+        );
+        // Past the limit: kept, said, nothing asked.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Typed("x".repeat(351))),
+        );
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(model.rooms.input.len(), 351);
+        let said = whole_screen(&model);
+        assert!(said.contains("This line is 351 bytes long"), "{said}");
+
+        // The control: no hub, no Rooms.
+        let mut off = off;
+        update(&mut off, key('R'));
+        assert!(!off.rooms.showing());
+        assert!(!whole_screen(&off).contains("A room is live"));
     }
 
     /// 1369: the Browse tab in the terminal is lnomad's own screen, drawn

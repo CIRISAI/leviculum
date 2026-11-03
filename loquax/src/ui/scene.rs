@@ -80,6 +80,9 @@ pub enum TabId {
     /// lnomad's browser, hosted (1337): on the phone and the M9 only,
     /// where [`super::browse::Browse::enabled`] says so.
     Browse,
+    /// Reticulum Relay Chat's rooms on a hub (1379), where
+    /// [`super::rooms::Rooms::enabled`] says so.
+    Rooms,
 }
 
 /// A node's stable identity: a renderer diffs on it, hit tests to it, and
@@ -165,6 +168,7 @@ impl NodeId {
             NodeId::Tab(TabId::Chats) => "tab_chats".to_string(),
             NodeId::Tab(TabId::Map) => "tab_map".to_string(),
             NodeId::Tab(TabId::Browse) => "tab_browse".to_string(),
+            NodeId::Tab(TabId::Rooms) => "tab_rooms".to_string(),
             NodeId::List => "list".to_string(),
             NodeId::Row(peer) => format!("row_{}", to_hex(peer)),
             NodeId::Pin(peer) => format!("pin_{}", to_hex(peer)),
@@ -953,6 +957,8 @@ pub enum ScreenId {
     },
     /// The Browse tab in front (1337).
     Browse,
+    /// The Rooms tab in front (1379).
+    Rooms,
 }
 
 /// One screen's nodes.
@@ -979,6 +985,8 @@ pub struct Scene {
     /// address, the page as a window of runs, the places sheet, the name
     /// results, its toast), built by lnomad, never by Loquax.
     pub browse: Option<lnomad::app::scene::Scene>,
+    /// The Rooms surface while its tab is in front (1379).
+    pub rooms: Option<super::rooms::RoomsNode>,
 }
 
 impl<B> UiModel<B> {
@@ -986,6 +994,9 @@ impl<B> UiModel<B> {
     pub fn scene(&self, class: LayoutClass) -> Scene {
         if self.browse.enabled && self.browse.open {
             return browse_scene(self).in_class(class);
+        }
+        if self.rooms.showing() {
+            return rooms_scene(self).in_class(class);
         }
         let open = self.conversations.get(self.selected).map(|_| self.selected);
         let chat = open.map(|c| chat(self, c));
@@ -1011,6 +1022,7 @@ impl<B> UiModel<B> {
             new_group: super::group_scene::new_group(self),
             members: super::group_scene::member_sheet(self),
             browse: None,
+            rooms: None,
         }
         .in_class(class)
     }
@@ -1038,6 +1050,33 @@ fn browse_scene<B>(model: &UiModel<B>) -> Scene {
         new_group: None,
         members: None,
         browse: Some(model.browse.model.scene()),
+        rooms: None,
+    }
+}
+
+/// The Rooms tab in front (1379): Loquax's bar titled Rooms, its tab bar
+/// with Rooms active, and the Rooms surface as the whole content. No list
+/// of conversations and no chat: a room is not one.
+fn rooms_scene<B>(model: &UiModel<B>) -> Scene {
+    let mut top = me_bar(model);
+    top.title = Text::key(StrId::TabRooms);
+    top.actions = Vec::new();
+    top.a11y = A11y::of(NodeId::TopBar, Role::Bar, Text::key(StrId::TabRooms));
+    Scene {
+        class: LayoutClass::Wide,
+        screen: ScreenId::Rooms,
+        top,
+        tabs: Some(tabs(model)),
+        list: None,
+        chat: None,
+        sheet: None,
+        whereabouts: None,
+        card: None,
+        chips: Vec::new(),
+        new_group: None,
+        members: None,
+        browse: None,
+        rooms: Some(super::rooms::node(model)),
     }
 }
 
@@ -1222,6 +1261,7 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
     let unread = u32::try_from(unread).unwrap_or(u32::MAX);
     let active = match model.map {
         _ if model.browse.enabled && model.browse.open => TabId::Browse,
+        _ if model.rooms.showing() => TabId::Rooms,
         Some(_) => TabId::Map,
         None => TabId::Chats,
     };
@@ -1258,6 +1298,15 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
                 StrId::TabBrowse,
                 None,
                 Text::key(StrId::TabBrowse),
+            )
+        }))
+        .chain(model.rooms.enabled.then(|| {
+            let unread: u32 = model.rooms.rooms.iter().map(|r| r.unread).sum();
+            tab(
+                TabId::Rooms,
+                StrId::TabRooms,
+                (unread > 0).then_some(unread),
+                Text::key(StrId::TabRooms),
             )
         }))
         .collect(),
@@ -2161,6 +2210,7 @@ impl Scene {
             ScreenId::Chats => json!("chats"),
             ScreenId::Chat { peer } => json!({ "chat": hex(&peer) }),
             ScreenId::Browse => json!("browse"),
+            ScreenId::Rooms => json!("rooms"),
         };
         map.insert("screen".into(), screen);
         map.insert("top".into(), self.top.to_json());
@@ -2212,6 +2262,9 @@ impl Scene {
         }
         if let Some(browse) = &self.browse {
             map.insert("browse".into(), browse.to_json());
+        }
+        if let Some(rooms) = &self.rooms {
+            map.insert("rooms".into(), rooms.to_json());
         }
         Value::Object(map)
     }
