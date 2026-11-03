@@ -348,7 +348,8 @@ a home. What that needs, measured against the code:
   retry ladder and budgets move down to `no_std`, the waiting stays
   with the platform. Rendezvous over TCP does not exist here and is not
   needed: over LoRa the client reaches the home destination through the
-  mesh by path request, the way every destination is reached.
+  mesh by path request, the way every destination is reached. Done on
+  the host in slice five (1363, "Slice five, host half" below).
 - **The home's address gets onto the board** as the admission code: 140
   typeable characters (`lqxh1…`, `loquax/src/home/code.rs`), entered on
   the 37 keys for the first pairing, or written over the USB control
@@ -359,7 +360,8 @@ a home. What that needs, measured against the code:
 - **The RAM of a client session** is bounded by the pull batch — a
   `/sync` answer carries the messages themselves — and is not measured
   yet; the pairing slice runs the census on the board with a real pull
-  before the batch size is fixed.
+  before the batch size is fixed. On the host since 1363: a LoRa page
+  is one packet, and its pull peaks at 392 B.
 
 ### The test plan
 
@@ -614,31 +616,32 @@ yet. Both end in the same join.
   goes to the same parser and checksum as on every device. `grouped`
   (`loquax/src/home/code.rs:226`) shows it in fives, so the eye keeps its
   place against the code it copies.
-- **The join without the waiting** (`Join`,
-  `loquax/src/home/ask.rs:168`): the seam this page asked for, cut as the
-  store's. The path ladder (`PathLadder`, `loquax/src/home/ask.rs:66`;
+- **The join without the waiting** (`Join` then, `Ask` since 1363,
+  `loquax/src/home/ask.rs:258`): the seam this page asked for, cut as the
+  store's. The path ladder (`PathLadder`, `loquax/src/home/ask.rs:67`;
   requests at 0, 7, 21, 49 and 105 s, then a minute apart), the per-hop
   link budget of rule 3 (`establishment_ms`,
-  `loquax/src/home/ask.rs:120`) and what a `/join` answer means
-  (`join_outcome`, `loquax/src/home/ask.rs:126`) are `no_std` and shared:
+  `loquax/src/home/ask.rs:121`) and what a `/join` answer means
+  (`join_outcome`, `loquax/src/home/ask.rs:127`) are `no_std` and shared:
   the desktop's `open` takes the ladder and the budget from there, and
   `HomeError` lives there. The join is a set of `Step`s
-  (`loquax/src/home/ask.rs:135`), request a path, connect, identify, send
+  (`loquax/src/home/ask.rs:214`), request a path, connect, identify, send
   `/join`, done, which the platform performs and reports back; a report
   out of turn ends the join instead of being read as the home's word.
 
-What of `home::client` is not `no_std` yet, all of it behind
-`#[cfg(feature = "std")]` (`loquax/src/home.rs:43`):
+What of `home::client` was not `no_std` then, all of it behind
+`#[cfg(feature = "std")]` (`loquax/src/home.rs:43`); slice five's host
+half (1363, below) moved the rows up to the group verbs:
 
 | piece | where | what it needs on the board |
 |---|---|---|
-| the link loop: path, connect, identify | `open`, `loquax/src/home/client.rs:518` | nothing more: `Join` is its board form; other requests get the same steps |
-| one request and its answer | `request`, `loquax/src/home/client.rs:583` | the firmware's request over a core link, reported to `Join::answered` |
-| the join | `join`, `loquax/src/home/client.rs:34` | none: `Join` replaces it |
-| the pull and its pages | `pull`, `loquax/src/home/client.rs:370`; `pages`, `loquax/src/home/client.rs:384` | a `Pull` flow like `Join` with the page loop, and the batch size the session census fixes |
-| send, mark and the group verbs | `send`, `loquax/src/home/client.rs:59`; `mark`, `loquax/src/home/client.rs:116` | the same steps with their own request; slice five for the groups |
-| the client id | `client_id`, `loquax/src/home/client.rs:363` | a random source the firmware has |
-| being a client: the home's key, the cursor | `load_client`, `loquax/src/home/client.rs:615`; `save_client`, `loquax/src/home/client.rs:640`; `load_cursor`, `loquax/src/home/client.rs:646` | a record in flash beside the store, the device identity with it |
+| the link loop: path, connect, identify | `open`, `loquax/src/home/client.rs:590` | nothing more: `Join` is its board form; other requests get the same steps |
+| one request and its answer | `request`, `loquax/src/home/client.rs:655` | the firmware's request over a core link, reported to `Join::answered` |
+| the join | `join`, `loquax/src/home/client.rs:35` | none: `Join` replaces it |
+| the pull and its pages | `pull`, `loquax/src/home/client.rs:464`; `pages`, gone in 1363 | a `Pull` flow like `Join` with the page loop, and the batch size the session census fixes |
+| send, mark and the group verbs | `send`, `loquax/src/home/client.rs:150`; `mark`, `loquax/src/home/client.rs:208` | the same steps with their own request; slice five for the groups |
+| the client id | `client_id`, `loquax/src/home/client.rs:455` | a random source the firmware has |
+| being a client: the home's key, the cursor | `load_client`, `loquax/src/home/client.rs:687`; `save_client`, `loquax/src/home/client.rs:712`; `load_cursor`, `loquax/src/home/client.rs:718` | a record in flash beside the store, the device identity with it |
 
 What moves to make the admit flow run on the board, in order: the
 pairing screen in `loquax-m9`, the typed code drawn grouped with its
@@ -740,6 +743,146 @@ of slice four: everything the board says. Whether the frame on the panel
 reads the right way round, whether the dump equals the golden, what the
 board's census measures, and what the controller's answer is.
 
+### Slice five, host half (1363)
+
+The board as a Loquax client of its home over LoRa, built and measured
+on the host. The board's half (its executor over `leviculum-core`'s
+links, the record in flash, the census line at boot) waits for the
+image of slice four to run.
+
+**The client moved down.** `home::ask` is now the whole ask, not only
+the join: `Ask` (`loquax/src/home/ask.rs:258`) over a `Verb`
+(`loquax/src/home/ask.rs:154`), `/join`, `/sync` page by page, `/send`,
+`/mark` and `/group`, with an `Outcome`
+(`loquax/src/home/ask.rs:183`). The platform performs the `Step`s
+(`loquax/src/home/ask.rs:214`) as before; two are new. `Page` hands out
+one page of a pull and the ask keeps none of it, so a pull's memory is
+one page however long the archive. `Close` says an answer was lost: the
+same request goes again on a fresh link, at most `ATTEMPTS`
+(`loquax/src/home/ask.rs:150`) times, for every verb but `/join`, whose
+token is single-use. The host's executor is `client::run_ask`
+(`loquax/src/home/client.rs:59`), over `leviculum_std`; the desktop's
+and the phone's `join`, `pull` and `mark` now run the same ask through
+it, so the page loop exists once.
+
+| piece | before 1363 | now |
+|---|---|---|
+| the link loop: path, connect, identify | `open`, std | `Ask` for the five verbs; `open` stays for the desktop's other requests |
+| one request and its answer | `request`, std | `Step::Request` and `Ask::answered`; `request` is the host executor's |
+| the join | `Join` | `Ask::join`, `Verb::Join` |
+| the pull and its pages | `pull`, `pages`, std | `Verb::Pull`, `Step::Page`; `pull` runs it, `pages` is gone |
+| send, mark, group | std | `Verb::Send`, `Verb::Mark`, `Verb::Group`; `mark` runs the ask, `send` keeps its own loop, because `send_retrying` already asks three times and would ask nine |
+| the client id, the home's key, the cursor | std | still std: the firmware's random source and its flash record are the board half |
+| the old-home probe of `/group` | std | std only: a home before 1307 drops `/group`, and the board's homes are newer |
+
+`just m9-render-no-std` now checks the client with the renderer: its
+positive control puts a `std::fs` call into `loquax/src/home/ask.rs` as
+well as into the renderer, and both must be refused for thumbv7em.
+
+**The page fits a packet.** A link on LoRa keeps the default MTU, 500
+bytes, and its MDU is 431 (`LORA_LINK_MDU`,
+`loquax/src/home/ask.rs:138`). A response longer than that goes as a
+resource (`leviculum-core/src/node/mod.rs:1808`), which is an
+advertisement, its parts and a proof. The home's own page bound is
+64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:285`). So
+the client asks smaller pages: `/sync [cursor, page]`, a second element
+that a home from before reads past. The board asks `LORA_PAGE_BYTES`
+(`loquax/src/home/ask.rs:145`), 412, the longest answer that still fits
+one response packet once the response frame (1 + 18 bytes) is around
+it. The home cuts the page to that, keeping at least one entry, and
+says `more` (`fit_page`, `loquax/src/home/wire.rs:298`; the server's
+`sync`, `loquax/src/home/server.rs:1029`). A message larger than a page
+still comes alone, as a resource.
+
+**The bytes, measured** (`loquax-android/tests/m9_client.rs`). The
+board's node, a mailbox on a node of its own, and a transport node
+between them that carries the device link, as on the mesh. A proxy on
+the board's link reads every Reticulum packet both ways. A LoRa
+interface sends each packet as one or two frames of its own, so these
+lengths are what the air carries. The board's packets are `HEADER_2`,
+since the home is two hops away. The announces both nodes send are left
+out, because they are the nodes' cost and not the client's.
+
+| ask | packets | up | down | the packets, bytes |
+|---|---:|---:|---:|---|
+| join | 8 | 693 B | 217 B | path request 67; link request 102, link proof 118 (down), RTT 83, identify 211; `/join` 131, answer 99 (down); close 99 |
+| watch, kept | 6 | 495 B | 217 B | link 102, 118, 83, 211; `/watch` 99, answer 99 |
+| send, 12 characters | 7 | 658 B | 249 B | link 102, 118, 83, 211; `/send` 163, answer 131; close 99 |
+| wake | 2 | 115 B | 83 B | channel message 83 (down), its proof 115 |
+| pull one message | 7 | 610 B | 345 B | link 102, 118, 83, 211; `/sync` 115, the page 227 (down); close 99 |
+| mark one read | 7 | 642 B | 217 B | link 102, 118, 83, 211; `/mark` 147, answer 99; close 99 |
+| keepalive | 2 | 20 B | 20 B | flags, hops, link id, context, one byte (`build_keepalive_packet`, `leviculum-core/src/link/mod.rs:2686`), every 230 s |
+
+Five entries pulled in LoRa pages came as two pages, answers of 499 and
+467 bytes, each one packet of at most two LoRa frames. The control, the
+same five in the home's own page, is one 867-byte answer: over TCP's
+larger link MTU that is one packet, but on LoRa it would be a resource.
+
+**The airtime**, at our defaults (BW 125 kHz, SF8, CR 4/5, 18-symbol
+preamble), from those lengths through `packet_airtime_ms`
+(`leviculum-core/src/rnode.rs:1702`), as [Announce
+cadence](announce-cadence.md) reckons its announces. Every entry the
+archive gains wakes the watching link, the board's own entries too, and
+every wake past the cursor is a pull. So a message in costs a wake, a
+pull, the mark read and the mark's wake. A message out costs the send,
+its wake and the pull of its own entry.
+
+| per hour | airtime | of the hour |
+|---|---:|---:|
+| idle client: 15.65 keepalive exchanges of 248 ms | 3,882 ms | 0.108 % |
+| one message in | 7,025 ms | |
+| one message out | 6,490 ms | |
+| idle and one message in | 10,907 ms | 0.303 % |
+| idle, one in and one out | 17,397 ms | 0.483 % |
+| the board's own share of that, what its duty budget is charged | 11,020 ms | 0.306 % |
+
+A link of its own costs 1,951 ms of every ask: the link request, its
+proof, the RTT, the identify and the close. That is two thirds of a
+one-message pull (2,977 ms). The watching link is up anyway, and asking
+over it would save that time on every pull, send and mark. The watch
+does not do that yet (`watch.rs`: the pull "is the `/sync` it always
+was, on a link of its own"); it is the first lever, before any change
+to the page.
+
+**Pairing, from the keys to `HOME admitted`.** The same test types the
+code the phone shows on the board's keys. The scan frames go through
+the driver (`Keyboard`, debounce two polls of 10 ms) on the provisional
+layout, with digits on a tapped Sym. The key events go into the pairing
+screen (`Pairing`, `loquax-m9/src/pair.rs:31`). After 20 characters, a
+`9` (Sym on `o`, not base32) reads "character 21 cannot stand there".
+Backspace takes it back, the remaining 120 characters follow, and Enter
+gives the `HomeCode` the phone showed. The join (`Pairing::join`,
+`loquax-m9/src/pair.rs:64`) then runs over the mesh. The home logs
+`HOME admitted`, and its store lists the board's identity under the
+name its owner gave the code. The board's own `DEVICE_NAME`, "M9", is
+what it sends, but the home names a device by its code. The screen
+shows the code in fives, wrapped at a group's end to the 53 cells
+(`Pairing::lines`, `loquax-m9/src/pair.rs:70`), and one verdict line.
+
+**The session's heap.** `census::session`
+(`loquax-m9/src/census.rs:158`) is a routine the board can run as it
+runs the screen census. It drives a pull of fed answers with the
+platform's probe. The host runs it in `m9_fixture_census` over thirty
+LoRa pages of one 200-byte message each: `session=pull held=0 peak=392
+verdict=ok`. Between pages nothing is held, and a page costs what it
+carries. The ceilings are about double that (`SESSION_PEAK`, 1,000 B,
+`loquax-m9/src/census.rs:149`; `SESSION_HELD`, 256 B). The positive
+control is the same archive in one page of the home's own bound: a
+63,225-byte answer, peak 84,576 B, refused. The page bound that keeps
+LoRa answers to one packet also keeps a pull's RAM to one page. On the
+board that is SRAM beside the node and not the UI's PSRAM.
+
+All targets:
+
+- **M9:** the ask, the pairing screen and the session census. The
+  board's executor and its flash record are still to come.
+- **Desktop (TUI and window):** `join`, `pull` and `mark` run the same
+  ask through `run_ask`, in the home's own pages over TCP.
+- **Android:** the same `client`, through its runner (the facade cells
+  pass unchanged).
+- **The home:** it answers the page bound. A client from before asks
+  none and gets the 64 KiB page as before.
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice
@@ -757,9 +900,11 @@ The M9 frontend: the six slices of "The slices, in order" above but the
 host halves of slice one, of slice two (1356, the chat drawn and typed
 into), of slice three (1359, the keyboard driver, the typed code and
 the join's `no_std` steps) and of slice four (1361, the image that boots
-the renderer, built, its board half not yet run). Of the client seam, the pull, the sends and
-the client's record in flash are still `std` (the table under "Slice
-three done"). Of the 2026-10-21 list that stood
+the renderer, built, its board half not yet run) and of slice five
+(1363, the `no_std` client, the LoRa page, the pairing walk and the
+session census, measured on the host). Of the client seam, the client's
+record in flash and the board's executor over `leviculum-core` are
+still to build (the table under "Slice five, host half"). Of the 2026-10-21 list that stood
 here, the rest has landed since: the core builds `no_std`
 (`just loquax-core-no-std`), the desktop window ships beside the
 terminal, Android went through the JNI facade rather than the C
