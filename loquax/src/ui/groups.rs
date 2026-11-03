@@ -673,16 +673,7 @@ impl<B> UiModel<B> {
         let Some(message) = self.message_mut(c, m) else {
             return;
         };
-        message.note(
-            now,
-            &alloc::format!(
-                "the group: delivered to {} of {}, read by {} of {}",
-                status.delivered,
-                status.members,
-                status.read,
-                status.readers
-            ),
-        );
+        message.note(now, &status_line(status));
         if matches!(message.delivery, Some(DeliveryState::Read { .. })) {
             return;
         }
@@ -732,6 +723,69 @@ impl<B> UiModel<B> {
             self.learn_group(peer, outbound, &fields);
         }
         self.forget_deleted_groups();
+    }
+}
+
+/// The start of a group status's ledger line (1381): the four numbers
+/// follow it, so the line is data and [`ledger_line`] says it in the
+/// reader's language.
+const STATUS_LINE: &str = "group-status";
+
+/// The ledger line of `status`: `group-status 2 3 1 2`, delivered, members,
+/// read and readers.
+fn status_line(status: &GroupStatus) -> String {
+    alloc::format!(
+        "{STATUS_LINE} {} {} {} {}",
+        status.delivered,
+        status.members,
+        status.read,
+        status.readers
+    )
+}
+
+/// The English sentence a store written before 1381 kept for a status.
+const OLD_STATUS_LINE: &str = "the group: delivered to ";
+
+/// A ledger line in `lang`: a group status's numbers as the catalogue's
+/// sentence, the English sentence an older store kept too; any other line
+/// as it was written.
+pub fn ledger_line(what: &str, lang: Lang) -> String {
+    let numbers = |rest: &str| -> Vec<i64> {
+        rest.split(|c: char| !c.is_ascii_digit())
+            .filter(|n| !n.is_empty())
+            .filter_map(|n| n.parse().ok())
+            .collect()
+    };
+    let said = match (
+        what.strip_prefix(STATUS_LINE),
+        what.strip_prefix(OLD_STATUS_LINE),
+    ) {
+        (Some(rest), _) => Some(numbers(rest)),
+        (None, Some(rest)) => Some(numbers(rest)).filter(|n| {
+            n.len() == 4
+                && what
+                    == alloc::format!(
+                        "{OLD_STATUS_LINE}{} of {}, read by {} of {}",
+                        n[0],
+                        n[1],
+                        n[2],
+                        n[3]
+                    )
+        }),
+        (None, None) => None,
+    };
+    match said.as_deref() {
+        Some(&[delivered, members, read, readers]) => Text::Key(
+            StrId::GroupStatusNote,
+            alloc::vec![
+                Arg::Int(delivered),
+                Arg::Int(members),
+                Arg::Int(read),
+                Arg::Int(readers),
+            ],
+        )
+        .resolve(lang),
+        _ => what.to_string(),
     }
 }
 
@@ -2565,6 +2619,43 @@ mod tests {
             rows.iter().any(|r| r.contains("1 send no read receipts")),
             "{rows:?}"
         );
+        // The ledger keeps the status as numbers and says them in the
+        // reader's language (1381).
+        assert!(
+            rows.iter()
+                .any(|r| r.ends_with("  Group: delivered to 3 of 3, read by 1 of 2")),
+            "{rows:?}"
+        );
+        model.lang = Lang::De;
+        let rows = super::super::message_detail(&model, GROUP, key)
+            .expect("detail")
+            .rows;
+        assert!(
+            rows.iter()
+                .any(|r| r.ends_with("  Gruppe: bei 3 von 3 angekommen, von 1 von 2 gelesen")),
+            "{rows:?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("group-status")), "{rows:?}");
+        model.lang = Lang::En;
+        // The phone's Info says the counts as plain rows (1381).
+        let info: Vec<(String, String)> = super::super::info::message_info(&model, GROUP, key)
+            .expect("info")
+            .rows
+            .iter()
+            .map(|r| r.resolve(Lang::De))
+            .collect();
+        assert!(
+            info.contains(&("Gruppe".into(), "Bei 3 von 3 angekommen".into())),
+            "{info:?}"
+        );
+        assert!(
+            info.contains(&(
+                "Gelesen".into(),
+                "Von 1 von 2 gelesen · 1 senden keine Lesebestätigungen und zählen nicht mit"
+                    .into()
+            )),
+            "{info:?}"
+        );
 
         arrive(&mut model, GROUP, 13, "", status(OURS, 3, 2, 2));
         assert!(
@@ -2581,6 +2672,42 @@ mod tests {
             0,
             "{bodies:?}"
         );
+    }
+
+    /// 1381: a status's ledger line is data, said in the reader's
+    /// language; the English sentence a store kept before is said so too.
+    /// Controls: a line that only starts like one, and any other line,
+    /// stay as written.
+    #[test]
+    fn a_status_ledger_line_is_said_in_the_readers_language() {
+        let line = status_line(&GroupStatus {
+            original: [0; 32],
+            delivered: 2,
+            members: 3,
+            read: 1,
+            readers: 2,
+        });
+        assert_eq!(line, "group-status 2 3 1 2");
+        assert_eq!(
+            ledger_line(&line, Lang::En),
+            "Group: delivered to 2 of 3, read by 1 of 2"
+        );
+        assert_eq!(
+            ledger_line(&line, Lang::De),
+            "Gruppe: bei 2 von 3 angekommen, von 1 von 2 gelesen"
+        );
+        assert_eq!(
+            ledger_line("the group: delivered to 2 of 3, read by 1 of 2", Lang::De),
+            "Gruppe: bei 2 von 3 angekommen, von 1 von 2 gelesen"
+        );
+        for kept in [
+            "the group: delivered to 2 of 3",
+            "group-status 2 3",
+            "queued",
+            "received, signature verified",
+        ] {
+            assert_eq!(ledger_line(kept, Lang::De), kept);
+        }
     }
 
     /// 1348: a digest line the home left out carries its English sentence

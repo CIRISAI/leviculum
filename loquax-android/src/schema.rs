@@ -1456,14 +1456,23 @@ pub struct LinkRow {
     pub name: String,
 }
 
-/// A message's detail, what the terminal's `v` shows: who, the peer, the
-/// id, the size, the delivery state or the signature, the fields read and
-/// what this device saw happen to it, one line each, an empty one between
-/// the parts.
+/// A message's Info (1381): plain rows in the phone's language, a label
+/// and its value each (who, when, where it stands, the group's counts, the
+/// size), and under `advanced` the terminal's `v` lines: the peer, the id,
+/// the fields read and what this device saw happen to it, one line each,
+/// an empty one between the parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Info {
     pub v: u32,
-    pub rows: Vec<String>,
+    pub rows: Vec<InfoRow>,
+    pub advanced: Vec<String>,
+}
+
+/// One plain row of a message's Info.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InfoRow {
+    pub label: String,
+    pub value: String,
 }
 
 /// The recent emoji, newest first.

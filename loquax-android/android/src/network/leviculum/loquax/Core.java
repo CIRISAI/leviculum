@@ -501,16 +501,18 @@ final class Core {
         return command(map("t", "used", "emoji", emoji));
     }
 
-    /** A message's detail lines, the terminal's `v` view; null with the error in `error[0]`. */
-    @SuppressWarnings("unchecked")
-    static List<String> info(String peer, long key, String[] error) {
+    /**
+     * A message's Info (1381): `rows`, each a `label` and a `value` in the phone's language, and
+     * `advanced`, the terminal's `v` lines; null with the error in `error[0]`.
+     */
+    static Map<String, Object> info(String peer, long key, String[] error) {
         Map<String, Object> answer = answer(Native.query(MsgPack.pack(
                 map("t", "info", "peer", peer, "key", key))));
         if (!(answer.get("rows") instanceof List)) {
             error[0] = str(answer, "error");
             return null;
         }
-        return strings(answer.get("rows"));
+        return answer;
     }
 
     /** The emoji used last, newest first; none without a session. */

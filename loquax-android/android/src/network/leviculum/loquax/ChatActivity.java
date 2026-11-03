@@ -2137,27 +2137,60 @@ public class ChatActivity extends Activity implements Events.Listener {
                 .show();
     }
 
-    /** The message's detail, the terminal's `v` view, in a dialog. */
+    /**
+     * The message's Info in a dialog (1381): the core's plain rows, a label over its value, in the
+     * phone's language; the terminal's lines with the hex only once Advanced is tapped.
+     */
     private void info(Map<String, Object> row) {
         String[] error = new String[1];
-        List<String> lines = Core.info(peer, Core.num(row, "key"), error);
-        if (lines == null) {
+        Map<String, Object> info = Core.info(peer, Core.num(row, "key"), error);
+        if (info == null) {
             line(error[0]);
             return;
         }
-        StringBuilder text = new StringBuilder();
-        for (String l : lines) {
-            text.append(l).append('\n');
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setPadding(dp(20), dp(12), dp(20), dp(12));
+        for (Map<String, Object> r : Core.list(info, "rows")) {
+            TextView label = new TextView(this);
+            label.setText(Core.str(r, "label"));
+            label.setTextSize(12);
+            label.setTextColor(getColor(R.color.text_secondary));
+            label.setPadding(0, dp(6), 0, 0);
+            column.addView(label);
+            TextView value = new TextView(this);
+            value.setText(Core.str(r, "value"));
+            value.setTextSize(15);
+            value.setTextIsSelectable(true);
+            value.setTextColor(getColor(R.color.text));
+            column.addView(value);
         }
-        TextView view = new TextView(this);
-        view.setText(text.toString().trim());
-        view.setTypeface(Typeface.MONOSPACE);
-        view.setTextSize(13);
-        view.setTextIsSelectable(true);
-        view.setTextColor(getColor(R.color.text));
-        view.setPadding(dp(20), dp(12), dp(20), dp(12));
+        StringBuilder lines = new StringBuilder();
+        for (String l : Core.words(info, "advanced")) {
+            lines.append(l).append('\n');
+        }
+        TextView advanced = new TextView(this);
+        advanced.setText(lines.toString().trim());
+        advanced.setTypeface(Typeface.MONOSPACE);
+        advanced.setTextSize(12);
+        advanced.setTextIsSelectable(true);
+        advanced.setTextColor(getColor(R.color.text_secondary));
+        advanced.setPadding(0, dp(12), 0, 0);
+        advanced.setVisibility(View.GONE);
+        Button open = new Button(this);
+        open.setText(R.string.info_advanced);
+        open.setAllCaps(false);
+        open.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                advanced.setVisibility(View.VISIBLE);
+                open.setVisibility(View.GONE);
+            }
+        });
+        column.addView(open);
+        column.addView(advanced);
         ScrollView scroll = new ScrollView(this);
-        scroll.addView(view);
+        scroll.addView(column);
         new AlertDialog.Builder(this)
                 .setTitle(R.string.info)
                 .setView(scroll)

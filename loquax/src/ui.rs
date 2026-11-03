@@ -142,6 +142,7 @@ pub mod group_scene;
 pub mod groups;
 pub mod history;
 pub mod hit;
+pub mod info;
 pub mod intent;
 pub mod layout;
 pub mod liveness;
@@ -5107,7 +5108,10 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
             .at
             .map(|at| at.hh_mm_ss())
             .unwrap_or_else(|| "--:--:--".to_string());
-        rows.push(format!("{at}  {}", entry.what));
+        rows.push(format!(
+            "{at}  {}",
+            groups::ledger_line(&entry.what, model.lang)
+        ));
     }
     Some(DetailView {
         title: "message".to_string(),
@@ -12688,6 +12692,51 @@ pub(crate) mod tests {
         );
         assert!(detail.rows.iter().any(|r| r == "signature verified"));
         assert!(message_detail(&model, PEER, 999).is_none());
+    }
+
+    /// 1381, finding 19: the phone's Info is plain rows in the reader's
+    /// language, no hex; the terminal's lines with the id come along for
+    /// Advanced. Control: the same message in English.
+    #[test]
+    fn the_info_speaks_the_readers_language_and_keeps_the_hex_for_advanced() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, UiEvent::Clock(at(25, 14, 0)));
+        received(&mut model, ID, "one");
+        let key = model.conversations[0].messages[0].activity;
+        let info = info::message_info(&model, PEER, key).expect("info");
+        let said =
+            |lang| -> Vec<(String, String)> { info.rows.iter().map(|r| r.resolve(lang)).collect() };
+        let de = said(strings::Lang::De);
+        let name = model.names.label(&PEER);
+        assert_eq!(de[0], ("Von".to_string(), name.clone()));
+        assert_eq!(
+            de[1],
+            ("Empfangen".to_string(), "Heute · 14:00".to_string())
+        );
+        assert_eq!(
+            de[2],
+            (
+                "Absender".to_string(),
+                "Durch die Signatur bestätigt".to_string()
+            )
+        );
+        assert_eq!(de[3], ("Größe".to_string(), "0,1 KB".to_string()));
+        assert_eq!(de.len(), 4, "{de:?}");
+        let hex = to_hex(&ID);
+        assert!(
+            de.iter()
+                .all(|(l, v)| !l.contains(&hex[..8]) && !v.contains(&hex[..8])),
+            "{de:?}"
+        );
+        assert!(
+            info.advanced.contains(&format!("id     {hex}")),
+            "{:?}",
+            info.advanced
+        );
+        let en = said(strings::Lang::En);
+        assert_eq!(en[0], ("From".to_string(), name));
+        assert_eq!(en[3], ("Size".to_string(), "0.1 KB".to_string()));
+        assert!(info::message_info(&model, PEER, 999).is_none());
     }
 
     /// The terminal's verbs of 1371, on two restored chats: PEER's

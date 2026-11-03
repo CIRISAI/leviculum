@@ -137,6 +137,35 @@ leviculum_ui::catalogue! {
     ActionInfo = "action_info", "Info", "Info";
     ActionDelete = "action_delete", "Delete", "Löschen";
     ActionSelect = "action_select", "Select", "Auswählen";
+    // A message's Info (1381): plain rows in the reader's language; the
+    // hex and the device's log only under Advanced.
+    InfoAdvanced = "info_advanced", "Advanced", "Erweitert";
+    InfoFrom = "info_from", "From", "Von";
+    InfoTo = "info_to", "To", "An";
+    InfoSent = "info_sent", "Sent", "Gesendet";
+    InfoReceived = "info_received", "Received", "Empfangen";
+    InfoState = "info_state", "Status", "Status";
+    InfoWaiting = "info_waiting", "Waiting to be sent", "Wartet auf den Versand";
+    InfoPreparing = "info_preparing", "Being prepared for sending", "Wird zum Senden vorbereitet";
+    InfoSending = "info_sending", "Being sent now", "Wird gerade gesendet";
+    InfoMailbox = "info_mailbox", "In the mailbox, delivered once %1$s is online", "Im Postfach, wird zugestellt, sobald %1$s online ist";
+    InfoDelivered = "info_delivered", "Arrived on %1$s's device", "Auf dem Gerät von %1$s angekommen";
+    InfoRefused = "info_refused", "Not sent: it was refused. Double tap to send again", "Nicht gesendet: es wurde abgelehnt. Doppeltippen, um es erneut zu senden";
+    InfoSender = "info_sender", "Sender", "Absender";
+    InfoSignatureOk = "info_signature_ok", "Confirmed by its signature", "Durch die Signatur bestätigt";
+    InfoSignatureUnchecked = "info_signature_unchecked", "Not confirmed yet: the sender's key is missing", "Noch nicht bestätigt: der Schlüssel des Absenders fehlt";
+    InfoSignatureBad = "info_signature_bad", "Signature invalid: it may not be from %1$s", "Signatur ungültig: sie ist vielleicht nicht von %1$s";
+    InfoRead = "info_read", "Read", "Gelesen";
+    InfoReceiptsOff = "info_receipts_off", "Read receipts are off: you send none and see none", "Lesebestätigungen sind aus: du sendest keine und siehst keine";
+    InfoNoReceipts = "info_no_receipts", "%1$s sends no read receipts", "%1$s sendet keine Lesebestätigungen";
+    InfoGroup = "info_group", "Group", "Gruppe";
+    InfoGroupNone = "info_group_none", "No member's copy is confirmed yet", "Noch bei keinem Mitglied bestätigt";
+    InfoGroupDelivered = "info_group_delivered", "Delivered to %1$d of %2$d", "Bei %1$d von %2$d angekommen";
+    InfoGroupRead = "info_group_read", "Read by %1$d of %2$d", "Von %1$d von %2$d gelesen";
+    InfoGroupNoReaders = "info_group_no_readers", "Nobody in it sends read receipts", "Niemand darin sendet Lesebestätigungen";
+    InfoGroupQuiet = "info_group_quiet", "%1$d send no read receipts and are not counted", "%1$d senden keine Lesebestätigungen und zählen nicht mit";
+    InfoSize = "info_size", "Size", "Größe";
+    InfoKb = "info_kb", "%1$d.%2$d KB", "%1$d,%2$d KB";
     // The verbs no Android string named yet: each intent's label
     // (`super::intent::Intent::label`), new keys under `scene_`.
     Back = "scene_back", "Back", "Zurück";
@@ -236,6 +265,8 @@ leviculum_ui::catalogue! {
     GroupLeftOutVoice = "group_left_out_voice", "sent a voice message (too large for the radio)", "hat eine Sprachnachricht geschickt (zu groß für die Funkstrecke)";
     GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für die Funkstrecke)";
     GroupLeftOutGone = "group_left_out_gone", "a message (no longer here)", "eine Nachricht (nicht mehr da)";
+    // A group's status of our message in its ledger (1381): kept as numbers, said in the reader's language.
+    GroupStatusNote = "group_status_note", "Group: delivered to %1$d of %2$d, read by %3$d of %4$d", "Gruppe: bei %1$d von %2$d angekommen, von %3$d von %4$d gelesen";
     MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";

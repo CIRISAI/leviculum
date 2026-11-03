@@ -13,10 +13,10 @@
 use loquax_android::schema::{
     self, AddressRow, Addresses, Backup, Bar, BarButton, Blob, CandidateRow, Chip, ContactCopy,
     ConversationRow, Conversations, Detail, Done, Event, FileRow, FriendRow, Friends, ImRow, Info,
-    LinkCode, LinkRow, Linked, Links, MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown,
-    MapThemeChoice, Me, MessageRow, Messages, PositionRow, Query, Recents, Recording, RegionRow,
-    Request, Run, RunRow, ShareRow, Shared, SharedRow, Shares, Start, Started, SuggestionRow,
-    Suggestions,
+    InfoRow, LinkCode, LinkRow, Linked, Links, MapFlingChoice, MapMark, MapRegions, MapRequest,
+    MapShown, MapThemeChoice, Me, MessageRow, Messages, PositionRow, Query, Recents, Recording,
+    RegionRow, Request, Run, RunRow, ShareRow, Shared, SharedRow, Shares, Start, Started,
+    SuggestionRow, Suggestions,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -1242,7 +1242,11 @@ proptest! {
         qr_size in u32s(),
         names in (text(), text(), opt_text(), i64s(), u32s()),
     ) {
-        round_trips(&Info { v, rows: rows.clone() })?;
+        round_trips(&Info {
+            v,
+            rows: vec![InfoRow { label: line.clone(), value: names.1.clone() }],
+            advanced: rows.clone(),
+        })?;
         round_trips(&Recents { v, emoji: rows.clone() })?;
         round_trips(&Done { v, ok, error: error.clone() })?;
         round_trips(&Backup { v, line: line.clone(), qr_size, qr: qr.clone() })?;
@@ -1291,7 +1295,7 @@ proptest! {
                 name: names.1,
             }],
         })?;
-        round_trips(&Info { v, rows: Vec::new() })?;
+        round_trips(&Info { v, rows: Vec::new(), advanced: Vec::new() })?;
         round_trips(&Run { v, positions: Vec::new() })?;
     }
 

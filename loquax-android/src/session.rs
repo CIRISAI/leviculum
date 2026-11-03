@@ -1520,11 +1520,20 @@ impl Session {
             schema::Query::Group => schema::encode(&inner.group_screen()),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
-                let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
-                    .ok_or_else(|| "no such message".to_string())?;
+                let info =
+                    loquax::ui::info::message_info(&inner.model, peer, schema::model_key(key))
+                        .ok_or_else(|| "no such message".to_string())?;
                 schema::encode(&schema::Info {
                     v: VERSION,
-                    rows: detail.rows,
+                    rows: info
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            let (label, value) = row.resolve(inner.lang);
+                            schema::InfoRow { label, value }
+                        })
+                        .collect(),
+                    advanced: info.advanced,
                 })
             }
             schema::Query::Run { peer, key } => schema::encode(&run(
