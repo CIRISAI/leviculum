@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use loquax::home::ask::LORA_PAGE_BYTES;
 use loquax::home::wire;
 use loquax_m9::census::{self, Census, Probe, Step};
-use loquax_m9::fixture::Screen;
+use loquax_m9::fixture::SCREENS;
 use loquax_m9::frame::Frame;
 use loquax_m9::render::Renderer;
 
@@ -92,10 +92,11 @@ impl Probe for HostProbe {
     }
 }
 
-/// The census the board prints, over the same model, held to the same
-/// budgets.
+/// The census the board prints, over the same models, held to the same
+/// budgets: the two screens of slice four and the group's seven of slice
+/// six (1366).
 #[test]
-fn the_two_screens_keep_the_boards_budgets() {
+fn every_screen_keeps_the_boards_budgets() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -106,9 +107,10 @@ fn the_two_screens_keep_the_boards_budgets() {
     let renderer_held = LIVE.load(Ordering::SeqCst) - before;
     println!("renderer made: held {renderer_held} B");
     assert!((renderer_held as usize) < census::RENDERER_HELD);
-    for (screen, budget) in [(Screen::Chats, census::CHATS), (Screen::Chat, census::CHAT)] {
-        let model = screen.model();
-        let got: Census = census::measure(&mut probe, &model, &mut renderer).expect("draw");
+    for screen in SCREENS {
+        let budget = screen.budget();
+        let (model, row) = screen.walk();
+        let got: Census = census::measure_at(&mut probe, &model, row, &mut renderer).expect("draw");
         let line = census::Line {
             screen: screen.name(),
             census: &got,

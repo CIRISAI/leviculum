@@ -54,6 +54,33 @@ pub(crate) fn lines(chat: &Chat, look: &Look, cols: usize, rows: usize) -> Vec<R
             cols,
             RStyle::default(),
         ));
+        // The card's Join (slice six, 1366): the trust sentence read once
+        // before it, and the key that joins.
+        if let Some(join) = &invite.join {
+            let trust = narrow(&invite.trust.resolve(look.lang));
+            let wrapped = loquax::ui::wrap(&[styled(&trust, muted(look))], cols - 2, 0);
+            for line in wrapped {
+                let mut row = styled(" ", RStyle::default());
+                row.cells.extend(line.cells);
+                foot.push(fill(row, cols, RStyle::default()));
+            }
+            let mut keys = styled(" ", RStyle::default());
+            push(
+                &mut keys,
+                "[Enter]",
+                RStyle {
+                    bold: true,
+                    ..RStyle::default()
+                },
+            );
+            let label = Text::key(join.label_key).resolve(look.lang);
+            push(
+                &mut keys,
+                &format!(" {}", narrow(&label)),
+                RStyle::default(),
+            );
+            foot.push(fill(keys, cols, RStyle::default()));
+        }
     }
     match &chat.ended {
         Some(ended) => foot.push(fill(
@@ -239,6 +266,16 @@ fn block(node: &BubbleNode, look: &Look, cols: usize, selected: bool) -> (usize,
         texts.push((invite.title.resolve(lang), RStyle::default()));
         if let Some(state) = &invite.state {
             texts.push((state.resolve(lang), RStyle::default()));
+        }
+        // Its Join, under the cursor's Enter (slice six, 1366).
+        if let Some(join) = &invite.join {
+            texts.push((
+                format!("[Enter] {}", Text::key(join.label_key).resolve(lang)),
+                RStyle {
+                    bold: true,
+                    ..RStyle::default()
+                },
+            ));
         }
     }
     if let Some(text) = &node.text {

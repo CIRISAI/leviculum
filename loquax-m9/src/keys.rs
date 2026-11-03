@@ -12,7 +12,9 @@
 //! chat's and the compose line's of slice two. A letter is the key the
 //! terminal binds to the same verb (`i` writes), so the M9 binds nothing
 //! of its own; what no row binds in the compose line is the field's edit
-//! ([`crate::field::Field`]).
+//! ([`crate::field::Field`]). The group's verbs have no chord in the
+//! terminal, only its palette, so their keys run the scene node's action
+//! instead and live in [`crate::group`] (slice six, 1366).
 
 use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
 use loquax::ui::Pane;

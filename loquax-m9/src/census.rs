@@ -54,11 +54,29 @@ pub fn measure<D>(
 where
     D: DrawTarget<Color = Rgb565> + 'static,
 {
+    measure_at(probe, model, 0, renderer)
+}
+
+/// [`measure`] with the M9's cursor over a group's rows on `row`
+/// ([`crate::group`]).
+pub fn measure_at<D>(
+    probe: &mut dyn Probe,
+    model: &UiModel<Field>,
+    row: usize,
+    renderer: &mut Renderer<'_, D>,
+) -> Result<Census, DrawError>
+where
+    D: DrawTarget<Color = Rgb565> + 'static,
+{
     probe.begin();
     let scene = step_scene(model);
     let scene_step = probe.end();
+    let look = Look {
+        row,
+        ..Look::of(model)
+    };
     probe.begin();
-    let drawn = step_draw(renderer, &scene, &Look::of(model));
+    let drawn = step_draw(renderer, &scene, &look);
     let draw_step = probe.end();
     drawn?;
     Ok(Census {
@@ -114,6 +132,20 @@ pub const CHAT: Budget = Budget {
     scene_stack: 160_000,
     draw_peak: 180_000,
     draw_stack: 24_000,
+};
+
+/// A group's screens (slice six, 1366): the member sheet, its question,
+/// "New group"'s friends and its name. The scene is the open chat's or
+/// the list's with the sheet's nodes on top; over the fixture the 64-bit
+/// host measures at most 28,453 B held, a 65,337 B peak and 66,920 B of
+/// stack (the picker, which keeps the list), and a draw of one sheet at
+/// most 79,648 B peak in 8,600 B of stack. The ceilings are about double.
+pub const SHEET: Budget = Budget {
+    scene_held: 60_000,
+    scene_peak: 140_000,
+    scene_stack: 140_000,
+    draw_peak: 160_000,
+    draw_stack: 18_000,
 };
 
 /// What making the renderer may hold: about double 107,584 B (slice one).

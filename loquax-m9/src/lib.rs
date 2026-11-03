@@ -29,6 +29,9 @@
 //! - [`fixture`]: the model the board shows before it has a network.
 //! - [`pair`]: the home code typed on the keys, and the join it makes
 //!   (slice five, 1363).
+//! - [`group`]: a group's screens, the member sheet and "New group", the
+//!   keys that run their verbs, and what the board asks its home for each
+//!   (slice six, 1366).
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
 
 #![no_std]
@@ -41,6 +44,7 @@ pub mod dump;
 pub mod field;
 pub mod fixture;
 pub mod frame;
+pub mod group;
 pub mod kbraw;
 pub mod keyboard;
 pub mod keys;

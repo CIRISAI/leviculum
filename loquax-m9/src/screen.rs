@@ -60,6 +60,9 @@ pub struct Look {
     /// The compose field's cursor, in characters, while it has the keys;
     /// none draws no caret, and the hint on an empty field.
     pub caret: Option<usize>,
+    /// The M9's own cursor over a group's sheet or picker, a row index
+    /// ([`crate::group`]); the model has none for them.
+    pub row: usize,
 }
 
 impl Look {
@@ -71,6 +74,7 @@ impl Look {
             now,
             cursor: None,
             caret: None,
+            row: 0,
         }
     }
 
@@ -116,6 +120,9 @@ pub fn scene<B>(model: &UiModel<B>) -> Scene {
 /// scrolled to show its selected row, the tab bar; or, with a chat open
 /// and no list, the chat's bar over the chat ([`crate::chat`]).
 pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine> {
+    if let Some(sheet) = crate::group::lines(scene, look, cols, rows) {
+        return sheet;
+    }
     let mut out = Vec::with_capacity(rows);
     out.push(top_bar(&scene.top, look, cols));
     let below = rows.saturating_sub(1 + usize::from(scene.tabs.is_some()));
@@ -246,6 +253,15 @@ fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
             ),
             false,
         ),
+        // A group with no line yet says how many are in it, or that the
+        // reader is invited (`GroupBadge::words`).
+        (None, None) if shown.last.is_empty() && row.group.is_some() => (
+            row.group
+                .as_ref()
+                .map(|g| g.words.resolve(look.lang))
+                .unwrap_or_default(),
+            false,
+        ),
         (None, None) => (shown.last.clone(), false),
     };
     let budget = match fit_width(&end) {
@@ -303,7 +319,7 @@ pub fn state_of(mark: Mark) -> DeliveryState {
 }
 
 /// An avatar: its initials in its colours, a cell either side.
-fn push_avatar(line: &mut RLine, avatar: &Avatar) {
+pub(crate) fn push_avatar(line: &mut RLine, avatar: &Avatar) {
     let style = RStyle {
         fg: Some(rgb(avatar.fg)),
         bg: Some(rgb(avatar.bg)),
