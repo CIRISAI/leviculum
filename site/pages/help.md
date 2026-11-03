@@ -29,15 +29,27 @@ Codes from Columba and Sideband work the same way.
 
 ## Sending photos, files and voice messages
 
-Not yet. Today Loquax sends text, emoji and your position. Photos, files and voice messages are coming, and this page will say how once they are there.
+- **A photo:** tap the camera in the message field to take one, or the plus next to it, then "Gallery". You can add a caption before you send it. Loquax makes photos smaller before they go, and their place and camera data never go along. How small is under Settings, Chats, "Photo size".
+- **A file:** the plus, then "File".
+- **A voice message:** hold the microphone while you speak and let go to send. Slide left to cancel, or slide up to lock the recording so you can let go of the button.
 
 ## Sending your position
 
-In a chat, tap the paper clip, then "My position". Loquax asks once for permission to use your location, then sends where you are right now to this one person. Nobody else sees it, and Loquax sends your position only when you tap.
+In a chat, tap the position mark in the message field. Loquax asks once for permission to use your location, then offers "Now, once", or for 15 minutes, 1 hour, 8 hours or "Until I stop". Only this one person sees it, and Loquax sends your position only when you choose so.
 
-You can also share from the map: "Share my position" asks whom it should go to.
+While you share, the chat shows how long is left and a "Stop" button. Settings, Privacy, "Position sharing" lists everyone you share with right now.
 
-Sharing your position for a while, so that it keeps updating by itself, is not in the app yet. Until then, share again when you have moved. When a friend's app keeps sending theirs, Loquax marks it "live" and shows them on the map.
+You can also share from the map: "Share my position" asks whom it should go to. When a friend shares theirs, Loquax marks them "live" and shows them on the map.
+
+## Groups
+
+Tap the pencil in the chat list, then "New group". Pick the people, tap "Next", give the group a name and tap "Create". Everyone you picked gets an invitation with a "Join" button.
+
+A group lives on the mailbox of the person who made it, and that mailbox can read the group's messages. Loquax says so on the invitation, so you know whom you trust.
+
+In the group's chat, the menu's "Members" shows who is in it. There you can leave the group; the person who made it can also add and remove members and delete the group for everyone.
+
+Friends who use another app, Columba or Sideband for instance, can be in a group too: they get the invitation and the group's messages as ordinary messages.
 
 ## The mailbox
 
@@ -55,7 +67,12 @@ Already using Loquax with the mailbox on the phone? Open your profile and tap "U
 
 ## A second device
 
-A tablet or a second phone can read the same mailbox when the mailbox runs on a computer. Run `loquax mailbox setup` on the computer again: each code works for one device, once. Then install Loquax on the second device and scan the new code as above.
+A tablet or a second phone can read the same mailbox.
+
+- **Mailbox on your phone:** tap your picture, then "Link a device". On the other device, install Loquax, choose "Join an existing mailbox" and scan the code.
+- **Mailbox on a computer:** run `loquax mailbox setup` on the computer again: each code works for one device, once. Then install Loquax on the second device and scan the new code as above.
+
+A new phone that replaces the old one is a move, not a second device: on the old phone tap your picture, then "Move to a new phone". Your address, contacts and messages move over.
 
 Both devices then see the same chats. When you delete a message, Loquax asks whether to delete it on this device only or on every device of the mailbox.
 
