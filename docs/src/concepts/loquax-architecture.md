@@ -47,7 +47,7 @@ settles the conflicts.
 **How the conflicts are actually resolved.** Three layers, in this order.
 
 1. *Global escapes*, before any mode dispatch
-   (`update_key`, `lnomad/src/app/event.rs:447-479`; `pane`,
+   (`update_key`, `lnomad/src/app/event.rs:460-492`; `pane`,
    `lnomad/src/app/keys.rs:339`): any key dismisses the
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
@@ -55,8 +55,8 @@ settles the conflicts.
    (`lnomad/src/app/model.rs:101-120`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
-   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:486`,
-   whitelist at `lnomad/src/app/event.rs:496-502`).
+   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:499`,
+   whitelist at `lnomad/src/app/event.rs:509-515`).
 3. *Modifier discrimination*. Nearly every single-letter binding is guarded
    `&& !ctrl && !alt`, which is what lets `f` (hint mode) and `Ctrl-f`
    (page down), `d` (places) and `Ctrl-d` (half page), `n` (next match) and
@@ -175,9 +175,9 @@ colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1522-1525`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1535-1538`). The messenger is the natural target of that
 handoff: hosted as Loquax's Browse tab (1337) the browser hands the address
-over instead (`lnomad/src/app/event.rs:1518-1521`), and Loquax opens that chat.
+over instead (`lnomad/src/app/event.rs:1531-1534`), and Loquax opens that chat.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
