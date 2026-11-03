@@ -16,7 +16,7 @@
 //! binary-searches about eight ids. What was remembered since the last
 //! merge is *open*, a `BTreeSet`, merged into the sorted part when the
 //! next prune finds the bucket's week over or the set
-//! [`OPEN_SEAL_LEN`] long. Pruning drops whole buckets and walks no id.
+//! `OPEN_SEAL_LEN` (4096) long. Pruning drops whole buckets and walks no id.
 //!
 //! **Why a week.** A lookup searches every bucket, about 90 ns each at
 //! 10 M ids on the coder host: day buckets cost 12.6 µs a lookup there,
@@ -251,7 +251,7 @@ impl ProcessedIds {
     }
 
     /// Whether `transient_id` was remembered and not yet pruned: one fence
-    /// read and a binary search of about [`IDS_PER_FENCE`] ids per bucket.
+    /// read and a binary search of about `IDS_PER_FENCE` (8) ids per bucket.
     pub fn contains(&self, transient_id: &TransientId) -> bool {
         let key = key_of(transient_id);
         self.days.values().any(|day| day.contains(&key))
@@ -270,7 +270,7 @@ impl ProcessedIds {
     /// Drop every bucket whose last second is more than `window` before
     /// `now_secs`, so no id is forgotten younger than `window`, and merge
     /// the open set of every bucket that has ended or holds
-    /// [`OPEN_SEAL_LEN`] open ids. Visits the buckets, and of the ids only
+    /// `OPEN_SEAL_LEN` (4096) open ids. Visits the buckets, and of the ids only
     /// those a merge copies. Returns the ids dropped.
     pub fn prune(&mut self, now_secs: u64, window: u64) -> usize {
         let mut dropped = 0;
