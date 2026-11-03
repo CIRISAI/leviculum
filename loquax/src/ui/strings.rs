@@ -81,6 +81,10 @@ leviculum_ui::catalogue! {
     NearbyCard = "nearby_card", "Nearby, not in your contacts", "In der Nähe, nicht in deinen Kontakten";
     NearbyAdd = "nearby_add", "Add", "Hinzufügen";
     NearbyEnterAdds = "nearby_enter_adds", "Enter adds", "Enter fügt hinzu";
+    // The map on the M9 (1375): its pins in ASCII, the atlas has no ◉, and
+    // the keys a board without a palette or a pointer works it with.
+    MapLegend = "map_legend", "* person  @ chosen  grey: old or nearby", "* Person  @ gewählt  grau: alt oder in der Nähe";
+    MapKeys = "map_keys", "arrows pan  +- zoom  space pin  enter open", "Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";

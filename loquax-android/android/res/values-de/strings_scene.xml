@@ -41,6 +41,8 @@
     <string name="nearby_card">In der Nähe, nicht in deinen Kontakten</string>
     <string name="nearby_add">Hinzufügen</string>
     <string name="nearby_enter_adds">Enter fügt hinzu</string>
+    <string name="map_legend">* Person  @ gewählt  grau: alt oder in der Nähe</string>
+    <string name="map_keys">Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen</string>
     <string name="draft_row">Entwurf: %1$s</string>
     <string name="reacted">hat mit %1$s reagiert</string>
     <string name="you_reacted">Du hast mit %1$s reagiert</string>

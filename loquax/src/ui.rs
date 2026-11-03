@@ -802,6 +802,11 @@ pub struct UiModel<B> {
     pub map: Option<map::MapState>,
     /// What the shell draws the map with ([`UiEvent::MapSetup`]).
     pub map_setup: map::MapSetup,
+    /// Where the map's picture is, in cells, on a shell that does not lay
+    /// out the terminal's panes (the M9 draws it under its bar, the whole
+    /// width, 1375); `None` for the terminal's conversation pane. The fit,
+    /// the pan's step and the pins' cells go by it ([`UiModel::map_area`]).
+    pub map_picture: Option<Rect>,
     /// The left button held down on the map, a click or a drag.
     pub map_press: Option<map::MapPress>,
     /// Whether going to a place loads its region by itself (`map_autoload`,
@@ -943,6 +948,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             fixes_received: Vec::new(),
             map: None,
             map_setup: map::MapSetup::default(),
+            map_picture: None,
             map_press: None,
             map_autoload: false,
             map_theme: None,
@@ -4240,7 +4246,7 @@ impl<B> UiModel<B> {
     /// The map's pins in `Tab` order: every peer with a position, our own
     /// named `you`.
     pub fn map_pins(&self) -> Vec<map::MapPin> {
-        let shown: BTreeMap<[u8; 16], Fix> = self
+        let mut shown: BTreeMap<[u8; 16], Fix> = self
             .positions
             .iter()
             .filter(|(peer, _)| {
@@ -4248,6 +4254,23 @@ impl<B> UiModel<B> {
             })
             .map(|(peer, fix)| (*peer, fix.clone()))
             .collect();
+        // The shell's own fix (its receiver, or typed by hand) is our pin
+        // where it is newer than the last we shared (1375): a board with a
+        // GNSS shows where it is before it shared anything.
+        if let (Some(own), Some(location)) = (self.address, self.bar.own_fix) {
+            let fix = Fix {
+                peer: own,
+                via: own,
+                message: None,
+                received_at: self.now.map(|now| now.unix_secs),
+                location,
+                telemetry: Vec::new(),
+                source: telemetry::Source::Telemetry,
+            };
+            if shown.get(&own).is_none_or(|held| fix.newer_than(held)) {
+                shown.insert(own, fix);
+            }
+        }
         map::pins_of(
             &shown,
             |peer| self.names.label(peer),
@@ -4298,12 +4321,18 @@ impl<B> UiModel<B> {
         }
     }
 
-    /// The cells the map's picture covers.
+    /// The cells the map's picture covers: the shell's own place for it
+    /// ([`UiModel::map_picture`]), else inside the conversation pane.
     pub fn map_area(&self) -> Rect
     where
         B: InputBuffer,
     {
-        map::picture_area(Screen::of(self.screen.0, self.screen.1, self.compose_rows()).messages)
+        match self.map_picture {
+            Some(picture) => picture,
+            None => map::picture_area(
+                Screen::of(self.screen.0, self.screen.1, self.compose_rows()).messages,
+            ),
+        }
     }
 
     /// The map is being dragged: the shell draws it at its tick, not at
@@ -10459,6 +10488,45 @@ pub(crate) mod tests {
             }),
         );
         model
+    }
+
+    /// The shell's own fix is our pin where it is newer than the one we
+    /// shared (1375): a board's GNSS shows it before it shared anything,
+    /// and the older one does not move it back. The map's picture is the
+    /// shell's own place where it says one, else the terminal's pane.
+    #[test]
+    fn the_own_fix_is_our_pin_and_a_shell_places_the_picture() {
+        let mut model = mapped();
+        let ours = |m: &UiModel<Field>| {
+            let pins = m.map_pins();
+            pins.iter()
+                .find(|p| p.peer == [0x01; 16])
+                .map(|p| (p.label.clone(), p.at))
+        };
+        let shared = ours(&model).expect("the shared fix");
+        let gnss = fix_at(43_777_000, 11_255_000, two_pm() - 5)
+            .location
+            .expect("a location");
+        update(&mut model, UiEvent::OwnFix(Some(gnss)));
+        let (label, at) = ours(&model).expect("our pin");
+        assert_eq!(label, "you");
+        assert_ne!(at, shared.1, "the newer fix moved it");
+        // Control: an own fix older than the share leaves the share's pin.
+        let old = fix_at(43_777_000, 11_255_000, two_pm() - 3_600)
+            .location
+            .expect("a location");
+        update(&mut model, UiEvent::OwnFix(Some(old)));
+        assert_eq!(ours(&model), Some(shared));
+        // Control: none at all, no position of ours stored, no pin.
+        model.positions.remove(&[0x01; 16]);
+        update(&mut model, UiEvent::OwnFix(None));
+        assert_eq!(ours(&model), None);
+
+        let pane = model.map_area();
+        let picture = Rect::new(0, 1, 53, 21);
+        model.map_picture = Some(picture);
+        assert_eq!(model.map_area(), picture);
+        assert_ne!(pane, picture, "control: the terminal's pane is another");
     }
 
     fn selected_label(model: &UiModel<Field>) -> String {

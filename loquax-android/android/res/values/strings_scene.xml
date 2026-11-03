@@ -41,6 +41,8 @@
     <string name="nearby_card">Nearby, not in your contacts</string>
     <string name="nearby_add">Add</string>
     <string name="nearby_enter_adds">Enter adds</string>
+    <string name="map_legend">* person  @ chosen  grey: old or nearby</string>
+    <string name="map_keys">arrows pan  +- zoom  space pin  enter open</string>
     <string name="draft_row">Draft: %1$s</string>
     <string name="reacted">reacted %1$s</string>
     <string name="you_reacted">You reacted %1$s</string>
