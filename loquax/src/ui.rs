@@ -133,6 +133,7 @@ use leviculum_lxmf::Field;
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
 pub mod browse;
+pub mod by_hand;
 pub mod chat;
 pub mod compose;
 pub mod contacts;
@@ -155,6 +156,7 @@ pub mod search;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod verbs;
 pub mod viewload;
 pub mod voice;
 pub mod zoom;
@@ -1529,6 +1531,15 @@ pub enum UiEvent {
     /// The shell's newest own fix, or none (1270): the position sheet
     /// shows it and its age.
     OwnFix(Option<leviculum_lxmf::telemetry::Location>),
+    /// A position typed or pasted on a shell without a receiver (1371):
+    /// read by [`by_hand::parse`], it becomes the own fix.
+    EnterPosition { text: String },
+    /// The map's centre as the shell's map shows it, or none while it has
+    /// no map (1371): what the position sheet's "map centre" row takes.
+    MapCentre(Option<leviculum_lxmf::telemetry::Location>),
+    /// The position sheet's "map centre" row: the map's centre is the own
+    /// fix (1371).
+    FixAtMapCentre,
     /// A node announced its position to the mesh (1302,
     /// [`crate::mesh_position`]): `identity` the hash of the identity the
     /// announce proved, `fix` its position, `name` the name a shell knows
@@ -1738,6 +1749,10 @@ pub enum UiEffect {
     /// Ask the home to delete its group `group` for everyone (1307 pass
     /// four, `/groupdelete`); answered with [`UiEvent::GroupDeleted`].
     DeleteGroup { group: [u8; 16] },
+    /// Delete every map region on this device (1371, the palette's
+    /// `delete all maps` once asked): the shell's, which holds the files,
+    /// and tells the model the regions left with [`UiEvent::MapSetup`].
+    DeleteAllMaps,
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.
     Recording {
@@ -1875,8 +1890,15 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::OwnFix(fix) => {
             model.bar.own_fix = fix;
+            model.bar.by_hand = false;
             model.shares_due()
         }
+        UiEvent::EnterPosition { text } => model.enter_position(&text),
+        UiEvent::MapCentre(centre) => {
+            model.bar.map_centre = centre;
+            Vec::new()
+        }
+        UiEvent::FixAtMapCentre => model.fix_at_map_centre(),
         UiEvent::MeshPosition {
             identity,
             fix,
@@ -3523,6 +3545,36 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             Vec::new()
         }
         PaletteCommand::Pin => model.toggle_pin(),
+        // The verbs the terminal lacked against the phone (1371).
+        PaletteCommand::Reply => model.start_reply(),
+        PaletteCommand::SendAgain => model.send_again_here(),
+        PaletteCommand::Forward => {
+            model.ask_forward();
+            Vec::new()
+        }
+        PaletteCommand::Mute => model.toggle_mute(),
+        PaletteCommand::Verify => {
+            model.toggle_verified();
+            Vec::new()
+        }
+        PaletteCommand::MarkUnread => {
+            model.toggle_unread();
+            Vec::new()
+        }
+        PaletteCommand::PhotoSize => model.next_photo_size(),
+        PaletteCommand::Position => {
+            model.ask_position();
+            Vec::new()
+        }
+        PaletteCommand::SharePosition => {
+            model.ask_share();
+            Vec::new()
+        }
+        PaletteCommand::StopSharing => model.stop_share_here(),
+        PaletteCommand::DeleteAllMaps => {
+            model.ask_delete_all_maps();
+            Vec::new()
+        }
         PaletteCommand::Archive => model.toggle_archive(),
         PaletteCommand::Archived => {
             model.toggle_archived_view();
@@ -3718,6 +3770,10 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         return Vec::new();
     }
     let body = model.compose.take();
+    // A reply the palette's `reply` started (1371) answers its message.
+    if let Some((peer, target)) = model.open_reply() {
+        return model.reply_to(peer, target, body);
+    }
     send_body(model, body)
 }
 
@@ -12505,5 +12561,208 @@ pub(crate) mod tests {
         );
         assert!(detail.rows.iter().any(|r| r == "signature verified"));
         assert!(message_detail(&model, PEER, 999).is_none());
+    }
+
+    /// The terminal's verbs of 1371, on two restored chats: PEER's
+    /// message 5 under the cursor, PEER open.
+    fn two_chats() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![
+            restored(PEER, vec![stored(5, false, "lunch?", None)], 0),
+            restored(OTHER, vec![stored(2, false, "older", None)], 0),
+        ]);
+        update(&mut model, UiEvent::Clock(at(25, 14, 0)));
+        model.message_cursor = 0;
+        model
+    }
+
+    fn sends(effects: &[UiEffect]) -> Vec<([u8; 16], String, Vec<i64>)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                UiEffect::Send { to, body, fields } => {
+                    Some((*to, body.clone(), fields.iter().map(|(k, _)| *k).collect()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1371: `reply` makes the next send answer the message under the
+    /// cursor. Control: the same send without it carries no reply field.
+    #[test]
+    fn the_palette_replies_to_the_message_under_the_cursor() {
+        use leviculum_lxmf::constants::FIELD_REPLY_TO;
+        let mut model = two_chats();
+        model.focus = Pane::Compose;
+        typed(&mut model, "plain");
+        let plain = update(&mut model, UiEvent::Run(PaletteCommand::Send));
+        let plain = sends(&plain);
+        assert_eq!(plain.len(), 1);
+        assert!(!plain[0].2.contains(&FIELD_REPLY_TO), "control: no reply");
+
+        model.message_cursor = 0;
+        update(&mut model, UiEvent::Run(PaletteCommand::Reply));
+        assert_eq!(model.open_reply(), Some((PEER, [5; 32])));
+        typed(&mut model, "yes");
+        let answered = sends(&update(&mut model, UiEvent::Run(PaletteCommand::Send)));
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].0, PEER);
+        assert!(answered[0].2.contains(&FIELD_REPLY_TO), "{answered:?}");
+        assert_eq!(model.open_reply(), None, "the reply is spent");
+    }
+
+    /// `forward` asks a name and sends the copy there; a name nobody has
+    /// sends nothing. `send again` does nothing to a message that did not
+    /// fail.
+    #[test]
+    fn the_palette_forwards_and_sends_again_only_a_failed_one() {
+        let mut model = two_chats();
+        update(&mut model, UiEvent::Run(PaletteCommand::Forward));
+        let ask = model.palette.as_ref().and_then(|p| p.ask);
+        assert_eq!(ask, Some(contacts::Ask::Forward { from: PEER, key: 5 }));
+        let label = model.names.label(&OTHER);
+        let none = model.answer_ask(ask.expect("asked"), "nobody at all".to_string());
+        assert!(sends(&none).is_empty(), "control: no such friend");
+        let forwarded = model.answer_ask(ask.expect("asked"), label);
+        let forwarded = sends(&forwarded);
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!((forwarded[0].0, forwarded[0].1.as_str()), (OTHER, "lunch?"));
+
+        assert!(update(&mut model, UiEvent::Run(PaletteCommand::SendAgain)).is_empty());
+        let mut failed = UiModel::<Field>::new(&[]);
+        failed.restore(vec![restored(
+            PEER,
+            vec![stored(7, true, "lost", Some(DeliveryState::Failed))],
+            0,
+        )]);
+        failed.message_cursor = 0;
+        let again = sends(&update(
+            &mut failed,
+            UiEvent::Run(PaletteCommand::SendAgain),
+        ));
+        assert_eq!(again.len(), 1);
+        assert_eq!((again[0].0, again[0].1.as_str()), (PEER, "lost"));
+    }
+
+    /// `mute`, `verify` and `mark unread` swap the open chat's state and
+    /// back; the window's row menu reaches the same through `peer_word`,
+    /// and a forget still asking is no event.
+    #[test]
+    fn mute_verify_and_unread_swap_and_the_window_gets_the_same_events() {
+        let mut model = two_chats();
+        assert!(!model.muted(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Mute));
+        assert!(model.muted(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Mute));
+        assert!(!model.muted(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Verify));
+        assert!(model.verified(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Verify));
+        assert!(!model.verified(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::MarkUnread));
+        assert_eq!(model.conversations[model.selected].unread, 1);
+        update(&mut model, UiEvent::Run(PaletteCommand::MarkUnread));
+        assert_eq!(model.conversations[model.selected].unread, 0);
+
+        let target = intent::Target::Peer(OTHER);
+        let pin = model.peer_word(&intent::Intent::Pin {
+            peer: target,
+            on: intent::Switch::On,
+        });
+        match pin {
+            Some(UiEvent::PeerState { peer, state }) => {
+                assert_eq!(peer, OTHER);
+                assert!(state.pinned);
+            }
+            other => panic!("not the pin: {other:?}"),
+        }
+        let mute = model.peer_word(&intent::Intent::Mute {
+            peer: target,
+            secs: -1,
+        });
+        assert!(matches!(
+            mute,
+            Some(UiEvent::PeerState { state, .. }) if state.muted_until == Some(state::MUTED_ALWAYS)
+        ));
+        let asking = intent::Intent::Forget {
+            peer: target,
+            everywhere: false,
+            confirmed: false,
+        };
+        assert_eq!(model.peer_word(&asking), None, "control: it still asks");
+        assert_eq!(model.peer_word(&intent::Intent::Copy), None);
+    }
+
+    /// `photo size` steps through the three tiers and keeps each;
+    /// `position` reads a typed fix, `share position` sends it once or
+    /// starts a share, `stop sharing` ends it.
+    #[test]
+    fn the_palette_sets_the_photo_size_and_shares_a_typed_position() {
+        let mut model = two_chats();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let effects = update(&mut model, UiEvent::Run(PaletteCommand::PhotoSize));
+            assert!(effects.iter().any(|e| matches!(
+                e,
+                UiEffect::Remember {
+                    key: "photo_size",
+                    ..
+                }
+            )));
+            seen.push(model.photo_size);
+        }
+        assert_eq!(
+            seen,
+            [
+                photos::PhotoSize::Original,
+                photos::PhotoSize::Small,
+                photos::PhotoSize::Phone
+            ]
+        );
+
+        update(&mut model, UiEvent::Run(PaletteCommand::SharePosition));
+        let share = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert!(
+            sends(&model.answer_ask(share, String::new())).is_empty(),
+            "no fix yet"
+        );
+
+        update(&mut model, UiEvent::Run(PaletteCommand::Position));
+        let position = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert_eq!(position, contacts::Ask::Position);
+        model.answer_ask(position, "52.5163, 13.3777".to_string());
+        assert!(model.bar.by_hand);
+        let once = sends(&model.answer_ask(share, String::new()));
+        assert_eq!(once.len(), 1);
+        assert!(once[0]
+            .2
+            .contains(&leviculum_lxmf::constants::FIELD_TELEMETRY));
+
+        model.answer_ask(share, "1h".to_string());
+        assert!(model.share(&PEER).is_some());
+        update(&mut model, UiEvent::Run(PaletteCommand::StopSharing));
+        assert!(model.share(&PEER).is_none());
+    }
+
+    /// `delete all maps` asks first and only where there are maps; once
+    /// answered the shell is told.
+    #[test]
+    fn delete_all_maps_asks_and_then_tells_the_shell() {
+        const FLORENCE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.lmr");
+        let mut model = two_chats();
+        update(&mut model, UiEvent::Run(PaletteCommand::DeleteAllMaps));
+        assert!(model.palette.is_none(), "control: no maps, no question");
+        let region = *leviculum_map::region::Region::from_bytes(FLORENCE)
+            .expect("the fixture")
+            .header();
+        model.map_setup.regions = vec![region];
+        update(&mut model, UiEvent::Run(PaletteCommand::DeleteAllMaps));
+        let ask = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert!(model.ask_rows(ask)[0].contains("delete all 1 maps"));
+        assert_eq!(
+            model.answer_ask(ask, String::new()),
+            [UiEffect::DeleteAllMaps]
+        );
     }
 }

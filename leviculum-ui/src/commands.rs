@@ -118,6 +118,32 @@ pub enum Command {
     /// Make the open group again with the same people, once the reader
     /// left it or it ended (Loquax 1307 pass four): Enter keeps its name.
     StartAgain,
+    /// Answer the message under the cursor: the next send replies to it
+    /// (Loquax 1371).
+    Reply,
+    /// Send the message under the cursor again, one of ours that failed.
+    SendAgain,
+    /// Forward the message under the cursor: the palette takes a friend's
+    /// name.
+    Forward,
+    /// Mute the open conversation until unmuted, or unmute it.
+    Mute,
+    /// Mark the open peer's identity as compared in person, or no longer.
+    Verify,
+    /// Mark the open conversation unread, or read.
+    MarkUnread,
+    /// The next of the three photo sizes a sent picture is scaled to.
+    PhotoSize,
+    /// Set the own position by hand: the palette takes latitude and
+    /// longitude, or the map's centre.
+    Position,
+    /// Share the own position with the open conversation, once or for a
+    /// while.
+    SharePosition,
+    /// Stop sharing the position with the open conversation.
+    StopSharing,
+    /// Delete every map on this device, after asking.
+    DeleteAllMaps,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -132,7 +158,7 @@ pub struct PaletteEntry {
 /// The table, in the order the palette lists it unfiltered. A first user's
 /// two commands stand right under `send`, where an open palette shows them
 /// (1263), and the code a friend adds us by right after them (1279).
-pub const COMMANDS: [PaletteEntry; 44] = [
+pub const COMMANDS: [PaletteEntry; 55] = [
     entry("send", Command::Send),
     entry("new conversation", Command::NewConversation),
     entry("add contact", Command::AddContact),
@@ -177,6 +203,17 @@ pub const COMMANDS: [PaletteEntry; 44] = [
     entry("add members", Command::AddMembers),
     entry("delete group", Command::DeleteGroup),
     entry("start again", Command::StartAgain),
+    entry("reply", Command::Reply),
+    entry("send again", Command::SendAgain),
+    entry("forward", Command::Forward),
+    entry("mute", Command::Mute),
+    entry("verify", Command::Verify),
+    entry("mark unread", Command::MarkUnread),
+    entry("photo size", Command::PhotoSize),
+    entry("position", Command::Position),
+    entry("share position", Command::SharePosition),
+    entry("stop sharing", Command::StopSharing),
+    entry("delete all maps", Command::DeleteAllMaps),
 ];
 
 /// The entry that runs `command`.

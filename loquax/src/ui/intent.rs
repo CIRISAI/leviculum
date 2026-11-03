@@ -311,6 +311,14 @@ pub enum Intent {
     /// The position sheet without a fix: the platform turns location on
     /// (the 1201 permission flow) and answers with [`Intent::OwnFix`].
     LocationOn,
+    /// The position sheet's entry on a shell without a receiver (1371):
+    /// without `text` the shell opens its field, with it the text is the
+    /// own fix ([`super::UiEvent::EnterPosition`]).
+    EnterPosition {
+        text: Option<String>,
+    },
+    /// The position sheet's "map centre" row (1371).
+    FixAtMapCentre,
     /// The platform's own fix, or none.
     OwnFix {
         location: Option<Location>,
@@ -567,6 +575,8 @@ impl Intent {
             },
             Intent::StopShare { .. } => StrId::ShareStop,
             Intent::LocationOn => StrId::LocationOn,
+            Intent::EnterPosition { .. } => StrId::EnterPosition,
+            Intent::FixAtMapCentre => StrId::MapCentre,
             Intent::OwnFix { .. } => StrId::Locate,
             Intent::SendFile { .. } => StrId::AttachFile,
             Intent::OpenFile { .. } => StrId::OpenFile,
@@ -764,6 +774,40 @@ impl From<Command> for Intent {
             Command::StartAgain => Intent::Group(Verb::Again {
                 group: Target::Open,
             }),
+            // The message under the cursor (1371): the model fills its id
+            // and key when the palette runs them; the zero ones here name
+            // the verb for its label.
+            Command::Reply => Intent::Reply {
+                to: Target::Open,
+                target: [0; 32],
+                body: None,
+            },
+            Command::SendAgain => Intent::SendAgain {
+                peer: [0; 16],
+                key: 0,
+            },
+            Command::Forward => Intent::Forward {
+                from: [0; 16],
+                key: 0,
+                to: [0; 16],
+            },
+            Command::Mute => Intent::Mute {
+                peer: Target::Open,
+                secs: -1,
+            },
+            Command::Verify => Intent::Verify {
+                peer: Target::Open,
+                on: Switch::Toggle,
+            },
+            Command::MarkUnread => Intent::MarkUnread {
+                peer: Target::Open,
+                on: Switch::Toggle,
+            },
+            Command::PhotoSize => Intent::PhotoSize(super::photos::PhotoSize::Phone),
+            Command::Position => Intent::EnterPosition { text: None },
+            Command::SharePosition => Intent::ShareFix { peer: [0; 16] },
+            Command::StopSharing => Intent::StopShare { peer: [0; 16] },
+            Command::DeleteAllMaps => Intent::DeleteAllRegions { confirmed: false },
         }
     }
 }

@@ -232,6 +232,9 @@
     <string name="share_notice">Loquax shares your position</string>
     <string name="no_shares">Your position is not shared with anyone.</string>
     <string name="location_on">Turn location on</string>
+    <string name="enter_position">Type my position</string>
+    <string name="map_centre">The map\'s centre</string>
+    <string name="position_hint">52.5163, 13.3777</string>
     <string name="no_fix">Loquax does not know where you are yet.</string>
     <string name="fix_age">Found %1$s</string>
     <string name="fix_now">Found just now</string>

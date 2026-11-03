@@ -872,6 +872,67 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("start again"),
+        Row::new(
+            "answer the message under the cursor: the next send replies to it",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("reply"),
+        Row::new(
+            "send the message under the cursor again, one of ours that failed",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("send again"),
+        Row::new(
+            "forward the message under the cursor to a friend by name",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("forward"),
+        Row::new("mute the open conversation, or unmute it", EVERYWHERE, &[]).palette("mute"),
+        Row::new(
+            "mark the open peer as compared in person, or no longer",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("verify"),
+        Row::new(
+            "mark the open conversation unread, or read",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("mark unread"),
+        Row::new(
+            "the next photo size: small, phone, original (the photo_size key)",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("photo size"),
+        Row::new(
+            "your position by hand: latitude, longitude, or the map's centre",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("position"),
+        Row::new(
+            "share your position with the open conversation: now, 15m, 1h, 8h, until",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("share position"),
+        Row::new(
+            "stop sharing your position with the open conversation",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("stop sharing"),
+        Row::new(
+            "delete every map on this device, after asking",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("delete all maps"),
     ]
 };
 

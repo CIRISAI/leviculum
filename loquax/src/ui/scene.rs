@@ -1617,6 +1617,8 @@ pub fn sheet_row(intent: &Intent) -> Option<SheetRow> {
         Intent::ShareFix { .. } => Some(SheetRow::ShareNow),
         Intent::StartShare { span, .. } => Some(SheetRow::ShareFor(*span)),
         Intent::LocationOn => Some(SheetRow::LocationOn),
+        Intent::EnterPosition { .. } => Some(SheetRow::EnterPosition),
+        Intent::FixAtMapCentre => Some(SheetRow::MapCentre),
         _ => None,
     }
 }
@@ -1649,7 +1651,7 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
             };
             (
                 StrId::Locate,
-                compose::position_rows(fix),
+                compose::position_rows(fix, model.bar.abilities, model.map_centre().is_some()),
                 Some(whereabouts),
             )
         }
@@ -1672,6 +1674,8 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
                 SheetRow::ShareNow => Intent::ShareFix { peer },
                 SheetRow::ShareFor(span) => Intent::StartShare { peer, span },
                 SheetRow::LocationOn => Intent::LocationOn,
+                SheetRow::EnterPosition => Intent::EnterPosition { text: None },
+                SheetRow::MapCentre => Intent::FixAtMapCentre,
             })
         })
         .collect();

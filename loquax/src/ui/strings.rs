@@ -299,6 +299,10 @@ leviculum_ui::catalogue! {
     ShareNotice = "share_notice", "Loquax shares your position", "Loquax teilt deine Position";
     NoShares = "no_shares", "Your position is not shared with anyone.", "Deine Position wird mit niemandem geteilt.";
     LocationOn = "location_on", "Turn location on", "Standort einschalten";
+    // The position by hand on a desktop (1371).
+    EnterPosition = "enter_position", "Type my position", "Meine Position eingeben";
+    MapCentre = "map_centre", "The map's centre", "Die Kartenmitte";
+    PositionHint = "position_hint", "52.5163, 13.3777", "52.5163, 13.3777";
     NoFix = "no_fix", "Loquax does not know where you are yet.", "Loquax weiß noch nicht, wo du bist.";
     FixAge = "fix_age", "Found %1$s", "Ermittelt %1$s";
     FixNow = "fix_now", "Found just now", "Gerade eben ermittelt";

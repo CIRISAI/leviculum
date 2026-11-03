@@ -367,6 +367,17 @@ impl Shell {
                 }
                 UiEffect::Log(line) => tracing::warn!("{line}"),
                 UiEffect::LoadMap(want) => self.map_ask(want),
+                // The palette's `delete all maps` (1371): the files go, as
+                // the window's settings button deletes them, and the model
+                // learns the regions left.
+                UiEffect::DeleteAllMaps => {
+                    let line = match self.maps.delete_all() {
+                        Ok(gone) => format!("deleted {gone} maps"),
+                        Err(why) => why,
+                    };
+                    self.regions_changed();
+                    answers.push(UiEvent::Notice(line));
+                }
                 UiEffect::Import => answers.extend(self.import()),
                 // A photo whole (1220): the terminal has no pixels for it,
                 // so the system's viewer shows it, from a file under the
@@ -907,6 +918,18 @@ impl Shell {
         self.map_steps(steps);
     }
 
+    /// The regions on disk, told to the model's map setup.
+    fn regions_changed(&mut self) {
+        let regions = self.maps.headers();
+        let zooms = leviculum_map::choice::view_zooms(regions.iter());
+        let setup = MapSetup {
+            zooms: (*zooms.start(), *zooms.end()),
+            regions,
+            ..self.model.map_setup.clone()
+        };
+        self.apply(UiEvent::MapSetup(setup));
+    }
+
     /// The loader's steps: one `tui.log` line each, and the model told. A
     /// region that landed reaches the model's setup before its `Done`, so
     /// the fit that follows sees it.
@@ -938,14 +961,7 @@ impl Shell {
                         landed.name,
                         landed.evicted.len()
                     );
-                    let regions = self.maps.headers();
-                    let zooms = leviculum_map::choice::view_zooms(regions.iter());
-                    let setup = MapSetup {
-                        zooms: (*zooms.start(), *zooms.end()),
-                        regions,
-                        ..self.model.map_setup.clone()
-                    };
-                    self.apply(UiEvent::MapSetup(setup));
+                    self.regions_changed();
                     self.apply(UiEvent::MapLoad(MapLoad::Done(want)));
                 }
                 Step::Failed {
