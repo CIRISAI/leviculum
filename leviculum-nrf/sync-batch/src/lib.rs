@@ -83,19 +83,23 @@ pub enum Arrival {
 /// left" to drift away from the messages themselves.
 pub struct SyncBatch<M> {
     messages: VecDeque<M>,
+    offered: usize,
     accepted: usize,
     bytes: u64,
     invalid: usize,
+    store_failed: usize,
 }
 
 impl<M> SyncBatch<M> {
     /// Take the batch of an `/offer` whose envelope decoded.
     pub fn new(messages: VecDeque<M>) -> Self {
         Self {
+            offered: messages.len(),
             messages,
             accepted: 0,
             bytes: 0,
             invalid: 0,
+            store_failed: 0,
         }
     }
 
@@ -122,6 +126,21 @@ impl<M> SyncBatch<M> {
     /// Count a message whose stamp did not hold up, or that would not decode.
     pub fn reject(&mut self) {
         self.invalid += 1;
+    }
+
+    /// Count a message whose stamp held but which the store did not keep:
+    /// refused, or its write did not reach flash. The sender's cursor is
+    /// already past it (the batch exists only once its resource is proven),
+    /// so it is lost on this path; the engine declines the next offers and
+    /// batches until its sweep has run, as `lnpnd` does (order 1355).
+    pub fn store_failure(&mut self) {
+        self.store_failed += 1;
+    }
+
+    /// The `PN_STORE_FULL offered=<n> dropped=<n>` of a concluded batch,
+    /// `None` when the store kept everything it was handed.
+    pub fn store_full(&self) -> Option<(usize, usize)> {
+        (self.store_failed > 0).then_some((self.offered, self.store_failed))
     }
 
     /// No message left to judge.
@@ -352,6 +371,34 @@ mod tests {
         assert_eq!(batch.bytes(), 4);
         assert_eq!(batch.invalid(), 1);
         assert_eq!(batch.result(), "invalid_stamps");
+    }
+
+    /// A message the store did not keep is what `PN_STORE_FULL` reports, with
+    /// the batch's size as `offered=`; it neither counts as transferred nor
+    /// throttles the sender. A batch the store kept whole reports nothing.
+    #[test]
+    fn a_message_the_store_did_not_keep_is_reported_with_the_batch_size() {
+        let mut whole = SyncBatch::new(VecDeque::from(vec![&b"a"[..], &b"b"[..]]));
+        settle_until_drained(&mut whole);
+        assert_eq!(whole.store_full(), None);
+
+        let mut batch = SyncBatch::new(VecDeque::from(vec![
+            &b"kept"[..],
+            &b"lost"[..],
+            &b"too"[..],
+        ]));
+        let kept = batch.take_next().expect("a message to judge");
+        batch.accept(kept.len() as u64);
+        let _lost = batch.take_next().expect("a message to judge");
+        batch.store_failure();
+        let _too = batch.take_next().expect("a message to judge");
+        batch.store_failure();
+
+        assert!(batch.drained());
+        assert_eq!(batch.store_full(), Some((3, 2)));
+        assert_eq!(batch.transferred(), 1);
+        assert_eq!(batch.invalid(), 0);
+        assert_eq!(batch.result(), "ok");
     }
 }
 

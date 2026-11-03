@@ -130,7 +130,7 @@ players only through the `Sinks` seam. Five things play:
 - **A held button reaching 2 s** (`leviculum-nrf/firmware/src/button.rs:202`, `release_now`)
   plays `release-now` on the LED and the buzzer.
 - **A message for this board's own `lxmf.delivery` destination stored by
-  the propagation role** (`leviculum-nrf/src/pn.rs:3311,3591`, a client
+  the propagation role** (`leviculum-nrf/src/pn.rs:3352,3642`, a client
   upload and a peer sync; a duplicate is not news) plays `notify` on the
   notification LED where the board has one, else on the LED, and on the
   buzzer. The board has no inbox, so its propagation store is the one

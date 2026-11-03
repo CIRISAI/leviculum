@@ -84,6 +84,7 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::ops::ControlFlow;
 
 use leviculum_lxmf::constants::DESTINATION_LENGTH;
@@ -494,55 +495,99 @@ pub fn board_accepts_resource_of<S: PropagationStore>(
     data_size: u64,
     from_validated_peer: bool,
 ) -> bool {
-    board_oversize_refusal(role, data_size, from_validated_peer).is_none()
+    board_resource_refusal(role, data_size, from_validated_peer, false).is_none()
 }
 
-/// Why [`board_accepts_resource_of`] refuses a resource, as the line the
-/// board prints for it, or `None` when it takes it.
+/// Why the board refuses a resource at its advertisement, as the line it
+/// prints for it, or `None` when it takes it: the same reasons, in the same
+/// order and with the same keys, as `lnpnd`'s gate
+/// (`lnpnd/src/engine.rs`, the `ResourceAdvertised` arm).
 ///
-/// `cap` is the tightest limit the resource is held to: the announced
-/// per-sync limit, and for a client's upload also
-/// [`MAX_UPLOAD_RESOURCE_BYTES`]. Until 867 this refusal was the one
-/// refusing arm of the board's role with no `PN_REJECT` line: a 122 953 B
-/// upload to a board on 2026-10-20 was refused correctly, with the RCL the
-/// reference sends, and left nothing on the capture to say so.
-pub fn board_oversize_refusal<S: PropagationStore>(
+/// * A client's upload above what the store can keep is `too_large`, its
+///   limit [`MAX_UPLOAD_RESOURCE_BYTES`]. That is the board's own delivery
+///   limit: `lnpnd` stores up to lxmd's 1 MB and the record log one page,
+///   so where `lnpnd` stores a 300 KB upload local only, the board refuses
+///   it here (order 1355). The client is not told the number; no stock
+///   client reads a propagation node's limits before it uploads (only a
+///   peer does, from announce fields 3 and 4,
+///   `reference/LXMF/LXMF/LXMRouter.py:2367-2375`), and the refusal on the
+///   wire is the RCL the reference sends, with no reason.
+/// * A peer's batch above the announced per-sync limit is
+///   `over_sync_limit`, the reference's own gate
+///   (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`).
+/// * A peer's batch while `store_full` (a sync message the store could not
+///   hold since the last sweep) is `store_full`, so the peer keeps its
+///   messages for a later round instead of moving its cursor past them.
+///
+/// Until 867 the size refusal was the one refusing arm of the board's role
+/// with no `PN_REJECT` line: a 122 953 B upload to a board on 2026-10-20
+/// was refused correctly, with the RCL the reference sends, and left
+/// nothing on the capture to say so. Until 1355 it read `reason=oversize`
+/// with `size=` and `cap=`, a word and keys of its own.
+pub fn board_resource_refusal<S: PropagationStore>(
     role: &PropagationNode<S>,
     data_size: u64,
     from_validated_peer: bool,
-) -> Option<OversizeRefusal> {
+    store_full: bool,
+) -> Option<ResourceRefusal> {
     let sync_limit = role.resource_limit_bytes();
-    let cap = if from_validated_peer {
-        sync_limit
+    let (reason, limit) = if !from_validated_peer {
+        ("too_large", sync_limit.min(MAX_UPLOAD_RESOURCE_BYTES))
+    } else if data_size > sync_limit {
+        ("over_sync_limit", sync_limit)
+    } else if store_full {
+        return Some(ResourceRefusal {
+            reason: "store_full",
+            bytes: data_size,
+            limit: 0,
+        });
     } else {
-        sync_limit.min(MAX_UPLOAD_RESOURCE_BYTES)
+        return None;
     };
-    (data_size > cap).then_some(OversizeRefusal {
-        size: data_size,
-        cap,
+    (data_size > limit).then_some(ResourceRefusal {
+        reason,
+        bytes: data_size,
+        limit,
     })
 }
 
-/// A resource refused at its advertisement for its size: the body of
-/// `PN_REJECT reason=oversize via=resource size=<bytes> cap=<bytes>`, keys
-/// in the shape of every other `PN_REJECT` line, so a capture counts them
-/// with the rest and reads how far over the limit the sender was.
+/// A resource refused at its advertisement: the body of
+/// `PN_REJECT reason=<word> via=resource bytes=<bytes> limit=<bytes>`, the
+/// keys `lnpnd` prints for the same refusal (`log_reject_sized`), so one
+/// analysis reads both. `limit=0` for `store_full`, as on `lnpnd`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OversizeRefusal {
-    /// The advertised (uncompressed) size, bytes.
-    pub size: u64,
+pub struct ResourceRefusal {
+    /// `too_large`, `over_sync_limit` or `store_full`.
+    pub reason: &'static str,
+    /// The advertised (uncompressed) size.
+    pub bytes: u64,
     /// The limit it failed, bytes.
-    pub cap: u64,
+    pub limit: u64,
 }
 
-impl core::fmt::Display for OversizeRefusal {
+impl core::fmt::Display for ResourceRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "reason=oversize via=resource size={} cap={}",
-            self.size, self.cap
+            "reason={} via=resource bytes={} limit={}",
+            self.reason, self.bytes, self.limit
         )
     }
+}
+
+/// The offer the board builds toward `peer`: held to the peer's limits and
+/// to our own announced transfer limit, so a message above ours (a client
+/// upload stored local only, [`PropagationNode::is_local_only`]) is skipped
+/// for good and only its recipient collecting here takes it away, as on
+/// `lnpnd` (1295's rule; `lnpnd/src/peering.rs`). Both of the board's
+/// offer sites build through this.
+pub fn board_offer_builder<S: PropagationStore>(
+    role: &PropagationNode<S>,
+    peer: &leviculum_lxmf::peering::Peer,
+    offer_budget: usize,
+) -> leviculum_lxmf::peering::OfferBuilder {
+    leviculum_lxmf::peering::OfferBuilder::new(peer, offer_budget)
+        .with_own_transfer_limit(role.transfer_limit_bytes())
 }
 
 /// A verdict the role reached that the node then refused: the body of
@@ -664,6 +709,13 @@ pub struct PnStore<R> {
     /// Pages in the region, for [`PropagationStore::capacity`].
     pages: u32,
     queue: VecDeque<FlushOp>,
+    /// A receive time no message record, durable or queued, is older than;
+    /// `None` until the first expiry walk has measured one. What lets the
+    /// sweep skip the region when nothing can have expired
+    /// ([`PropagationStore::for_each_received_before`]): every append
+    /// lowers it to its own time, and nothing else can make it wrong,
+    /// since a purge and a page reclaim only take records away.
+    oldest_live: Cell<Option<u32>>,
 }
 
 impl<R: Region> PnStore<R> {
@@ -673,6 +725,7 @@ impl<R: Region> PnStore<R> {
             region,
             pages,
             queue: VecDeque::new(),
+            oldest_live: Cell::new(None),
         }
     }
 
@@ -924,13 +977,104 @@ impl<R: Region> PropagationStore for PnStore<R> {
             // limit (field 3 = 4 kB) keeps conforming peers below this.
             return Err(StorageError::Full);
         }
+        let time = received_at.min(u32::MAX as u64) as u32;
+        if let Some(oldest) = self.oldest_live.get() {
+            self.oldest_live.set(Some(oldest.min(time)));
+        }
         self.queue.push_back(FlushOp::Append {
             key: *transient_id,
-            time: received_at.min(u32::MAX as u64) as u32,
+            time,
             tag: stamp_value.min(MESSAGE_TAG_MAX),
             body: body.to_vec(),
         });
         Ok(())
+    }
+
+    /// The expiry sweep's walk, which reads the region only when something
+    /// in it can have expired: while the oldest receive time the last walk
+    /// measured is not below `before`, nothing is, and the call costs no
+    /// scan at all (order 1355, the board's half of 1295's rule). A walk
+    /// that does run measures the oldest time again over every message
+    /// record it passes and every queued append, so the tick after an
+    /// expiry walks once more and then rests.
+    ///
+    /// The record log has no receive-time index and the board has no heap
+    /// for one, so a walk that runs is still one [`scan`]: 8 to 33 ms for
+    /// the full 64 KiB on the board (concept page §Scan). What the hint
+    /// takes away is the walk on the ticks where nothing expired, which is
+    /// every tick of a store younger than the expiry window.
+    fn for_each_received_before(
+        &self,
+        before: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        if self
+            .oldest_live
+            .get()
+            .is_some_and(|oldest| u64::from(oldest) >= before)
+        {
+            return Ok(());
+        }
+        let mut oldest = self
+            .queue
+            .iter()
+            .filter_map(|op| match op {
+                FlushOp::Append { time, tag, .. } if *tag <= MESSAGE_TAG_MAX => Some(*time),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(u32::MAX);
+        let mut done = false;
+        self.scan_messages(|record| {
+            if record.body.len() < MIN_BODY_LEN {
+                return;
+            }
+            oldest = oldest.min(record.time);
+            if done || u64::from(record.time) >= before {
+                return;
+            }
+            let mut destination_hash = [0u8; DESTINATION_LENGTH];
+            destination_hash.copy_from_slice(&record.body[..DESTINATION_LENGTH]);
+            done = visit(&StoredMessage {
+                transient_id: *record.key,
+                destination_hash,
+                size: record.body.len() as u32,
+                received_at: record.time as u64,
+                stamp_value: record.tag,
+                sequence: record.sequence(),
+            })
+            .is_break();
+        });
+        self.oldest_live.set(Some(oldest));
+        Ok(())
+    }
+
+    /// A message record of `transient_id` received at or after
+    /// `received_since` that is purged on flash, or whose purge is queued:
+    /// the message left this store before it expired, and the record says
+    /// so until the round-robin reclaim erases its page. That is how a
+    /// collected, delivered or re-priced id stays a duplicate across a
+    /// restart (1294 item 4 on the board, order 1355) without a byte of
+    /// new flash format or of heap: the purge already writes it.
+    ///
+    /// How long it holds is one lap of the ring, the same lap a message
+    /// stored with it lives: on the 16-page store at the field's 22.4
+    /// messages an hour, about eight hours (16 pages of 11 field-sized
+    /// records). After it the board accepts a re-offered copy again, as it
+    /// did for every departed id before.
+    ///
+    /// Cost: one [`scan`], beside the one `contains` already makes.
+    fn departed(&self, transient_id: &[u8; 32], received_since: u64) -> Result<bool, StorageError> {
+        let mut found = false;
+        self.region.with_bytes(|bytes| {
+            scan(bytes, |record| {
+                found |= record.tag <= MESSAGE_TAG_MAX
+                    && record.key == transient_id
+                    && u64::from(record.time) >= received_since
+                    && (!record.live || self.is_purge_masked(record.offset));
+            })
+        });
+        Ok(found)
     }
 
     /// Durable records only — a queued append is deliberately absent (see
