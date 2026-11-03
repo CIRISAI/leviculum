@@ -428,13 +428,24 @@ mod driver {
         Peer,
     }
 
-    /// One word of the platform about the network, numbered so a rotation
-    /// sees each.
+    /// The platform's last word about the network, numbered, with the
+    /// number of the last word that said the network changed. A watch
+    /// holds only the newest value: a burst said faster than a rotation
+    /// reads it ("lost", "available", "capabilities" within a millisecond)
+    /// reaches it as its last word, which says no change, and the change
+    /// before it is kept here instead (1346).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     struct Note {
         seq: u64,
         kind: NetworkKind,
-        changed: bool,
+        changed_seq: u64,
+    }
+
+    impl Note {
+        /// The kind now, and whether a word after `seen` said a change.
+        fn since(&self, seen: u64) -> (NetworkKind, bool) {
+            (self.kind, self.changed_seq > seen)
+        }
     }
 
     /// The platform's word on the phone's network (1298), handed to every
@@ -468,9 +479,11 @@ mod driver {
         /// from none). Every rotation evaluates it once the burst settled.
         pub fn say(&self, kind: NetworkKind, changed: bool) {
             self.notes.send_modify(|note| {
-                note.seq = note.seq.wrapping_add(1);
+                note.seq += 1;
                 note.kind = kind;
-                note.changed = changed;
+                if changed {
+                    note.changed_seq = note.seq;
+                }
             });
         }
 
@@ -674,6 +687,7 @@ mod driver {
         let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut tap = dial.node.subscribe_events();
         let mut notes = dial.network.subscribe();
+        let mut seen = notes.borrow().seq;
         let mut notes_open = true;
         let mut settle = Settle::default();
         let mut owed = Owed {
@@ -716,7 +730,9 @@ mod driver {
                 said = notes.changed(), if notes_open => match said {
                     Ok(()) => {
                         let note = *notes.borrow_and_update();
-                        settle.note(now_ms(), note.kind, note.changed);
+                        let (kind, changed) = note.since(seen);
+                        seen = note.seq;
+                        settle.note(now_ms(), kind, changed);
                         continue;
                     }
                     // Every handle is gone: nobody says a change again.
@@ -830,6 +846,34 @@ mod driver {
                     rotation.return_refused(now_ms());
                 }
             }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 1346: a burst the platform says faster than a rotation reads
+        /// reaches it as one value, the last word; the change an earlier
+        /// word said is not lost with it. The facade's network test went
+        /// red one run in two on this: "lost, available, capabilities" in
+        /// a millisecond read as "mobile, no change", and the rotation
+        /// asked instead of re-dialling.
+        #[test]
+        fn a_burst_read_at_once_keeps_its_change() {
+            let network = Network::new();
+            let mut notes = network.subscribe();
+            let mut seen = notes.borrow().seq;
+            network.say(NetworkKind::None, true);
+            network.say(NetworkKind::Mobile, true);
+            network.say(NetworkKind::Mobile, false);
+            assert!(notes.has_changed().expect("the sender lives"));
+            let note = *notes.borrow_and_update();
+            assert_eq!(note.since(seen), (NetworkKind::Mobile, true));
+            seen = note.seq;
+            // The same network said again, read alone: no change.
+            network.say(NetworkKind::Mobile, false);
+            let note = *notes.borrow_and_update();
+            assert_eq!(note.since(seen), (NetworkKind::Mobile, false));
         }
     }
 }
