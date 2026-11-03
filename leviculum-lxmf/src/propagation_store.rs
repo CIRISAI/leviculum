@@ -292,6 +292,23 @@ pub trait PropagationStore {
     /// mount already pays for.
     fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError>;
 
+    /// Whether the store itself still remembers that a message received at
+    /// or after `received_since` left it before it expired, so a restart
+    /// does not turn its re-offer into a new copy (the reference persists
+    /// its whole duplicate set, `reference/LXMF/LXMF/LXMRouter.py:1018-1024`).
+    ///
+    /// Default `false`: a host persists its departures beside the store
+    /// ([`crate::PropagationNode::restore_departures`]). The board's record
+    /// log keeps a purged record on flash until its page is reclaimed, and
+    /// answers from that (`leviculum-nrf/pn-store`).
+    fn departed(
+        &self,
+        _transient_id: &TransientId,
+        _received_since: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
     /// Number of stored messages — one directory pass by default; the record
     /// log's mount already reports the same count
     /// (`leviculum-nrf/record-log/src/lib.rs:420`).

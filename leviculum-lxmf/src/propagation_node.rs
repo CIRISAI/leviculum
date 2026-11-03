@@ -947,9 +947,11 @@ pub struct PropagationNode<S> {
     /// in the store is a duplicate by [`PropagationStore::contains`] alone.
     /// The board keeps no per-message state outside the log — a rewritten
     /// metadata page is the 18.6-day endurance failure the concept paper's
-    /// §2 forbids — so after its restart a client that re-uploads an
-    /// already-drained message sees it accepted again, which its own
-    /// `has_message` filter tolerates (`message_list_response`,
+    /// §2 forbids — and needs none: a purged record stays on flash until
+    /// its page is reclaimed, and the store answers from it
+    /// ([`PropagationStore::departed`]). Past that reclaim a re-upload of
+    /// an already-drained message is accepted again, which the client's
+    /// own `has_message` filter tolerates (`message_list_response`,
     /// `reference/LXMF/LXMF/LXMRouter.py:1581`).
     processed: alloc::collections::BTreeMap<TransientId, u64>,
     /// When [`Self::tick`] next walks `processed`: the oldest entry's expiry
@@ -1276,8 +1278,15 @@ impl<S: PropagationStore> PropagationNode<S> {
         body.extend_from_slice(stamp);
         let size = body.len() as u32;
 
+        // A store that remembers its own departures answers for them past a
+        // restart; an expired message is not one (`track_departures`).
+        let received_since = now_secs.saturating_sub(self.config.message_expiry_secs);
         let duplicate = self.processed.contains_key(&transient_id)
-            || self.store.contains(&transient_id).unwrap_or(false);
+            || self.store.contains(&transient_id).unwrap_or(false)
+            || self
+                .store
+                .departed(&transient_id, received_since)
+                .unwrap_or(false);
         if duplicate {
             return UploadOutcome::Accepted {
                 transient_id,
