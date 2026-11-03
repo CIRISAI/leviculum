@@ -9,6 +9,7 @@ use std::time::Duration;
 use leviculum_core::{DestinationHash, Identity, LinkId};
 use leviculum_std::ReticulumNode;
 
+use super::ask::{Ask, Outcome, Step, Verb};
 use super::wire::{self, Entry, Status};
 
 /// How often a waiting path is looked for.
@@ -39,18 +40,108 @@ pub async fn join(
     name: &str,
     budget: Duration,
 ) -> Result<(), HomeError> {
-    let deadline = tokio::time::Instant::now() + budget;
-    let link = open(node, public_key, device, deadline).await?;
-    let answer = request(
-        node,
-        &link,
-        super::JOIN_PATH,
-        &wire::join_request(token, name),
-        deadline,
-    )
-    .await;
-    let _ = node.close_link(&link).await;
-    super::ask::join_outcome(&answer?)
+    let verb = Verb::Join {
+        token: *token,
+        name: name.to_string(),
+    };
+    let ask = Ask::new(public_key, verb, 0, millis(budget))?;
+    run_ask(node, device, ask, |_| {}).await.map(|_| ())
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Perform an [`Ask`]'s steps over `node` as `device`: the host's executor
+/// of the client the M9 runs (1363). Its clock is the milliseconds since
+/// the call, so `ask` is one begun at 0. Each page of a pull goes to
+/// `page` before the next is asked.
+pub async fn run_ask(
+    node: &ReticulumNode,
+    device: &Identity,
+    mut ask: Ask,
+    mut page: impl FnMut(wire::Page),
+) -> Result<Outcome, HomeError> {
+    let start = tokio::time::Instant::now();
+    let now = || millis(start.elapsed());
+    let destination = DestinationHash::new(ask.destination());
+    let path = || {
+        node.has_path(&destination)
+            .then(|| node.hops_to(&destination).unwrap_or(1))
+    };
+    let mut link: Option<LinkId> = None;
+    let mut step = ask.poll(now(), path());
+    loop {
+        step = match step {
+            Step::Wait => {
+                tokio::time::sleep(PATH_POLL).await;
+                ask.poll(now(), path())
+            }
+            Step::RequestPath(_) => {
+                if let Err(error) = node.request_path(&destination).await {
+                    return Err(HomeError::NoLink(error.to_string()));
+                }
+                if ask.path_requests() > 1 {
+                    tracing::info!(
+                        "HOME looking for the mailbox: path request {}",
+                        ask.path_requests()
+                    );
+                }
+                tokio::time::sleep(PATH_POLL).await;
+                ask.poll(now(), path())
+            }
+            Step::Connect { signing_key, .. } => {
+                match node.connect_awaited(&destination, &signing_key).await {
+                    Err(error) => ask.linked(Err(error.to_string())),
+                    Ok((handle, established)) => {
+                        link = Some(*handle.link_id());
+                        let from = now();
+                        let left = ask.left_ms(from);
+                        let waited = tokio::time::timeout(Duration::from_millis(left), established);
+                        match waited.await {
+                            // The budget is spent: the ask says so itself.
+                            Err(_) => ask.poll(from.saturating_add(left), None),
+                            Ok(Err(error)) => ask.linked(Err(error.to_string())),
+                            Ok(Ok(_)) => ask.linked(Ok(())),
+                        }
+                    }
+                }
+            }
+            Step::Identify => match &link {
+                Some(id) => ask.identified(
+                    node.identify_link(id, device)
+                        .await
+                        .map_err(|error| error.to_string()),
+                ),
+                None => ask.identified(Err("no link".to_string())),
+            },
+            Step::Request { path, data } => {
+                let deadline =
+                    tokio::time::Instant::now() + Duration::from_millis(ask.left_ms(now()));
+                let answer = match &link {
+                    Some(id) => request(node, id, path, &data, deadline).await,
+                    None => Err(HomeError::Transfer("no link".to_string())),
+                };
+                ask.answered(answer.as_deref().map_err(HomeError::clone))
+            }
+            Step::Page(got) => {
+                page(got);
+                ask.poll(now(), path())
+            }
+            Step::Close => {
+                if let Some(id) = link.take() {
+                    let _ = node.close_link(&id).await;
+                }
+                ask.poll(now(), path())
+            }
+            Step::Done(result) => {
+                if let Some(id) = link.take() {
+                    let _ = node.close_link(&id).await;
+                }
+                return result;
+            }
+        };
+    }
 }
 
 /// Hand one message to the home node to send: link, identify as `device`,
@@ -112,7 +203,8 @@ pub async fn send_retrying(
 
 /// Hand the home node one mark: link, identify as `device`, `/mark`,
 /// asked again up to three times when the answer was lost, as
-/// [`send_retrying`] does: the home node keeps a mark it has once.
+/// [`send_retrying`] does: the home node keeps a mark it has once. The
+/// [`Ask`] the M9 runs.
 pub async fn mark(
     node: &ReticulumNode,
     public_key: &[u8; 64],
@@ -120,8 +212,8 @@ pub async fn mark(
     mark: &wire::Mark,
     budget: Duration,
 ) -> Result<(), HomeError> {
-    let data = wire::mark_request(mark);
-    ask_retrying(node, public_key, device, super::MARK_PATH, &data, budget).await
+    let ask = Ask::new(public_key, Verb::Mark(mark.clone()), 0, millis(budget))?;
+    run_ask(node, device, ask, |_| {}).await.map(|_| ())
 }
 
 /// Hand the home node the reader's name for `peer`, `None` clearing it
@@ -366,7 +458,9 @@ pub fn client_id() -> [u8; 16] {
     id
 }
 
-/// Pull everything after `cursor`, page by page over one link.
+/// Pull everything after `cursor`, page by page over one link: the
+/// [`Ask`] the M9 runs, in the home's own pages, asked again on a fresh
+/// link when an answer was lost.
 pub async fn pull(
     node: &ReticulumNode,
     public_key: &[u8; 64],
@@ -374,40 +468,18 @@ pub async fn pull(
     cursor: u64,
     budget: Duration,
 ) -> Result<Pulled, HomeError> {
-    let deadline = tokio::time::Instant::now() + budget;
-    let link = open(node, public_key, device, deadline).await?;
-    let pulled = pages(node, &link, cursor, deadline).await;
-    let _ = node.close_link(&link).await;
-    pulled
-}
-
-async fn pages(
-    node: &ReticulumNode,
-    link: &LinkId,
-    mut cursor: u64,
-    deadline: tokio::time::Instant,
-) -> Result<Pulled, HomeError> {
+    let verb = Verb::Pull {
+        cursor,
+        page_bytes: None,
+    };
+    let ask = Ask::new(public_key, verb, 0, millis(budget))?;
     let mut pulled = Pulled::default();
-    loop {
-        let answer = request(
-            node,
-            link,
-            super::SYNC_PATH,
-            &wire::sync_request(cursor),
-            deadline,
-        )
-        .await?;
-        let page = wire::read_sync_answer(&answer)
-            .map_err(|_| HomeError::Malformed)?
-            .map_err(HomeError::Refused)?;
+    run_ask(node, device, ask, |page| {
         pulled.first = page.first;
-        let last = page.entries.last().map(|entry| entry.seq);
         pulled.entries.extend(page.entries);
-        match (page.more, last) {
-            (true, Some(last)) if last > cursor => cursor = last,
-            _ => return Ok(pulled),
-        }
-    }
+    })
+    .await?;
+    Ok(pulled)
 }
 
 /// What a move's pages brought (1281): the identity's private key, its
