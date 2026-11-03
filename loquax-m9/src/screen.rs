@@ -1,5 +1,6 @@
-//! The chats list scene as styled lines on the M9's cell grid: 53 x 24
-//! cells of mousefood's 6 x 10 atlas on the 320 x 240 panel.
+//! The scene as styled lines on the M9's cell grid: 53 x 24 cells of
+//! mousefood's 6 x 10 atlas on the 320 x 240 panel. The chats list here,
+//! the open chat under its bar in [`crate::chat`].
 //!
 //! The scene is the one the phone and the window draw (`Scene`,
 //! `loquax::ui::scene`); this words and places it in cells, as the
@@ -19,12 +20,14 @@ use alloc::vec::Vec;
 
 use leviculum_ui::color::Ink;
 use leviculum_ui::delivery::{glyph, DeliveryState};
+use leviculum_ui::input::InputBuffer;
 use leviculum_ui::style::{RLine, RStyle, StyledChar};
 use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::tokens::{Paint, Tokens};
 use loquax::ui::chat::Mark;
-use loquax::ui::scene::{Avatar, Lead, Row, Scene, TopBar};
+use loquax::ui::scene::{Avatar, LayoutClass, Lead, Row, Scene, ScreenId, TopBar};
 use loquax::ui::strings::{Lang, StrId, Text};
+use loquax::ui::{Pane, UiModel};
 use loquax::when::{list_time, WallTime};
 
 /// Cells across: 320 px of a 6 px wide atlas, 2 px left over.
@@ -50,26 +53,75 @@ pub struct Look {
     pub lang: Lang,
     /// The time of day, for the list's times; none draws none.
     pub now: Option<WallTime>,
+    /// The open chat's cursor, the key of the bubble it stands on
+    /// (`BubbleNode::bubble.key`), while the chat has the keys; none draws
+    /// no bubble selected and the newest at the bottom.
+    pub cursor: Option<u64>,
+    /// The compose field's cursor, in characters, while it has the keys;
+    /// none draws no caret, and the hint on an empty field.
+    pub caret: Option<usize>,
 }
 
 impl Look {
-    /// The M9's: truecolor on dark, the reader's language.
+    /// The M9's: truecolor on dark, the reader's language, no cursor.
     pub fn m9(lang: Lang, now: Option<WallTime>) -> Self {
         Self {
             tokens: &leviculum_ui::tokens::TRUECOLOR_DARK,
             lang,
             now,
+            cursor: None,
+            caret: None,
+        }
+    }
+
+    /// The M9's look of `model`: its language and time, and where its keys
+    /// go, the chat's cursor or the compose field's.
+    pub fn of<B: InputBuffer>(model: &UiModel<B>) -> Self {
+        let cursor = match model.focus {
+            Pane::Messages => model
+                .conversations
+                .get(model.selected)
+                .and_then(|c| c.messages.get(model.message_cursor))
+                .map(|m| m.activity),
+            _ => None,
+        };
+        Self {
+            cursor,
+            caret: (model.focus == Pane::Compose).then(|| model.compose.cursor()),
+            ..Self::m9(model.lang, model.now)
         }
     }
 }
 
+/// The scene the M9 draws of `model`: the Compact one, which is the open
+/// chat alone, and the list while the keys are on the list. The model's
+/// back from the chat moves the keys to the list and keeps the chat open,
+/// as the terminal's panes do; a screen of one pane shows the pane the keys
+/// are in.
+pub fn scene<B>(model: &UiModel<B>) -> Scene {
+    match model.focus {
+        Pane::Conversations => {
+            let mut scene = model.scene(LayoutClass::Wide);
+            scene.chat = None;
+            scene.sheet = None;
+            scene.whereabouts = None;
+            scene.screen = ScreenId::Chats;
+            scene.in_class(LayoutClass::Compact)
+        }
+        _ => model.scene(LayoutClass::Compact),
+    }
+}
+
 /// The screen the scene is, `cols` x `rows` cells: the top bar, the list
-/// scrolled to show its selected row, the tab bar. A scene with a chat
-/// open draws the top bar alone until the chat's slice.
+/// scrolled to show its selected row, the tab bar; or, with a chat open
+/// and no list, the chat's bar over the chat ([`crate::chat`]).
 pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine> {
     let mut out = Vec::with_capacity(rows);
     out.push(top_bar(&scene.top, look, cols));
     let below = rows.saturating_sub(1 + usize::from(scene.tabs.is_some()));
+    if let (None, Some(chat)) = (&scene.list, &scene.chat) {
+        out.extend(crate::chat::lines(chat, look, cols, below));
+    }
     if let Some(list) = &scene.list {
         match list.rows.is_empty() {
             true => {
@@ -267,12 +319,12 @@ fn rgb(c: u32) -> Ink {
     Ink::Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
-fn muted(look: &Look) -> RStyle {
+pub(crate) fn muted(look: &Look) -> RStyle {
     painted(look.tokens.muted)
 }
 
 /// A style drawn in a token's colours (`layout::painted`).
-fn painted(paint: Paint) -> RStyle {
+pub(crate) fn painted(paint: Paint) -> RStyle {
     loquax::ui::layout::painted(paint)
 }
 
@@ -305,13 +357,13 @@ pub fn narrow(text: &str) -> String {
 }
 
 /// `text` [`narrow`]ed and cut to `cols` cells, an ellipsis where it was cut.
-fn cut(text: &str, cols: usize) -> String {
+pub(crate) fn cut(text: &str, cols: usize) -> String {
     truncate_to_cols(&narrow(text), cols)
 }
 
 /// `line` cut or padded to `cols` cells, the padding in `style`, one cell
 /// a character as [`narrow`] makes them.
-fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
+pub(crate) fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
     let mut out = RLine::default();
     for mut cell in line.cells {
         match fit_width(cell.ch.encode_utf8(&mut [0; 4])) {
@@ -329,7 +381,7 @@ fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
     out
 }
 
-fn push(line: &mut RLine, text: &str, st: RStyle) {
+pub(crate) fn push(line: &mut RLine, text: &str, st: RStyle) {
     line.cells.extend(text.chars().map(|ch| StyledChar {
         ch,
         st,

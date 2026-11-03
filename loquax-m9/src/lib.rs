@@ -9,17 +9,24 @@
 //! frames into [`frame::Frame`] and pins them as PNG goldens
 //! (`tests/golden.rs`); the board will draw them into its panel.
 //!
-//! - [`screen`]: the chats list scene as styled lines, 53 x 24 cells, the
-//!   delivery marks on their ASCII ladder (the atlas has no tick).
+//! - [`screen`]: the scene as styled lines, 53 x 24 cells, the chats list
+//!   and the delivery marks on their ASCII ladder (the atlas has no tick),
+//!   and which scene and cursor a model shows.
+//! - [`chat`]: the open chat under its bar, the bubbles and the compose
+//!   line (slice two, 1356).
+//! - [`field`]: the compose field the M9's keys edit.
 //! - [`render`]: the lines through ratatui into any `DrawTarget` of
 //!   `Rgb565`, with mousefood as the backend.
 //! - [`frame`]: the panel's frame on the heap, what the host draws into.
-//! - [`keys`]: which M9 key is which key event, for the list's rows.
+//! - [`keys`]: which M9 key is which key event, the list's rows and the
+//!   chat's.
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod chat;
+pub mod field;
 pub mod frame;
 pub mod keys;
 pub mod render;
