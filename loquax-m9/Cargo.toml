@@ -1,6 +1,7 @@
 [package]
 name = "loquax-m9"
-# Versioned with loquax, whose frontend on the ThinkNode M9 this is.
+# Versioned on its own, like loquax, whose frontend on the ThinkNode M9
+# this is.
 version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
