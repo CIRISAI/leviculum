@@ -705,6 +705,7 @@ impl From<Command> for Intent {
             Command::Map => Intent::ShowMap { peer: None },
             Command::LoadMapArea => Intent::LoadMapArea,
             Command::MapDrawing => Intent::MapDrawing,
+            Command::Browse => Intent::Tab(TabId::Browse),
             Command::Rename => Intent::Rename {
                 peer: Target::Open,
                 name: None,

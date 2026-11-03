@@ -583,6 +583,13 @@ pub const ROWS: &[Row<Action>] = {
             ],
         )
         .palette("map"),
+        // The Browse tab (1369): NomadNet pages, lnomad's own screen.
+        Row::new(
+            "the NomadNet pages (the Browse tab)",
+            MAP_GROUP,
+            &[&[key(Char('B'), Mods::Plain, run(C::Browse), COMMAND_PANES)]],
+        )
+        .palette("browse"),
         Row::new(
             "this conversation's peer on the map",
             MAP_GROUP,

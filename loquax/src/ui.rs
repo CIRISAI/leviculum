@@ -1796,6 +1796,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::Key(key) if key.kind == KeyEventKind::Release => Vec::new(),
+        // The Browse tab in front owns the keys and the mouse, as lnomad's
+        // own screen does (1369): its quit leaves the tab.
+        UiEvent::Key(key) if model.browse.showing() => {
+            model.touched();
+            browse::app(model, lnomad::AppEvent::Key(key))
+        }
         UiEvent::Key(key) => {
             model.touched();
             on_key(model, key)
@@ -1826,7 +1832,14 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             // A taller screen brings the overlays' bottoms nearer.
             model.help_scroll = model.help_scroll.min(help_bounds(model).1);
             model.detail_scroll = model.detail_scroll.min(detail_bounds(model).1);
-            Vec::new()
+            // The terminal's screen is the Browse tab's whole page, which
+            // lnomad's own screen fills (1369); only the terminal says
+            // this event, the phone and the window name the tab's cells.
+            browse::app(model, lnomad::AppEvent::Resize(width, height))
+        }
+        UiEvent::Mouse(mouse) if model.browse.showing() => {
+            model.touched();
+            browse::app(model, lnomad::AppEvent::Mouse(mouse))
         }
         UiEvent::Mouse(mouse) => {
             let effects = on_mouse(model, mouse);
@@ -3523,6 +3536,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             open_map(model);
             Vec::new()
         }
+        PaletteCommand::Browse => browse::open(model),
         PaletteCommand::MapDrawing => {
             if model.map_setup.drawings.is_empty() {
                 model.toast(ToastKind::Info, "the map is drawn one way here".to_string());
