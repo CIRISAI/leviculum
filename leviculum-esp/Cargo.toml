@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
-description = "Reticulum firmware for ESP32-class boards (Heltec WiFi LoRa 32 V4)"
+description = "Reticulum firmware for ESP32-class boards (Heltec WiFi LoRa 32 V4, ThinkNode M9)"
 
 # leviculum-esp is excluded from the root workspace and is its own
 # workspace root, exactly as `leviculum-nrf` is. Two reasons, and the
@@ -54,6 +54,13 @@ embedded-hal-async = "1"
 # esp-hal registers the `critical_section::Impl` the heap needs.
 embedded-alloc = { version = "0.7", default-features = false, features = ["llff"] }
 
+# The ThinkNode M9's Loquax image (order 1361): the renderer, the fixture
+# model, the keyboard decoder, the frame dump and the census, all `no_std`
+# and the same code the host pins its goldens with (`loquax-m9/tests/`).
+# The loquax core comes through it, without `std`.
+loquax-m9 = { path = "../loquax-m9" }
+loquax = { path = "../loquax", default-features = false }
+
 # esp-bootloader-esp-idf is used only through `esp_app_desc!()`, which
 # expands to a static in a named link section; cargo-machete cannot see
 # a macro-only dependency.
@@ -74,3 +81,9 @@ debug = true         # emit the DWARF in the first place
 [[bin]]
 name = "heltec_v4"
 path = "src/bin/heltec_v4.rs"
+
+# The ThinkNode M9 as a Loquax handheld (order 1361): the renderer on the
+# panel, the keyboard, no radio yet. `just build-m9` builds it.
+[[bin]]
+name = "thinknode_m9"
+path = "src/bin/thinknode_m9.rs"

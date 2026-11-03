@@ -2653,3 +2653,28 @@ loquax-name:
 [doc('Check that every Python-spawning test declares its prerequisites')]
 check-python-test-prerequisites:
     @python3 scripts/check-python-test-prerequisites.py
+
+# The ThinkNode M9's Loquax image (1361, #232, #473): the renderer on the
+# panel, the keyboard over I2C, the frame dump on a control frame, no radio.
+# Builds and packages it and prints its flash and stack headroom the way
+# nrf-flash-budget prints the nRF images' (FLASH_HEADROOM, STACK_HEADROOM),
+# red below 8 KiB of the partition free or a stack under the open chat's
+# census ceilings. About 1.5 min cold, 35 s warm (2026-11-03). Not in a
+# gate: the Xtensa compiler fork is optional per host, as for build-esp32.
+[doc('Build the ThinkNode M9 Loquax image and print its headroom')]
+build-m9:
+    bash scripts/build-m9-image.sh
+
+# Write the image `build-m9` made to an M9 through the ROM loader, at the
+# 230400 baud its CH340K holds (lnflash/src/esp.rs, the bench notes of
+# 2026-10-25), with espflash's default partition table for 16 MB. The port
+# is the bridge's tty; espflash resets the board into the loader and back.
+[doc('Flash the ThinkNode M9 Loquax image over its CH340 (port: the tty)')]
+flash-m9 port:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.cargo/bin:$PATH"
+    elf=leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9
+    test -f "$elf" || { echo "no $elf: run just build-m9 first"; exit 1; }
+    espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
+        --non-interactive --flash-size 16mb "$elf"
