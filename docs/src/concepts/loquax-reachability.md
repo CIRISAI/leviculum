@@ -402,6 +402,10 @@ Then `evaluate` decides what to do:
 
 ## What this page does not decide
 
+- **Whether a message left at the propagation node reached its
+  recipient.** That is a receipt the recipient sends:
+  [receipts for propagated post](loquax-propagation-receipts.md).
+
 - **The rendezvous list beyond `leviculum.network`**: who else is in the
   shipped list, and whether a mailbox's list is the shipped list, its
   own server, or both. Today it is both: `loquax mailbox admit --server`

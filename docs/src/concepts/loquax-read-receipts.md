@@ -123,6 +123,14 @@ reference packs the fields, unpacks the message with
 same bytes. `leviculum-lxmf/tests/lev_vectors.rs` holds both directions;
 the codec is `leviculum-lxmf/src/lev.rs`.
 
+### The propagation receipt
+
+Capability bit 2 and key `0x07` acknowledge a message that arrived
+through the propagation network, which has no proof the sender ever sees.
+The recipient sends it, not switchable, only for messages that arrived by
+propagation from a sender that set bit 2:
+[receipts for propagated post](loquax-propagation-receipts.md).
+
 ### The group keys
 
 Group chats (`docs/drafts/group-chats-study-2026-11.md`, built from 1307)
