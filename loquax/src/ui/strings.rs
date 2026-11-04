@@ -407,6 +407,14 @@ leviculum_ui::catalogue! {
     JoinBadWhere = "join_bad_where", "Loquax cannot read where the mailbox is. It looks like 192.168.1.20:4242.", "Loquax kann nicht lesen, wo das Postfach ist. Das sieht so aus: 192.168.1.20:4242.";
     JoinFailed = "join_failed", "Joining the mailbox did not work.", "Das Postfach ließ sich nicht verbinden.";
     JoinOtherMailbox = "join_other_mailbox", "This phone already reads another mailbox.", "Dieses Handy liest schon ein anderes Postfach.";
+    // A device of a home that has no window to say more (1415, the M9's
+    // top bar): joining with its code, the archive coming in, and the
+    // home out of reach. The pull counts entries of the archive, which
+    // are messages and what became of them.
+    HomeJoining = "home_joining", "Joining your mailbox", "Verbinde mit deinem Postfach";
+    HomeFetched = "home_fetched", "Fetched %1$d of %2$d", "%1$d von %2$d abgeholt";
+    HomeFetchedSome = "home_fetched_some", "Fetched %1$d", "%1$d abgeholt";
+    HomeUnreachable = "home_unreachable", "Mailbox unreachable", "Postfach nicht erreichbar";
     // Linking a device (1264): the phone holds no mailbox to link to.
     LinkOnComputer = "link_on_computer", "Your mailbox is on a computer. Link the other device there.", "Dein Postfach ist auf einem Computer. Verbinde das andere Gerät dort.";
     // Moving to a new phone (1281, walk finding 24).

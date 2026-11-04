@@ -170,6 +170,7 @@ fn a_client_sessions_pull_keeps_its_budget_in_lora_pages() {
         entries: all,
         more: false,
         first: 1,
+        left: None,
     })];
     let got = census::session(&mut probe, &home, &whole).expect("session");
     let line = census::SessionLine(&got);

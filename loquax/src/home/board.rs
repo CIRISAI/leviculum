@@ -22,7 +22,8 @@ use rand_core::CryptoRngCore;
 
 use super::ask::{self, Ask, HomeError, Outcome, Step};
 use super::wire::{self, Status};
-use crate::ui::strings::StrId;
+use crate::outbox::OutboxEvent;
+use crate::ui::strings::{Arg, StrId, Text};
 
 /// The smallest page a pull shrinks to before it gives up on an answer
 /// that does not fit: one short text message and its entry header.
@@ -386,6 +387,163 @@ impl Session {
     /// Ask again now: a wake, a key press, a link that came up.
     pub fn hurry(&mut self, now_ms: u64) {
         self.next_ms = self.next_ms.min(now_ms);
+    }
+}
+
+/// What the board's screen says of its home (1415): one word in the top
+/// bar, the board's whole account of its client. The words are the
+/// catalogue's ([`Word::text`]), so the phone and the desktop could say
+/// the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Word {
+    /// A code was taken in and its join runs, or waits for its next try.
+    Joining,
+    /// A pull took `taken` entries of the archive; `of` is how many there
+    /// were in all when the home said so (`wire::Page::left`).
+    Fetched { taken: u64, of: Option<u64> },
+    /// The last ask got through and nothing is being pulled.
+    Connected,
+    /// The last ask found no path, no link or no answer.
+    Unreachable,
+    /// The home did not take the code: wrong, used or expired. Only a new
+    /// code helps.
+    CodeRefused,
+    /// The home refused a device it once admitted.
+    Refused,
+}
+
+impl Word {
+    /// The words of it, in the catalogue.
+    pub fn text(self) -> Text {
+        match self {
+            Self::Joining => Text::key(StrId::HomeJoining),
+            Self::Fetched {
+                taken,
+                of: Some(of),
+            } => Text::Key(
+                StrId::HomeFetched,
+                alloc::vec![Arg::Int(count(taken)), Arg::Int(count(of))],
+            ),
+            Self::Fetched { taken, of: None } => {
+                Text::Key(StrId::HomeFetchedSome, alloc::vec![Arg::Int(count(taken))])
+            }
+            Self::Connected => Text::key(StrId::MailboxConnected),
+            Self::Unreachable => Text::key(StrId::HomeUnreachable),
+            Self::CodeRefused => Text::key(StrId::JoinRefused),
+            Self::Refused => Text::key(StrId::MailboxNotConnected),
+        }
+    }
+
+    /// The word for a client in `session`: `admitted` or still joining,
+    /// with `progress` of the pull in flight or just ended.
+    pub fn of(session: &Session, admitted: bool, progress: Option<Progress>) -> Self {
+        match (session.reach(), admitted, progress) {
+            (Reach::Refused(_), false, _) => Self::CodeRefused,
+            (Reach::Refused(_), true, _) => Self::Refused,
+            (_, false, _) => match session.reach() {
+                Reach::Unreachable => Self::Unreachable,
+                _ => Self::Joining,
+            },
+            (_, true, Some(progress)) if progress.taken > 0 => Self::Fetched {
+                taken: progress.taken,
+                of: progress.of,
+            },
+            (Reach::Unreachable, true, _) => Self::Unreachable,
+            (_, true, _) => Self::Connected,
+        }
+    }
+}
+
+fn count(n: u64) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// How far a pull came (1415): the entries taken, and how many there are
+/// in all once a page said how many wait after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub taken: u64,
+    pub of: Option<u64>,
+}
+
+impl Progress {
+    /// A page was taken.
+    pub fn page(&mut self, page: &wire::Page) {
+        self.taken = self.taken.saturating_add(page.entries.len() as u64);
+        self.of = page.left.map(|left| self.taken.saturating_add(left));
+    }
+}
+
+/// The client record a code makes (1415): the code as typed, pasted or
+/// written over the USB control link, a new device identity, the name
+/// the board joins under. Whitespace and case do not matter, and a code
+/// that carries its rendezvous (`code@host:port,...`) is taken without
+/// it: the board reaches its home over its own node.
+pub fn admit(
+    text: &str,
+    device: &Identity,
+    name: &str,
+) -> Result<super::record::ClientRecord, AdmitError> {
+    let (code, _) =
+        super::code::HomeCode::parse_with_rendezvous(text.trim()).map_err(AdmitError::Code)?;
+    super::record::ClientRecord::pending(device, &code, name).map_err(AdmitError::Record)
+}
+
+/// Why a code did not become a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmitError {
+    /// Not a home code: the prefix, a stray character, the checksum.
+    Code(super::code::CodeError),
+    /// The device identity has no private key.
+    Record(super::record::RecordError),
+}
+
+/// What one archive entry is for the board's model (1415), the board's
+/// form of `client::take_in` without an engine: a message the home took
+/// in for `address` (the home's LXMF address, which the board shows as
+/// its own), one of the home's devices sent, a mark one of them set, a
+/// name the home heard. `None` for the rest: their states and receipts
+/// change bubbles the board does not keep yet, and a kind from a later
+/// home the board cannot read. The board has not checked a received
+/// message's signature: it has no sender's identity, so it says
+/// `verified: false` and the model shows it so.
+pub fn fold(entry: &wire::Entry, address: &[u8; 16]) -> Option<OutboxEvent> {
+    use leviculum_lxmf::{DeliveryMethod, Message};
+    match entry.kind {
+        super::KIND_RECEIVED => {
+            let message =
+                Message::unpack(&entry.packed, None, None, DeliveryMethod::Direct).ok()?;
+            (message.destination_hash == *address).then_some(OutboxEvent::Received {
+                message_id: message.message_id,
+                source: message.source_hash,
+                title: message.title,
+                body: message.content,
+                fields: message.fields,
+                verified: false,
+            })
+        }
+        super::KIND_SENT => {
+            let message =
+                Message::unpack(&entry.packed, None, None, DeliveryMethod::Direct).ok()?;
+            Some(OutboxEvent::HomeSent {
+                message_id: message.message_id,
+                destination: message.destination_hash,
+                sent_at: message.timestamp as i64,
+                body: message.content,
+                fields: message.fields,
+            })
+        }
+        super::KIND_MARK => wire::read_mark(&entry.packed)
+            .ok()
+            .map(|mark| OutboxEvent::HomeMarked { mark }),
+        super::KIND_NAME => wire::read_name_entry(&entry.packed)
+            .ok()
+            .map(|(destination, name)| OutboxEvent::Announced {
+                destination,
+                name: Some(name),
+                path_response: false,
+            }),
+        _ => None,
     }
 }
 

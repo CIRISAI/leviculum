@@ -147,7 +147,17 @@ pub struct Page {
     pub more: bool,
     /// The oldest sequence the archive holds; 0 when it is empty.
     pub first: u64,
+    /// How many entries wait after this page (1415): a fifth element the
+    /// home sends only to a client that asked a page bound, which is a
+    /// client from 1363 on that reads it; one that asked none gets the
+    /// four elements it always read. What makes "pulled N of M" on the
+    /// board's screen.
+    pub left: Option<u64>,
 }
+
+/// What `left` is while the home cuts a page to its bound: the longest
+/// number msgpack writes, so the cut leaves room for the real count.
+pub const LEFT_UNCOUNTED: u64 = u64::MAX;
 
 /// How a request went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,13 +384,16 @@ pub fn read_wake(data: &[u8]) -> Result<u64, Malformed> {
 
 pub fn sync_answer(page: &Page) -> Vec<u8> {
     let mut out = Vec::new();
-    msgpack::array(&mut out, 4);
+    msgpack::array(&mut out, 4 + usize::from(page.left.is_some()));
     msgpack::uint(&mut out, Status::Ok.code());
     msgpack::uint(&mut out, page.first);
     msgpack::bool(&mut out, page.more);
     msgpack::array(&mut out, page.entries.len());
     for entry in &page.entries {
         entry_out(&mut out, entry);
+    }
+    if let Some(left) = page.left {
+        msgpack::uint(&mut out, left);
     }
     out
 }
@@ -836,7 +849,8 @@ pub fn read_sync_answer(data: &[u8]) -> Result<Result<Page, Status>, Malformed> 
         return Ok(Err(status));
     }
     let mut p = 0;
-    if msgpack::array_len(data, &mut p)? != 4 {
+    let len = msgpack::array_len(data, &mut p)?;
+    if !(4..=5).contains(&len) {
         return Err(Malformed);
     }
     msgpack::read_uint(data, &mut p)?;
@@ -859,10 +873,15 @@ pub fn read_sync_answer(data: &[u8]) -> Result<Result<Page, Status>, Malformed> 
             packed,
         });
     }
+    let left = match len {
+        5 => Some(msgpack::read_uint(data, &mut p)?),
+        _ => None,
+    };
     Ok(Ok(Page {
         entries,
         more,
         first,
+        left,
     }))
 }
 
@@ -1053,8 +1072,27 @@ mod tests {
             ],
             more: true,
             first: 2,
+            left: None,
         };
-        assert_eq!(read_sync_answer(&sync_answer(&page)), Ok(Ok(page)));
+        assert_eq!(read_sync_answer(&sync_answer(&page)), Ok(Ok(page.clone())));
+        // A paged answer says how many wait (1415); a home that says none
+        // is read as before.
+        let counted = Page {
+            left: Some(41),
+            ..page.clone()
+        };
+        let answer = sync_answer(&counted);
+        assert_eq!(answer.len(), sync_answer(&page).len() + 1);
+        assert_eq!(read_sync_answer(&answer), Ok(Ok(counted)));
+        // The placeholder the cut counts with is the longest a count gets.
+        let placeholder = Page {
+            left: Some(LEFT_UNCOUNTED),
+            ..page.clone()
+        };
+        assert_eq!(
+            sync_answer(&placeholder).len(),
+            sync_answer(&page).len() + 9
+        );
     }
 
     #[test]

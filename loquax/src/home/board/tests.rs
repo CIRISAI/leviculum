@@ -23,6 +23,7 @@ use crate::home::ask::{Ask, Verb, ATTEMPTS, LORA_PAGE_BYTES};
 use crate::home::code::HomeCode;
 use crate::home::record::{Admission, ClientRecord};
 use crate::home::{JOIN_PATH, KIND_RECEIVED, SYNC_PATH};
+use crate::ui::strings::Lang;
 
 #[derive(Clone)]
 struct TestClock(Arc<AtomicU64>);
@@ -100,9 +101,16 @@ impl Home {
                         .collect(),
                     more: false,
                     first: self.archive.first().map_or(0, |entry| entry.seq),
+                    left: None,
                 };
                 if let Some(asked) = asked {
+                    // As the home does (`server::sync`): count with the
+                    // longest number, cut, then say how many wait.
+                    page.left = Some(wire::LEFT_UNCOUNTED);
                     wire::fit_page(&mut page, asked as usize);
+                    let after = page.entries.last().map_or(cursor, |entry| entry.seq);
+                    let left = self.archive.iter().filter(|entry| entry.seq > after);
+                    page.left = Some(left.count() as u64);
                 }
                 wire::sync_answer(&page)
             }
@@ -575,4 +583,195 @@ fn a_refit_asks_the_same_page_smaller_and_only_a_pull() {
         Step::Done(Err(HomeError::Transfer(_)))
     ));
     assert_eq!(ATTEMPTS, 3);
+}
+
+/// 1415: the pages say how many wait, so the board counts "N of M" as it
+/// pulls, and a link broken mid-pull counts on from where it was, never
+/// past M and never an entry twice.
+#[test]
+fn the_pull_counts_n_of_m_and_a_break_does_not_count_twice() {
+    for break_at in [None, Some(2)] {
+        let archive: Vec<_> = (1..=6).map(|seq| entry(seq, 150)).collect();
+        let mut bench = Bench::new(archive);
+        let record = bench.join();
+        bench.home.break_at = break_at;
+        let pulled = bench.pull(&record, lora());
+        assert!(matches!(
+            pulled,
+            Some(Ok(Outcome::Pulled { entries: 6, .. }))
+        ));
+        let mut progress = Progress::default();
+        let mut seen = Vec::new();
+        for page in &bench.pages {
+            progress.page(page);
+            seen.push((progress.taken, progress.of));
+        }
+        assert!(seen.iter().all(|&(_, of)| of == Some(6)), "{seen:?}");
+        assert_eq!(seen.last(), Some(&(6, Some(6))));
+        assert!(seen.windows(2).all(|w| w[0].0 < w[1].0), "{seen:?}");
+        let mut session = Session::new();
+        session.finished(bench.now(), &pulled.expect("done"));
+        assert_eq!(
+            Word::of(&session, true, Some(progress))
+                .text()
+                .resolve(Lang::En),
+            "Fetched 6 of 6"
+        );
+    }
+}
+
+/// 1415: the word the board's top bar shows for each state of its client,
+/// in both languages; the M9 needed four words the catalogue lacked.
+#[test]
+fn the_word_follows_the_session() {
+    let mut session = Session::new();
+    let word = |session: &Session, admitted, progress| Word::of(session, admitted, progress);
+    assert_eq!(word(&session, false, None), Word::Joining);
+    assert_eq!(
+        Word::Joining.text().resolve(Lang::De),
+        "Verbinde mit deinem Postfach"
+    );
+    session.finished(1, &Err(HomeError::NoPath));
+    assert_eq!(word(&session, false, None), Word::Unreachable);
+    assert_eq!(word(&session, true, None), Word::Unreachable);
+    assert_eq!(
+        Word::Unreachable.text().resolve(Lang::En),
+        "Mailbox unreachable"
+    );
+    session.finished(2, &Err(HomeError::Refused(Status::BadToken)));
+    assert_eq!(word(&session, false, None), Word::CodeRefused);
+    assert_eq!(
+        Word::CodeRefused.text().resolve(Lang::En),
+        "The mailbox did not take this code. Make a new one on the computer."
+    );
+    assert_eq!(word(&session, true, None), Word::Refused);
+    session.finished(3, &Ok(Outcome::Joined));
+    assert_eq!(word(&session, true, None), Word::Connected);
+    let some = Progress { taken: 4, of: None };
+    assert_eq!(
+        word(&session, true, Some(some)).text().resolve(Lang::En),
+        "Fetched 4"
+    );
+    let counted = Progress {
+        taken: 4,
+        of: Some(9),
+    };
+    assert_eq!(
+        word(&session, true, Some(counted)).text().resolve(Lang::De),
+        "4 von 9 abgeholt"
+    );
+    // Nothing taken is no news: the word stays "connected".
+    assert_eq!(
+        word(&session, true, Some(Progress::default())),
+        Word::Connected
+    );
+}
+
+/// 1415: a code as `loquax mailbox admit` prints it, with its rendezvous,
+/// in capitals or broken over lines, becomes the pending record; a typo
+/// and a foreign text are refused by name and make none.
+#[test]
+fn a_code_becomes_a_pending_record_and_a_bad_one_none() {
+    let bench = Bench::new(Vec::new());
+    let text = bench.code.encode();
+    let record = admit(&text, &bench.device, "M9").expect("record");
+    assert_eq!(record.home, bench.code.public_key);
+    assert_eq!(
+        record.admission,
+        Admission::Pending {
+            token: bench.code.token
+        }
+    );
+    assert_eq!(record.name, "M9");
+    let with_rendezvous = bench
+        .code
+        .encode_with_rendezvous(&[std::string::String::from("leviculum.network:4242")]);
+    assert_eq!(
+        admit(&with_rendezvous, &bench.device, "M9"),
+        Ok(record.clone())
+    );
+    let shouted = std::format!(" {} \n", text.to_uppercase());
+    assert_eq!(admit(&shouted, &bench.device, "M9"), Ok(record));
+    let mut typo = text.clone();
+    let other = if &typo[40..41] == "a" { "b" } else { "a" };
+    typo.replace_range(40..41, other);
+    assert_eq!(
+        admit(&typo, &bench.device, "M9"),
+        Err(AdmitError::Code(crate::home::code::CodeError::Checksum))
+    );
+    assert_eq!(
+        admit("hello", &bench.device, "M9"),
+        Err(AdmitError::Code(crate::home::code::CodeError::Prefix))
+    );
+}
+
+/// 1415: what the board's model takes from the archive. A message the
+/// home took in for its address is a received one, unchecked; one for
+/// another address and bytes that are no message are nothing; a sent one
+/// is the home's devices' bubble; a mark and a name pass as the engine
+/// passes them; a kind the board does not show is nothing.
+#[test]
+fn entries_fold_into_what_the_model_takes() {
+    use leviculum_lxmf::{DeliveryMethod, Message};
+    let me = Identity::generate(&mut OsRng);
+    let friend = Identity::generate(&mut OsRng);
+    let address = crate::home::lxmf_address(&me.public_key_bytes()).expect("address");
+    let theirs = crate::home::lxmf_address(&friend.public_key_bytes()).expect("address");
+    let pack = |from: &Identity, to: [u8; 16], body: &str| {
+        let source = crate::home::lxmf_address(&from.public_key_bytes()).expect("address");
+        Message::create(
+            to,
+            source,
+            from,
+            1_762_000_000.0,
+            std::vec::Vec::new(),
+            body.as_bytes().to_vec(),
+            std::vec::Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("create")
+        .pack()
+    };
+    let at = |kind, packed| wire::Entry {
+        seq: 1,
+        kind,
+        at: 1_762_000_000,
+        packed,
+    };
+    let received = at(KIND_RECEIVED, pack(&friend, address, "hallo"));
+    match fold(&received, &address) {
+        Some(OutboxEvent::Received {
+            source,
+            body,
+            verified,
+            ..
+        }) => {
+            assert_eq!(source, theirs);
+            assert_eq!(body, b"hallo");
+            assert!(!verified, "the board checked no signature");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fold(&received, &theirs), None);
+    assert_eq!(fold(&at(KIND_RECEIVED, std::vec![1, 2, 3]), &address), None);
+    let sent = at(crate::home::KIND_SENT, pack(&me, theirs, "zurück"));
+    assert!(matches!(
+        fold(&sent, &address),
+        Some(OutboxEvent::HomeSent { destination, ref body, .. }) if destination == theirs && body == "zurück".as_bytes()
+    ));
+    let mark = wire::Mark {
+        flag: wire::MarkFlag::Read,
+        ids: std::vec![[7; 32]],
+    };
+    assert_eq!(
+        fold(
+            &at(crate::home::KIND_MARK, wire::mark_request(&mark)),
+            &address
+        ),
+        Some(OutboxEvent::HomeMarked { mark })
+    );
+    assert_eq!(
+        fold(&at(crate::home::KIND_DELIVERED, std::vec![7; 32]), &address),
+        None
+    );
 }

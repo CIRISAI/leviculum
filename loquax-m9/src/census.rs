@@ -317,9 +317,11 @@ pub fn lora_answers(all: &[loquax::home::wire::Entry]) -> alloc::vec::Vec<alloc:
             entries: all[at..].to_vec(),
             more: false,
             first: 1,
+            left: Some(wire::LEFT_UNCOUNTED),
         };
         wire::fit_page(&mut page, LORA_PAGE_BYTES);
         at += page.entries.len();
+        page.left = Some((all.len() - at) as u64);
         answers.push(wire::sync_answer(&page));
     }
     answers

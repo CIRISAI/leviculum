@@ -1883,7 +1883,23 @@ impl Store {
             entries,
             more,
             first: first.map_or(0, |seq| seq as u64),
+            left: None,
         })
+    }
+
+    /// How many archive entries come after `seq` (1415): what a paged
+    /// `/sync` answer says still waits.
+    pub fn archive_count_after(&self, seq: u64) -> Result<u64, StoreError> {
+        let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM archive WHERE identity = ?1 AND seq > ?2",
+                params![&self.identity[..], seq],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(u64::try_from(count).unwrap_or(0))
     }
 
     /// The archive's newest sequence, 0 when it is empty: what a wake

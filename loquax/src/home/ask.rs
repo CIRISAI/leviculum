@@ -714,6 +714,7 @@ mod tests {
             entries,
             more,
             first: 1,
+            left: None,
         };
         let one = page(alloc::vec![entry(4), entry(5)], true);
         assert_eq!(

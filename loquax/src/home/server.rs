@@ -1170,13 +1170,26 @@ fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
     match store.archive_since(cursor, bound) {
         Ok(mut page) => {
             if asked.is_some() {
+                // A client that asks a bound reads how many wait (1415);
+                // the cut counts with the longest such number, so the
+                // real one never pushes the answer past the bound.
+                page.left = Some(wire::LEFT_UNCOUNTED);
                 wire::fit_page(&mut page, bound);
+                let after = page.entries.last().map_or(cursor, |entry| entry.seq);
+                match store.archive_count_after(after) {
+                    Ok(left) => page.left = Some(left),
+                    Err(error) => {
+                        tracing::warn!("HOME sync: {error}");
+                        return wire::status_answer(Status::Failed);
+                    }
+                }
             }
             tracing::info!(
-                "HOME sync device={} cursor={cursor} entries={} more={}",
+                "HOME sync device={} cursor={cursor} entries={} more={} left={}",
                 crate::address::to_hex(&device),
                 page.entries.len(),
-                page.more
+                page.more,
+                page.left.map_or(-1, |left| left as i64)
             );
             wire::sync_answer(&page)
         }
@@ -2263,6 +2276,8 @@ mod tests {
             assert!(!page.entries.is_empty());
             walked.extend(page.entries.iter().map(|e| e.seq));
             cursor = page.entries.last().expect("one").seq;
+            // 1415: the page says how many wait after it, exactly.
+            assert_eq!(page.left, Some((seqs.len() - walked.len()) as u64));
             if !page.more {
                 break;
             }
@@ -2277,14 +2292,12 @@ mod tests {
             100.0,
         );
         assert!(whole.bytes.len() > bound);
-        assert_eq!(
-            read_sync_answer(&whole.bytes)
-                .expect("answer")
-                .expect("page")
-                .entries
-                .len(),
-            5
-        );
+        let whole = read_sync_answer(&whole.bytes)
+            .expect("answer")
+            .expect("page");
+        assert_eq!(whole.entries.len(), 5);
+        // A client that asked no bound gets the four elements it reads.
+        assert_eq!(whole.left, None);
         // One entry larger than the bound still comes, alone.
         let big = store
             .archive_append(KIND_RECEIVED, &[9; 32], &[9; 600], 50, u64::MAX)

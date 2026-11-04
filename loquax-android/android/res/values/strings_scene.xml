@@ -319,6 +319,10 @@
     <string name="join_bad_where">Loquax cannot read where the mailbox is. It looks like 192.168.1.20:4242.</string>
     <string name="join_failed">Joining the mailbox did not work.</string>
     <string name="join_other_mailbox">This phone already reads another mailbox.</string>
+    <string name="home_joining">Joining your mailbox</string>
+    <string name="home_fetched">Fetched %1$d of %2$d</string>
+    <string name="home_fetched_some">Fetched %1$d</string>
+    <string name="home_unreachable">Mailbox unreachable</string>
     <string name="link_on_computer">Your mailbox is on a computer. Link the other device there.</string>
     <string name="move_on_computer">Your mailbox is on a computer. Your new phone joins it there.</string>
     <string name="move_failed">The move did not work. Your old phone still has everything.</string>
