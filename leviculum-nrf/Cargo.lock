@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.10.0-dev.3"
+version = "0.10.0-dev.4"
 dependencies = [
  "aes",
  "cbc",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.10.0-dev.3"
+version = "0.10.0-dev.4"
 dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-nrf"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
