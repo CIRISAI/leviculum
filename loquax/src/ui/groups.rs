@@ -47,8 +47,9 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
 use leviculum_lxmf::lev::{
-    DigestLine, GroupStatus, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, LEFT_OUT_FILE,
-    LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_ADMIN, MEMBER_JOINED, MEMBER_LEFT,
+    DigestLine, GroupStatus, Lev, Member, Members, StandIn, CAP_GROUPS, CAP_READ_RECEIPTS,
+    LEFT_OUT_FILE, LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_ADMIN, MEMBER_JOINED,
+    MEMBER_LEFT,
 };
 use leviculum_lxmf::Field;
 use leviculum_ui::delivery::DeliveryState;
@@ -296,13 +297,52 @@ pub fn is_state(body: &str, fields: &[Field]) -> bool {
 /// The writer of a group's copy and the text the home put after its
 /// `"Name: "` prefix (study 3.1): `(writer, name, text)`. None for a
 /// message that is no copy.
-pub fn copy_of<'a>(body: &'a str, fields: &[Field]) -> Option<([u8; 16], &'a str, &'a str)> {
+///
+/// The writer comes from the copy's `0x02` and the name from `info`, the
+/// group's membership, and exactly `"name: "` (or `"name:"`) is taken off,
+/// so a name with a colon in it stays whole (1388). A copy whose text is
+/// the home's sentence for a message without words, `"Photo from Anna"`
+/// ([`StandIn`]), has no text: the bubble draws the photo under its
+/// writer. Only for a writer the membership does not name is the name
+/// what stands before the first colon, or after the sentence's words.
+pub fn copy_of<'a>(
+    body: &'a str,
+    fields: &[Field],
+    info: Option<&'a GroupInfo>,
+) -> Option<([u8; 16], &'a str, &'a str)> {
     let copy = Lev::from_fields(fields)?.group_copy?;
+    let known = info
+        .and_then(|info| info.member(&copy.sender))
+        .map(|m| m.name.as_str())
+        .filter(|name| !name.is_empty());
+    if let Some(name) = known {
+        if StandIn::read(body, fields, name) {
+            return Some((copy.sender, name, ""));
+        }
+        if let Some(rest) = body
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            return Some((copy.sender, name, rest.strip_prefix(' ').unwrap_or(rest)));
+        }
+    }
+    if let Some(name) = StandIn::name_in(body, fields) {
+        return Some((copy.sender, name, ""));
+    }
     let (name, text) = match body.split_once(':') {
         Some((name, rest)) => (name, rest.strip_prefix(' ').unwrap_or(rest)),
         None => ("", body),
     };
     Some((copy.sender, name, text))
+}
+
+/// The words the terminal draws for a group's copy whose text is the
+/// home's sentence for a message without words (1388): `"Anna:"`, the
+/// writer as every other copy names them there, over the media. None for
+/// every other message, whose text the terminal draws as it came.
+pub fn stand_in_line(body: &str, fields: &[Field]) -> Option<String> {
+    Lev::from_fields(fields)?.group_copy?;
+    StandIn::name_in(body, fields).map(|name| alloc::format!("{name}:"))
 }
 
 /// The line a membership from the group at `index` of `messages` makes
@@ -2894,6 +2934,108 @@ mod tests {
             .map(|b| b.body)
             .collect();
         assert_eq!(bodies, ["Anna: Brot\nBob: Danke"]);
+    }
+
+    /// 1388: the bubble takes the writer from `0x02` and strips exactly
+    /// the name the membership gives them, so a name with a colon and a
+    /// line that starts with one stay whole; a photo without words, whose
+    /// copy says "Photo from a:b", is the photo alone under its writer.
+    /// Controls: a writer the membership does not name falls back to the
+    /// split at the first colon, and a stock reader (no `0x02`) keeps the
+    /// text as it came.
+    #[test]
+    fn a_copy_loses_exactly_its_writers_name_and_a_photo_its_sentence() {
+        const CAROL: [u8; 16] = [0x05; 16];
+        let mut model = in_familie(false);
+        arrive(
+            &mut model,
+            GROUP,
+            3,
+            "",
+            members(
+                2,
+                &[
+                    (LEW, "Lew", 2 | 4),
+                    (ME, "Me", 4),
+                    (ANNA, "a:b", 4),
+                    (BOB, "Bob", 4),
+                ],
+            ),
+        );
+        arrive(&mut model, GROUP, 20, "a:b: hello", copy_at(ANNA, 10));
+        arrive(&mut model, GROUP, 21, "Bob: : smile", copy_at(BOB, 11));
+        let photo = crate::ui::photos::photo_fields("webp", vec![1, 2, 3]);
+        let mut fields = lev_fields(copy_at(ANNA, 12));
+        fields.extend(photo.iter().cloned());
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: [22; 32],
+                source: GROUP,
+                title: Vec::new(),
+                body: b"Photo from a:b".to_vec(),
+                fields,
+                verified: true,
+            }),
+        );
+        // A writer the membership does not name: the split.
+        arrive(
+            &mut model,
+            GROUP,
+            23,
+            "Carol: hi: there",
+            copy_at(CAROL, 13),
+        );
+        let c = group_chat(&model);
+        let drawn: Vec<(String, String, bool)> = super::super::chat::bubbles(&model, c)
+            .into_iter()
+            .filter(|b| !b.note && !b.ours)
+            .map(|b| {
+                (
+                    b.writer.map(|w| w.1).unwrap_or_default(),
+                    b.body,
+                    b.photo.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("a:b", "hello", false),
+                ("Bob", ": smile", false),
+                ("a:b", "", true),
+                ("Carol", "hi: there", false),
+            ]
+            .map(|(w, b, p)| (w.to_string(), b.to_string(), p))
+        );
+
+        // The terminal names the writer over the photo as every copy does
+        // there, `"a:b:"`, and never says the sentence.
+        let rows: Vec<String> = super::super::view(&model)
+            .messages
+            .iter()
+            .map(|row| row.cells.iter().map(|c| c.ch).collect::<String>())
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.trim_start().starts_with("a:b:") && !row.contains("hello")),
+            "{rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Photo from")),
+            "{rows:#?}"
+        );
+
+        // Control: a stock reader's copy has no 0x02, its text stays.
+        let mut stock = in_familie(false);
+        arrive(&mut stock, GROUP, 20, "Photo from a:b", Lev::default());
+        let c = group_chat(&stock);
+        let bodies: Vec<String> = super::super::chat::bubbles(&stock, c)
+            .into_iter()
+            .filter(|b| !b.note)
+            .map(|b| b.body)
+            .collect();
+        assert_eq!(bodies, ["Photo from a:b"]);
     }
 
     fn ended(epoch: u64, list: &[([u8; 16], &str, u64)]) -> Lev {

@@ -93,6 +93,9 @@ reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_travels_both_w
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
+# 1388: a group's photo without words to a stock Python member.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer
 reference/Reticulum/RNS/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
 reference/LXMF/LXMF/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
 reference/Reticulum/RNS/__init__.py loquax/home_node a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later

@@ -10,7 +10,9 @@
 //!
 //! - the content is `"<name>: <text>"` for every copy, the name the admin
 //!   gave the writer: Columba keeps no title (study 1.3), so the content
-//!   is the one place a name survives in every client;
+//!   is the one place a name survives in every client; a copy without
+//!   words is `"Photo from <name>"` and its siblings instead
+//!   ([`copy_text`], 1388);
 //! - a member that showed capability bit 1 gets the `lev` key `0x02` too,
 //!   the writer and the writer's own timestamp, the dedup pair, and the
 //!   membership epoch; a stock member gets no `lev` pair;
@@ -73,7 +75,7 @@ use leviculum_lxmf::constants::{
     FIELD_REACTION, FIELD_REPLY_TO,
 };
 use leviculum_lxmf::lev::{
-    DigestLine, GroupCopy, GroupStatus, Invite, Lev, Member, Members, CAP_GROUPS,
+    DigestLine, GroupCopy, GroupStatus, Invite, Lev, Member, Members, StandIn, CAP_GROUPS,
     CAP_READ_RECEIPTS, LEFT_OUT_FILE, LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_LEFT,
 };
 use leviculum_lxmf::message::Field;
@@ -1271,7 +1273,7 @@ pub fn copy(
     // A reaction is no line: its text (none, mostly) goes as it is.
     let content = match reaction_of(original) {
         Some(_) => original.content.clone(),
-        None => prefixed(writer_name, &original.content),
+        None => copy_text(writer_name, &original.content, &original.fields),
     };
     sign(
         &hosted.identity,
@@ -1283,9 +1285,21 @@ pub fn copy(
     )
 }
 
-/// `"<name>: <text>"`, and `"<name>:"` for a message without text (a
-/// photo without caption still names its sender, study 3.1).
-pub fn prefixed(name: &str, content: &[u8]) -> Vec<u8> {
+/// A copy's text for `name`'s message of `content` and `fields`:
+/// `"<name>: <text>"`, the one wire shape for every member, and for a
+/// message without words the English sentence for what it carries and
+/// from whom, `"Photo from <name>"` ([`StandIn`], 1388, Lew 2026-11-03: a
+/// bare `"<name>:"` under a photo confused a stock member). A message of
+/// none of those kinds keeps `"<name>:"`.
+pub fn copy_text(name: &str, content: &[u8], fields: &[Field]) -> Vec<u8> {
+    match (content.trim_ascii().is_empty(), StandIn::of(fields)) {
+        (true, Some(kind)) => kind.wire(name).into_bytes(),
+        _ => prefixed(name, content),
+    }
+}
+
+/// `"<name>: <text>"`, and `"<name>:"` for a message without text.
+fn prefixed(name: &str, content: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(name.len() + 2 + content.len());
     out.extend_from_slice(name.as_bytes());
     out.push(b':');
@@ -2076,10 +2090,30 @@ mod tests {
         assert!(hosted(home, &scene.store).expect("hosted").is_empty());
     }
 
+    /// 1388: a text gets the name in front; a message without words says
+    /// what it carries and from whom, in English, where it said `"Lew:"`.
     #[test]
-    fn a_name_goes_in_front_of_every_text_and_alone_before_a_photo() {
-        assert_eq!(prefixed("Lew", b"Hallo"), b"Lew: Hallo");
-        assert_eq!(prefixed("Lew", b""), b"Lew:");
+    fn a_name_goes_in_front_of_every_text_and_a_sentence_stands_for_no_words() {
+        let field = |key: i64| vec![(key, vec![0x90])];
+        assert_eq!(
+            copy_text("Lew", b"Hallo", &field(FIELD_IMAGE)),
+            b"Lew: Hallo"
+        );
+        assert_eq!(copy_text("Lew", b"Hallo", &[]), b"Lew: Hallo");
+        let said =
+            |fields: &[Field]| String::from_utf8(copy_text("Lew", b"", fields)).expect("utf-8");
+        assert_eq!(said(&field(FIELD_IMAGE)), "Photo from Lew");
+        assert_eq!(said(&field(FIELD_AUDIO)), "Voice message from Lew");
+        assert_eq!(said(&field(FIELD_FILE_ATTACHMENTS)), "File from Lew");
+        assert_eq!(
+            said(&field(leviculum_lxmf::constants::FIELD_TELEMETRY)),
+            "Position from Lew"
+        );
+        // A whitespace caption is no words either.
+        assert_eq!(
+            copy_text("Lew", b" \n", &field(FIELD_IMAGE)),
+            b"Photo from Lew"
+        );
     }
 
     fn archived(scene: &mut Scene, message: &Message) {
@@ -2425,7 +2459,7 @@ mod tests {
             ),
             (left_out(LEFT_OUT_GONE, "").0, "a message (no longer here)"),
             (
-                String::from_utf8(prefixed("Anna", b"Brot")).expect("utf-8"),
+                String::from_utf8(copy_text("Anna", b"Brot", &[])).expect("utf-8"),
                 "Anna: Brot",
             ),
         ];

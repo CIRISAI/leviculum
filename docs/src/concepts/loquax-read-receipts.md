@@ -155,6 +155,18 @@ no longer there; its text is then the English sentence ("sent a photo
 (too large for the radio)", the caption after `": "`). Every other line
 keeps three elements, and a reader before it reads the first three.
 
+Every copy, to a member that understands groups or not, carries the
+text as `"Name: text"`, one wire shape for all: a Loquax reader takes the
+writer from `0x02` and the name from the membership and strips exactly
+`"Name: "`, so a name with a colon in it stays whole; the prefix is what
+still names the writer when the field is lost. A copy without words
+says what it carries and from whom instead, `"Photo from Lew"`, `"Voice
+message from Lew"`, `"File from Lew"` or `"Position from Lew"`, where it
+said a bare `"Lew:"` before (1388, 2026-11-04). A Loquax reader knows the
+sentence by `0x02`, the writer's name and the kind the fields carry and
+draws the bubble without it: the photo under its writer, and on the
+terminal `"Lew:"` over it as every copy names its writer there.
+
 Wire text is English. Localisation happens on the reader from the lev
 data. The invitation's text, "Lew invited you to Familie: lxma://…
 Reply /leave to leave.", is English whatever the admin's language, and

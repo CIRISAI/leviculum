@@ -1668,11 +1668,30 @@ impl HomeNode {
         rns: &Path,
         home: &Path,
     ) -> Self {
-        let mut transport = ReticulumNodeBuilder::new()
+        Self::start_linked(listener, instance, rns, home, None).await
+    }
+
+    /// [`HomeNode::start`] with a TCP link to a Python daemon on
+    /// `python`, so the home reaches a stock member there.
+    async fn start_linked(
+        listener: std::net::TcpListener,
+        instance: &str,
+        rns: &Path,
+        home: &Path,
+        python: Option<u16>,
+    ) -> Self {
+        let mut builder = ReticulumNodeBuilder::new()
             .enable_transport(true)
             .share_instance(true)
             .instance_name(instance.to_string())
-            .add_tcp_server_listener(listener)
+            .add_tcp_server_listener(listener);
+        if let Some(port) = python {
+            let python: std::net::SocketAddr = format!("127.0.0.1:{port}")
+                .parse()
+                .expect("loopback address");
+            builder = builder.add_tcp_client(python);
+        }
+        let mut transport = builder
             .storage_path(rns.join("storage"))
             .build_sync()
             .expect("the transport node");
@@ -6389,5 +6408,132 @@ async fn a_group_made_on_the_phone_is_in_the_list_at_once_and_after_a_restart() 
     })
     .await
     .expect("the second session");
+    node.stop().await;
+}
+
+/// 1388, Lew's live test with a stock Columba member 2026-11-03: a photo
+/// without words from the phone, in a group on its home, reaches a stock
+/// Python member from the group's address as the photo with the English
+/// sentence `"Photo from <name>"`, not the bare `"<name>:"` it said before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer() {
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start_linked(
+        listener,
+        &instance,
+        rns.path(),
+        home.path(),
+        Some(peer.rns_port),
+    )
+    .await;
+    // The home learns the stock member's key before it invites it.
+    peer.lxmf_announce();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let bob = python.clone();
+    let (session, group) = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let verb = |verb: &str, peer: &str, text: &str| {
+            session
+                .request(Request::Group {
+                    verb: verb.to_string(),
+                    peer: peer.to_string(),
+                    member: String::new(),
+                    text: text.to_string(),
+                    confirmed: false,
+                })
+                .unwrap_or_else(|error| panic!("{verb}: {error}"));
+        };
+        verb("new", "", "");
+        verb("pick", &bob, "");
+        verb("next", "", "");
+        verb("name", "", "Familie");
+        while session.next_event(Duration::from_millis(300)).is_some() {}
+        verb("create", "", "");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let group = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no changed with the group"
+            );
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Notice { text, .. }) => panic!("the home refused: {text}"),
+                Some(Event::Changed { .. }) => {
+                    let shown: schema::Conversations = rmp_serde::from_slice(
+                        &session
+                            .query(schema::Query::Conversations { search: None })
+                            .expect("the list"),
+                    )
+                    .expect("decode");
+                    if let Some(row) = shown
+                        .conversations
+                        .iter()
+                        .find(|row| row.name.starts_with("Familie"))
+                    {
+                        break row.peer.clone();
+                    }
+                }
+                _ => {}
+            }
+        };
+        session
+            .request(Request::Photo {
+                peer: group.clone(),
+                data: schema::Blob(PHOTO.to_vec()),
+            })
+            .unwrap_or_else(|error| panic!("the photo: {error}"));
+        (session, group)
+    })
+    .await
+    .expect("the session");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let got = loop {
+        let found = peer
+            .received()
+            .into_iter()
+            .find(|m| m["source_hash"] == group.as_str() && python_photo(m).is_some());
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stock member never got the photo: {:?}",
+            peer.received()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    // The peer hands content over as hex.
+    let content = got["content"].as_str().expect("content");
+    let content: Vec<u8> = (0..content.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&content[i..i + 2], 16).expect("hex"))
+        .collect();
+    let content = String::from_utf8(content).expect("utf-8");
+    let name = content
+        .strip_prefix("Photo from ")
+        .unwrap_or_else(|| panic!("the sentence, not {content:?}"));
+    assert!(
+        !name.is_empty() && !name.contains(':'),
+        "a name after it: {content:?}"
+    );
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
     node.stop().await;
 }

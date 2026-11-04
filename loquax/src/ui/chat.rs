@@ -600,7 +600,7 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 1 => (0, None),
                 n => (n, run.first().and_then(|&f| conversation.messages[f].at)),
             };
-            let copy = super::groups::copy_of(&message.body, &message.fields)
+            let copy = super::groups::copy_of(&message.body, &message.fields, info)
                 .filter(|_| group && !message.outbound);
             // The reader's own word for the writer, else the admin's
             // (1307); the bare name, as a group's sender line has it.
