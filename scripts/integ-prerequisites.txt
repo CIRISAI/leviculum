@@ -67,6 +67,12 @@ reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_w
 # panics naming the submodule when it is not checked out.
 reference/LXMF/LXMF/__init__.py leviculum-lxmf/reference_lock
 
+# leviculum-lxmf lev_status_reference feeds the announce of a node that
+# serves /lev/status to the reference's pn_announce_data_is_valid, which
+# imports RNS and LXMF out of reference/ (order 1394).
+reference/Reticulum/RNS/__init__.py leviculum-lxmf/lev_status_reference
+reference/LXMF/LXMF/__init__.py leviculum-lxmf/lev_status_reference
+
 # loquax python_interop drives scripts/test_daemon.py, which imports RNS and
 # LXMF out of reference/ and tells the caller to init the submodule.
 # PythonPeer::start asserts the daemon says READY; there is no skip guard.

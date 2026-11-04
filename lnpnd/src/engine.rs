@@ -49,7 +49,7 @@ use leviculum_lxmf::MAX_EXPIRED_PER_TICK;
 use leviculum_lxmf::{
     Eviction, EvictionReason, FetchPlan, GetOutcome, Message, PropagationBodyStore,
     PropagationNode, PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome,
-    MESSAGE_GET_PATH,
+    LEV_STATUS_PATH, MESSAGE_GET_PATH,
 };
 
 use leviculum_std::file_propagation_store::SettledWrites;
@@ -104,6 +104,13 @@ const POLL_INTERVAL_MS: u64 = 200;
 /// 1.2 ms grind in a release build, so a 1 ms poll is about one extra
 /// tick per upload, and the polling stops with the last verdict.
 const VALIDATION_POLL_MS: u64 = 1;
+
+/// The shortest spacing of two `/lev/status` requests on one link; a
+/// faster one is answered [`PeerError::Throttled`]. A home asks once per
+/// sync round (`docs/src/concepts/loquax-propagation-receipts.md`,
+/// section B), so a link that asks faster is not one; the bound keeps a
+/// stranger from turning one cheap link into a store walk per packet.
+const LEV_STATUS_MIN_SPACING_MS: u64 = 1_000;
 
 /// How many messages one hook invocation may persist before it hands the
 /// core back.
@@ -372,6 +379,9 @@ pub struct Engine<S> {
     /// A message left the store early since the departures were last
     /// saved; the next tick saves them.
     departures_dirty: bool,
+    /// When each open link last asked `/lev/status`
+    /// ([`LEV_STATUS_MIN_SPACING_MS`]); dropped with the link.
+    status_asked_at: HashMap<LinkId, u64>,
 }
 
 /// An accepted upload whose proof waits until its append is durable.
@@ -561,6 +571,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 last_profile: HookTimes::default(),
                 departures_path: None,
                 departures_dirty: false,
+                status_asked_at: HashMap::new(),
             },
             receiver,
         )
@@ -594,6 +605,56 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         match crate::departures::save(path, ready.node.departures()) {
             Ok(()) => self.departures_dirty = false,
             Err(error) => tracing::warn!("lnpnd: departures {}: {error}", path.display()),
+        }
+    }
+
+    /// One `PN_DEPART` line per id that left the store since the last
+    /// hook, whichever path removed it (a `/get` confirmation, an own-
+    /// mailbox delivery, an eviction during an upload or a peer's sync, an
+    /// expiry), and the departures marked for the next save.
+    fn log_departures(&mut self, ready: &mut Ready<S>) {
+        let fresh = ready.node.take_fresh_departures();
+        if fresh.is_empty() {
+            return;
+        }
+        self.departures_dirty = true;
+        for (transient_id, reason) in fresh {
+            tracing::debug!(
+                event = "PN_DEPART",
+                id = full_hex(&transient_id),
+                reason = reason.word(),
+            );
+        }
+    }
+
+    /// Answer one `/lev/status` request on `link_id`, spaced per link by
+    /// [`LEV_STATUS_MIN_SPACING_MS`]. The link's identity is never asked
+    /// for, so the node learns nothing about who holds the ids.
+    fn answer_lev_status(
+        &mut self,
+        ready: &Ready<S>,
+        link_id: &LinkId,
+        data: &[u8],
+        now_ms: u64,
+    ) -> Vec<u8> {
+        let spaced = self
+            .status_asked_at
+            .get(link_id)
+            .is_none_or(|last| now_ms.saturating_sub(*last) >= LEV_STATUS_MIN_SPACING_MS);
+        if !spaced {
+            tracing::debug!(event = "PN_STATUS", ids = 0usize, result = "throttled");
+            return leviculum_lxmf::lev_status::encode_refusal(PeerError::Throttled);
+        }
+        self.status_asked_at.insert(*link_id, now_ms);
+        match leviculum_lxmf::lev_status::decode_request(data) {
+            Ok(ids) => {
+                tracing::debug!(event = "PN_STATUS", ids = ids.len(), result = "answered");
+                ready.node.answer_lev_status(&ids)
+            }
+            Err(error) => {
+                tracing::debug!(event = "PN_STATUS", ids = 0usize, result = "refused");
+                leviculum_lxmf::lev_status::encode_refusal(error)
+            }
         }
     }
 
@@ -689,6 +750,10 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             OFFER_REQUEST_PATH,
             RequestPolicy::AllowAll,
         );
+        // Ours, announced under `PN_META_CUSTOM` (`leviculum_lxmf::lev_status`):
+        // open to any link, identified or not, so the node never needs to
+        // know who asks.
+        core.register_request_handler(destination_hash, LEV_STATUS_PATH, RequestPolicy::AllowAll);
 
         // The control destination, on the same identity, with its three
         // request handlers behind the allow list — the reference's exact
@@ -758,6 +823,9 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 }
             }
         }
+        // The status answer comes from the departures; without a file they
+        // live in RAM and a restart answers `unknown`.
+        node.serve_lev_status();
         let min_cost = node.min_accepted_cost();
         let mut peering =
             PeeringRuntime::new(peering, peer_store, identity_copy, self.events.clone());
@@ -1311,9 +1379,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         mailbox.deliver_propagated(core, unstamped, out);
         match ready.node.store_mut().purge(transient_id) {
             Ok(_) => {
-                ready
-                    .node
-                    .note_confirmed_deletion(transient_id, unix_secs());
+                ready.node.note_delivered_locally(transient_id, unix_secs());
                 self.departures_dirty = true;
             }
             Err(error) => tracing::warn!("lnpnd: own-mailbox purge failed: {error}"),
@@ -2006,7 +2072,19 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
                     .answer_offer_request(core, &ready.node, link_id, data);
                 self.respond(core, link_id, request_id, &response, &mut out);
             }
+            NodeEvent::RequestReceived {
+                link_id,
+                destination_hash,
+                request_id,
+                path,
+                data,
+                ..
+            } if destination_hash == &ready.destination_hash && path == LEV_STATUS_PATH => {
+                let response = self.answer_lev_status(&ready, link_id, data, core.now_ms());
+                self.respond(core, link_id, request_id, &response, &mut out);
+            }
             NodeEvent::LinkClosed { link_id, .. } => {
+                self.status_asked_at.remove(link_id);
                 self.pending_proofs.remove(link_id);
                 self.unproven
                     .retain(|unproven| &unproven.link_id != link_id);
@@ -2035,6 +2113,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
         }
         self.release_proofs(&mut ready, core, &mut out);
         self.ask_back_for_proofs(core, &mut out);
+        self.log_departures(&mut ready);
         self.profile.lap(Section::Drain);
         self.state = State::Ready(ready);
         // A job queued for the worker, here or by an earlier hook, comes
@@ -2126,6 +2205,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
         ready
             .peering
             .on_tick(core, &mut ready.node, now_ms, &mut out);
+        self.log_departures(&mut ready);
         self.profile.lap(Section::Peering);
 
         self.state = State::Ready(ready);
@@ -2466,7 +2546,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("departures");
         let left = [0x6e; 32];
-        let at = unix_secs() - 60;
+        let at = leviculum_lxmf::Departure {
+            at_secs: unix_secs() - 60,
+            reason: leviculum_lxmf::DepartureReason::Collected,
+        };
         crate::departures::save(&path, [(&left, &at)].into_iter()).expect("saves");
 
         let mut core = core(dir.path());
@@ -2489,6 +2572,189 @@ mod tests {
             crate::departures::load(&path).expect("saved at the sweep"),
             vec![(left, at)]
         );
+    }
+
+    /// A seeded upload envelope for `destination`, unique per `seed`.
+    fn seeded_upload(destination: [u8; 16], seed: u8) -> Vec<u8> {
+        use leviculum_lxmf::constants::LXMF_OVERHEAD;
+        let mut lxmf = destination.to_vec();
+        lxmf.resize(LXMF_OVERHEAD + 40, seed);
+        PropagationUpload::single(1.0, lxmf, [0xEE; STAMP_SIZE]).encode()
+    }
+
+    fn seed(engine: &mut Engine<MemoryPropagationStore>, upload: &[u8]) -> TransientId {
+        let State::Ready(ready) = &mut engine.state else {
+            panic!("engine must be ready");
+        };
+        match ready
+            .node
+            .handle_upload(upload, unix_secs(), |_, _| Some(0))
+        {
+            UploadOutcome::Accepted { transient_id, .. } => transient_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Order 1394, the request path end to end: a client that never
+    /// identifies asks `/lev/status` over a real link and gets each id's
+    /// status; a second request on the same link inside the spacing is
+    /// answered `Throttled`. The collection the node saw before leaves its
+    /// `PN_DEPART` line with the full id.
+    #[test]
+    fn a_status_request_on_an_unidentified_link_answers_each_id() {
+        use leviculum_lxmf::lev_status::{decode_answer, encode_request};
+        use leviculum_lxmf::propagation::MessageGetRequest;
+        use leviculum_lxmf::MessageStatus;
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 3600,
+            announce_at_start: true,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        let recipient = [0x3c; 16];
+        let held = seed(&mut engine, &seeded_upload(recipient, 1));
+        let collected = seed(&mut engine, &seeded_upload(recipient, 2));
+        {
+            let State::Ready(ready) = &mut engine.state else {
+                panic!("engine must be ready");
+            };
+            let acknowledge = MessageGetRequest::acknowledge(vec![collected]);
+            ready
+                .node
+                .handle_get(
+                    &acknowledge.encode().expect("encodes"),
+                    &recipient,
+                    unix_secs(),
+                )
+                .expect("the recipient confirms");
+        }
+
+        let unknown = [0x55; 32];
+        let request = encode_request(&[held, collected, unknown]);
+        enable_log_dispatch();
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        let (first, second) = tracing::subscriber::with_default(subscriber, || {
+            let (link_id, _, out) = client
+                .connect(destination_hash, &signing_key)
+                .expect("connect");
+            let (events, _) = converse(&mut engine, &mut server, &mut client, out);
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, NodeEvent::LinkEstablished { .. })),
+                "the link must come up: {events:?}"
+            );
+            assert!(
+                server.get_remote_identity(&link_id).is_none(),
+                "the link must stay unidentified, or the test proves nothing"
+            );
+            let mut ask = || {
+                let (_, out) = client
+                    .send_request(&link_id, LEV_STATUS_PATH, Some(&request), None)
+                    .expect("request");
+                let (events, _) = converse(&mut engine, &mut server, &mut client, out);
+                events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        NodeEvent::ResponseReceived { response_data, .. } => Some(response_data),
+                        _ => None,
+                    })
+                    .expect("the node must answer")
+            };
+            (ask(), ask())
+        });
+        assert_eq!(
+            decode_answer(&first).expect("decodes"),
+            Ok(vec![
+                (held, MessageStatus::Held),
+                (collected, MessageStatus::Collected),
+                (unknown, MessageStatus::Unknown),
+            ])
+        );
+        assert_eq!(
+            decode_answer(&second).expect("decodes"),
+            Err(PeerError::Throttled.code()),
+            "a second request inside the spacing is throttled"
+        );
+
+        let log = capture.unquoted();
+        let departs: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=PN_DEPART"))
+            .collect();
+        assert_eq!(departs.len(), 1, "{log}");
+        assert!(
+            departs[0].contains(&format!("id={}", full_hex(&collected)))
+                && departs[0].contains("reason=collected"),
+            "{}",
+            departs[0]
+        );
+        let statuses: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=PN_STATUS"))
+            .collect();
+        assert_eq!(statuses.len(), 2, "{log}");
+        assert!(statuses[0].contains("ids=3") && statuses[0].contains("result=answered"));
+        assert!(statuses[1].contains("result=throttled"), "{}", statuses[1]);
+    }
+
+    /// The own-mailbox path records `delivered`, not `collected`: the
+    /// operator's mailbox took it, no recipient's client confirmed.
+    #[test]
+    fn an_own_mailbox_delivery_departs_as_delivered() {
+        use leviculum_lxmf::{DepartureReason, MessageStatus};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = engine_with(Vec::new(), Some(mailbox_config()));
+        let now = core.now_ms();
+        let _ = engine.on_tick(&mut core, now);
+        let mailbox_hash = match &engine.state {
+            State::Ready(ready) => ready.mailbox.as_ref().expect("mailbox").delivery_hash,
+            _ => panic!("engine must be ready"),
+        };
+        let mine = seed(&mut engine, &seeded_upload(mailbox_hash, 1));
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let _ = ready.node.take_fresh_departures();
+        let mut out = TickOutput::empty();
+        engine.deliver_own_mailbox(&mut ready, &mut core, &mine, &mailbox_hash, &mut out);
+        assert_eq!(ready.node.status_of(&mine), MessageStatus::Delivered);
+        assert_eq!(
+            ready.node.take_fresh_departures(),
+            vec![(mine, DepartureReason::Delivered)]
+        );
+        assert!(engine.departures_dirty);
     }
 
     /// Each of those announces leaves an `ANN_TX` line in the node's own

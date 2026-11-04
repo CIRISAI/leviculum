@@ -33,6 +33,7 @@ use leviculum_core::{Destination, Identity};
 
 use crate::{
     constants::{DESTINATION_LENGTH, STAMP_SIZE},
+    lev_status::{self, DepartureReason, MessageStatus},
     msgpack,
     node::APP_NAME,
     propagation::{
@@ -487,6 +488,25 @@ impl Default for PropagationNodeConfig {
             prioritised_destinations: Vec::new(),
         }
     }
+}
+
+/// When and why one message left the store ([`PropagationNode::departures`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Departure {
+    pub at_secs: u64,
+    pub reason: DepartureReason,
+}
+
+/// The departures a host asked the role to keep
+/// ([`PropagationNode::track_departures`]).
+struct Departures {
+    left: alloc::collections::BTreeMap<TransientId, Departure>,
+    /// Departures since the host last took them
+    /// ([`PropagationNode::take_fresh_departures`]), for its log line.
+    fresh: Vec<(TransientId, DepartureReason)>,
+    /// The host answers `/lev/status`, so the announce says so
+    /// ([`PropagationNode::serve_lev_status`]).
+    serves_status: bool,
 }
 
 /// One message removed by expiry or displacement, for the host's `PN_EVICT`
@@ -978,11 +998,11 @@ pub struct PropagationNode<S> {
     /// walk, for [`EVICTION_CANDIDATES_SECS`] ([`Self::make_room`]).
     eviction_candidates: Vec<Eviction>,
     eviction_walked_at: u64,
-    /// Ids that left the store before they expired (a confirmed
-    /// collection, an own-mailbox delivery, a displacement), with when,
-    /// for a host to persist: `None` unless [`Self::track_departures`]
-    /// asked for it, so a board pays nothing.
-    departed: Option<alloc::collections::BTreeMap<TransientId, u64>>,
+    /// Ids that left the store (a confirmed collection, an own-mailbox
+    /// delivery, a displacement, an expiry), with when and why, for a host
+    /// to persist and to answer `/lev/status` from: `None` unless
+    /// [`Self::track_departures`] asked for it, so a board pays nothing.
+    departed: Option<Departures>,
     /// Compute true stamp values even when our own accepted cost is 0.
     /// Set by the engine while any known peer requires a stamp value above
     /// 0 of the messages it takes (`docs/src/concepts/
@@ -1006,10 +1026,11 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// adapter accounts for its own queued writes.
     pub fn heap_bytes(&self) -> usize {
         self.processed.heap_bytes()
-            + self
-                .departed
-                .as_ref()
-                .map_or(0, leviculum_core::heap_census::btree_map_bytes)
+            + self.departed.as_ref().map_or(0, |departed| {
+                leviculum_core::heap_census::btree_map_bytes(&departed.left)
+                    + departed.fresh.capacity()
+                        * core::mem::size_of::<(TransientId, DepartureReason)>()
+            })
             + self.config.name.as_ref().map_or(0, |name| name.capacity())
             + self.eviction_candidates.capacity() * core::mem::size_of::<Eviction>()
     }
@@ -1124,6 +1145,9 @@ impl<S: PropagationStore> PropagationNode<S> {
             let mut raw = Vec::with_capacity(name.len() + 2);
             msgpack::bin(&mut raw, name);
             metadata.push((PN_META_NAME, raw));
+        }
+        if self.departed.as_ref().is_some_and(|d| d.serves_status) {
+            metadata.push(lev_status::capability_metadata());
         }
         let announce = PropagationNodeAnnounce {
             legacy_support: false,
@@ -1644,36 +1668,100 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// has committed, including an independently verified uncertain receipt.
     pub fn note_confirmed_deletion(&mut self, transient_id: &TransientId, now_secs: u64) {
         self.remember_processed(*transient_id, now_secs);
-        self.note_departure(transient_id, now_secs);
+        self.note_departure(transient_id, now_secs, DepartureReason::Collected);
+    }
+
+    /// Remember a message the host delivered to its own mailbox and then
+    /// purged: a duplicate from now on, and `delivered` to `/lev/status`.
+    pub fn note_delivered_locally(&mut self, transient_id: &TransientId, now_secs: u64) {
+        self.remember_processed(*transient_id, now_secs);
+        self.note_departure(transient_id, now_secs, DepartureReason::Delivered);
     }
 
     fn remember_processed(&mut self, transient_id: TransientId, at_secs: u64) {
         self.processed.insert(&transient_id, at_secs);
     }
 
-    fn note_departure(&mut self, transient_id: &TransientId, now_secs: u64) {
+    fn note_departure(
+        &mut self,
+        transient_id: &TransientId,
+        now_secs: u64,
+        reason: DepartureReason,
+    ) {
         if let Some(departed) = self.departed.as_mut() {
-            departed.insert(*transient_id, now_secs);
+            departed.left.insert(
+                *transient_id,
+                Departure {
+                    at_secs: now_secs,
+                    reason,
+                },
+            );
+            departed.fresh.push((*transient_id, reason));
         }
     }
 
-    /// Keep the ids that leave the store before they expire, so a host can
-    /// persist them ([`Self::departures`]) and a restart does not turn a
+    /// Keep the ids that leave the store, with why, so a host can persist
+    /// them ([`Self::departures`]) and a restart does not turn a
     /// re-offered, already-collected message into a revenant: the
     /// reference persists its whole duplicate set
     /// (`locally_processed_transient_ids`,
     /// `reference/LXMF/LXMF/LXMRouter.py:2496`, saved at `:1018-1024`).
-    /// Expired ones are not kept: past the expiry window a peer re-offers
-    /// what it received after us, and it is a new copy for us too.
+    /// Expired ones are kept for `/lev/status` but are no duplicates
+    /// ([`DepartureReason::blocks_reoffer`]).
     pub fn track_departures(&mut self) {
-        self.departed
-            .get_or_insert_with(alloc::collections::BTreeMap::new);
+        self.departed.get_or_insert_with(|| Departures {
+            left: alloc::collections::BTreeMap::new(),
+            fresh: Vec::new(),
+            serves_status: false,
+        });
     }
 
-    /// The departed ids and when they left, held to the expiry window by
-    /// [`Self::tick`]; empty unless [`Self::track_departures`] was called.
-    pub fn departures(&self) -> impl Iterator<Item = (&TransientId, &u64)> {
-        self.departed.iter().flat_map(|departed| departed.iter())
+    /// Track departures and say in the announce that this node answers
+    /// `/lev/status` ([`crate::lev_status`]); the host serves the path.
+    pub fn serve_lev_status(&mut self) {
+        self.track_departures();
+        if let Some(departed) = self.departed.as_mut() {
+            departed.serves_status = true;
+        }
+    }
+
+    /// The departed ids, when and why they left, held to the expiry window
+    /// by [`Self::tick`]; empty unless [`Self::track_departures`] was
+    /// called.
+    pub fn departures(&self) -> impl Iterator<Item = (&TransientId, &Departure)> {
+        self.departed
+            .iter()
+            .flat_map(|departed| departed.left.iter())
+    }
+
+    /// The departures since the last call, in the order they happened, for
+    /// the host's `PN_DEPART` line; restored ones are not among them.
+    pub fn take_fresh_departures(&mut self) -> Vec<(TransientId, DepartureReason)> {
+        self.departed
+            .as_mut()
+            .map(|departed| core::mem::take(&mut departed.fresh))
+            .unwrap_or_default()
+    }
+
+    /// What `/lev/status` answers for `transient_id`: held while the store
+    /// has it, else why it left, else unknown.
+    pub fn status_of(&self, transient_id: &TransientId) -> MessageStatus {
+        if self.store.contains(transient_id).unwrap_or(false) {
+            return MessageStatus::Held;
+        }
+        self.departed
+            .as_ref()
+            .and_then(|departed| departed.left.get(transient_id))
+            .map_or(MessageStatus::Unknown, |departure| {
+                MessageStatus::of_departure(departure.reason)
+            })
+    }
+
+    /// The `/lev/status` answer for `ids`, decoded by the host
+    /// ([`lev_status::decode_request`]), which also owns the refusals.
+    pub fn answer_lev_status(&self, ids: &[TransientId]) -> Vec<u8> {
+        let entries: Vec<_> = ids.iter().map(|id| (*id, self.status_of(id))).collect();
+        lev_status::encode_answer(&entries)
     }
 
     /// Re-seed the duplicate cache with persisted departures, skipping
@@ -1681,18 +1769,22 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// was restored is persisted again.
     pub fn restore_departures(
         &mut self,
-        entries: impl IntoIterator<Item = (TransientId, u64)>,
+        entries: impl IntoIterator<Item = (TransientId, Departure)>,
         now_secs: u64,
     ) -> usize {
         self.track_departures();
         let window = self.config.message_expiry_secs;
         let mut restored = 0;
-        for (transient_id, departed_at) in entries {
-            if now_secs.saturating_sub(departed_at) > window {
+        for (transient_id, departure) in entries {
+            if now_secs.saturating_sub(departure.at_secs) > window {
                 continue;
             }
-            self.remember_processed(transient_id, departed_at);
-            self.note_departure(&transient_id, departed_at);
+            if departure.reason.blocks_reoffer() {
+                self.remember_processed(transient_id, departure.at_secs);
+            }
+            if let Some(departed) = self.departed.as_mut() {
+                departed.left.insert(transient_id, departure);
+            }
             restored += 1;
         }
         restored
@@ -1782,10 +1874,15 @@ impl<S: PropagationStore> PropagationNode<S> {
             });
         expired.retain(|eviction| self.store.purge(&eviction.transient_id).unwrap_or(false));
         self.evicted_total += expired.len() as u64;
+        for eviction in &expired {
+            self.note_departure(&eviction.transient_id, now_secs, DepartureReason::Expired);
+        }
 
         self.processed.prune(now_secs, PROCESSED_ID_EXPIRY_SECS);
         if let Some(departed) = self.departed.as_mut() {
-            departed.retain(|_, left| now_secs.saturating_sub(*left) <= expiry);
+            departed
+                .left
+                .retain(|_, left| now_secs.saturating_sub(left.at_secs) <= expiry);
         }
         expired
     }
@@ -1848,7 +1945,7 @@ impl<S: PropagationStore> PropagationNode<S> {
                 break;
             };
             if self.store.purge(&candidate.transient_id).unwrap_or(false) {
-                self.note_departure(&candidate.transient_id, now_secs);
+                self.note_departure(&candidate.transient_id, now_secs, DepartureReason::Evicted);
                 evicted.push(Eviction {
                     age_secs: now_secs.saturating_sub(self.eviction_walked_at) + candidate.age_secs,
                     ..candidate

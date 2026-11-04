@@ -52,7 +52,7 @@ not read is skipped while the rest are still read.
 | A file Loquax sends | 990 000 bytes | `loquax::ui::files::LARGEST`, the same budget as an original photo |
 | Any receiver, direct or over a link | 1000 KB a message | `DELIVERY_LIMIT`, `reference/LXMF/LXMF/LXMRouter.py:60`, applied at `:1979`; ours `leviculum_lxmf::constants::DELIVERY_LIMIT_BYTES` |
 | A stock Python propagation node (lxmd) | 256 KB a message | `PROPAGATION_LIMIT`, `reference/LXMF/LXMF/LXMRouter.py:55`; lxmd's `propagation_transfer_max_accepted_size` default, `reference/LXMF/LXMF/Utilities/lxmd.py:165-177` |
-| lnpnd | 4 KB a message with no config file or flag, 256 with lxmd's config | `transfer_limit_kb`'s fallback `unwrap_or(4)`, `lnpnd/src/main.rs:465-471` |
+| lnpnd | 4 KB a message with no config file or flag, 256 with lxmd's config | `transfer_limit_kb`'s fallback `unwrap_or(4)`, `lnpnd/src/main.rs:466-472` |
 | A Loquax Mailbox's archive | 1024 MB in all, oldest first out | `DEFAULT_ARCHIVE_CAP_MB`, `loquax/src/home.rs:300`, `archive_cap_mb` in the config |
 | Columba | none of its own | `MAX_SINGLE_FILE_SIZE = Int.MAX_VALUE`, `columba/app/src/main/java/network/columba/app/util/FileUtils.kt:37`; its receiver defaults to 1 MB (`columba/app/src/main/java/network/columba/app/repository/SettingsRepository.kt:1849`) |
 

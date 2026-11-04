@@ -59,8 +59,9 @@ const VERSION: &str = env!("LEVICULUM_VERSION");
                   lxmd nodes alike.\n\n\
                   Set LEVICULUM_EVENT_LOG=<path> for one structured line per \
                   accepted upload (PN_ACCEPT), rejected upload (PN_REJECT), \
-                  mailbox request (PN_GET), eviction (PN_EVICT), peering \
-                  change (PN_PEER), offer round (PN_OFFER), sync round \
+                  mailbox request (PN_GET), eviction (PN_EVICT), departure \
+                  with its reason (PN_DEPART), status query (PN_STATUS), \
+                  peering change (PN_PEER), offer round (PN_OFFER), sync round \
                   (PN_SYNC) and own-mailbox delivery (PN_MAILBOX), plus a \
                   PN_STORE line every 8 minutes carrying store size against \
                   the limit -- which is also the log's liveness heartbeat. \

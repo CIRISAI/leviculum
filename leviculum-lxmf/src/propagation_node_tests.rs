@@ -2161,3 +2161,171 @@ fn a_full_store_is_walked_once_per_candidate_fraction_not_per_upload() {
         );
     }
 }
+
+/// Order 1394: each path out of the store records its own reason, and
+/// `/lev/status` answers it. Collected by a `haves` confirmation,
+/// displaced by a full store, expired by the tick, delivered to the own
+/// mailbox; a stored one is held, a never-seen one unknown.
+#[test]
+fn every_path_out_of_the_store_records_its_reason() {
+    use crate::lev_status::{DepartureReason, MessageStatus};
+
+    let mut node = node(340);
+    node.serve_lev_status();
+    let collected = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    assert_eq!(node.status_of(&collected), MessageStatus::Held);
+    let acknowledge = MessageGetRequest::acknowledge(vec![collected]);
+    node.handle_get(
+        &acknowledge.encode().unwrap(),
+        &[7; DESTINATION_LENGTH],
+        DAY,
+    )
+    .unwrap();
+
+    let displaced = accepted_id(&node.handle_upload(&envelope(7, 2), DAY, stamp_of_value_zero));
+    let kept = accepted_id(&node.handle_upload(&envelope(7, 3), 9 * DAY, stamp_of_value_zero));
+    let newest = accepted_id(&node.handle_upload(&envelope(7, 4), 10 * DAY, stamp_of_value_zero));
+    assert!(!node.store().contains(&displaced).unwrap());
+
+    assert!(node.store_mut().purge(&kept).unwrap());
+    node.note_delivered_locally(&kept, 11 * DAY);
+
+    let expired = node.tick(10 * DAY + MESSAGE_EXPIRY_SECS + 1);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].transient_id, newest);
+
+    let fresh = node.take_fresh_departures();
+    assert_eq!(
+        fresh,
+        vec![
+            (collected, DepartureReason::Collected),
+            (displaced, DepartureReason::Evicted),
+            (kept, DepartureReason::Delivered),
+            (newest, DepartureReason::Expired),
+        ]
+    );
+    assert!(node.take_fresh_departures().is_empty(), "taken once");
+
+    // The tick also dropped what left more than the window ago: the
+    // collected and the displaced one left at day 1, before the window.
+    assert_eq!(node.status_of(&collected), MessageStatus::Unknown);
+    assert_eq!(node.status_of(&displaced), MessageStatus::Unknown);
+    assert_eq!(node.status_of(&kept), MessageStatus::Delivered);
+    assert_eq!(node.status_of(&newest), MessageStatus::Expired);
+    assert_eq!(node.status_of(&[0x55; 32]), MessageStatus::Unknown);
+}
+
+/// Inside the window every reason answers as itself.
+#[test]
+fn the_status_answers_each_reason_inside_the_window() {
+    use crate::lev_status::{decode_answer, MessageStatus};
+
+    let mut node = node(340);
+    node.serve_lev_status();
+    let collected = accepted_id(&node.handle_upload(&envelope(7, 1), 0, stamp_of_value_zero));
+    let acknowledge = MessageGetRequest::acknowledge(vec![collected]);
+    node.handle_get(&acknowledge.encode().unwrap(), &[7; DESTINATION_LENGTH], 1)
+        .unwrap();
+    let displaced = accepted_id(&node.handle_upload(&envelope(7, 2), 2, stamp_of_value_zero));
+    let _ = node.handle_upload(&envelope(7, 3), 9 * DAY, stamp_of_value_zero);
+    let held = accepted_id(&node.handle_upload(&envelope(7, 4), 10 * DAY, stamp_of_value_zero));
+    assert!(!node.store().contains(&displaced).unwrap());
+
+    let answer = node.answer_lev_status(&[collected, displaced, held, [0x55; 32]]);
+    assert_eq!(
+        decode_answer(&answer).unwrap().unwrap(),
+        vec![
+            (collected, MessageStatus::Collected),
+            (displaced, MessageStatus::Evicted),
+            (held, MessageStatus::Held),
+            ([0x55; 32], MessageStatus::Unknown),
+        ]
+    );
+}
+
+/// An expired id answers `expired` after a restart too, but the restore
+/// does not make it a duplicate: the file held no expired ids before
+/// order 1394, and a peer that offers one past the window received it
+/// after us, a new copy here too. (Before the restart the RAM duplicate
+/// cache still holds it from the accept, unchanged by this order.)
+#[test]
+fn an_expired_departure_is_answered_but_not_restored_as_a_duplicate() {
+    use crate::lev_status::{DepartureReason, MessageStatus};
+
+    let mut node = node(64 * 1024);
+    node.track_departures();
+    let bytes = envelope(7, 1);
+    let id = accepted_id(&node.handle_upload(&bytes, 0, stamp_of_value_zero));
+    let now = MESSAGE_EXPIRY_SECS + 1;
+    assert_eq!(node.tick(now).len(), 1);
+    assert_eq!(node.status_of(&id), MessageStatus::Expired);
+    assert_eq!(
+        node.departures()
+            .map(|(id, d)| (*id, *d))
+            .collect::<Vec<_>>(),
+        vec![(
+            id,
+            Departure {
+                at_secs: now,
+                reason: DepartureReason::Expired
+            }
+        )]
+    );
+
+    let mut restarted = self::node(64 * 1024);
+    let departure = Departure {
+        at_secs: now,
+        reason: DepartureReason::Expired,
+    };
+    assert_eq!(restarted.restore_departures([(id, departure)], now + 1), 1);
+    assert_eq!(restarted.status_of(&id), MessageStatus::Expired);
+    match restarted.handle_upload(&bytes, now + 1, stamp_of_value_zero) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(!duplicate),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The announce carries `{"lev": {"status": 1}}` under `PN_META_CUSTOM`
+/// only on a node that serves the path: a board, which does not, announces
+/// what it did before.
+#[test]
+fn only_a_node_that_serves_the_status_announces_it() {
+    use crate::lev_status::{announced_version, PN_META_CUSTOM};
+
+    let mut node = node(64 * 1024);
+    let plain = PropagationNodeAnnounce::decode(&node.announce_app_data(1)).unwrap();
+    assert!(plain.metadata.iter().all(|(key, _)| *key != PN_META_CUSTOM));
+    assert_eq!(announced_version(&plain), None);
+
+    node.track_departures();
+    let tracking = PropagationNodeAnnounce::decode(&node.announce_app_data(1)).unwrap();
+    assert_eq!(
+        announced_version(&tracking),
+        None,
+        "tracking alone is not serving"
+    );
+
+    node.serve_lev_status();
+    let serving = node.announce_app_data(1);
+    let announce = PropagationNodeAnnounce::decode(&serving).unwrap();
+    assert_eq!(announced_version(&announce), Some(1));
+    // The whole entry, key and value, is 16 bytes on the wire.
+    let raw = &announce
+        .metadata
+        .iter()
+        .find(|(key, _)| *key == PN_META_CUSTOM)
+        .unwrap()
+        .1;
+    assert_eq!(
+        raw.as_slice(),
+        b"\x81\xa3lev\x81\xa6status\x01",
+        "{{\"lev\": {{\"status\": 1}}}}"
+    );
+    assert_eq!(serving.len(), plain_len(&node) + 2 + raw.len());
+
+    fn plain_len(node: &PropagationNode<MemoryPropagationStore>) -> usize {
+        let mut announce = PropagationNodeAnnounce::decode(&node.announce_app_data(1)).unwrap();
+        announce.metadata.retain(|(key, _)| *key != PN_META_CUSTOM);
+        announce.encode().unwrap().len()
+    }
+}

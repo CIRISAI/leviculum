@@ -20,7 +20,8 @@ Phases, in the order an operator asks the questions:
   3. Store                -- utilisation against the limit, evictions, and
                              where the accepted messages went (accepted,
                              delivered to clients, forwarded to peers,
-                             evicted; the same four `lnpnd --status` prints)
+                             evicted; the same four `lnpnd --status` prints),
+                             departures by reason, /lev/status queries
   4. Peers                -- offer and sync rounds per peer, with outcome
   5. Clients              -- mailbox requests served, own mail received
   6. Liveness             -- gaps in the PN_STORE heartbeat
@@ -41,6 +42,8 @@ KNOWN = {
     "PN_ACCEPT",
     "PN_REJECT",
     "PN_EVICT",
+    "PN_DEPART",
+    "PN_STATUS",
     "PN_GET",
     "PN_PEER",
     "PN_OFFER",
@@ -96,6 +99,11 @@ class Stats:
         self.store_used_max = 0
         self.evicted = defaultdict(int)
         self.evicted_bytes = 0
+        # Why messages left, by reason (PN_DEPART), and the /lev/status
+        # queries by result (PN_STATUS); counters, never per-id state.
+        self.departed = defaultdict(int)
+        self.status_queries = defaultdict(int)
+        self.status_ids = 0
         self.store_full_rounds = 0
         self.store_full_dropped = 0
 
@@ -207,6 +215,13 @@ def consume(stats, line):
     elif name == "PN_EVICT":
         stats.evicted[values.get("reason", "?")] += 1
         stats.evicted_bytes += as_int(values, "bytes")
+
+    elif name == "PN_DEPART":
+        stats.departed[values.get("reason", "?")] += 1
+
+    elif name == "PN_STATUS":
+        stats.status_queries[values.get("result", "?")] += 1
+        stats.status_ids += as_int(values, "ids")
 
     elif name == "PN_STORE":
         stats.store_used = as_int(values, "used")
@@ -332,6 +347,17 @@ def report(stats):
     out(f"evicted          {evicted} ({human_bytes(stats.evicted_bytes)})\n")
     for reason, count in sorted(stats.evicted.items(), key=lambda kv: -kv[1]):
         out(f"  {reason:<14} {count}\n")
+    if stats.departed:
+        out(f"departed         {sum(stats.departed.values())}\n")
+        for reason, count in sorted(stats.departed.items(), key=lambda kv: -kv[1]):
+            out(f"  {reason:<14} {count}\n")
+    if stats.status_queries:
+        out(
+            f"status queries   {sum(stats.status_queries.values())} "
+            f"({stats.status_ids} id(s) answered)\n"
+        )
+        for result, count in sorted(stats.status_queries.items(), key=lambda kv: -kv[1]):
+            out(f"  {result:<14} {count}\n")
     if stats.store_full_rounds:
         out(
             f"store full       {stats.store_full_rounds} sync round(s) lost "

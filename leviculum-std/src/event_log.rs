@@ -918,6 +918,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PN_EVICT",
         required_keys: &["tid", "bytes", "age_s", "reason"],
     },
+    // Why a message left the store, per id, with the full transient id a
+    // sender's `/lev/status` query names it by (order 1394): `reason` is
+    // collected, evicted, expired or delivered.
+    EventSchema {
+        name: "PN_DEPART",
+        required_keys: &["id", "reason"],
+    },
+    // One `/lev/status` request: `result` is answered, refused or
+    // throttled; `ids` how many it asked for when answered.
+    EventSchema {
+        name: "PN_STATUS",
+        required_keys: &["ids", "result"],
+    },
     // Peering events (Codeberg #384 part 2): one line per peer-table
     // change, per `/offer` round (either direction), per concluded or
     // failed sync round. `peer` is the remote propagation destination

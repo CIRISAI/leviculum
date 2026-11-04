@@ -127,6 +127,7 @@ skip  leviculum-lxmf  generated_field_pins       # pins generated field values; 
 skip  leviculum-lxmf  inbound_link_promise       # link state machine; subject is the code
 skip  leviculum-lxmf  lev_position_airtime       # airtime arithmetic of the position announce; subject is the code
 skip  leviculum-lxmf  lev_vectors                # vector corpus of the lev namespace; subject is the codec
+skip  leviculum-lxmf  lev_status_reference       # spawns python3 over reference/ on our announce; subject is the encoder
 skip  leviculum-lxmf  message_vectors            # vector corpus; subject is the codec
 skip  leviculum-lxmf  propagation_client         # propagation client logic; subject is the code
 skip  leviculum-lxmf  propagation_node           # propagation node logic; subject is the code
