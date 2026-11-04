@@ -53,6 +53,9 @@ pub const EPISODE_FLOOR_SECS: i64 = 24 * 3600;
 pub const PLACE_CREDIT_SECS: i64 = 6 * 3600;
 /// A place's cell, in screen pixels at the render zoom (rule 4).
 pub const PLACE_CELL_PX: f64 = 8.0;
+/// A place's cell joins a larger one closer than this many cells, so a
+/// place the grid cuts is one blob (rule 4).
+pub const PLACE_JOIN_CELLS: f64 = 2.0;
 /// Places of one peer, the largest kept (rule 4).
 pub const PLACE_BUDGET: usize = 48;
 /// Places that carry a label: the largest few (rule 4).
@@ -257,12 +260,24 @@ pub fn dwells(fixes: &[TrackFix], outlier: &[bool]) -> Vec<Dwell> {
 }
 
 /// Where the current episode starts (rule 3): after the last dwell of
-/// [`EPISODE_DWELL_SECS`] or more, and at least [`EPISODE_FLOOR_SECS`]
-/// before `now`. Without such a dwell the episode is everything.
-pub fn episode_start(dwells: &[Dwell], now: i64) -> i64 {
+/// [`EPISODE_DWELL_SECS`] or more, or at the first fix after a silence that
+/// long (a peer that shares only while it moves stopped somewhere we did
+/// not see), and at least [`EPISODE_FLOOR_SECS`] before `now`. Without
+/// either the episode is everything.
+pub fn episode_start(fixes: &[TrackFix], dwells: &[Dwell], now: i64) -> i64 {
     let floor = now - EPISODE_FLOOR_SECS;
-    match dwells.iter().rev().find(|d| d.ends_episode()) {
-        Some(d) => d.end.min(floor),
+    let stay = dwells
+        .iter()
+        .rev()
+        .find(|d| d.ends_episode())
+        .map(|d| d.end);
+    let silence = fixes
+        .windows(2)
+        .rev()
+        .find(|w| w[1].t - w[0].t >= EPISODE_DWELL_SECS)
+        .map(|w| w[1].t);
+    match stay.max(silence) {
+        Some(start) => start.min(floor),
         None => i64::MIN,
     }
 }
@@ -346,15 +361,15 @@ impl TrackWindow {
     }
 
     /// The window's span `[from, to)` in unix seconds at `now`, the
-    /// episode's from the dwells.
-    pub fn bounds(self, dwells: &[Dwell], now: &WallTime) -> (i64, i64) {
+    /// episode's from the fixes and their dwells.
+    pub fn bounds(self, fixes: &[TrackFix], dwells: &[Dwell], now: &WallTime) -> (i64, i64) {
         let c = now.civil();
         let midnight = now.unix_secs
             - i64::from(c.hour) * 3600
             - i64::from(c.minute) * 60
             - i64::from(c.second);
         match self {
-            TrackWindow::Episode => (episode_start(dwells, now.unix_secs), i64::MAX),
+            TrackWindow::Episode => (episode_start(fixes, dwells, now.unix_secs), i64::MAX),
             TrackWindow::Today => (midnight, i64::MAX),
             TrackWindow::Yesterday => (midnight - 86_400, midnight),
             TrackWindow::Week => (midnight - i64::from(c.weekday) * 86_400, i64::MAX),
@@ -422,6 +437,56 @@ impl Age {
 /// track, which is neutral grey.
 pub fn hue(peer: &[u8; 16], own: bool) -> Option<u8> {
     (!own).then_some(peer[0] % HUES)
+}
+
+/// The eight hues on a light map (rule 6): blue, orange, green, red,
+/// violet, teal, magenta, brown; apart in hue and in lightness, so two stay
+/// apart at a quarter of their opacity.
+pub const HUE_LIGHT: [[u8; 3]; 8] = [
+    [0x1f, 0x5f, 0xd0],
+    [0xe0, 0x70, 0x00],
+    [0x12, 0x8f, 0x4a],
+    [0xd0, 0x22, 0x2e],
+    [0x7a, 0x3f, 0xc8],
+    [0x00, 0x8c, 0x96],
+    [0xc0, 0x2a, 0x90],
+    [0x8a, 0x5a, 0x1e],
+];
+/// The same hues on the dark map, lighter, so they hold against its
+/// ground.
+pub const HUE_DARK: [[u8; 3]; 8] = [
+    [0x6a, 0xa4, 0xff],
+    [0xff, 0xa8, 0x40],
+    [0x4c, 0xd0, 0x80],
+    [0xff, 0x6a, 0x6a],
+    [0xb8, 0x8c, 0xff],
+    [0x3c, 0xd4, 0xd8],
+    [0xff, 0x7a, 0xd0],
+    [0xd8, 0xa8, 0x68],
+];
+/// Our own track: neutral grey on either map.
+pub const OWN_LIGHT: [u8; 3] = [0x60, 0x60, 0x60];
+pub const OWN_DARK: [u8; 3] = [0xb0, 0xb0, 0xb0];
+
+/// The colour of a track of `hue` ([`hue`]) on a light or a dark map.
+pub fn colour(hue: Option<u8>, dark: bool) -> [u8; 3] {
+    match (hue, dark) {
+        (Some(h), false) => HUE_LIGHT[usize::from(h % HUES)],
+        (Some(h), true) => HUE_DARK[usize::from(h % HUES)],
+        (None, false) => OWN_LIGHT,
+        (None, true) => OWN_DARK,
+    }
+}
+
+/// The ANSI colour of a hue for a terminal of sixteen: blue, yellow,
+/// green, red, magenta, cyan, bright magenta, bright yellow; ours white
+/// or black by the map.
+pub fn ansi16(hue: Option<u8>, dark: bool) -> u8 {
+    match hue {
+        Some(h) => [4, 3, 2, 1, 5, 6, 13, 11][usize::from(h % HUES)],
+        None if dark => 7,
+        None => 8,
+    }
 }
 
 /// A blob's radius in logical pixels for a stay of `secs` (rules 2 and
@@ -509,34 +574,45 @@ pub fn segments(
 ) -> Vec<Segment> {
     let in_dwell = dwell_of(fixes.len(), dwells);
     let near = (DECIMATE_PX * unit).max(0.0);
-    // Fixes on the line inside the window, decimated by screen distance;
-    // a fix kept carries its dwell, so a stay is not drawn across.
-    let mut kept: Vec<(usize, World)> = Vec::new();
+    let on_line = |i: usize, f: &TrackFix| f.t >= from && f.t < to && !f.vague() && !outlier[i];
+    // The newest fix on the line is always kept: the line reaches the pin.
+    let newest = fixes
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(i, f)| on_line(*i, f))
+        .map(|(i, _)| i);
+    let mut out = Vec::new();
+    // The last fix kept, and the last fix on the line: two fixes are
+    // joined along the chain of their neighbours, so a pixel's worth of
+    // fixes is one segment however long it took to walk.
+    let mut kept: Option<(usize, World)> = None;
+    let mut prev: Option<usize> = None;
     for (i, f) in fixes.iter().enumerate() {
-        if f.t < from || f.t >= to || f.vague() || outlier[i] {
+        if !on_line(i, f) {
             continue;
         }
         let at = f.at();
-        if let Some(&(j, last)) = kept.last() {
-            let close = world_distance(last, at) < near;
-            if close && in_dwell[j] == in_dwell[i] && joined(&fixes[j], f) {
-                continue;
+        let linked = prev.is_some_and(|p| joined(&fixes[p], f));
+        prev = Some(i);
+        match kept {
+            Some((j, start)) if linked => {
+                let close = world_distance(start, at) < near;
+                if close && Some(i) != newest {
+                    continue;
+                }
+                let same_dwell = in_dwell[j].is_some() && in_dwell[j] == in_dwell[i];
+                if !same_dwell {
+                    out.push(Segment {
+                        from: start,
+                        to: at,
+                        age: Age::of(now - f.t),
+                    });
+                }
+                kept = Some((i, at));
             }
+            _ => kept = Some((i, at)),
         }
-        kept.push((i, at));
-    }
-    let mut out = Vec::new();
-    for w in kept.windows(2) {
-        let ((i, a), (j, b)) = (w[0], w[1]);
-        let same_dwell = in_dwell[i].is_some() && in_dwell[i] == in_dwell[j];
-        if same_dwell || !joined(&fixes[i], &fixes[j]) {
-            continue;
-        }
-        out.push(Segment {
-            from: a,
-            to: b,
-            age: Age::of(now - fixes[j].t),
-        });
     }
     thin(out, SEGMENT_BUDGET)
 }
@@ -611,9 +687,28 @@ pub fn places(fixes: &[TrackFix], skip: &[bool], (from, to): (i64, i64), cell: f
         }
         last = Some((k, f.t));
     }
-    let mut out: Vec<Place> = cells
-        .into_values()
-        .filter(|c| c.3 >= DWELL_SECS)
+    // The cells with a stay, the largest first; a cell beside a larger
+    // one joins it, so a place cut by the grid is one blob.
+    let mut kept: Vec<(u64, u64, u64, i64)> =
+        cells.into_values().filter(|c| c.3 >= DWELL_SECS).collect();
+    kept.sort_by_key(|c| core::cmp::Reverse(c.3));
+    let mut merged: Vec<(u64, u64, u64, i64)> = Vec::new();
+    for c in kept {
+        let at = |c: &(u64, u64, u64, i64)| World {
+            x: (c.0 / c.2) as u32,
+            y: (c.1 / c.2) as u32,
+        };
+        let here = at(&c);
+        match merged
+            .iter_mut()
+            .find(|m| world_distance(at(m), here) < cell * PLACE_JOIN_CELLS)
+        {
+            Some(m) => *m = (m.0 + c.0, m.1 + c.1, m.2 + c.2, m.3 + c.3),
+            None => merged.push(c),
+        }
+    }
+    let mut out: Vec<Place> = merged
+        .into_iter()
         .map(|(sx, sy, n, dwell)| Place {
             at: World {
                 x: (sx / n) as u32,
@@ -714,7 +809,7 @@ pub fn track(
 ) -> Track {
     let outlier = outliers(fixes);
     let stays = dwells(fixes, &outlier);
-    let bounds = window.bounds(&stays, now);
+    let bounds = window.bounds(fixes, &stays, now);
     let (from, to) = bounds;
     let t = now.unix_secs;
     let segments = segments(fixes, &outlier, &stays, bounds, t, unit);
@@ -756,6 +851,24 @@ pub fn track(
     }
 }
 
+/// Every peer's fixes the map draws a track of: the peer, whether it is
+/// us, the fixes in time order.
+pub type TrackInput = Vec<([u8; 16], bool, alloc::sync::Arc<Vec<TrackFix>>)>;
+
+/// The tracks of `input` ([`track`] for each).
+pub fn tracks(
+    input: &TrackInput,
+    window: TrackWindow,
+    now: &WallTime,
+    unit: f64,
+    scale: f32,
+) -> Vec<Track> {
+    input
+        .iter()
+        .map(|(peer, own, fixes)| track(*peer, *own, fixes, window, now, unit, scale))
+        .collect()
+}
+
 /// The last `budget` of `items`.
 fn newest<T>(mut items: Vec<T>, budget: usize) -> Vec<T> {
     let n = items.len();
@@ -778,6 +891,8 @@ pub fn cost(track: &Track) -> (usize, usize) {
 pub const BLOB_BUDGET: usize = DOT_BUDGET + DWELL_BUDGET + PLACE_BUDGET;
 
 pub mod cells;
+#[cfg(any(test, feature = "std"))]
+pub mod scenes;
 
 #[cfg(test)]
 mod tests {
@@ -925,11 +1040,19 @@ mod tests {
         // A night at home ending 30 h ago, then a two-hour stop: the
         // episode starts at the night's end.
         let d = [stay(now - 40 * 3600, 10), stay(now - 10 * 3600, 2)];
-        assert_eq!(episode_start(&d, now), now - 30 * 3600);
+        assert_eq!(episode_start(&[], &d, now), now - 30 * 3600);
         // The night ended 5 h ago: widened to 24 h.
         let d = [stay(now - 15 * 3600, 10)];
-        assert_eq!(episode_start(&d, now), now - 24 * 3600);
-        assert_eq!(episode_start(&[stay(now - 3600, 2)], now), i64::MIN);
+        assert_eq!(episode_start(&[], &d, now), now - 24 * 3600);
+        assert_eq!(episode_start(&[], &[stay(now - 3600, 2)], now), i64::MIN);
+        // A silence of 3 h ends one as a stay does; 2 h 59 does not.
+        let quiet = [at(now - 40 * 3600, 0.0, 0.0), at(now - 37 * 3600, 0.0, 0.0)];
+        assert_eq!(episode_start(&quiet, &[], now), now - 37 * 3600);
+        let short = [
+            at(now - 40 * 3600, 0.0, 0.0),
+            at(now - 40 * 3600 + 10_799, 0.0, 0.0),
+        ];
+        assert_eq!(episode_start(&short, &[], now), i64::MIN);
     }
 
     /// Rule 3 on the map: lines only after the night, the night a blob,
@@ -990,15 +1113,18 @@ mod tests {
     fn the_named_windows_are_local_days() {
         let now = noon();
         let midnight = WallTime::from_civil(2026, 11, 4, 0, 0, 3600).unix_secs;
-        assert_eq!(TrackWindow::Today.bounds(&[], &now), (midnight, i64::MAX));
         assert_eq!(
-            TrackWindow::Yesterday.bounds(&[], &now),
+            TrackWindow::Today.bounds(&[], &[], &now),
+            (midnight, i64::MAX)
+        );
+        assert_eq!(
+            TrackWindow::Yesterday.bounds(&[], &[], &now),
             (midnight - 86_400, midnight)
         );
         let monday = WallTime::from_civil(2026, 11, 2, 0, 0, 3600).unix_secs;
-        assert_eq!(TrackWindow::Week.bounds(&[], &now).0, monday);
+        assert_eq!(TrackWindow::Week.bounds(&[], &[], &now).0, monday);
         let first = WallTime::from_civil(2026, 11, 1, 0, 0, 3600).unix_secs;
-        assert_eq!(TrackWindow::Month.bounds(&[], &now).0, first);
+        assert_eq!(TrackWindow::Month.bounds(&[], &[], &now).0, first);
         assert_eq!(TrackWindow::Episode.step(true), TrackWindow::Today);
         assert_eq!(TrackWindow::Episode.step(false), TrackWindow::All);
         assert_eq!(
