@@ -1090,14 +1090,22 @@ fn regions() -> impl Strategy<Value = Vec<RegionRow>> {
 
 fn marks() -> impl Strategy<Value = Vec<MapMark>> {
     prop::collection::vec(
-        (i32s(), i32s(), texts(), prop::option::of(u32s())).prop_map(
-            |(x, y, peers, split_milli)| MapMark {
+        (
+            i32s(),
+            i32s(),
+            texts(),
+            prop::option::of(u32s()),
+            opt_text(),
+            any::<bool>(),
+        )
+            .prop_map(|(x, y, peers, split_milli, way, low_battery)| MapMark {
                 x,
                 y,
                 peers,
                 split_milli,
-            },
-        ),
+                way,
+                low_battery,
+            }),
         0..4,
     )
 }

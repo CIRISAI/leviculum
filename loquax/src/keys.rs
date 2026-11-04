@@ -176,6 +176,9 @@ pub enum MapCmd {
     GlyphTest,
     /// The tracks' next time window (`true`) or the previous one (1385).
     TrackWindow(bool),
+    /// Every peer with a position inside the tracks' time window in view
+    /// (1386).
+    FitWindow,
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -710,6 +713,14 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('0'), Mods::Plain, Map(MapCmd::Fit), MAP)]],
         )
         .footer_droppable("fit", 4),
+        // 1386: "fit all", every peer with a position inside the tracks'
+        // time window; the window's strip and the phone's chips have it
+        // as a button.
+        Row::new(
+            "every peer inside the time window in view",
+            MAP_GROUP,
+            &[&[key(Char('f'), Mods::Plain, Map(MapCmd::FitWindow), MAP)]],
+        ),
         Row::new(
             "next / previous pin",
             MAP_GROUP,

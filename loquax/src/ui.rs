@@ -148,6 +148,7 @@ pub mod layout;
 pub mod liveness;
 pub mod map;
 pub mod photos;
+pub mod radar;
 pub mod reactions;
 pub mod receipts;
 pub mod recording;
@@ -809,6 +810,9 @@ pub struct UiModel<B> {
     /// The map's time window for the tracks' lines: a map control, the
     /// current episode until the reader picks another.
     pub track_window: tracks::TrackWindow,
+    /// The fix time of the own fix the store last kept (1386): the way
+    /// back is stored a row every [`OWN_TRACK_EVERY_SECS`] at most.
+    own_stored_at: Option<i64>,
     /// The map, when open: it takes the conversation pane.
     pub map: Option<map::MapState>,
     /// What the shell draws the map with ([`UiEvent::MapSetup`]).
@@ -961,6 +965,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             fixes_received: Vec::new(),
             tracks: BTreeMap::new(),
             track_window: tracks::TrackWindow::default(),
+            own_stored_at: None,
             map: None,
             map_setup: map::MapSetup::default(),
             map_picture: None,
@@ -1960,7 +1965,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
                     }
                     _ => location.last_update,
                 };
-                let mut point = tracks::TrackFix::of(&Fix {
+                let own_fix = Fix {
                     peer: own,
                     via: own,
                     message: None,
@@ -1968,12 +1973,23 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
                     location,
                     telemetry: Vec::new(),
                     source: telemetry::Source::Telemetry,
-                });
+                };
+                let mut point = tracks::TrackFix::of(&own_fix);
                 point.t = t;
                 tracks::insert(
                     alloc::sync::Arc::make_mut(model.tracks.entry(own).or_default()),
                     point,
                 );
+                // The way back (1386): the own fixes stored too, a row a
+                // minute at most, so the track outlives a restart and needs
+                // no network.
+                let due = model
+                    .own_stored_at
+                    .is_none_or(|last| t >= last + OWN_TRACK_EVERY_SECS || t < last);
+                if due {
+                    model.own_stored_at = Some(t);
+                    model.fixes_received.push(own_fix);
+                }
             }
             model.bar.own_fix = fix;
             model.bar.by_hand = false;
@@ -2595,6 +2611,15 @@ fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
     }
 }
 
+/// The own fixes the store keeps for the way back (1386): one a minute at
+/// most, whatever the receiver's cadence; a day outdoors is 1 440 rows.
+pub const OWN_TRACK_EVERY_SECS: i64 = 60;
+
+/// World units a pixel of `view` spans.
+fn viewport_unit(view: &leviculum_map::viewport::Viewport) -> f64 {
+    libm::exp2(24.0 - f64::from(view.zoom()))
+}
+
 /// The palette's `map`: the map in the conversation's place, every pin in
 /// view, the first in `Tab` order selected.
 fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
@@ -2646,6 +2671,12 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
     let setup = model.map_setup.clone();
     let area = model.map_area();
     let pins = model.map_pins();
+    let inside = match (cmd, model.now) {
+        (MapCmd::FitWindow, Some(now)) => {
+            tracks::inside(&model.track_input(), model.track_window, &now)
+        }
+        _ => Vec::new(),
+    };
     let Some(state) = model.map.as_mut() else {
         return Vec::new();
     };
@@ -2658,6 +2689,12 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
         MapCmd::Pan(dx, dy) => pan_map(state, area, &setup, dx, dy),
         MapCmd::Fit => {
             let (centre, zoom) = map::fit(&pins, area, &setup);
+            state.centre = centre;
+            state.zoom = zoom;
+        }
+        MapCmd::FitWindow => {
+            let shown = map::in_window(&pins, &inside);
+            let (centre, zoom) = map::fit(&shown, area, &setup);
             state.centre = centre;
             state.zoom = zoom;
         }
@@ -4417,8 +4454,18 @@ impl<B> UiModel<B> {
         let state = self.map.as_ref()?;
         let area = self.map_area();
         let viewport = map::viewport(state, area, &self.map_setup);
+        let mut shown = self.map_pins();
+        // No region touches the view: the radar (1386), its pins labelled
+        // by distance and compass point from the centre.
+        let radar = match radar::shows(&viewport, &self.map_setup.regions) {
+            true => radar::radar(&shown, viewport_unit(&viewport), viewport.size()),
+            false => None,
+        };
+        if let Some(r) = &radar {
+            radar::label(&mut shown, r);
+        }
         let pins = map::place(
-            &self.map_pins(),
+            &shown,
             &viewport,
             area,
             &self.map_setup,
@@ -4436,12 +4483,17 @@ impl<B> UiModel<B> {
             self.map_setup.cell_px,
             self.ascii,
         );
+        let radar = radar.map(|r| map::RadarCells {
+            note: r.note(),
+            cells: radar::cells(&r, &viewport, area, self.map_setup.cell_px, self.ascii),
+        });
         Some(map::MapView {
             area,
             viewport,
             cell_px: self.map_setup.cell_px,
             pins,
             tracks,
+            radar,
         })
     }
 
@@ -10429,6 +10481,39 @@ pub(crate) mod tests {
             name: None,
             age,
         }
+    }
+
+    /// 1386, the way back: the own receiver's fixes go into our track and
+    /// to the store, a row a minute at most however often the receiver
+    /// reports, so the track outlives a restart without a network.
+    #[test]
+    fn the_own_fixes_are_stored_a_row_a_minute_for_the_way_back() {
+        const OWN: [u8; 16] = [0x0e; 16];
+        let mut model = UiModel::<Field>::new(&[]);
+        model.address = Some(OWN);
+        clock(&mut model, 26, 14, 0);
+        let _ = model.take_writes();
+        // Every 5 s for three minutes, as the phone's watch reports.
+        for k in 0..36 {
+            let at = two_pm() - 180 + 5 * i64::from(k);
+            let location = fix_at(1_000_000 + k, 11_260_000, at).location;
+            update(&mut model, UiEvent::OwnFix(location));
+        }
+        let stored: Vec<i64> = model
+            .take_writes()
+            .iter()
+            .filter_map(|w| match w {
+                StoreWrite::Position(f) if f.peer == OWN => Some(f.fix_time()),
+                _ => None,
+            })
+            .collect();
+        let t0 = two_pm() - 180;
+        assert_eq!(stored, [t0, t0 + 60, t0 + 120], "a row a minute");
+        assert_eq!(model.tracks[&OWN].len(), 36, "the track keeps every fix");
+        assert!(model
+            .track_input()
+            .iter()
+            .any(|(p, own, _)| *p == OWN && *own));
     }
 
     /// 1302, the merge rule: an announced position joins the telemetry

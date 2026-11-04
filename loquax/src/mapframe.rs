@@ -77,6 +77,10 @@ pub struct Ask<'a> {
     pub pins: &'a [MapPin],
     /// The tracks, drawn over the names and under the pins (1385).
     pub tracks: &'a [crate::ui::tracks::Track],
+    /// The radar where the view has no region data (1386): the ground
+    /// drawn blank with its rings, no names; the tracks and the pins as
+    /// ever ([`crate::ui::radar`]).
+    pub radar: Option<&'a crate::ui::radar::Radar>,
     pub selected: Option<[u8; 16]>,
     /// The zooms the regions allow, the floor the screen's width sets
     /// first: how far a prefetch goes out and in.
@@ -613,12 +617,29 @@ impl Frames {
             }),
         };
         let now = ask.now_ms;
+        // No region here: the radar's blank ground and rings instead of
+        // the outline and its names (1386).
+        if let Some(radar) = ask.radar {
+            let per_px = crate::ui::radar::metres_per_unit(radar.centre) * drawn.unit();
+            screenmap::draw_radar(
+                rgba,
+                w,
+                h,
+                radar,
+                |p| drawn.to_screen(p),
+                per_px,
+                scale,
+                theme,
+                &mut self.type_,
+            );
+        }
+        let names_off = self.names_off || ask.radar.is_some();
         // The screen's view and its margins: where a frame at rest at this
         // zoom places its names, and the frame drawn unless the frontend
         // scales it.
         let mut exact = view.on_whole_pixel();
         exact.resize(fw, fh);
-        if !self.names_off && !ask.moving {
+        if !names_off && !ask.moving {
             // At rest the names are placed anew over the frame, at the
             // exact scale, after the pins, and kept in world terms; asked
             // again while they fade, the same frame keeps them.
@@ -647,7 +668,7 @@ impl Frames {
                 self.rest_key = Some(key);
             }
             self.rested = Some(view.zoom_milli());
-        } else if !self.names_off {
+        } else if !names_off {
             // A frame that moves at another zoom than its names were
             // placed at, or into a frame of another step, places them
             // anew (1225); a pan at their zoom moves them.
@@ -661,7 +682,10 @@ impl Frames {
         self.last_view = Some(exact);
         self.drawn_names.clear();
         self.drawn_leaving.clear();
-        if let Some(from) = self.names_view {
+        if ask.radar.is_some() {
+            self.leaving.clear();
+        }
+        if let Some(from) = self.names_view.filter(|_| ask.radar.is_none()) {
             for (i, name) in self.names.iter().enumerate() {
                 let alpha = self.fades[i].alpha(now);
                 if alpha == 0 {
@@ -1244,6 +1268,7 @@ mod tests {
             zooms: (10, 17),
             draw_pins: true,
             tracks: &[],
+            radar: None,
             measure: None,
             now_ms: None,
             scaled_while_moving: false,

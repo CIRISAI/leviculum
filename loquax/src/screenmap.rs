@@ -54,6 +54,18 @@ pub fn setup(painter: &Painter) -> MapSetup {
     }
 }
 
+/// [`setup`] with the radar's zooms (1386) when there are `pins` to draw
+/// it about: deeper than the outline reaches where no region is. Without
+/// a pin there is no radar, and the zooms stay the regions' and the
+/// outline's.
+pub fn setup_for(painter: &Painter, pins: &[MapPin]) -> MapSetup {
+    let mut setup = setup(painter);
+    if !pins.is_empty() {
+        setup.zooms = crate::ui::radar::zooms(setup.zooms);
+    }
+    setup
+}
+
 /// The picture's area in screen pixels, as the model's map functions take
 /// it.
 pub fn area(size: (u32, u32)) -> Rect {
@@ -167,6 +179,8 @@ pub struct Placed {
     /// [`MapPin::nearby`]: drawn in a neutral grey.
     pub nearby: bool,
     pub selected: bool,
+    /// [`MapPin::low_battery`] (1386): a battery beside the marker.
+    pub low_battery: bool,
 }
 
 /// The sizes the label rule counts with at `scale`.
@@ -276,6 +290,7 @@ fn labelled(
             stale: pin.stale,
             nearby: pin.nearby,
             selected: Some(pin.peer) == selected,
+            low_battery: pin.low_battery(),
         })
         .collect();
     out.sort_by_key(|p| p.selected);
@@ -418,6 +433,9 @@ pub fn draw_pins(
             1.0,
         );
         disc(rgba, w, h, pin.x, pin.y, radius, ink.marker.0, ink.marker.1);
+        if pin.low_battery {
+            draw_battery(rgba, w, h, pin.x, pin.y, scale, theme);
+        }
         let Some((x, y, words)) = &pin.label else {
             continue;
         };
@@ -440,12 +458,79 @@ pub fn draw_pins(
     }
 }
 
+/// The low battery's size in logical pixels, its body without the nub
+/// (1386).
+pub const BATTERY: (f32, f32) = (11.0, 6.0);
+
+/// Where the low battery sits from a marker's centre, its body's top left
+/// corner in screen pixels: centred above the marker, clear of the label
+/// beside it.
+pub fn battery_at(x: f32, y: f32, scale: f32) -> (f32, f32) {
+    (
+        x - BATTERY.0 / 2.0 * scale,
+        y - (MARKER / 2.0 + BATTERY.1 + 3.0) * scale,
+    )
+}
+
+/// The low battery beside a marker at `(x, y)` (1386): a body with a nub
+/// at its right, outlined in the label's ink on its ground, a fifth of it
+/// filled red.
+pub fn draw_battery(rgba: &mut [u8], w: u32, h: u32, x: f32, y: f32, scale: f32, theme: MapTheme) {
+    let (ground, ink) = match theme {
+        MapTheme::Dark => ([0x18, 0x18, 0x18], [0xe6, 0xe6, 0xe6]),
+        _ => ([0xff, 0xff, 0xff], [0x10, 0x10, 0x10]),
+    };
+    let (x0, y0) = battery_at(x, y, scale);
+    let (bw, bh) = (BATTERY.0 * scale, BATTERY.1 * scale);
+    let nub = (1.5 * scale).max(1.0);
+    let t = scale.max(1.0).round();
+    let fill = |rgba: &mut [u8], x0: f32, y0: f32, x1: f32, y1: f32, c: [u8; 3], a: f64| {
+        for py in y0.round() as i64..y1.round() as i64 {
+            for px in x0.round() as i64..x1.round() as i64 {
+                blend(rgba, w, h, px, py, c, a);
+            }
+        }
+    };
+    fill(
+        rgba,
+        x0 - t,
+        y0 - t,
+        x0 + bw + nub + t,
+        y0 + bh + t,
+        ground,
+        0.85,
+    );
+    fill(rgba, x0, y0, x0 + bw, y0 + bh, ink, 1.0);
+    fill(rgba, x0 + t, y0 + t, x0 + bw - t, y0 + bh - t, ground, 1.0);
+    let inner = bw - 2.0 * t;
+    fill(
+        rgba,
+        x0 + t,
+        y0 + t,
+        x0 + t + (inner / 5.0).max(1.0),
+        y0 + bh - t,
+        [0xd0, 0x30, 0x30],
+        1.0,
+    );
+    fill(
+        rgba,
+        x0 + bw,
+        y0 + bh / 3.0,
+        x0 + bw + nub,
+        y0 + bh * 2.0 / 3.0,
+        ink,
+        1.0,
+    );
+}
+
 /// A track's line width in logical pixels (1385).
 pub const TRACK_WIDTH: f32 = 3.0;
 /// An outlier's dot's radius in logical pixels.
 pub const DOT_RADIUS: f32 = 2.0;
 /// A place's opacity: faint, under everything else.
 pub const PLACE_ALPHA: f32 = 0.22;
+/// A late segment's dash and gap in logical pixels (1386).
+pub const DASH: (f32, f32) = (6.0, 4.0);
 /// The wedge's length and half width in logical pixels, beyond the
 /// marker's ring.
 pub const WEDGE: (f32, f32) = (8.0, 5.0);
@@ -508,6 +593,36 @@ impl Cover {
                 self.put(x, y, c * alpha);
             }
         }
+    }
+
+    /// The segment from `a` to `b` in dashes of `dash` and gaps of `gap`
+    /// pixels (1386), `phase` pixels into the pattern at `a`; the phase at
+    /// `b`, so a run of short segments is one dashed line.
+    fn dashed(
+        &mut self,
+        (a, b): ((f64, f64), (f64, f64)),
+        width: f32,
+        alpha: f32,
+        (dash, gap): (f64, f64),
+        phase: f64,
+    ) -> f64 {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = dx.hypot(dy);
+        let period = dash + gap;
+        if period <= 0.0 || len <= 0.0 {
+            return phase;
+        }
+        let at = |d: f64| (a.0 + dx * d / len, a.1 + dy * d / len);
+        // From the start of the pattern's period the phase is in.
+        let mut d = -phase.rem_euclid(period);
+        while d < len {
+            let (from, to) = (d.max(0.0), (d + dash).min(len));
+            if to > from {
+                self.line(at(from), at(to), width, alpha);
+            }
+            d += period;
+        }
+        (phase + len).rem_euclid(period)
     }
 
     /// A disc of `radius` about `c`, at `alpha`.
@@ -586,8 +701,21 @@ pub fn draw_tracks(
         let hue = colour(t.hue, dark);
         // The oldest first, so a newer line is over an older one.
         for age in [Age::Old, Age::Faint, Age::Half, Age::Strong, Age::Fresh] {
+            // A late run's dashes go on across its segments (1386).
+            let dash = (f64::from(DASH.0 * scale), f64::from(DASH.1 * scale));
+            let mut phase = 0.0;
+            let mut last = None;
             for s in t.segments.iter().filter(|s| s.age == age) {
-                cover.line(at(s.from), at(s.to), width, age.alpha());
+                if !s.late {
+                    cover.line(at(s.from), at(s.to), width, age.alpha());
+                    last = None;
+                    continue;
+                }
+                if last != Some(s.from) {
+                    phase = 0.0;
+                }
+                phase = cover.dashed((at(s.from), at(s.to)), width, age.alpha(), dash, phase);
+                last = Some(s.to);
             }
         }
         for d in &t.dwells {
@@ -639,6 +767,103 @@ pub fn draw_tracks(
             mapnames::paint_faded(rgba, w, h, &mask, centre, 0.0, hue, 1.0);
         }
     }
+}
+
+/// The radar's ground, light and dark (1386): the map's paper, blank.
+pub fn radar_ground(theme: MapTheme) -> [u8; 3] {
+    match theme {
+        MapTheme::Dark => [0x16, 0x16, 0x16],
+        _ => [0xf2, 0xef, 0xe9],
+    }
+}
+
+/// The radar's rings' ink, light and dark.
+fn radar_ink(theme: MapTheme) -> [u8; 3] {
+    match theme {
+        MapTheme::Dark => [0x9a, 0x9a, 0x9a],
+        _ => [0x6a, 0x6a, 0x6a],
+    }
+}
+
+/// Draw `radar` into `rgba`, `w` by `h` pixels, as the ground where no
+/// region is (1386, `loquax-tracks.md`, "Radar without a map"): the frame
+/// blank, the rings about the centre faint with their distance on their
+/// north crossing, a cross at the centre, "N" with an arrow at the top
+/// right, and the radar's note at the top left. `at(world)` is where a
+/// point lands on the frame, `per_px` the metres a screen pixel spans.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_radar(
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    radar: &crate::ui::radar::Radar,
+    at: impl Fn(leviculum_map::mercator::World) -> (f64, f64),
+    per_px: f64,
+    scale: f32,
+    theme: MapTheme,
+    type_: &mut Typesetter,
+) {
+    if w == 0 || h == 0 || per_px <= 0.0 {
+        return;
+    }
+    let ground = radar_ground(theme);
+    for px in rgba.chunks_exact_mut(4) {
+        px[..3].copy_from_slice(&ground);
+        px[3] = 0xff;
+    }
+    let ink = radar_ink(theme);
+    let c = at(radar.centre);
+    let mut cover = Cover::new(w, h);
+    for &r in &radar.rings {
+        let px = f64::from(r) / per_px;
+        let steps = ((px * core::f64::consts::TAU / 4.0).ceil() as usize).clamp(32, 4096);
+        for k in 0..steps {
+            let a0 = k as f64 / steps as f64 * core::f64::consts::TAU;
+            let a1 = (k + 1) as f64 / steps as f64 * core::f64::consts::TAU;
+            let p = |a: f64| (c.0 + px * a.sin(), c.1 - px * a.cos());
+            cover.line(p(a0), p(a1), scale, 0.55);
+        }
+    }
+    let arm = f64::from(6.0 * scale);
+    cover.line((c.0 - arm, c.1), (c.0 + arm, c.1), 1.5 * scale, 1.0);
+    cover.line((c.0, c.1 - arm), (c.0, c.1 + arm), 1.5 * scale, 1.0);
+    // North: an arrow up at the top right, "N" under it.
+    let size = LABEL * 0.85 * scale;
+    let (nx, top) = (
+        f64::from(w) - f64::from(18.0 * scale),
+        f64::from(8.0 * scale),
+    );
+    let long = f64::from(14.0 * scale);
+    cover.line((nx, top), (nx, top + long), 1.5 * scale, 1.0);
+    let barb = f64::from(4.0 * scale);
+    cover.line((nx, top), (nx - barb, top + barb), 1.5 * scale, 1.0);
+    cover.line((nx, top), (nx + barb, top + barb), 1.5 * scale, 1.0);
+    cover.blend(rgba, ink);
+    let north = type_.mask("N", size, 0, false);
+    let below = top + long + f64::from(size * LINE) / 2.0;
+    mapnames::paint_faded(rgba, w, h, &north, (nx, below), 0.0, ink, 1.0);
+    for &r in &radar.rings {
+        let px = f64::from(r) / per_px;
+        let words = crate::ui::radar::distance(f64::from(r));
+        let mask = type_.mask(&words, size, 0, false);
+        let centre = (c.0, c.1 - px);
+        let half_w = mask.w as f64 / 2.0 + f64::from(2.0 * scale);
+        let half_h = f64::from(size * LINE) / 2.0;
+        for py in (centre.1 - half_h).floor() as i64..(centre.1 + half_h).ceil() as i64 {
+            for qx in (centre.0 - half_w).floor() as i64..(centre.0 + half_w).ceil() as i64 {
+                blend(rgba, w, h, qx, py, ground, 1.0);
+            }
+        }
+        mapnames::paint_faded(rgba, w, h, &mask, centre, 0.0, ink, 1.0);
+    }
+    let note = radar.note();
+    let mask = type_.mask(&note, size, 0, false);
+    let pad = f64::from(6.0 * scale);
+    let centre = (
+        pad + mask.w as f64 / 2.0,
+        pad + f64::from(size * LINE) / 2.0,
+    );
+    mapnames::paint_faded(rgba, w, h, &mask, centre, 0.0, ink, 1.0);
 }
 
 /// One view drawn whole for a screen that only hosts a bitmap: the

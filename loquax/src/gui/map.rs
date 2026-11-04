@@ -5,7 +5,19 @@
 //! (1144); what is the window's own is its font measuring a label
 //! ([`measure`]), as iced sets the label on the canvas.
 
-pub use loquax::screenmap::{area, hit, pin_hue, setup, Placed, DRAG, LABEL, LINE, MARKER};
+pub use loquax::screenmap::{
+    area, battery_at, hit, pin_hue, Placed, BATTERY, DRAG, LABEL, LINE, MARKER,
+};
+
+/// What the model's map functions are told in the window
+/// ([`loquax::screenmap::setup`]), with the radar's zooms (1386): deeper
+/// than the outline reaches where no region is, so the radar is there to
+/// zoom into.
+pub fn setup(painter: &loquax::picture::Painter) -> loquax::ui::map::MapSetup {
+    let mut setup = loquax::screenmap::setup(painter);
+    setup.zooms = loquax::ui::radar::zooms(setup.zooms);
+    setup
+}
 
 /// The width of `text` at `size` pixels as the window sets it: iced's own
 /// paragraph over its font system, with nothing drawn, so it works without
@@ -62,6 +74,9 @@ pub(super) mod tests {
             age: Some("5m".to_string()),
             stale: peer == 3,
             nearby: false,
+            own: false,
+            fix_at: None,
+            battery: None,
         }
     }
 
@@ -85,6 +100,7 @@ pub(super) mod tests {
             zooms: (0, 20),
             draw_pins: false,
             tracks: &[],
+            radar: None,
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
@@ -221,6 +237,7 @@ pub(super) mod tests {
             zooms: (0, 20),
             draw_pins: false,
             tracks: &[],
+            radar: None,
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
@@ -352,6 +369,7 @@ pub(super) mod tests {
                         zooms: (0, 20),
                         draw_pins: false,
                         tracks: &[],
+                        radar: None,
                         measure: Some(measure),
                         now_ms: None,
                         scaled_while_moving: false,
@@ -416,6 +434,7 @@ pub(super) mod tests {
                     scale: 1.0,
                     pins: &pins,
                     tracks: &drawn,
+                    radar: None,
                     selected: None,
                     zooms: (0, 20),
                     draw_pins: true,
@@ -442,6 +461,85 @@ pub(super) mod tests {
                 }
                 same_as(&name, &rgb, 480, 320);
             }
+        }
+    }
+
+    /// 1386's five scenes through the window's own frames over the
+    /// Florence fixture, 480 x 320, the pins drawn in, each the golden
+    /// `gui-tracks-<name>.png`: the radar where no region touches the view
+    /// (decided by [`loquax::ui::radar::shows`] over the fixture's
+    /// regions, as the window decides), the way back in grey, the late
+    /// stretch dashed, the low battery beside Kai's marker, and "fit all"
+    /// at the view its fit gives. `LOQUAX_TRACK_PNG_DIR` writes them there
+    /// too.
+    #[test]
+    fn the_marks_scenes_are_the_goldens() {
+        use loquax::ui::radar;
+        use loquax::ui::tracks::{scenes, tracks, TrackWindow};
+        let out = std::env::var_os("LOQUAX_TRACK_PNG_DIR").map(PathBuf::from);
+        let mut frames = florence();
+        let setup = setup(frames.painter());
+        let (w, h) = (480u32, 320u32);
+        for scene in scenes::marks() {
+            let fitted = match scene.name {
+                "fit-all" => {
+                    let (centre, zoom) = fit(&scenes::fitted_pins(&scene), area((w, h)), &setup);
+                    leviculum_map::viewport::Viewport::new(centre, zoom, w, h)
+                }
+                _ => scenes::view_of(&scene, w, h, 28),
+            };
+            let view = ExactView::new(fitted.centre, u32::from(fitted.zoom()) * MILLI, w, h);
+            let unit = libm::exp2(24.0 - f64::from(fitted.zoom()));
+            let drawn = tracks(
+                &scenes::input(&scene),
+                TrackWindow::Episode,
+                &scene.now,
+                unit,
+                1.0,
+            );
+            let mut pins = scenes::pins(&scene);
+            let shown = match radar::shows(&fitted, &setup.regions) {
+                true => radar::radar(&pins, view.unit(), view.size()),
+                false => None,
+            };
+            assert_eq!(shown.is_some(), scene.name == "radar", "{}", scene.name);
+            if let Some(r) = &shown {
+                radar::label(&mut pins, r);
+            }
+            let shot = frames.frame(&Ask {
+                view,
+                margin: (0, 0),
+                moving: false,
+                style: Style::SCREEN,
+                scale: 1.0,
+                pins: &pins,
+                tracks: &drawn,
+                radar: shown.as_ref(),
+                selected: None,
+                zooms: (0, 20),
+                draw_pins: true,
+                measure: None,
+                now_ms: None,
+                scaled_while_moving: false,
+            });
+            let rgb: Vec<u8> = shot
+                .rgba
+                .chunks(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
+            let name = format!("gui-tracks-{}.png", scene.name);
+            if let Some(dir) = &out {
+                std::fs::create_dir_all(dir).expect("png dir");
+                let mut bytes = Vec::new();
+                let mut e = png::Encoder::new(&mut bytes, w, h);
+                e.set_color(png::ColorType::Rgb);
+                e.set_depth(png::BitDepth::Eight);
+                let mut writer = e.write_header().expect("header");
+                writer.write_image_data(&rgb).expect("data");
+                writer.finish().expect("finish");
+                std::fs::write(dir.join(&name), bytes).expect("write png");
+            }
+            same_as(&name, &rgb, w, h);
         }
     }
 
@@ -478,6 +576,7 @@ pub(super) mod tests {
                         zooms: (0, 20),
                         draw_pins: false,
                         tracks: &[],
+                        radar: None,
                         measure: Some(measure),
                         now_ms: None,
                         scaled_while_moving: false,

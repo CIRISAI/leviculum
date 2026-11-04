@@ -100,6 +100,10 @@ pub struct TrackFix {
     pub bearing_e2: i32,
     /// Metres times 100, 0 when unknown.
     pub accuracy_e2: u16,
+    /// It arrived late ([`Fix::late_secs`], 1386): the segment it ends is
+    /// dashed, the peer was out of reach meanwhile. In the padding, so a
+    /// fix stays 32 bytes.
+    pub late: bool,
 }
 
 impl TrackFix {
@@ -112,6 +116,7 @@ impl TrackFix {
             speed_e2: l.speed_e2,
             bearing_e2: l.bearing_e2,
             accuracy_e2: l.accuracy_e2,
+            late: fix.late_secs().is_some(),
         }
     }
 
@@ -505,6 +510,8 @@ pub struct Segment {
     pub to: World,
     /// The newer end's age.
     pub age: Age,
+    /// The newer end arrived late (1386): drawn dashed.
+    pub late: bool,
 }
 
 /// A fix drawn as a faint dot and never on the line: an outlier or a
@@ -607,6 +614,7 @@ pub fn segments(
                         from: start,
                         to: at,
                         age: Age::of(now - f.t),
+                        late: f.late,
                     });
                 }
                 kept = Some((i, at));
@@ -874,6 +882,27 @@ pub fn tracks(
         .collect()
 }
 
+/// The peers of `input` whose newest fix lies inside `window` at `now`
+/// (1386): what "fit all" brings into view. The current episode is the
+/// last [`EPISODE_FLOOR_SECS`] for this: a peer silent longer has ended
+/// its episode by the silence (rule 3), though no fix after it says so.
+pub fn inside(input: &TrackInput, window: TrackWindow, now: &WallTime) -> Vec<[u8; 16]> {
+    input
+        .iter()
+        .filter(|(_, _, fixes)| {
+            let Some(newest) = fixes.last() else {
+                return false;
+            };
+            let (from, to) = match window {
+                TrackWindow::Episode => (now.unix_secs - EPISODE_FLOOR_SECS, i64::MAX),
+                _ => window.bounds(fixes, &[], now),
+            };
+            newest.t >= from && newest.t < to
+        })
+        .map(|(peer, _, _)| *peer)
+        .collect()
+}
+
 /// The last `budget` of `items`.
 fn newest<T>(mut items: Vec<T>, budget: usize) -> Vec<T> {
     let n = items.len();
@@ -917,6 +946,7 @@ mod tests {
             speed_e2: 0,
             bearing_e2: 0,
             accuracy_e2: 500,
+            late: false,
         }
     }
 

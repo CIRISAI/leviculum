@@ -2556,9 +2556,11 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     .await;
     let before = frame(&frames, "before the load");
     assert!(before.contains("· loading map"), "{before}");
+    // No region holds the place yet: the radar meanwhile (1386), centred
+    // on the one pin, which it says, at the fit's zoom the region keeps.
     assert!(
-        before.contains("Natural Earth"),
-        "the outline meanwhile\n{before}"
+        before.contains("radar on them") && before.contains("z15"),
+        "the radar meanwhile\n{before}"
     );
     let after = frame(&frames, "after the load");
     assert!(

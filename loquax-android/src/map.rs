@@ -65,7 +65,10 @@ use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
 use loquax::tiles::Stats;
-use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
+use loquax::ui::map::{
+    fit, fit_at, in_window, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant,
+};
+use loquax::ui::radar;
 use loquax::ui::tracks::TrackWindow;
 use loquax::ui::viewload::ViewLoads;
 use loquax::when::WallTime;
@@ -386,7 +389,7 @@ impl Renderer {
         let now = self.now_ms();
         let polled = self.loader.poll(now);
         let landed = self.steps(polled, &mut notice);
-        let setup = screenmap::setup(self.frames.painter());
+        let setup = screenmap::setup_for(self.frames.painter(), pins);
         let area = screenmap::area((request.w.max(1), request.h.max(1)));
         let scale = (request.density_milli.max(100) as f32) / 1000.0;
         let mut selected = request
@@ -441,6 +444,13 @@ impl Renderer {
             if let Some(want) = want_place(at, &setup.regions) {
                 self.ask(want, &mut notice);
             }
+        } else if request.fit_window {
+            // "Fit all" (1386): every peer inside the tracks' time window.
+            let inside = crate::current()
+                .map(|session| session.map_inside())
+                .unwrap_or_default();
+            fit_to(&mut view, fit(&in_window(pins, &inside), area, &setup));
+            self.fitted_at = Some(fitted(&view));
         } else if first || request.fit || refit {
             fit_to(&mut view, fit(pins, area, &setup));
             self.fitted_at = Some(fitted(&view));
@@ -541,6 +551,21 @@ impl Renderer {
             Some(session) => session.map_tracks(unit, scale, pressed),
             None => (Vec::new(), TrackWindow::default()),
         };
+        // No region touches the view: the radar (1386), every pin saying
+        // how far and which way it is from the centre.
+        let radar = match radar::shows(&view.at_zoom(rest_zoom), &setup.regions) {
+            true => radar::radar(pins, view.unit(), view.size()),
+            false => None,
+        };
+        let mut labelled;
+        let pins = match &radar {
+            Some(r) => {
+                labelled = pins.to_vec();
+                radar::label(&mut labelled, r);
+                &labelled[..]
+            }
+            None => pins,
+        };
         let ask = Ask {
             view,
             margin: (mx, my),
@@ -549,6 +574,7 @@ impl Renderer {
             scale,
             pins,
             tracks: &tracks,
+            radar: radar.as_ref(),
             selected,
             zooms,
             draw_pins: !request.avatars,
@@ -562,11 +588,18 @@ impl Renderer {
         };
         let (w, h) = shot.view.size();
         let marks = match request.avatars {
-            true => marks(pins, &shot.shows, (mx, my), scale, ceiling.max(floor)),
+            true => marks(
+                pins,
+                &shot.shows,
+                (mx, my),
+                scale,
+                ceiling.max(floor),
+                radar.as_ref(),
+            ),
             false => Vec::new(),
         };
         let no_map = !self.loader.loading_here()
-            && !any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
+            && !radar::any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
         let own = match (request.own_lat_e6, request.own_lon_e6) {
             (Some(lat), Some(lon)) => {
@@ -680,13 +713,15 @@ impl Renderer {
 /// view pixels, clustered by [`friends::cluster`] with circles of
 /// [`friends::PIN_DP`] at `scale`: those that land in the frame, its
 /// `margin` on each side included; each cluster with the zoom that parts
-/// it, no deeper than `max_milli`.
+/// it, no deeper than `max_milli`. Under a `radar` (1386) a pin says how
+/// far and which way it is from the radar's centre.
 pub fn marks(
     pins: &[MapPin],
     shows: &ExactView,
     margin: (u32, u32),
     scale: f32,
     max_milli: u32,
+    radar: Option<&radar::Radar>,
 ) -> Vec<MapMark> {
     let (w, h) = shows.size();
     let (mx, my) = (f64::from(margin.0), f64::from(margin.1));
@@ -704,6 +739,10 @@ pub fn marks(
         .into_iter()
         .map(|members| {
             let (x, y) = points[members[0]];
+            let pin = landed[members[0]].0;
+            let way = radar
+                .filter(|r| members.len() == 1 && pin.at != r.centre)
+                .map(|r| radar::relative(r.centre, pin.at));
             MapMark {
                 x: x.round() as i32,
                 y: y.round() as i32,
@@ -718,25 +757,11 @@ pub fn marks(
                     diameter,
                     max_milli,
                 ),
+                way,
+                low_battery: members.len() == 1 && pin.low_battery(),
             }
         })
         .collect()
-}
-
-/// Whether any of `regions` reaches into `view` at some zoom: without one
-/// the map shows only the world's outline there, "No map here yet"
-/// (1200). A box across the antimeridian counts as reaching in.
-fn any_region(
-    regions: &[leviculum_map::region::Header],
-    view: &leviculum_map::viewport::Viewport,
-) -> bool {
-    let b = view.bounds();
-    regions.iter().any(|h| {
-        let r = h.bounds;
-        r.west > r.east
-            || b.west > b.east
-            || (r.west <= b.east && b.west <= r.east && r.south <= b.north && b.south <= r.north)
-    })
 }
 
 /// The process's renderers, one a directory: the app has one; a test

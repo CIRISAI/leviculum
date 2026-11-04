@@ -2,7 +2,9 @@
 //! terminal"): the lines as braille dots, two by four a cell, whatever
 //! technique draws the picture under them; a dwell as `•`, a place as `○`,
 //! an outlier as `·`, the wedge as an arrow in the cell the newest fix
-//! moves towards, the quiet line on the row below the pin. Four levels of
+//! moves towards, the quiet line on the row below the pin. A line whose
+//! newer fix arrived late (1386) is `┄` where no other line crosses the
+//! cell, `:` in ASCII. Four levels of
 //! age ([`super::Age::level`]), the hue per peer ([`super::hue`]).
 //!
 //! A cell holds one track: where two cross, the one drawn later wins, and
@@ -60,6 +62,8 @@ pub fn cells(
     for track in tracks {
         // Per cell: the braille bits, the level, and a mark over them.
         let mut grid: BTreeMap<(i64, i64), (u8, u8, Option<Mark>)> = BTreeMap::new();
+        // The cells a line crosses that arrived on time.
+        let mut solid = alloc::collections::BTreeSet::new();
         let set_dot = |grid: &mut BTreeMap<(i64, i64), (u8, u8, Option<Mark>)>,
                        (x, y): (i64, i64),
                        level: u8| {
@@ -97,6 +101,9 @@ pub fn cells(
             }
             for p in line(a, b) {
                 set_dot(&mut grid, p, s.age.level());
+                if !s.late {
+                    solid.insert((p.0.div_euclid(2), p.1.div_euclid(4)));
+                }
             }
         }
         for d in &track.dots {
@@ -120,6 +127,8 @@ pub fn cells(
                 (Some(Mark::Dot), true) if bits == 0 => ',',
                 (Some(Mark::Place), false) if bits == 0 => '○',
                 (Some(Mark::Place), true) if bits == 0 => 'O',
+                (None, true) if !solid.contains(&(col, row)) => ':',
+                (None, false) if !solid.contains(&(col, row)) => '┄',
                 (_, true) => '.',
                 (_, false) => char::from_u32(0x2800 + u32::from(bits)).unwrap_or('⠿'),
             };
@@ -229,6 +238,7 @@ mod tests {
                 from: px(&v, 0, 1),
                 to: px(&v, 19, 1),
                 age: Age::Fresh,
+                late: false,
             }],
             dots: Vec::new(),
             dwells: vec![Blob {

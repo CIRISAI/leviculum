@@ -1667,6 +1667,20 @@ impl Session {
         self.lock().model.map_pins()
     }
 
+    /// The peers with a position inside the tracks' time window (1386):
+    /// what "fit all" brings into view; none before the clock is known.
+    pub fn map_inside(&self) -> Vec<[u8; 16]> {
+        let inner = self.lock();
+        match inner.model.now {
+            Some(now) => loquax::ui::tracks::inside(
+                &inner.model.track_input(),
+                inner.model.track_window,
+                &now,
+            ),
+            None => Vec::new(),
+        }
+    }
+
     /// The map's tracks on a view whose screen pixel spans `unit` world
     /// units, drawn at `scale` (1385), after a chip `pressed`; and the
     /// window they are drawn in.

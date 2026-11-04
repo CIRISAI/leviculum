@@ -642,6 +642,7 @@ impl Intent {
             Intent::Map(MapCmd::ZoomOut) => StrId::ZoomOut,
             Intent::Map(MapCmd::Pan(..)) => StrId::Pan,
             Intent::Map(MapCmd::Fit) => StrId::Fit,
+            Intent::Map(MapCmd::FitWindow) => StrId::FitWindow,
             Intent::Map(MapCmd::Step(_)) => StrId::StepPin,
             Intent::Map(MapCmd::Open) => StrId::Open,
             Intent::Map(MapCmd::Close) => StrId::Close,

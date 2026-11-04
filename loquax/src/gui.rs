@@ -571,6 +571,8 @@ pub struct Order {
     pub pins: Vec<MapPin>,
     /// The tracks at the view's zoom (1385).
     pub tracks: Vec<loquax::ui::tracks::Track>,
+    /// The radar where no region touches the view (1386).
+    pub radar: Option<loquax::ui::radar::Radar>,
     pub selected: Option<[u8; 16]>,
     pub zooms: (u8, u8),
     /// The maps directory's epoch it is asked at.
@@ -597,7 +599,7 @@ pub struct Shown {
 /// What the worker does next.
 #[derive(Debug)]
 enum Job {
-    Draw(Order),
+    Draw(Box<Order>),
     Prefetch(u64),
 }
 
@@ -618,6 +620,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         scale: order.scale,
         pins: &order.pins,
         tracks: &order.tracks,
+        radar: order.radar.as_ref(),
         selected: order.selected,
         zooms: order.zooms,
         draw_pins: false,
@@ -1468,6 +1471,7 @@ impl App {
                 self.fit();
                 self.selected = selected.or(self.selected);
             }
+            MapCmd::FitWindow => self.fit_window(),
             MapCmd::Step(next) => {
                 let pins = &self.seen.pins;
                 let at = pins.iter().position(|p| Some(p.peer) == self.selected);
@@ -1898,7 +1902,7 @@ impl App {
             .as_ref()
             .is_some_and(|s| s.order == order && s.missing == 0 && !s.fading);
         let job = match current {
-            false => Job::Draw(order),
+            false => Job::Draw(Box::new(order)),
             true if self.prefetching && self.focused && !order.moving => {
                 Job::Prefetch(self.now_ms())
             }
@@ -1911,19 +1915,38 @@ impl App {
     /// The frame the view asks for now.
     fn order(&self) -> Option<Order> {
         let (w, h) = self.pixels()?;
+        let (pins, radar) = self.radar_pins();
         Some(Order {
             view: self.view,
             margin: (w / MARGIN_PART, h / MARGIN_PART),
             moving: self.moving(),
             style: self.seen.style,
             scale: self.scale,
-            pins: self.seen.pins.clone(),
+            pins,
             tracks: self.tracks(),
+            radar,
             selected: self.selected,
             zooms: self.zooms(),
             epoch: self.seen.maps,
             motion: self.motion,
         })
+    }
+
+    /// The pins as the frame draws them, and the radar where no region
+    /// touches the view at its tile zoom (1386): then each pin says how
+    /// far and which way it is from the centre.
+    fn radar_pins(&self) -> (Vec<MapPin>, Option<loquax::ui::radar::Radar>) {
+        use loquax::ui::radar;
+        let mut pins = self.seen.pins.clone();
+        let at_rest = self.view.at_zoom(self.view.tile_zoom());
+        let shown = match radar::shows(&at_rest, &self.setup.regions) {
+            true => radar::radar(&pins, self.view.unit(), self.view.size()),
+            false => None,
+        };
+        if let Some(r) = &shown {
+            radar::label(&mut pins, r);
+        }
+        (pins, shown)
     }
 
     /// The tracks at the view's tile zoom, as the frame draws them: kept
@@ -1981,7 +2004,7 @@ impl App {
         let frames = self.frames.clone();
         match self.next_job() {
             Some(Job::Draw(order)) => tasks.push(Task::perform(
-                async move { draw(&frames, order) },
+                async move { draw(&frames, *order) },
                 Message::Painted,
             )),
             Some(Job::Prefetch(now)) => tasks.push(Task::perform(
@@ -2014,6 +2037,24 @@ impl App {
                 self.ask(want);
             }
         }
+    }
+
+    /// "Fit all" (1386): every peer with a position inside the tracks'
+    /// time window in view, as `f` does in the terminal.
+    fn fit_window(&mut self) {
+        let Some(size) = self.pixels() else {
+            return;
+        };
+        let inside = match self.seen.now {
+            Some(now) => {
+                loquax::ui::tracks::inside(&self.seen.tracks, self.seen.track_window, &now)
+            }
+            None => Vec::new(),
+        };
+        let pins = loquax::ui::map::in_window(&self.seen.pins, &inside);
+        let (centre, zoom) = fit(&pins, map::area(size), &self.setup);
+        self.view = ExactView::new(centre, u32::from(zoom) * MILLI, size.0, size.1);
+        self.hold();
     }
 
     fn ask(&self, want: MapWant) {
@@ -2478,6 +2519,13 @@ impl App {
                         .style(style),
                 )
             })
+            // "Fit all" (1386): every peer inside the window in view.
+            .push(
+                button(text(StrId::FitWindow.text(Lang::En)).size(13))
+                    .on_press(Message::Intent(Intent::Map(MapCmd::FitWindow)))
+                    .padding([0, 6])
+                    .style(button::text),
+            )
             .into()
     }
 }
@@ -2661,6 +2709,33 @@ impl canvas::Program<Message> for MapCanvas<'_> {
             let radius = map::MARKER / 2.0;
             frame.fill(&Path::circle(centre, radius + 1.5), Color::WHITE);
             frame.fill(&Path::circle(centre, radius), ink);
+            // A battery below a fifth (1386), as the phone's frame draws it.
+            if pin.low_battery {
+                let (bw, bh) = map::BATTERY;
+                let (x, y) = map::battery_at(centre.x, centre.y, 1.0);
+                let at = Point::new(x, y);
+                frame.fill_rectangle(
+                    Point::new(at.x - 1.0, at.y - 1.0),
+                    Size::new(bw + 3.5, bh + 2.0),
+                    Color::from_rgba8(0xff, 0xff, 0xff, 0.85),
+                );
+                frame.fill_rectangle(at, Size::new(bw, bh), Color::from_rgb8(0x10, 0x10, 0x10));
+                frame.fill_rectangle(
+                    Point::new(at.x + 1.0, at.y + 1.0),
+                    Size::new(bw - 2.0, bh - 2.0),
+                    Color::WHITE,
+                );
+                frame.fill_rectangle(
+                    Point::new(at.x + 1.0, at.y + 1.0),
+                    Size::new(((bw - 2.0) / 5.0).max(1.0), bh - 2.0),
+                    Color::from_rgb8(0xd0, 0x30, 0x30),
+                );
+                frame.fill_rectangle(
+                    Point::new(at.x + bw, at.y + bh / 3.0),
+                    Size::new(1.5, bh / 3.0),
+                    Color::from_rgb8(0x10, 0x10, 0x10),
+                );
+            }
             if let Some((x, y, words)) = &pin.label {
                 let text_ink = match (pin.stale, hue) {
                     (true, Some(hue)) => hue.scale_alpha(0.55),
@@ -2791,7 +2866,7 @@ mod tests {
         loop {
             match app.next_job() {
                 Some(Job::Draw(order)) => {
-                    let shown = draw(&app.frames, order);
+                    let shown = draw(&app.frames, *order);
                     app.apply(Message::Painted(shown.clone()));
                     last = Some(shown);
                 }

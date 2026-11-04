@@ -206,9 +206,31 @@ pub struct MapPin {
     /// A node the mesh announced that is no contact (1302): a neutral pin,
     /// grey, with its announced name and no avatar.
     pub nearby: bool,
+    /// Our own position (1386): what the radar centres on.
+    pub own: bool,
+    /// The fix time, unix seconds: the newest peer is what the radar
+    /// centres on without an own position.
+    pub fix_at: Option<i64>,
+    /// The battery's charge in percent, when the fix's Telemeter carried a
+    /// battery sensor (1386): below [`LOW_BATTERY`] the pin gets a glyph.
+    pub battery: Option<u8>,
 }
 
+/// A pin whose battery is below this many percent gets the battery glyph
+/// (1386).
+pub const LOW_BATTERY: u8 = 20;
+
+/// The low battery's glyph after a pin's name in the terminal, a battery
+/// on its side's outline; `!` in ASCII. A pixel screen draws a battery
+/// ([`crate::screenmap::draw_pins`]).
+pub const BATTERY_GLYPH: char = '▯';
+
 impl MapPin {
+    /// Whether its battery is low ([`LOW_BATTERY`]).
+    pub fn low_battery(&self) -> bool {
+        self.battery.is_some_and(|b| b < LOW_BATTERY)
+    }
+
     /// What is set beside the marker: the name, and the fix's age when
     /// the shell has said the time.
     pub fn words(&self) -> String {
@@ -415,6 +437,19 @@ pub struct MapView {
     pub pins: Vec<PinCell>,
     /// The tracks' cells under the pins (1385).
     pub tracks: Vec<crate::ui::tracks::cells::TrackCell>,
+    /// The radar where no region touches the view (1386): the picture is
+    /// left blank and these drawn instead.
+    pub radar: Option<RadarCells>,
+}
+
+/// The radar in the terminal's cells (1386).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RadarCells {
+    /// [`crate::ui::radar::Radar::note`], on the credit's row.
+    pub note: String,
+    /// The rings, their distances and the centre
+    /// ([`crate::ui::radar::cells`]).
+    pub cells: Vec<crate::ui::tracks::cells::TrackCell>,
 }
 
 /// Pixels the fit leaves free at each side, so a pin is not on the edge.
@@ -456,6 +491,9 @@ pub fn pins_of(
                 age,
                 stale: now.is_some_and(|now| fix.stale(now)),
                 nearby: Some(*peer) != own && nearby(peer),
+                own: Some(*peer) == own,
+                fix_at: Some(fix.fix_time()),
+                battery: fix.battery(),
             }
         })
         .collect();
@@ -517,8 +555,10 @@ fn pixels(area: Rect, setup: &MapSetup) -> (u32, u32) {
 
 /// The view that shows every pin, at the deepest zoom of `setup` that
 /// does, but no deeper than the region under its centre has data for
-/// ([`fit_ceiling`]): one pin fits at that region's max zoom, or at the
-/// outline's, and `+` goes on into the overzoom. With no pin, the first of
+/// ([`fit_ceiling`]): one pin fits at that region's max zoom, and `+` goes
+/// on into the overzoom. Where no region holds the centre the radar draws
+/// (1386): the fit goes to [`crate::ui::radar::FIT_ZOOM`] where `setup`
+/// reaches it, the outline's deepest where it does not. With no pin, the first of
 /// `setup`'s regions, which the shells list newest first; with none of
 /// those either, the world at the [`zoom_floor`].
 pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
@@ -539,6 +579,21 @@ pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
     fit_points(&points, area, setup)
 }
 
+/// The pins "fit all" brings into view (1386): those of `inside`, the
+/// peers with a position inside the tracks' time window
+/// ([`crate::ui::tracks::inside`]); every pin when none is.
+pub fn in_window(pins: &[MapPin], inside: &[[u8; 16]]) -> Vec<MapPin> {
+    let kept: Vec<MapPin> = pins
+        .iter()
+        .filter(|p| inside.contains(&p.peer))
+        .cloned()
+        .collect();
+    match kept.is_empty() {
+        true => pins.to_vec(),
+        false => kept,
+    }
+}
+
 /// The view centred on one point, at the zoom [`fit`] gives a single pin
 /// there: the deepest the region under it has data for, or the outline's
 /// without one. Where a report's fix opens the map (1076).
@@ -552,7 +607,16 @@ fn fit_points(points: &[World], area: Rect, setup: &MapSetup) -> (World, u8) {
     let floor = zoom_floor(area, setup);
     let (centre, zoom) = match Viewport::fit(points, w, h, margin, floor..=setup.zooms.1) {
         Some(view) => {
-            let ceiling = fit_ceiling(&setup.regions, view.centre).max(floor);
+            // Where no region holds the centre the radar draws (1386): the
+            // fit goes as deep as its rings read, not the outline's.
+            let at = unproject(view.centre);
+            let held = setup.regions.iter().any(|h| h.bounds.contains(at));
+            let ceiling = fit_ceiling(&setup.regions, view.centre);
+            let ceiling = match held {
+                true => ceiling,
+                false => ceiling.max(crate::ui::radar::FIT_ZOOM.min(setup.zooms.1)),
+            }
+            .max(floor);
             (view.centre, view.zoom().min(ceiling))
         }
         None => (
@@ -591,7 +655,12 @@ pub fn place(
             let pin = pins.get(placed.index)?;
             let col = u16::try_from(placed.x / u32::from(setup.cell_px.0.max(1))).ok()?;
             let row = u16::try_from(placed.y / u32::from(setup.cell_px.1.max(1))).ok()?;
-            let words = pin.words();
+            // A battery below a fifth after the name (1386).
+            let words = match (pin.low_battery(), ascii) {
+                (false, _) => pin.words(),
+                (true, false) => format!("{} {BATTERY_GLYPH}", pin.words()),
+                (true, true) => format!("{} !", pin.words()),
+            };
             let len = u16::try_from(words.chars().count()).unwrap_or(u16::MAX);
             Some((pin, (col, row), len, words))
         })
@@ -966,6 +1035,9 @@ mod tests {
             age: None,
             stale: false,
             nearby: false,
+            own: false,
+            fix_at: None,
+            battery: None,
         };
         let pins = [pin(1, "you"), pin(2, "them")];
         let area = Rect::new(1, 1, 40, 10);
@@ -1015,17 +1087,38 @@ mod tests {
             age: None,
             stale: false,
             nearby: false,
+            own: false,
+            fix_at: None,
+            battery: None,
         };
         let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &setup);
         assert_eq!(zoom, header.max_zoom);
-        // Frankfurt, outside the fixture: the outline's deepest.
+        // Frankfurt, outside the fixture: the radar draws there (1386),
+        // and the fit goes to its zoom where the setup reaches it, the
+        // outline's deepest where it does not.
         let (_, zoom) = fit(&[pin(50.1106, 8.6821)], area, &setup);
-        assert_eq!(zoom, leviculum_map::outline::MAX_ZOOM);
+        assert_eq!(
+            zoom,
+            crate::ui::radar::FIT_ZOOM
+                .min(setup.zooms.1)
+                .max(leviculum_map::outline::MAX_ZOOM)
+        );
         let none = MapSetup {
             regions: Vec::new(),
             ..setup.clone()
         };
         let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &none);
+        assert_eq!(
+            zoom,
+            crate::ui::radar::FIT_ZOOM
+                .min(setup.zooms.1)
+                .max(leviculum_map::outline::MAX_ZOOM)
+        );
+        let outline_only = MapSetup {
+            zooms: (0, leviculum_map::outline::MAX_ZOOM),
+            ..none
+        };
+        let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &outline_only);
         assert_eq!(zoom, leviculum_map::outline::MAX_ZOOM);
     }
 

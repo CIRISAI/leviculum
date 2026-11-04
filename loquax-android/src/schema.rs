@@ -2412,6 +2412,10 @@ pub struct MapRequest {
     /// which the frame drew.
     #[serde(default)]
     pub track_window: Option<String>,
+    /// The "fit all" chip pressed (1386): every peer with a position
+    /// inside the tracks' time window in view.
+    #[serde(default)]
+    pub fit_window: bool,
 }
 
 /// One region of the maps directory, for the Maps page (1201, 1207).
@@ -2451,6 +2455,14 @@ pub struct MapMark {
     /// for a pin.
     #[serde(default)]
     pub split_milli: Option<u32>,
+    /// Under the radar (1386), where no region touches the view: how far
+    /// and which way the pin is from the radar's centre, "1.3 km NE";
+    /// absent on a map, on a cluster and on the centre's own pin.
+    #[serde(default)]
+    pub way: Option<String>,
+    /// The pin's battery is below a fifth (1386): a battery beside it.
+    #[serde(default)]
+    pub low_battery: bool,
 }
 
 /// The map frame's description; its pixels follow it (see the table

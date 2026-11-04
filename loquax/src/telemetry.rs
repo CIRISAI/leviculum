@@ -112,7 +112,29 @@ impl Fix {
     pub fn stale(&self, now: i64) -> bool {
         now.saturating_sub(self.fix_time()) > STALE_AFTER_SECS
     }
+
+    /// The battery's charge in whole percent, when the Telemeter it came
+    /// in carried a battery sensor (1386).
+    pub fn battery(&self) -> Option<u8> {
+        let telemetry = Telemetry::decode(&self.telemetry).ok()?;
+        let percent = telemetry.battery?.charge_percent.as_f64();
+        percent
+            .is_finite()
+            .then(|| libm::round(percent.clamp(0.0, 100.0)) as u8)
+    }
+
+    /// How late it arrived: the seconds from its fix time to its receive
+    /// time, when that is more than [`LATE_AFTER_SECS`] (1386); the peer
+    /// was out of reach meanwhile.
+    pub fn late_secs(&self) -> Option<i64> {
+        let late = self.received_at? - self.fix_time();
+        (late > LATE_AFTER_SECS).then_some(late)
+    }
 }
+
+/// A fix that arrives more than this after its fix time arrived late
+/// (1386): the segment it ends is dashed.
+pub const LATE_AFTER_SECS: i64 = 30 * 60;
 
 /// A telemetry field whose value did not decode.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,6 +480,9 @@ fn sensors(rows: &mut Vec<String>, t: &Telemetry, when: &When) {
         }
         let wall = fix_wall(l.last_update, offset_secs);
         let c = wall.civil();
+        // Out of reach meanwhile (1386): the map dashes the line it ends.
+        let late = when.received_at.map(|at| at - l.last_update);
+        let late = late.filter(|&secs| secs > LATE_AFTER_SECS);
         let ahead = when
             .received_at
             .is_some_and(|at| l.last_update > at.saturating_add(FUTURE_TOLERANCE_SECS));
@@ -473,6 +498,9 @@ fn sensors(rows: &mut Vec<String>, t: &Telemetry, when: &When) {
                 ""
             }
         ));
+        if let Some(secs) = late {
+            rows.push(format!("  arrived   {} late", span(secs)));
+        }
     }
     if let Some(time) = t.time {
         rows.push(format!(
@@ -828,6 +856,35 @@ mod tests {
         assert!(rows.contains(&"  altitude  51.20 m".to_string()));
         assert!(rows.contains(&"  accuracy  ±5 m".to_string()));
         assert!(rows.contains(&"  battery   87.00 %, not charging".to_string()));
+    }
+
+    /// 1386: the battery a fix's Telemeter carried, in whole percent; a
+    /// fix that arrived 2 h after its fix time is late and its detail says
+    /// so, one 20 min after is not.
+    #[test]
+    fn a_fix_knows_its_battery_and_whether_it_arrived_late() {
+        let late = report(location(43_773_100, 11_256_000, 500, NOW - 7_200));
+        let fields = vec![(FIELD_TELEMETRY, late.encode_field_value())];
+        let fix = read(BOB, &fields, Some(NOW)).fixes.remove(0);
+        assert_eq!(fix.battery(), Some(87));
+        assert_eq!(fix.late_secs(), Some(7_200));
+        let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
+        assert!(
+            rows.contains(&"  arrived   2 h late".to_string()),
+            "{rows:?}"
+        );
+
+        let soon = report(location(43_773_100, 11_256_000, 500, NOW - 1_200));
+        let fields = vec![(FIELD_TELEMETRY, soon.encode_field_value())];
+        let fix = read(BOB, &fields, Some(NOW)).fixes.remove(0);
+        assert_eq!(fix.late_secs(), None);
+        let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
+        assert!(!rows.iter().any(|r| r.contains("arrived")), "{rows:?}");
+        let bare = Fix {
+            telemetry: Vec::new(),
+            ..fix
+        };
+        assert_eq!(bare.battery(), None);
     }
 
     #[test]

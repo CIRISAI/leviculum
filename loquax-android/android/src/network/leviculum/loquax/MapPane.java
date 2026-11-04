@@ -188,6 +188,24 @@ final class MapPane implements MapView.Listener {
             row.addView(chipView, at);
             trackChips[i] = chipView;
         }
+        // "Fit all" (1386): every peer inside the time window in view.
+        TextView fitChip = new TextView(activity);
+        fitChip.setText(activity.getString(R.string.scene_fit_window));
+        fitChip.setTextSize(13);
+        fitChip.setTextColor(activity.getColor(R.color.text));
+        fitChip.setBackgroundResource(R.drawable.chip);
+        fitChip.setElevation(2 * dp);
+        int fh = Math.round(12 * dp);
+        int fv = Math.round(6 * dp);
+        fitChip.setPadding(fh, fv, fh, fv);
+        fitChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                map.fitWindow();
+            }
+        });
+        row.addView(fitChip, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         HorizontalScrollView scroll = new HorizontalScrollView(activity);
         scroll.setHorizontalScrollBarEnabled(false);
         int side = Math.round(12 * dp);

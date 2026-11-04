@@ -2,7 +2,9 @@
 //! the real drawing code as the pictures' goldens: in cells
 //! (`tests/golden/tracks-*.txt`) and in the window's pixels
 //! (`tests/golden/gui-tracks-*.png`). Each is a clock and a few peers'
-//! fixes; nothing here draws.
+//! fixes; nothing here draws. Five more for 1386's marks ([`marks`]): the
+//! radar where no region is, the way back, a late stretch, a low battery,
+//! and "fit all".
 
 use alloc::vec::Vec;
 
@@ -18,6 +20,8 @@ pub struct Scene {
     pub now: WallTime,
     pub peers: Vec<([u8; 16], &'static str, Vec<TrackFix>)>,
     pub own: Option<[u8; 16]>,
+    /// The battery each peer's newest fix reported, where one did (1386).
+    pub battery: Vec<([u8; 16], u8)>,
 }
 
 impl Scene {
@@ -51,6 +55,7 @@ pub fn at(t: i64, north: f64, east: f64) -> TrackFix {
         speed_e2: 0,
         bearing_e2: 0,
         accuracy_e2: 500,
+        late: false,
     }
 }
 
@@ -143,6 +148,7 @@ pub fn hiking() -> Scene {
             (peer(3, 1), "dino", back),
         ],
         own: None,
+        battery: Vec::new(),
     }
 }
 
@@ -181,6 +187,7 @@ pub fn park() -> Scene {
             (peer(0, 2), "you", dad),
         ],
         own: Some(peer(0, 2)),
+        battery: Vec::new(),
     }
 }
 
@@ -213,6 +220,7 @@ pub fn convoy() -> Scene {
         now,
         peers,
         own: None,
+        battery: Vec::new(),
     }
 }
 
@@ -245,6 +253,7 @@ pub fn week_old() -> Scene {
         now,
         peers: alloc::vec![(peer(6, 1), "ezra", fixes)],
         own: None,
+        battery: Vec::new(),
     }
 }
 
@@ -269,6 +278,7 @@ pub fn outlier() -> Scene {
         now,
         peers: alloc::vec![(peer(7, 1), "fede", fixes)],
         own: None,
+        battery: Vec::new(),
     }
 }
 
@@ -310,6 +320,7 @@ pub fn handbag() -> Scene {
         now,
         peers: alloc::vec![(peer(1, 2), "bag", fixes)],
         own: None,
+        battery: Vec::new(),
     }
 }
 
@@ -333,9 +344,193 @@ pub fn pins(scene: &Scene) -> Vec<crate::ui::map::MapPin> {
                 age: Some(crate::telemetry::span(now - last.t)),
                 stale: now - last.t > crate::telemetry::STALE_AFTER_SECS,
                 nearby: false,
+                own: scene.own == Some(*peer),
+                fix_at: Some(last.t),
+                battery: scene
+                    .battery
+                    .iter()
+                    .find(|(p, _)| p == peer)
+                    .map(|(_, b)| *b),
             })
         })
         .collect()
+}
+
+/// `fixes` drawn about Florence moved to `(lat, lon)`, each the same
+/// metres north and east of it.
+fn moved_to(fixes: Vec<TrackFix>, (lat, lon): (f64, f64)) -> Vec<TrackFix> {
+    let k = 111_194.93;
+    fixes
+        .into_iter()
+        .map(|f| {
+            let north = (f64::from(f.lat_e6) * 1e-6 - LAT) * k;
+            let east = (f64::from(f.lon_e6) * 1e-6 - LON) * k * libm::cos(LAT.to_radians());
+            TrackFix {
+                lat_e6: libm::round((lat + north / k) * 1e6) as i32,
+                lon_e6: libm::round((lon + east / (k * libm::cos(lat.to_radians()))) * 1e6) as i32,
+                ..f
+            }
+        })
+        .collect()
+}
+
+/// The Seceda ridge in the Dolomites, far from the Florence fixture: no
+/// region is there, so the map draws the radar.
+const SECEDA: (f64, f64) = (46.6006, 11.7254);
+
+/// 1386, the radar: a walk up from a hut, ours, grey; Anna ahead to the
+/// north-east, fresh; Bert behind to the south-west, his last fix 40 min
+/// old. No region holds the ridge.
+pub fn radar() -> Scene {
+    let now = noon();
+    let n = now.unix_secs;
+    let own = walk(
+        n - 2 * 3600,
+        &[
+            (-1_400.0, -900.0),
+            (-900.0, -500.0),
+            (-300.0, -200.0),
+            (0.0, 0.0),
+        ],
+        0.35,
+        120,
+    );
+    let anna = walk(
+        n - 90 * 60,
+        &[(-600.0, 200.0), (300.0, 500.0), (900.0, 900.0)],
+        0.4,
+        120,
+    );
+    let bert = ending(
+        walk(
+            n - 3 * 3600,
+            &[(-2_600.0, -1_900.0), (-1_900.0, -1_500.0)],
+            0.3,
+            180,
+        ),
+        n - 40 * 60,
+    );
+    Scene {
+        name: "radar",
+        now,
+        peers: alloc::vec![
+            (peer(0, 2), "you", moved_to(own, SECEDA)),
+            (peer(1, 4), "anna", moved_to(anna, SECEDA)),
+            (peer(2, 4), "bert", moved_to(bert, SECEDA)),
+        ],
+        own: Some(peer(0, 2)),
+        battery: Vec::new(),
+    }
+}
+
+/// 1386, the way back: our own walk from the car park in the morning, a
+/// fix a minute as the store keeps it, grey; nobody else.
+pub fn way_back() -> Scene {
+    let now = noon();
+    let n = now.unix_secs;
+    let own = ending(
+        walk(
+            n - 3 * 3600,
+            &[
+                (-1_800.0, 1_200.0),
+                (-1_200.0, 900.0),
+                (-900.0, 200.0),
+                (-200.0, -300.0),
+                (300.0, -100.0),
+            ],
+            0.45,
+            60,
+        ),
+        n - 60,
+    );
+    Scene {
+        name: "way-back",
+        now,
+        peers: alloc::vec![(peer(0, 2), "you", own)],
+        own: Some(peer(0, 2)),
+        battery: Vec::new(),
+    }
+}
+
+/// 1386, a late stretch: a walk whose middle twenty minutes arrived an
+/// hour and a half late, out of reach behind a hill: the segments those
+/// fixes end are dashed.
+pub fn late() -> Scene {
+    let now = noon();
+    let n = now.unix_secs;
+    let mut fixes = walk(
+        n - 70 * 60,
+        &[
+            (-900.0, -1_200.0),
+            (-300.0, -200.0),
+            (500.0, 300.0),
+            (900.0, 1_100.0),
+        ],
+        0.8,
+        60,
+    );
+    let (from, to) = (n - 45 * 60, n - 25 * 60);
+    for f in fixes.iter_mut().filter(|f| f.t > from && f.t <= to) {
+        f.late = true;
+    }
+    Scene {
+        name: "late",
+        now,
+        peers: alloc::vec![(peer(3, 2), "gina", fixes)],
+        own: None,
+        battery: Vec::new(),
+    }
+}
+
+/// 1386, a low battery: two walking, Kai's phone at 12 %, Lia's at 64 %.
+pub fn battery() -> Scene {
+    let now = noon();
+    let n = now.unix_secs;
+    let kai = walk(n - 30 * 60, &[(-500.0, -700.0), (200.0, -100.0)], 0.6, 60);
+    let lia = walk(n - 30 * 60, &[(600.0, 900.0), (100.0, 300.0)], 0.6, 60);
+    Scene {
+        name: "battery",
+        now,
+        peers: alloc::vec![(peer(5, 2), "kai", kai), (peer(6, 2), "lia", lia)],
+        own: None,
+        battery: alloc::vec![(peer(5, 2), 12), (peer(6, 2), 64)],
+    }
+}
+
+/// 1386, "fit all": two walking in town now, and Ugo, whose last fix is
+/// five days old and 12 km away; the current episode holds the two, and
+/// the fit leaves Ugo out.
+pub fn fit_all() -> Scene {
+    let now = noon();
+    let n = now.unix_secs;
+    let mara = walk(n - 40 * 60, &[(-400.0, -500.0), (100.0, 100.0)], 0.7, 60);
+    let nico = walk(n - 40 * 60, &[(300.0, 600.0), (0.0, 200.0)], 0.6, 60);
+    let ugo = ending(
+        walk(n, &[(-12_000.0, 3_000.0), (-11_000.0, 3_500.0)], 1.0, 120),
+        n - 5 * 86_400,
+    );
+    Scene {
+        name: "fit-all",
+        now,
+        peers: alloc::vec![
+            (peer(7, 2), "mara", mara),
+            (peer(4, 2), "nico", nico),
+            (peer(1, 5), "ugo", ugo),
+        ],
+        own: None,
+        battery: Vec::new(),
+    }
+}
+
+/// 1386's five, in the report's order.
+pub fn marks() -> Vec<Scene> {
+    alloc::vec![radar(), way_back(), late(), battery(), fit_all()]
+}
+
+/// The pins "fit all" brings into view in `scene` ([`super::inside`]).
+pub fn fitted_pins(scene: &Scene) -> Vec<crate::ui::map::MapPin> {
+    let inside = super::inside(&input(scene), super::TrackWindow::Episode, &scene.now);
+    crate::ui::map::in_window(&pins(scene), &inside)
 }
 
 /// What [`super::tracks`] takes for a scene.
@@ -380,14 +575,42 @@ mod tests {
     use crate::ui::tracks::{cells::cells, tracks, TrackWindow};
 
     /// The terminal's picture of a scene: braille cells of 72 by 22, the
-    /// tracks and the pins over them, as the text frame draws them.
+    /// tracks and the pins over them, as the text frame draws them. The
+    /// radar scene with its rings and its pins labelled from the centre,
+    /// as [`crate::ui::UiModel::map_view`] lays them out where no region
+    /// is (the cells hold none); "fit all" at the view that fit gives.
     fn frame(scene: &Scene) -> String {
         let (cols, rows) = (72u16, 22u16);
         let area = Rect::new(0, 0, cols, rows);
-        let setup = MapSetup::default();
-        let view = view_of(scene, u32::from(cols) * 2, u32::from(rows) * 4, 6);
+        let setup = MapSetup {
+            zooms: (0, 17),
+            ..MapSetup::default()
+        };
+        let view = match scene.name {
+            "fit-all" => {
+                let (centre, zoom) = crate::ui::map::fit(&fitted_pins(scene), area, &setup);
+                crate::ui::map::viewport(
+                    &crate::ui::map::MapState {
+                        centre,
+                        zoom,
+                        selected: None,
+                    },
+                    area,
+                    &setup,
+                )
+            }
+            _ => view_of(scene, u32::from(cols) * 2, u32::from(rows) * 4, 6),
+        };
         let unit = libm::exp2(24.0 - f64::from(view.zoom()));
         let drawn = tracks(&input(scene), TrackWindow::Episode, &scene.now, unit, 0.5);
+        let mut pinned = pins(scene);
+        let radar = match scene.name == "radar" {
+            true => crate::ui::radar::radar(&pinned, unit, view.size()),
+            false => None,
+        };
+        if let Some(r) = &radar {
+            crate::ui::radar::label(&mut pinned, r);
+        }
         let mut grid = alloc::vec![alloc::vec![' '; usize::from(cols)]; usize::from(rows)];
         let mut put = |col: u16, row: u16, text: &str| {
             for (i, ch) in text.chars().enumerate() {
@@ -399,10 +622,15 @@ mod tests {
                 }
             }
         };
+        if let Some(r) = &radar {
+            for c in crate::ui::radar::cells(r, &view, area, setup.cell_px, false) {
+                put(c.col, c.row, &c.text);
+            }
+        }
         for c in cells(&drawn, &view, area, setup.cell_px, false) {
             put(c.col, c.row, &c.text);
         }
-        for p in place(&pins(scene), &view, area, &setup, None, false) {
+        for p in place(&pinned, &view, area, &setup, None, false) {
             put(p.col, p.row, &p.text);
             if let Some(a) = &p.apart {
                 put(a.col, a.row, &a.text);
@@ -410,6 +638,10 @@ mod tests {
         }
         let mut out = String::new();
         out.push_str(&alloc::format!("{} z{}\n", scene.name, view.zoom()));
+        if let Some(r) = &radar {
+            out.push_str(&r.note());
+            out.push('\n');
+        }
         for row in grid {
             let line: String = row.into_iter().collect();
             out.push_str(line.trim_end());
@@ -432,6 +664,49 @@ mod tests {
             let want = std::fs::read_to_string(&path).unwrap_or_default();
             assert!(want == got, "{} moved:\n{got}", path.display());
         }
+    }
+
+    /// 1386's five scenes in cells, each the golden `tests/golden/tracks-
+    /// <name>.txt`: the radar's rings, the grey way back, the late stretch
+    /// in `┄`, the low battery's `▯`, "fit all" without the week-old pin.
+    #[test]
+    fn the_marks_scenes_in_cells_are_the_goldens() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+        for scene in marks() {
+            let got = frame(&scene);
+            let path = dir.join(alloc::format!("tracks-{}.txt", scene.name));
+            if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+                std::fs::write(&path, &got).expect("write golden");
+            }
+            let want = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(want == got, "{} moved:\n{got}", path.display());
+        }
+    }
+
+    /// "Fit all" leaves out the peer whose position is outside the time
+    /// window, and takes every pin when none is inside.
+    #[test]
+    fn fit_all_takes_the_peers_inside_the_window() {
+        let scene = fit_all();
+        let names: Vec<String> = fitted_pins(&scene).into_iter().map(|p| p.label).collect();
+        assert_eq!(names, ["mara", "nico"]);
+        let old = crate::ui::map::in_window(&pins(&scene), &[]);
+        assert_eq!(old.len(), 3);
+    }
+
+    /// The late stretch: its segments are late, the others not.
+    #[test]
+    fn a_late_stretch_is_dashed_and_the_rest_solid() {
+        let scene = late();
+        let view = view_of(&scene, 480, 320, 20);
+        let unit = libm::exp2(24.0 - f64::from(view.zoom()));
+        let t = &tracks(&input(&scene), TrackWindow::Episode, &scene.now, unit, 1.0)[0];
+        let late = t.segments.iter().filter(|s| s.late).count();
+        assert!(
+            late > 0 && late < t.segments.len(),
+            "{late} of {}",
+            t.segments.len()
+        );
     }
 
     /// The handbag's year is a few places and today's commute: inside

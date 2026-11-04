@@ -1039,7 +1039,9 @@ impl MapPainter {
         let painter = Painter::new(maps.clone());
         let setup = MapSetup {
             cell_px: graphics.cell_px(font),
-            zooms: painter.zooms(),
+            // Deeper than the outline where no region is: the radar's
+            // zooms (1386).
+            zooms: loquax::ui::radar::zooms(painter.zooms()),
             regions: painter.headers(),
             ..MapSetup::default()
         };
@@ -1206,7 +1208,21 @@ impl MapPainter {
         // A picture painted for another pane size is not drawn over this
         // one: its cells would not cover the pane.
         let fits = painted.cells == ask.cells && (area.width, area.height) == ask.cells;
+        // No region here (1386): the radar's blank ground, whatever the
+        // technique; its rings are drawn with the tracks below.
+        let radar = shown.radar.as_ref();
         match graphics {
+            _ if radar.is_some() => {
+                let buf = frame.buffer_mut();
+                for row in 0..area.height {
+                    for col in 0..area.width {
+                        if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                            cell.reset();
+                            cell.set_char(' ');
+                        }
+                    }
+                }
+            }
             _ if !fits => {}
             Graphics::Halfblocks => {
                 let buf = frame.buffer_mut();
@@ -1293,7 +1309,7 @@ impl MapPainter {
                 Some((col, row, l.text.chars().count() as u16))
             })
             .collect();
-        let names = match fits {
+        let names = match fits && radar.is_none() {
             true => {
                 let at = leviculum_ui::Rect::new(area.x, area.y, area.width, area.height);
                 place_names(&painted.names, at, self.setup.cell_px, &taken)
@@ -1313,7 +1329,16 @@ impl MapPainter {
             .collect();
         // The tracks under the pins and over the map's names (1385).
         let dark = matches!(painted.style.theme, MapTheme::Dark);
-        if fits {
+        if let Some(r) = radar {
+            labels.extend(r.cells.iter().map(|t| Label {
+                col: t.col,
+                row: t.row,
+                style: track_style(self.tier, dark, t.hue, t.level),
+                text: t.text.clone(),
+                name: false,
+            }));
+        }
+        if fits || radar.is_some() {
             labels.extend(shown.tracks.iter().map(|t| Label {
                 col: t.col,
                 row: t.row,
@@ -1365,7 +1390,10 @@ impl MapPainter {
         self.labels = labels;
         // The region's own line, "© OpenStreetMap contributors", or the
         // outline's; always on the view.
-        let credit = format!("{} ", painted.attribution);
+        let credit = match radar {
+            Some(r) => format!("{} ", r.note),
+            None => format!("{} ", painted.attribution),
+        };
         let len = credit.chars().count() as u16;
         let x = (area.x + area.width).saturating_sub(len).max(area.x);
         if area.y + area.height >= bounds.bottom() {
@@ -1975,6 +2003,7 @@ mod tests {
             viewport: Viewport::new(at, 1, 30 * u32::from(cell_px.0), 8 * u32::from(cell_px.1)),
             cell_px,
             tracks: Vec::new(),
+            radar: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 16,
@@ -2050,6 +2079,7 @@ mod tests {
         let (cols, rows) = (w as u16, (h / 2) as u16);
         let shown = MapView {
             tracks: Vec::new(),
+            radar: None,
             area: leviculum_ui::Rect::new(1, 1, cols, rows),
             viewport: view,
             cell_px: (1, 2),
@@ -2116,6 +2146,7 @@ mod tests {
             ),
             cell_px,
             tracks: Vec::new(),
+            radar: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2180,6 +2211,7 @@ mod tests {
         };
         let shown = MapView {
             tracks: Vec::new(),
+            radar: None,
             area,
             viewport: Viewport::new(
                 at,
@@ -2239,6 +2271,7 @@ mod tests {
             ),
             cell_px,
             tracks: Vec::new(),
+            radar: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2995,6 +3028,7 @@ mod tests {
             ),
             cell_px,
             tracks: Vec::new(),
+            radar: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 39,
@@ -3114,6 +3148,7 @@ mod tests {
         let (cols, rows) = (60u16, 20u16);
         MapView {
             tracks: Vec::new(),
+            radar: None,
             area: leviculum_ui::Rect::new(0, 0, cols, rows),
             viewport: Viewport::new(
                 centre,

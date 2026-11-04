@@ -84,6 +84,9 @@ fn pin(peer: u8, label: &str, lat: f64, lon: f64) -> MapPin {
         age: Some("5m".to_string()),
         stale: false,
         nearby: false,
+        own: false,
+        fix_at: None,
+        battery: None,
     }
 }
 
