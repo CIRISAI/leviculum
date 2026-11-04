@@ -1312,9 +1312,10 @@ announce itself hands its name and how long ago it heard it.
 identity proves), so an announced fix joins the peer's telemetry
 positions in `UiModel::positions`: the newest fix wins by
 `Fix::newer_than` whichever way it came, and `Fix::source` remembers
-which (`Telemetry` or `Mesh`). It is a state: the store keeps no
-announced fix, since the node announces again at its cadence and a
-stranger leaves no trace once gone. An announced fix newer than every
+which (`Telemetry` or `Mesh`). Until 1385 it was a state the store did
+not keep; since schema 14 the store keeps every announced fix for the
+track, marked `positions.source = 1`, one row a peer and fix time
+([tracks on the map](loquax-tracks.md)). An announced fix newer than every
 report is the row's newest fix (`UiModel::liveness`), so the list's ⌖
 (1224), the ring and the Friends sheet show it unchanged.
 
@@ -1429,6 +1430,9 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
 
 ## See also
 
+- [Loquax: tracks on the map](loquax-tracks.md): each peer's current
+  movement as lines, the rest collapsed into places, the time window
+  (1385)
 - [A messenger whose core runs anywhere](handheld-messenger.md), "The map"
 - [Telemetry](telemetry.md), the format and the collector exchange
 - [A GUI toolkit for the desktop and the M9](gui-toolkit.md)

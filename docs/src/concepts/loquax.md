@@ -33,6 +33,9 @@ daemon" has to re-derive the argument from nothing.
 - [The map](loquax-map.md): telemetry positions in the conversation and
   on a map, the renderer shared by the terminal, the GUI and the M9, and
   the slices (decided 2026-10-27, Lew).
+- [Tracks on the map](loquax-tracks.md): each peer's current movement
+  as lines, everything older collapsed into places, and the time window
+  (decided 2026-11-03, Lew).
 
 ## 1. What the program is
 

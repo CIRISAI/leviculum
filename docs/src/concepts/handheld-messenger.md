@@ -1297,6 +1297,24 @@ and a room keeps up to 500 lines of up to 350 bytes (`LINES_KEPT`,
 `loquax/src/ui/rooms.rs:30`), which the census has to count before the
 M9 keeps as many.
 
+### Tracks on the M9 (1385, not built)
+
+The tracks ([Loquax: tracks on the map](loquax-tracks.md)) are derived
+in the `no_std` core (`loquax::ui::tracks`, the rules and the budget) and
+drawn by the frontends; the M9's map slice (e) is not built, so the M9
+draws none yet. What it needs there: **1 px lines**, the panel's 320 by
+240 at its density gives no room for the pixel screens' 3 px; the
+**blend into Rgb565**, one track's coverage kept as the strongest a pixel
+gets and blended once into the frame, as `screenmap::draw_tracks` does
+into RGBA, with the hue's 5-6-5 value and the age step's opacity (the
+lighter hue set on the dark map); and the **decimation** at the panel's
+zoom, which the core already does by the screen pixel passed in, so a
+year of fixes costs at most 2 000 segments and 176 blobs a peer. What it
+does not need is the store: the board holds the fixes it hears in the
+model's per-peer list, 32 bytes a fix, so the census has to set how many
+it keeps (a day at a 5 min cadence is 288 fixes, 9 KB a peer). The time
+window maps onto the key table as `w` does in the terminal.
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice
