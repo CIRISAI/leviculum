@@ -13,6 +13,13 @@
 //! | `0x04` | `[bin16 group, bin64 public key, str name, str admin's name, uint epoch]` | an invitation to a group |
 //! | `0x05` | `[uint epoch, [[bin16 address, str name, uint flags], ...], uint standing]` | a group's membership; a member leaving sends itself alone, flagged [`MEMBER_LEFT`]; the third element is there only when the group [`GROUP_ENDED`] |
 //! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text, uint left_out?], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them; `left_out` only on a line that stands for what was not sent ([`LEFT_OUT_PHOTO`] and its siblings) |
+//! | `0x07` | `[uint32 received_at, [bin32 message id, ...]]` | a propagation receipt: these messages of yours, collected from the propagation network, are on my device |
+//!
+//! Capability bit 2 says "I acknowledge propagated post and want it
+//! acknowledged": a recipient answers such a sender's message with key
+//! `0x07` when it arrived by propagation (1393,
+//! `docs/src/concepts/loquax-propagation-receipts.md`). A direct delivery
+//! has its proof and gets none.
 //!
 //! Capability bit 1 says "I understand groups": a group's home sends such a
 //! member its copies with key `0x02` and the bare text, and every other
@@ -67,6 +74,9 @@ pub const KEY_GROUP_MEMBERS: i64 = 0x05;
 /// The map key of a group's digest for a slow member (study 5.3).
 pub const KEY_GROUP_DIGEST: i64 = 0x06;
 
+/// The map key of a propagation receipt (1393).
+pub const KEY_PROPAGATION_RECEIPT: i64 = 0x07;
+
 /// What a digest line stands for when the home left its message out
 /// (1348): a photo, a voice message or a file too large for a slow member,
 /// or a message no longer there. The line's text is then the home's
@@ -85,6 +95,10 @@ pub const CAP_READ_RECEIPTS: u64 = 1;
 
 /// Capability bit 1: the sender understands groups.
 pub const CAP_GROUPS: u64 = 2;
+
+/// Capability bit 2: the sender acknowledges propagated post and wants its
+/// own acknowledged (1393).
+pub const CAP_PROPAGATION_RECEIPTS: u64 = 4;
 
 /// A member's flag in [`Members`]: it has left, or was removed.
 pub const MEMBER_LEFT: u64 = 1;
@@ -126,6 +140,30 @@ impl Receipt {
             .map(|chunk| Self {
                 read_at,
                 ids: chunk.to_vec(),
+            })
+            .collect()
+    }
+}
+
+/// "These messages of yours, which came through the propagation network,
+/// are on my device": the recipient's clock when the first of them
+/// arrived, unix seconds, and their full LXMF message ids. The shape of a
+/// [`Receipt`], under its own key, so a reader never takes arrival for
+/// reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropagationReceipt {
+    pub received_at: u32,
+    pub ids: Vec<[u8; 32]>,
+}
+
+impl PropagationReceipt {
+    /// The receipts for `ids`, at most [`RECEIPT_IDS_MAX`] each, in order.
+    pub fn batches(received_at: u32, ids: &[[u8; 32]]) -> Vec<Self> {
+        Receipt::batches(received_at, ids)
+            .into_iter()
+            .map(|receipt| Self {
+                received_at: receipt.read_at,
+                ids: receipt.ids,
             })
             .collect()
     }
@@ -235,6 +273,8 @@ pub struct Lev {
     pub members: Option<Members>,
     /// Key `0x06`.
     pub digest: Option<Vec<DigestLine>>,
+    /// Key `0x07`.
+    pub propagation_receipt: Option<PropagationReceipt>,
 }
 
 impl Lev {
@@ -266,6 +306,13 @@ impl Lev {
         self.capabilities.is_some_and(|caps| caps & CAP_GROUPS != 0)
     }
 
+    /// Whether the sender said it acknowledges propagated post and wants
+    /// its own acknowledged.
+    pub fn supports_propagation_receipts(&self) -> bool {
+        self.capabilities
+            .is_some_and(|caps| caps & CAP_PROPAGATION_RECEIPTS != 0)
+    }
+
     /// The two fields, `FIELD_CUSTOM_TYPE` first. The map's keys go in
     /// ascending order, each once, so the same [`Lev`] is always the same
     /// bytes: a group copy must be (study 2.4).
@@ -278,7 +325,8 @@ impl Lev {
             + usize::from(self.status.is_some())
             + usize::from(self.invite.is_some())
             + usize::from(self.members.is_some())
-            + usize::from(self.digest.is_some());
+            + usize::from(self.digest.is_some())
+            + usize::from(self.propagation_receipt.is_some());
         let mut data = Vec::new();
         msgpack::map(&mut data, entries);
         if let Some(caps) = self.capabilities {
@@ -347,6 +395,15 @@ impl Lev {
                 }
             }
         }
+        if let Some(receipt) = &self.propagation_receipt {
+            msgpack::int(&mut data, KEY_PROPAGATION_RECEIPT);
+            msgpack::array(&mut data, 2);
+            msgpack::uint(&mut data, u64::from(receipt.received_at));
+            msgpack::array(&mut data, receipt.ids.len());
+            for id in &receipt.ids {
+                msgpack::bin(&mut data, id);
+            }
+        }
         [(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)]
     }
 
@@ -361,8 +418,8 @@ impl Lev {
     /// (another client's protocol, or none). A `lev` type whose data is not
     /// a map says nothing: `Some` of the empty [`Lev`]. Unknown keys are
     /// skipped, a repeated key resolves to its last occurrence, as a Python
-    /// dict does, and a receipt that is not `[uint32, [bin32, ...]]` is
-    /// none; an id of another length in it is passed over. A group key of
+    /// dict does, and a receipt (`0x01` or `0x07`) that is not `[uint32,
+    /// [bin32, ...]]` is none; an id of another length in it is passed over. A group key of
     /// another shape is none too; elements after the ones listed are
     /// skipped, so a later version may append to an array.
     pub fn from_fields(fields: &[Field]) -> Option<Self> {
@@ -400,6 +457,12 @@ impl Lev {
                 Ok(KEY_GROUP_INVITE) => lev.invite = invite(value),
                 Ok(KEY_GROUP_MEMBERS) => lev.members = members(value),
                 Ok(KEY_GROUP_DIGEST) => lev.digest = digest(value),
+                Ok(KEY_PROPAGATION_RECEIPT) => {
+                    lev.propagation_receipt = receipt(value).map(|r| PropagationReceipt {
+                        received_at: r.read_at,
+                        ids: r.ids,
+                    });
+                }
                 _ => {}
             }
         }
@@ -919,6 +982,106 @@ mod tests {
         let read = Lev::from_fields(&[(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)])
             .expect("ours");
         assert_eq!(read.status, None);
+    }
+
+    /// 1393: a propagation receipt by hand. `82` a map of two, `00 05` the
+    /// capabilities (bit 0 read receipts, bit 2 propagation receipts, still
+    /// one fixint, so asking costs nothing), `07` the key, `92` an array of
+    /// two, `ce 65 53 f1 64` received_at 1700000100 as uint32, `91` one id,
+    /// `c4 20` and its 32 bytes.
+    #[test]
+    fn a_propagation_receipt_is_the_hand_built_bytes() {
+        let lev = Lev {
+            capabilities: Some(CAP_READ_RECEIPTS | CAP_PROPAGATION_RECEIPTS),
+            propagation_receipt: Some(PropagationReceipt {
+                received_at: 1_700_000_100,
+                ids: alloc::vec![[0xab; 32]],
+            }),
+            ..Lev::default()
+        };
+        let [(_, kind), (_, data)] = lev.fields();
+        assert_eq!(
+            hex(&data),
+            "8200050792ce6553f16491c420".to_owned() + &"ab".repeat(32)
+        );
+        // Alone, without the mark: the pair with its keys `cc fb`, `cc fc`
+        // is 18 bytes, and each id 34 more.
+        let alone = Lev {
+            propagation_receipt: lev.propagation_receipt.clone(),
+            ..Lev::default()
+        };
+        let [(_, k), (_, d)] = alone.fields();
+        assert_eq!(2 + k.len() + 2 + d.len(), 18 + 34);
+        assert_eq!(kind, k);
+        let read = Lev::from_fields(&lev.fields()).expect("lev");
+        assert_eq!(read, lev);
+        assert!(read.supports_propagation_receipts() && read.supports_receipts());
+        assert_eq!(read.receipt, None, "arrival is never taken for reading");
+        assert!(!Lev::mark().supports_propagation_receipts());
+        let batches = PropagationReceipt::batches(9, &[[1; 32]; 9]);
+        assert_eq!(
+            batches.iter().map(|r| r.ids.len()).collect::<Vec<_>>(),
+            [7, 2]
+        );
+    }
+
+    /// 1393: a decoder from before `0x07` takes the key for one it does not
+    /// know. The same map with the key renamed to one no decoder knows
+    /// (`0x7e`), put first, is what such a decoder sees: the capabilities
+    /// and the read receipt behind it still parse. Today's decoder reads the
+    /// original; a `0x07` of another shape is none and spoils nothing.
+    #[test]
+    fn a_decoder_without_0x07_skips_it_and_reads_the_rest() {
+        let map = |key: i64, shape_ok: bool| {
+            let mut data = Vec::new();
+            msgpack::map(&mut data, 3);
+            msgpack::int(&mut data, key);
+            msgpack::array(&mut data, 2);
+            msgpack::uint(&mut data, 1_700_000_100);
+            if shape_ok {
+                msgpack::array(&mut data, 2);
+                msgpack::bin(&mut data, &[0xab; 32]);
+                msgpack::bin(&mut data, &[0xcd; 32]);
+            } else {
+                msgpack::string(&mut data, "not a list");
+            }
+            msgpack::int(&mut data, KEY_CAPABILITIES);
+            msgpack::uint(&mut data, CAP_READ_RECEIPTS | CAP_PROPAGATION_RECEIPTS);
+            msgpack::int(&mut data, KEY_RECEIPT);
+            msgpack::array(&mut data, 2);
+            msgpack::uint(&mut data, 7);
+            msgpack::array(&mut data, 1);
+            msgpack::bin(&mut data, &[0xef; 32]);
+            let mut kind = Vec::new();
+            msgpack::bin(&mut kind, LEV_TYPE);
+            Lev::from_fields(&[(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)]).expect("lev")
+        };
+        let read_receipt = Some(Receipt {
+            read_at: 7,
+            ids: alloc::vec![[0xef; 32]],
+        });
+
+        let older = map(0x7e, true);
+        assert_eq!(older.propagation_receipt, None);
+        assert_eq!(older.receipt, read_receipt);
+        assert_eq!(
+            older.capabilities,
+            Some(CAP_READ_RECEIPTS | CAP_PROPAGATION_RECEIPTS)
+        );
+
+        let today = map(KEY_PROPAGATION_RECEIPT, true);
+        assert_eq!(
+            today.propagation_receipt,
+            Some(PropagationReceipt {
+                received_at: 1_700_000_100,
+                ids: alloc::vec![[0xab; 32], [0xcd; 32]],
+            })
+        );
+        assert_eq!(today.receipt, read_receipt);
+
+        let bad = map(KEY_PROPAGATION_RECEIPT, false);
+        assert_eq!(bad.propagation_receipt, None);
+        assert_eq!(bad.receipt, read_receipt);
     }
 
     /// 1307 pass four: an ended group's membership carries the standing as
