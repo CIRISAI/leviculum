@@ -63,6 +63,10 @@ pub struct Look {
     /// The M9's own cursor over a group's sheet or picker, a row index
     /// ([`crate::group`]); the model has none for them.
     pub row: usize,
+    /// What the top bar says of the board's home at its right end (1415):
+    /// joining, fetched N of M, unreachable. None on a board that is no
+    /// device of a home, which draws the bar as before.
+    pub home: Option<loquax::home::board::Word>,
 }
 
 impl Look {
@@ -75,6 +79,7 @@ impl Look {
             cursor: None,
             caret: None,
             row: 0,
+            home: None,
         }
     }
 
@@ -180,14 +185,31 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
     push_avatar(&mut bar, avatar);
     let title = top.title.resolve(look.lang);
     let room = cols.saturating_sub(AVATAR + 2);
+    // The home's word at the right end, the title cut before it; the
+    // title keeps a third of the bar at least.
+    let word = look
+        .home
+        .map(|word| cut(&word.text().resolve(look.lang), (room * 2) / 3))
+        .unwrap_or_default();
+    let words = word.chars().count();
+    let room = match words {
+        0 => room,
+        n => room.saturating_sub(n + 2),
+    };
+    let title = cut(&title, room);
     push(
         &mut bar,
-        &format!(" {}", cut(&title, room)),
+        &format!(" {title}"),
         RStyle {
             bold: true,
             ..chrome
         },
     );
+    if words > 0 {
+        let gap = cols.saturating_sub(bar.cells.len() + words + 1);
+        push(&mut bar, &" ".repeat(gap), chrome);
+        push(&mut bar, &word, chrome);
+    }
     fill(bar, cols, chrome)
 }
 

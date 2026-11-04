@@ -48,6 +48,7 @@ pub mod field;
 pub mod fixture;
 pub mod frame;
 pub mod group;
+pub mod home;
 pub mod kbraw;
 pub mod keyboard;
 pub mod keys;

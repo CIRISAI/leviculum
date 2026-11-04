@@ -86,6 +86,48 @@ impl Pairing {
     }
 }
 
+/// The pairing screen, `cols` x `rows` cells (1415): a bar saying what
+/// it is for and, once a code was taken, how the join goes (`home`), the
+/// code typed so far in fives under it, the verdict, and the two keys
+/// that matter. The words are the code's own (`verdict`), which the
+/// pairing has said in English since 1363.
+pub fn screen(
+    pairing: &Pairing,
+    home: Option<loquax::home::board::Word>,
+    look: &crate::screen::Look,
+    cols: usize,
+    rows: usize,
+) -> Vec<leviculum_ui::style::RLine> {
+    use crate::screen::{fill, painted, push};
+    use leviculum_ui::style::{RLine, RStyle};
+    let chrome = painted(look.tokens.chrome);
+    let plain = RStyle::default();
+    let text = |words: &str, style| {
+        let mut line = RLine::default();
+        push(&mut line, words, style);
+        fill(line, cols, style)
+    };
+    let title = match home {
+        Some(word) => format!(" {}", word.text().resolve(look.lang)),
+        None => String::from(" Link this M9 to your mailbox"),
+    };
+    let mut out = alloc::vec![text(&title, chrome), text("", plain)];
+    out.push(text(" Type the code your mailbox shows:", plain));
+    let mut lines = pairing.lines();
+    let verdict = lines.pop().unwrap_or_default();
+    for line in lines {
+        out.push(text(&format!(" {line}"), plain));
+    }
+    out.push(text("", plain));
+    out.push(text(&format!(" {verdict}"), plain));
+    while out.len() + 1 < rows {
+        out.push(text("", plain));
+    }
+    out.push(text(" Enter links this device   Esc leaves", chrome));
+    out.truncate(rows);
+    out
+}
+
 /// One line on how far the code came.
 fn verdict(typing: &Typing) -> String {
     match typing {

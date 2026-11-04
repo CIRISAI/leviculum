@@ -88,6 +88,16 @@ where
         Ok(())
     }
 
+    /// Draw `lines`, made for the grid's size: a screen of the M9's own
+    /// that is no scene, the pairing (1415).
+    pub fn text(
+        &mut self,
+        lines: impl FnOnce(usize, usize) -> alloc::vec::Vec<RLine>,
+    ) -> Result<(), DrawError> {
+        self.leave_map()?;
+        self.cells(lines)
+    }
+
     /// Cells drawn after the map's pixels must all be drawn, not only those
     /// ratatui saw change: its last frame holds the picture's rows blank.
     fn leave_map(&mut self) -> Result<(), DrawError> {

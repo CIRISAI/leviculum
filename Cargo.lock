@@ -3532,6 +3532,7 @@ name = "loquax-m9"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
+ "leviculum-core",
  "leviculum-lxmf",
  "leviculum-map",
  "leviculum-mapfill",
@@ -3541,6 +3542,7 @@ dependencies = [
  "loquax",
  "mousefood",
  "png",
+ "rand_core 0.6.4",
  "ratatui",
  "tempfile",
 ]

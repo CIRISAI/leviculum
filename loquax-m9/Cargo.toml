@@ -55,5 +55,8 @@ leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
 loquax = { path = "../loquax", features = ["history"] }
 leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
 leviculum-std = { path = "../leviculum-std" }
+# 1415: tests/home.rs makes identities and LXMF messages of its own.
+leviculum-core = { path = "../leviculum-core" }
+rand_core = { workspace = true, features = ["getrandom"] }
 tempfile = "3"
 png = "0.18"
