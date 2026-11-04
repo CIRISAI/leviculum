@@ -506,6 +506,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     // not `--pn` itself, which the router learns only from a SelectPn, and
     // with collections off nothing else sends one.
     let mut selected_pn = None;
+    // Whether the engine said Ready: what a later `Broken` means hangs on it.
+    let mut engine_ready = false;
     let origin = tokio::time::Instant::now();
     let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut pump = tokio::time::interval(PUMP);
@@ -676,9 +678,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     Ok(events) => events,
                     Err(gone) => break Err(gone.to_string()),
                 };
+                let mut unstarted = None;
                 for event in events {
                     match event {
                         OutboxEvent::Ready { .. } => {
+                            engine_ready = true;
                             if let Some(schedule) = &mut schedule {
                                 schedule.on(SyncEvent::Start, now_ms());
                             }
@@ -759,11 +763,15 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 schedule.on(SyncEvent::Announce, now_ms());
                             }
                         }
-                        OutboxEvent::Broken { detail } => {
-                            tracing::warn!("HOME engine broken: {detail}");
-                        }
+                        OutboxEvent::Broken { detail } => match engine_error(engine_ready, &detail) {
+                            Ok(line) => tracing::warn!("{line}"),
+                            Err(fatal) => unstarted = Some(fatal),
+                        },
                         _ => {}
                     }
+                }
+                if let Some(fatal) = unstarted {
+                    break Err(fatal);
                 }
                 for hosted in &mut groups {
                     pump_group(&mut store, &mut sender, hosted, selected_pn);
@@ -814,6 +822,25 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         hosted.engine.stop().await;
     }
     outcome
+}
+
+/// What the engine's `Broken` means to the home: the line to log while it
+/// runs on, or why the service ends.
+///
+/// Before Ready the engine could not register and never will, so the
+/// service ends and its unit restarts it. After Ready it is one router call
+/// that failed while the engine went on (each hook puts its state back,
+/// `crate::engine`), and the line says so. On miauhaus the home logged
+/// "engine broken" on 2026-11-04 and kept archiving for seven minutes
+/// (1412).
+fn engine_error(engine_ready: bool, detail: &str) -> Result<String, String> {
+    if engine_ready {
+        Ok(format!(
+            "HOME engine error, the engine keeps running: {detail}"
+        ))
+    } else {
+        Err(format!("the message engine could not start: {detail}"))
+    }
 }
 
 /// How a group's engine reaches the network: as the home's own does.
@@ -2017,6 +2044,24 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1412: a router call that failed after Ready is an error the engine
+    /// runs on through, and the line says so; one before Ready ends the
+    /// service instead of leaving a home that never registered.
+    #[test]
+    fn an_engine_error_after_ready_is_logged_and_one_before_ends_the_service() {
+        let detail = "router release_proofs: Node(ProofFailed)";
+        assert_eq!(
+            engine_error(true, detail),
+            Ok(format!(
+                "HOME engine error, the engine keeps running: {detail}"
+            ))
+        );
+        assert_eq!(
+            engine_error(false, "hold proofs: x"),
+            Err("the message engine could not start: hold proofs: x".to_string())
+        );
+    }
 
     /// 1330, miauhaus 12:15:37: `direct failed ... reason=failed` named
     /// the router's state and nothing else. A link that died mid-transfer
