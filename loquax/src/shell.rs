@@ -334,6 +334,20 @@ impl Shell {
                     tracing::info!("SYNC reason={reason}");
                     self.fetch_owed = Some(reason);
                 }
+                // The propagation node asked what became of our uploads
+                // (1409), on a link of its own; the answer comes back on
+                // the pump.
+                UiEffect::AskPn { node, ids } => {
+                    let reticulum = self.attached.node();
+                    let done = self.done_tx.clone();
+                    let budget = self.context.timeout;
+                    self.mark_tasks.push(tokio::spawn(async move {
+                        let answer =
+                            loquax::home::client::pn_answer(&reticulum, node, &ids, budget).await;
+                        let _ = done.send(Finished::Event(UiEvent::PnAnswered { node, answer }));
+                    }));
+                }
+                UiEffect::PnLine(line) => tracing::info!("{line}"),
                 UiEffect::Quit => {}
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
@@ -1395,6 +1409,7 @@ pub(crate) async fn start(
                 store.positions()?,
                 store.unverified()?,
                 store.fixes_between(None, i64::MIN, i64::MAX)?,
+                store.pn_asks()?,
             ))
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
@@ -1459,7 +1474,7 @@ pub(crate) async fn start(
     model.home_client = client.is_some();
     model.own_code = own_code(&own_key);
     model.names = loquax::names::Names::new(contacts);
-    let (restored, names, last_key, positions, unverified, track_fixes) = history;
+    let (restored, names, last_key, positions, unverified, track_fixes, pn_asks) = history;
     // The messages an earlier run kept unverified: the engine checks each
     // once its sender's key is known, and asks for it until then.
     for (message_id, source, packed) in unverified {
@@ -1486,6 +1501,8 @@ pub(crate) async fn start(
     };
     update(&mut model, UiEvent::Clock(start));
     model.restore(restored);
+    // What the propagation node is still to be asked about (1409).
+    model.pn_asker = loquax::pn_status::Asker::restore(pn_asks);
     model.restore_positions(positions);
     model.restore_tracks(track_fixes);
     model.activity = model.activity.max(last_key);

@@ -852,6 +852,14 @@ pub struct UiModel<B> {
     pub reading: receipts::Reading,
     /// The propagation receipts owed (1395).
     pub arrivals: arrival::Arrivals,
+    /// What the propagation node is to be asked about our uploads (1409),
+    /// on a device that is its own node; a home's client waits for the
+    /// home's [`crate::home::KIND_PN_STATUS`] instead. The shell restores
+    /// it from the store ([`crate::pn_status::Asker::restore`]).
+    pub pn_asker: crate::pn_status::Asker,
+    /// The sync rounds this session finished: the asker asks a node once a
+    /// round.
+    pn_round: u64,
     /// How far a photo is scaled before it goes (1220, `photo_size` in
     /// the config): the shell scales by it before
     /// [`UiEvent::SendPhoto`].
@@ -984,6 +992,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             drafts_due: BTreeMap::new(),
             reading: receipts::Reading::default(),
             arrivals: arrival::Arrivals::default(),
+            pn_asker: crate::pn_status::Asker::default(),
+            pn_round: 0,
             photo_size: photos::PhotoSize::default(),
             playing: None,
             bar: compose::Bar::default(),
@@ -1432,6 +1442,13 @@ pub enum UiEvent {
     SendLeg(Leg),
     /// The fetch finished: how many messages were new, or why it failed.
     FetchDone(Result<usize, String>),
+    /// The propagation node `node` answered [`UiEffect::AskPn`] (1409):
+    /// the statuses, or `None` when the link failed, the request went
+    /// unanswered or the node refused, which leaves every id open.
+    PnAnswered {
+        node: [u8; 16],
+        answer: Option<Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>>,
+    },
     /// A line a runner or the stamp worker said along the way (the auto
     /// fallback's "trying a propagation node", a mailbox adoption), the
     /// lines the CLI writes to stderr.
@@ -1716,6 +1733,14 @@ pub enum UiEffect {
     /// Drain the mailbox, as `loquax fetch` does; reported with
     /// [`UiEvent::FetchDone`].
     Fetch,
+    /// Ask the propagation node `node` what became of `ids`, our uploads'
+    /// `transient_id`s, over a link of its own that is never identified
+    /// (1409, `crate::home::client::ask_pn_status`); reported with
+    /// [`UiEvent::PnAnswered`].
+    AskPn { node: [u8; 16], ids: Vec<[u8; 32]> },
+    /// A line of the asking for the log at info level
+    /// (`PN_STATUS_ASKED …`, `PN_STATUS_SKIPPED reason=…`).
+    PnLine(String),
     /// Leave.
     Quit,
     /// Draw the whole screen again from scratch (`Ctrl-l`).
@@ -2109,7 +2134,19 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             }
             Vec::new()
         }
-        UiEvent::FetchDone(result) => on_fetch_done(model, result),
+        UiEvent::FetchDone(result) => {
+            let synced = result.is_ok();
+            let mut effects = on_fetch_done(model, result);
+            if synced {
+                effects.extend(pn_round(model));
+            }
+            effects
+        }
+        UiEvent::PnAnswered { node, answer } => {
+            let (answers, line) = model.pn_asker.answered(node, answer.as_deref());
+            model.pn_answered(&answers);
+            vec![UiEffect::PnLine(line)]
+        }
         UiEvent::Open { peer } => {
             let index = model.conversation(peer);
             model.select(index);
@@ -2204,6 +2241,27 @@ fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Ve
         effects.extend(start_pull(model, reason));
     }
     effects
+}
+
+/// The end of a sync round on a device that is its own node (1409): ask
+/// each propagation node that holds an open upload, once, or say why not.
+/// Only a round that synced: one that failed found the node silent. A
+/// home's client asks nothing; its home asks and archives the answer.
+fn pn_round<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    if model.home_client {
+        return Vec::new();
+    }
+    model.pn_round += 1;
+    let now = model.now.map_or(0, |at| at.unix_secs);
+    model
+        .pn_asker
+        .round(model.pn_round, now)
+        .into_iter()
+        .map(|(node, asked)| match asked {
+            Ok(ids) => UiEffect::AskPn { node, ids },
+            Err(skip) => UiEffect::PnLine(skip.line()),
+        })
+        .collect()
 }
 
 /// On a client of a home node, a send is followed by a pull, so the bubble
@@ -4028,7 +4086,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             return schedule(model, SyncEvent::Start);
         }
         // Free evidence that the mailbox is reachable now.
-        OutboxEvent::NodeAnnounced { destination, .. } => {
+        OutboxEvent::NodeAnnounced {
+            destination,
+            status,
+        } => {
+            model.pn_asker.announced(destination, status);
             if model.mailbox.node == Some(destination) {
                 return schedule(model, SyncEvent::Announce);
             }
@@ -4056,7 +4118,27 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
             }
         }
-        OutboxEvent::State { message_id, state } => apply_state(model, message_id, state),
+        OutboxEvent::State { message_id, state } => {
+            if state == MessageState::Delivered {
+                // A proof says more than the node can.
+                model.pn_asker.settled(&message_id);
+            }
+            apply_state(model, message_id, state)
+        }
+        // A node proved our upload (1409): asked about at the next rounds'
+        // ends, on a device that is its own node.
+        OutboxEvent::Uploaded {
+            message_id,
+            transient_id,
+            node,
+        } => {
+            if let (Some(node), false) = (node.or(model.mailbox.node), model.home_client) {
+                let now = model.now.map_or(0, |at| at.unix_secs);
+                model.pn_asker.uploaded(node, message_id, transient_id, now);
+            }
+        }
+        // What the home's propagation node said (1409).
+        OutboxEvent::HomePnStatus { answers } => model.pn_answered(&answers),
         OutboxEvent::HomeStalled { message_id } => home_stalled(model, message_id),
         OutboxEvent::HomeSent {
             message_id,
@@ -4089,7 +4171,12 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             message_id,
             last: Some(state),
             ..
-        } => apply_state(model, message_id, state),
+        } => {
+            if state == MessageState::Delivered {
+                model.pn_asker.settled(&message_id);
+            }
+            apply_state(model, message_id, state)
+        }
         OutboxEvent::MeshPosition {
             identity,
             location,
@@ -6368,6 +6455,182 @@ pub(crate) mod tests {
             model.conversations[0].messages[2].ledger.len(),
             model.conversations[0].messages[3].ledger.len()
         );
+    }
+
+    /// 1409: a device that is its own node asks the node that proved the
+    /// upload, at the end of a round that synced, once a round, and folds
+    /// the answer into the marks; the store learns what is open.
+    #[test]
+    fn a_device_asks_the_node_after_a_round_and_folds_its_word() {
+        use leviculum_lxmf::lev_status::MessageStatus;
+        const PN: [u8; 16] = [0x9c; 16];
+        let id = [0x61; 32];
+        let transient = [0x81; 32];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        sent(&mut model, "via the node");
+        engine(&mut model, OutboxEvent::Queued { message_id: id });
+        engine(
+            &mut model,
+            OutboxEvent::Uploaded {
+                message_id: id,
+                transient_id: transient,
+                node: Some(PN),
+            },
+        );
+        state(&mut model, id, MessageState::AwaitingCollection);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        let kept = model
+            .take_writes()
+            .into_iter()
+            .find_map(|w| match w {
+                history::StoreWrite::PnAsks(state) => Some(state),
+                _ => None,
+            })
+            .expect("the upload is kept");
+        assert_eq!(kept.open.len(), 1);
+        assert_eq!(kept.open[0].transient_id, transient);
+        // A stock node: never asked.
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))),
+            [UiEffect::PnLine(
+                "PN_STATUS_SKIPPED reason=no_capability".into()
+            )]
+        );
+        engine(
+            &mut model,
+            OutboxEvent::NodeAnnounced {
+                destination: PN,
+                status: Some(1),
+            },
+        );
+        // A round that failed found the node silent: nothing asked.
+        let failed = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert!(
+            !failed.iter().any(|e| matches!(e, UiEffect::AskPn { .. })),
+            "{failed:?}"
+        );
+        let asked = update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(
+            asked,
+            [UiEffect::AskPn {
+                node: PN,
+                ids: vec![transient]
+            }]
+        );
+        // `unknown` changes nothing and leaves it open.
+        let line = update(
+            &mut model,
+            UiEvent::PnAnswered {
+                node: PN,
+                answer: Some(vec![(transient, MessageStatus::Unknown)]),
+            },
+        );
+        assert_eq!(
+            line,
+            [UiEffect::PnLine("PN_STATUS_ASKED ids=1 answered=0".into())]
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].delivery,
+            Some(DeliveryState::InMailbox)
+        );
+        // A link that failed leaves it open: the next round asks again.
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        update(
+            &mut model,
+            UiEvent::PnAnswered {
+                node: PN,
+                answer: None,
+            },
+        );
+        assert_eq!(model.pn_asker.open(), 1);
+        assert!(matches!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))).as_slice(),
+            [UiEffect::AskPn { .. }]
+        ));
+        let line = update(
+            &mut model,
+            UiEvent::PnAnswered {
+                node: PN,
+                answer: Some(vec![(transient, MessageStatus::Collected)]),
+            },
+        );
+        assert_eq!(
+            line,
+            [UiEffect::PnLine("PN_STATUS_ASKED ids=1 answered=1".into())]
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))),
+            [UiEffect::PnLine(
+                "PN_STATUS_SKIPPED reason=no_open_ids".into()
+            )]
+        );
+        let kept = model
+            .take_writes()
+            .into_iter()
+            .find_map(|w| match w {
+                history::StoreWrite::PnAsks(state) => Some(state),
+                _ => None,
+            })
+            .expect("the answer closed it");
+        assert!(kept.open.is_empty());
+    }
+
+    /// 1409: a home's client never asks; the home's pulled word moves its
+    /// marks, and a proof or a receipt settles an upload on a device that
+    /// asks.
+    #[test]
+    fn a_homes_client_takes_the_homes_word_and_asks_nothing() {
+        use leviculum_lxmf::lev_status::MessageStatus;
+        let id = [0x62; 32];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        wall(&mut model, RT);
+        sent(&mut model, "through the home");
+        engine(&mut model, OutboxEvent::Queued { message_id: id });
+        state(&mut model, id, MessageState::AwaitingCollection);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        engine(
+            &mut model,
+            OutboxEvent::Uploaded {
+                message_id: id,
+                transient_id: [0x82; 32],
+                node: Some([0x9c; 16]),
+            },
+        );
+        assert_eq!(model.pn_asker.open(), 0);
+        let round = update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert!(
+            !round
+                .iter()
+                .any(|e| matches!(e, UiEffect::AskPn { .. } | UiEffect::PnLine(_))),
+            "{round:?}"
+        );
+        engine(
+            &mut model,
+            OutboxEvent::HomePnStatus {
+                answers: vec![(id, MessageStatus::Collected)],
+            },
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        let mut own = UiModel::<Field>::new(&[PEER]);
+        own.pn_asker.uploaded([0x9c; 16], [1; 32], [0x91; 32], 0);
+        own.pn_asker.uploaded([0x9c; 16], [2; 32], [0x92; 32], 0);
+        engine(
+            &mut own,
+            OutboxEvent::State {
+                message_id: [1; 32],
+                state: MessageState::Delivered,
+            },
+        );
+        assert_eq!(own.pn_asker.open(), 1, "a proof settles it");
     }
 
     /// 1230: a receipt alone reads the message it names, at the reader's

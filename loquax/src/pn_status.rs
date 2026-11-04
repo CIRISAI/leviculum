@@ -24,10 +24,17 @@
 //! An answer closes an id at `collected`, `delivered`, `expired` and
 //! `evicted`; `held` and `unknown` leave it open for the next round.
 //! [`crate::ui::UiModel::pn_answered`] turns the answers into marks.
+//!
+//! A round that does not ask says why ([`Skip`], the log line
+//! `PN_STATUS_SKIPPED reason=no_capability|no_open_ids|rate`). What is
+//! open survives a restart: [`Asker::state`] is what the store keeps and
+//! [`Asker::restore`] takes it back (1409), so an upload from before the
+//! restart is asked about after it.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use leviculum_lxmf::lev_status::{MessageStatus, LEV_STATUS_MAX_IDS};
@@ -38,13 +45,54 @@ use leviculum_lxmf::lev_status::{MessageStatus, LEV_STATUS_MAX_IDS};
 /// knows the id either.
 pub const MAX_AGE_SECS: i64 = 30 * 24 * 3600;
 
-/// One message the node has not settled yet.
+/// One message the node has not settled yet: its `transient_id`, our
+/// message id, the node it was uploaded to and when, unix seconds.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Open {
-    message_id: [u8; 32],
-    node: [u8; 16],
-    uploaded_at: i64,
+pub struct Open {
+    pub transient_id: [u8; 32],
+    pub message_id: [u8; 32],
+    pub node: [u8; 16],
+    pub uploaded_at: i64,
 }
+
+/// What the store keeps of an [`Asker`]: the open ids and the nodes that
+/// said they answer, with the version they said. The round last asked is
+/// not kept: a restart may ask once more.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AskerState {
+    pub open: Vec<Open>,
+    pub answering: Vec<([u8; 16], u64)>,
+}
+
+/// Why a round asks a node nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skip {
+    /// Its announce never said it answers `/lev/status`: a stock node.
+    NoCapability,
+    /// Nothing uploaded to it is open.
+    NoOpenIds,
+    /// It was asked this round already.
+    Rate,
+}
+
+impl Skip {
+    /// The word of the log line.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::NoCapability => "no_capability",
+            Self::NoOpenIds => "no_open_ids",
+            Self::Rate => "rate",
+        }
+    }
+
+    /// `PN_STATUS_SKIPPED reason=…`.
+    pub fn line(self) -> String {
+        format!("PN_STATUS_SKIPPED reason={}", self.word())
+    }
+}
+
+/// A node's question in a round: the `transient_id`s to ask, or why not.
+pub type Asked = Result<Vec<[u8; 32]>, Skip>;
 
 /// The asking rule: what is open, which nodes answer, and the round last
 /// asked.
@@ -55,9 +103,47 @@ pub struct Asker {
     asked_round: BTreeMap<[u8; 16], u64>,
     /// The ids the request in flight carries, per node.
     asking: BTreeMap<[u8; 16], Vec<[u8; 32]>>,
+    /// What the store keeps changed since [`Asker::take_changed`].
+    changed: bool,
 }
 
 impl Asker {
+    /// The asker a store kept.
+    pub fn restore(state: AskerState) -> Self {
+        Self {
+            open: state
+                .open
+                .into_iter()
+                .map(|open| (open.transient_id, open))
+                .collect(),
+            answering: state.answering.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// What the store keeps, oldest upload first.
+    pub fn state(&self) -> AskerState {
+        let mut open: Vec<Open> = self.open.values().cloned().collect();
+        open.sort_by_key(|open| (open.uploaded_at, open.transient_id));
+        AskerState {
+            open,
+            answering: self.answering.iter().map(|(n, v)| (*n, *v)).collect(),
+        }
+    }
+
+    /// The state, once each time it changed: what to write to the store.
+    pub fn take_changed(&mut self) -> Option<AskerState> {
+        core::mem::take(&mut self.changed).then(|| self.state())
+    }
+
+    /// The nodes that hold an open id, each once.
+    pub fn nodes(&self) -> Vec<[u8; 16]> {
+        let mut nodes: Vec<[u8; 16]> = self.open.values().map(|open| open.node).collect();
+        nodes.sort();
+        nodes.dedup();
+        nodes
+    }
+
     /// `node` proved the upload of `message_id`, stored there as
     /// `transient_id`, at `now` (unix seconds).
     pub fn uploaded(
@@ -70,30 +156,45 @@ impl Asker {
         self.open.insert(
             transient_id,
             Open {
+                transient_id,
                 message_id,
                 node,
                 uploaded_at: now,
             },
         );
+        self.changed = true;
     }
 
     /// `node` announced; `status` is the `/lev/status` version it says it
     /// answers, none for a stock node.
     pub fn announced(&mut self, node: [u8; 16], status: Option<u64>) {
-        match status {
-            Some(version) => {
-                self.answering.insert(node, version);
-            }
-            None => {
-                self.answering.remove(&node);
-            }
-        }
+        let before = match status {
+            Some(version) => self.answering.insert(node, version),
+            None => self.answering.remove(&node),
+        };
+        self.changed |= before != status;
     }
 
     /// Our message `message_id` needs no asking any more: a propagation
     /// receipt or a proof named it.
     pub fn settled(&mut self, message_id: &[u8; 32]) {
+        let before = self.open.len();
         self.open.retain(|_, open| open.message_id != *message_id);
+        self.changed |= self.open.len() != before;
+    }
+
+    /// One sync round's questions (1409): for every node that holds an open
+    /// id, the ids to ask it, or why it is not asked. With nothing open at
+    /// all the round says [`Skip::NoOpenIds`] once.
+    pub fn round(&mut self, round: u64, now: i64) -> Vec<([u8; 16], Asked)> {
+        let nodes = self.nodes();
+        if nodes.is_empty() {
+            return vec![([0; 16], Err(Skip::NoOpenIds))];
+        }
+        nodes
+            .into_iter()
+            .map(|node| (node, self.ask(node, round, now)))
+            .collect()
     }
 
     /// The ids still open, for a test or a log.
@@ -102,15 +203,14 @@ impl Asker {
     }
 
     /// The question for `node` in sync round `round` at `now`: the
-    /// `transient_id`s to ask, or none when the node does not answer, was
-    /// asked this round, or holds nothing open. Drops the ids past
+    /// `transient_id`s to ask, or why not: the node holds nothing open, does
+    /// not answer, or was asked this round. Drops the ids past
     /// [`MAX_AGE_SECS`].
-    pub fn ask(&mut self, node: [u8; 16], round: u64, now: i64) -> Option<Vec<[u8; 32]>> {
+    pub fn ask(&mut self, node: [u8; 16], round: u64, now: i64) -> Asked {
+        let before = self.open.len();
         self.open
             .retain(|_, open| now.saturating_sub(open.uploaded_at) <= MAX_AGE_SECS);
-        if !self.answering.contains_key(&node) || self.asked_round.get(&node) == Some(&round) {
-            return None;
-        }
+        self.changed |= self.open.len() != before;
         let mut ids: Vec<(i64, [u8; 32])> = self
             .open
             .iter()
@@ -118,7 +218,13 @@ impl Asker {
             .map(|(id, open)| (open.uploaded_at, *id))
             .collect();
         if ids.is_empty() {
-            return None;
+            return Err(Skip::NoOpenIds);
+        }
+        if !self.answering.contains_key(&node) {
+            return Err(Skip::NoCapability);
+        }
+        if self.asked_round.get(&node) == Some(&round) {
+            return Err(Skip::Rate);
         }
         ids.sort();
         let ids: Vec<[u8; 32]> = ids
@@ -128,7 +234,7 @@ impl Asker {
             .collect();
         self.asked_round.insert(node, round);
         self.asking.insert(node, ids.clone());
-        Some(ids)
+        Ok(ids)
     }
 
     /// `node`'s answer to the question in flight: each asked id the node
@@ -152,6 +258,7 @@ impl Asker {
             out.push((open.message_id, *status));
             if final_word(*status) {
                 self.open.remove(transient_id);
+                self.changed = true;
             }
         }
         let line = format!(
@@ -165,8 +272,17 @@ impl Asker {
     }
 }
 
+/// What a `/lev/status` answer's bytes say: the statuses, or `None` for a
+/// refusal or bytes that are no answer, which say nothing.
+pub fn read_answer(data: &[u8]) -> Option<Vec<([u8; 32], MessageStatus)>> {
+    match leviculum_lxmf::lev_status::decode_answer(data) {
+        Ok(Ok(entries)) => Some(entries),
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 /// Whether a status ends the asking for its id.
-fn final_word(status: MessageStatus) -> bool {
+pub fn final_word(status: MessageStatus) -> bool {
     matches!(
         status,
         MessageStatus::Collected
@@ -196,10 +312,14 @@ mod tests {
     fn a_stock_node_is_never_asked() {
         let mut asker = asker_with(2);
         asker.announced(NODE, None);
-        assert_eq!(asker.ask(NODE, 1, T0 + 10), None);
+        assert_eq!(asker.ask(NODE, 1, T0 + 10), Err(Skip::NoCapability));
         let mut never = Asker::default();
         never.uploaded(NODE, [1; 32], [2; 32], T0);
-        assert_eq!(never.ask(NODE, 1, T0 + 10), None);
+        assert_eq!(never.ask(NODE, 1, T0 + 10), Err(Skip::NoCapability));
+        assert_eq!(
+            Skip::NoCapability.line(),
+            "PN_STATUS_SKIPPED reason=no_capability"
+        );
     }
 
     #[test]
@@ -207,9 +327,13 @@ mod tests {
         let mut asker = asker_with(3);
         assert_eq!(
             asker.ask(NODE, 1, T0 + 10),
-            Some(vec![[0x80; 32], [0x81; 32], [0x82; 32]])
+            Ok(vec![[0x80; 32], [0x81; 32], [0x82; 32]])
         );
-        assert_eq!(asker.ask(NODE, 1, T0 + 20), None, "the same round again");
+        assert_eq!(
+            asker.ask(NODE, 1, T0 + 20),
+            Err(Skip::Rate),
+            "the same round again"
+        );
         // A receipt settled one, the node answered another collected.
         asker.settled(&[1; 32]);
         let (marks, line) = asker.answered(
@@ -227,20 +351,24 @@ mod tests {
             ]
         );
         assert_eq!(line, "PN_STATUS_ASKED ids=3 answered=2");
-        assert_eq!(asker.ask(NODE, 2, T0 + 30), Some(vec![[0x82; 32]]));
+        assert_eq!(asker.ask(NODE, 2, T0 + 30), Ok(vec![[0x82; 32]]));
         let (_, _) = asker.answered(NODE, Some(&[([0x82; 32], MessageStatus::Expired)]));
-        assert_eq!(asker.ask(NODE, 3, T0 + 40), None, "nothing open");
+        assert_eq!(
+            asker.ask(NODE, 3, T0 + 40),
+            Err(Skip::NoOpenIds),
+            "nothing open"
+        );
         assert_eq!(asker.open(), 0);
     }
 
     #[test]
     fn unknown_and_silence_leave_the_ids_open() {
         let mut asker = asker_with(1);
-        assert!(asker.ask(NODE, 1, T0).is_some());
+        assert!(asker.ask(NODE, 1, T0).is_ok());
         let (marks, line) = asker.answered(NODE, Some(&[([0x80; 32], MessageStatus::Unknown)]));
         assert_eq!(marks, [([0; 32], MessageStatus::Unknown)]);
         assert_eq!(line, "PN_STATUS_ASKED ids=1 answered=0");
-        assert!(asker.ask(NODE, 2, T0).is_some());
+        assert!(asker.ask(NODE, 2, T0).is_ok());
         let (marks, line) = asker.answered(NODE, None);
         assert!(marks.is_empty());
         assert_eq!(line, "PN_STATUS_ASKED ids=1 answered=0");
@@ -250,9 +378,12 @@ mod tests {
     #[test]
     fn an_id_is_asked_for_thirty_days_and_not_a_second_longer() {
         let mut asker = asker_with(1);
-        assert!(asker.ask(NODE, 1, T0 + MAX_AGE_SECS).is_some());
+        assert!(asker.ask(NODE, 1, T0 + MAX_AGE_SECS).is_ok());
         let _ = asker.answered(NODE, None);
-        assert_eq!(asker.ask(NODE, 2, T0 + MAX_AGE_SECS + 1), None);
+        assert_eq!(
+            asker.ask(NODE, 2, T0 + MAX_AGE_SECS + 1),
+            Err(Skip::NoOpenIds)
+        );
         assert_eq!(asker.open(), 0);
     }
 
@@ -274,9 +405,67 @@ mod tests {
         let other = [0x55; 16];
         asker.announced(other, Some(1));
         asker.uploaded(other, [7; 32], [0x77; 32], T0);
-        assert!(asker.ask(NODE, 1, T0).is_some());
+        assert!(asker.ask(NODE, 1, T0).is_ok());
         let (marks, _) = asker.answered(NODE, Some(&[([0x77; 32], MessageStatus::Collected)]));
         assert!(marks.is_empty());
         assert_eq!(asker.open(), 2);
+    }
+
+    #[test]
+    fn what_is_open_survives_a_restart_and_is_asked_after_it() {
+        let mut asker = asker_with(2);
+        let kept = asker.take_changed().expect("uploads change what is kept");
+        assert_eq!(asker.take_changed(), None, "said once");
+        assert_eq!(kept.open.len(), 2);
+        assert_eq!(kept.answering, [(NODE, 1)]);
+        let mut again = Asker::restore(kept.clone());
+        assert_eq!(again.state(), kept);
+        assert_eq!(again.take_changed(), None, "a restore changes nothing");
+        assert_eq!(again.nodes(), [NODE]);
+        assert_eq!(again.ask(NODE, 1, T0 + 5), Ok(vec![[0x80; 32], [0x81; 32]]));
+        let _ = again.answered(NODE, Some(&[([0x80; 32], MessageStatus::Collected)]));
+        let after = again.take_changed().expect("a final word changes it");
+        assert_eq!(after.open.len(), 1);
+        assert_eq!(after.open[0].message_id, [1; 32]);
+    }
+
+    #[test]
+    fn a_held_answer_and_a_repeated_announce_change_nothing_kept() {
+        let mut asker = asker_with(1);
+        let _ = asker.take_changed();
+        asker.announced(NODE, Some(1));
+        assert!(asker.ask(NODE, 1, T0).is_ok());
+        let _ = asker.answered(NODE, Some(&[([0x80; 32], MessageStatus::Held)]));
+        assert_eq!(asker.take_changed(), None);
+        asker.announced(NODE, None);
+        assert!(asker.take_changed().is_some(), "the node stopped answering");
+    }
+
+    #[test]
+    fn an_answer_reads_from_its_bytes_and_a_refusal_says_nothing() {
+        let answer =
+            leviculum_lxmf::lev_status::encode_answer(&[([0x80; 32], MessageStatus::Collected)]);
+        assert_eq!(
+            read_answer(&answer),
+            Some(vec![([0x80; 32], MessageStatus::Collected)])
+        );
+        let refusal = leviculum_lxmf::lev_status::encode_refusal(
+            leviculum_lxmf::propagation::PeerError::Throttled,
+        );
+        assert_eq!(read_answer(&refusal), None);
+        assert_eq!(read_answer(&[0xc1]), None);
+    }
+
+    /// The question on the wire for one upload: an array of one 32-byte
+    /// bin, 35 bytes (`docs/src/concepts/loquax-propagation-receipts.md`,
+    /// section B).
+    #[test]
+    fn the_request_for_one_upload_is_35_bytes() {
+        let mut asker = asker_with(1);
+        let ids = asker.ask(NODE, 1, T0).unwrap_or_default();
+        let request = leviculum_lxmf::lev_status::encode_request(&ids);
+        let mut want = vec![0x91, 0xc4, 0x20];
+        want.extend([0x80; 32]);
+        assert_eq!(request, want);
     }
 }

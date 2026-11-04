@@ -159,6 +159,12 @@ pub enum Command {
     /// ([`crate::home::KIND_STALLED`]); reported as
     /// [`OutboxEvent::HomeStalled`].
     HomeStalled { message_id: [u8; 32] },
+    /// What the propagation node said of messages the home sent (1409,
+    /// [`crate::home::KIND_PN_STATUS`]); reported as
+    /// [`OutboxEvent::HomePnStatus`].
+    HomePnStatus {
+        answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
+    },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
@@ -233,6 +239,11 @@ pub enum OutboxEvent {
     /// The home node gave up a silent leg of a message and tries again
     /// ([`Command::HomeStalled`]).
     HomeStalled { message_id: [u8; 32] },
+    /// What the propagation node said of messages the home sent
+    /// ([`Command::HomePnStatus`]).
+    HomePnStatus {
+        answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
+    },
     /// The reader's name for a peer, set on one of the home's devices
     /// ([`Command::HomePetname`]).
     HomePetname {
@@ -338,9 +349,12 @@ pub enum OutboxEvent {
     /// A propagation node proved the upload of the queued message
     /// `message_id`, which it stores under `transient_id`: what a sender
     /// asks it by later (`/lev/status`, 1395, [`crate::pn_status`]).
+    /// `node` is the propagation node the router had selected, the one
+    /// that proved it.
     Uploaded {
         message_id: [u8; 32],
         transient_id: [u8; 32],
+        node: Option<[u8; 16]>,
     },
     /// A node announced its position on `lev.position` (1302,
     /// [`crate::mesh_position`]): `identity` is the hash of the identity

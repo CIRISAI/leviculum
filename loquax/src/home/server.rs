@@ -670,6 +670,62 @@ pub fn owes_arrival(home: [u8; 16], packed: &[u8], propagated: bool) -> Option<[
         .then_some(message.source_hash)
 }
 
+/// The ids of ours a received message's receipt names, read or
+/// propagation (1409): the propagation node need not be asked about them
+/// any more ([`crate::pn_status::Asker::settled`]).
+pub fn settles(packed: &[u8]) -> Vec<[u8; 32]> {
+    let Ok(message) = leviculum_lxmf::Message::unpack(packed, None, None, DeliveryMethod::Direct)
+    else {
+        return Vec::new();
+    };
+    let Some(lev) = leviculum_lxmf::lev::Lev::from_fields(&message.fields) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    if let Some(receipt) = lev.receipt {
+        ids.extend(receipt.ids);
+    }
+    if let Some(receipt) = lev.propagation_receipt {
+        ids.extend(receipt.ids);
+    }
+    ids
+}
+
+/// Keep what the propagation node answered as archive entries every
+/// device folds (1409, [`super::KIND_PN_STATUS`]): only the words that
+/// move a mark (`collected`, `delivered`, `expired`, `evicted`), at most
+/// [`wire::MARK_IDS_MAX`] an entry. The newest sequence appended, none when
+/// nothing moved.
+pub fn keep_pn_status(
+    store: &mut Store,
+    cap_bytes: u64,
+    answers: &[([u8; 32], leviculum_lxmf::lev_status::MessageStatus)],
+    now: i64,
+) -> Option<u64> {
+    let moved: Vec<_> = answers
+        .iter()
+        .copied()
+        .filter(|(_, status)| crate::pn_status::final_word(*status))
+        .collect();
+    let mut newest = None;
+    for chunk in moved.chunks(wire::MARK_IDS_MAX) {
+        let data = wire::pn_status_entry(chunk);
+        let id = leviculum_core::crypto::sha256(&data);
+        match store.archive_append(super::KIND_PN_STATUS, &id, &data, now, cap_bytes) {
+            Ok(seq) => {
+                tracing::info!(
+                    "HOME pn status ids={} seq={}",
+                    chunk.len(),
+                    seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+                );
+                newest = newest.max(seq);
+            }
+            Err(error) => tracing::warn!("HOME pn status: {error}"),
+        }
+    }
+    newest
+}
+
 /// Sign the propagation receipts `owed`, per sender the ids that arrived
 /// by propagation in one pump, at the home's clock `received_at`, and put
 /// each in the outbox as the seen mark puts a read receipt: the new outbox

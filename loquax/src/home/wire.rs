@@ -486,6 +486,33 @@ pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     Ok(Mark { flag, ids })
 }
 
+/// A [`super::KIND_PN_STATUS`] entry's bytes: the propagation node's word
+/// per message id, `{ bin32 message id: str word, ... }`, in the shape of
+/// the node's `/lev/status` answer but keyed by the message id every
+/// device knows, not the `transient_id` only the sender's router saw.
+pub fn pn_status_entry(
+    answers: &[([u8; 32], leviculum_lxmf::lev_status::MessageStatus)],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::map(&mut out, answers.len());
+    for (id, status) in answers {
+        msgpack::bin(&mut out, id);
+        msgpack::string(&mut out, status.word());
+    }
+    out
+}
+
+/// A [`super::KIND_PN_STATUS`] entry: none, or more than [`MARK_IDS_MAX`],
+/// is malformed; a word this loquax does not know reads as `unknown`.
+pub fn read_pn_status_entry(
+    data: &[u8],
+) -> Result<Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>, Malformed> {
+    match leviculum_lxmf::lev_status::decode_answer(data) {
+        Ok(Ok(entries)) if !entries.is_empty() && entries.len() <= MARK_IDS_MAX => Ok(entries),
+        _ => Err(Malformed),
+    }
+}
+
 /// A name entry's bytes: the peer's address and the display name it
 /// announced, not yet sanitised; every client sanitises it as it does an
 /// announce it heard itself.
@@ -1193,6 +1220,30 @@ mod tests {
         msgpack::array(&mut unknown, 1);
         msgpack::bin(&mut unknown, &[1; 32]);
         assert_eq!(read_mark(&unknown), Err(Malformed));
+    }
+
+    /// 1409: the home's word of what the node answered is the node's
+    /// answer keyed by message id; none, too many or no map is malformed.
+    #[test]
+    fn a_pn_status_entry_round_trips_and_is_the_answers_shape() {
+        use leviculum_lxmf::lev_status::MessageStatus;
+        let answers = [
+            ([0x61; 32], MessageStatus::Collected),
+            ([0x62; 32], MessageStatus::Expired),
+        ];
+        let data = pn_status_entry(&answers);
+        assert_eq!(&data[..3], &[0x82, 0xc4, 0x20]);
+        assert_eq!(&data[35..45], b"\xa9collected");
+        assert_eq!(read_pn_status_entry(&data), Ok(answers.to_vec()));
+        assert_eq!(read_pn_status_entry(&pn_status_entry(&[])), Err(Malformed));
+        let many: Vec<_> = (0..=MARK_IDS_MAX)
+            .map(|i| ([i as u8; 32], MessageStatus::Collected))
+            .collect();
+        assert_eq!(
+            read_pn_status_entry(&pn_status_entry(&many)),
+            Err(Malformed)
+        );
+        assert_eq!(read_pn_status_entry(&[0x90]), Err(Malformed));
     }
 
     /// 1234: a seen mark carries the read time, begins with the prefix the

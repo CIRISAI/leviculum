@@ -141,6 +141,9 @@ pub enum StoreWrite {
     },
     /// Keep a group as the model knows it now (1307 G2).
     Group(super::groups::GroupInfo),
+    /// Keep what the propagation node is still to be asked about, all of
+    /// it in place of what was kept (1409).
+    PnAsks(crate::pn_status::AskerState),
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -366,6 +369,9 @@ impl<B> UiModel<B> {
             if let Some(group) = self.groups.get(&address) {
                 writes.push(StoreWrite::Group(group.clone()));
             }
+        }
+        if let Some(state) = self.pn_asker.take_changed() {
+            writes.push(StoreWrite::PnAsks(state));
         }
         writes.append(&mut self.forgotten);
         writes

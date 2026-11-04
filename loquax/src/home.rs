@@ -232,6 +232,15 @@ pub const KIND_STALLED: u8 = 11;
 /// its copies. The owner's devices get the owner's own copy as a received
 /// message, so a client skips this kind.
 pub const KIND_GROUP: u8 = 12;
+/// What a propagation node answered about messages this home sent through
+/// it (1409, `docs/src/concepts/loquax-propagation-receipts.md` section
+/// B): the home asked `/lev/status` and keeps the node's word per message
+/// as a map of message id to word ([`wire::pn_status_entry`]). Every client
+/// folds it into its marks as a device that asked itself does. Like a seen
+/// mark it carries only what moved: `collected`, `delivered`, `expired`
+/// and `evicted`. A client from before it skips it as a kind it cannot
+/// show.
+pub const KIND_PN_STATUS: u8 = 13;
 
 /// The word `loquax mailbox archive` prints for an entry kind (1305); a
 /// kind this program does not know is its number.
@@ -250,6 +259,7 @@ pub fn kind_word(kind: u8) -> alloc::borrow::Cow<'static, str> {
         KIND_PEERSTATE => "peerstate",
         KIND_STALLED => "stalled",
         KIND_GROUP => "group",
+        KIND_PN_STATUS => "pn-status",
         other => return alloc::borrow::Cow::Owned(alloc::format!("{other}")),
     })
 }

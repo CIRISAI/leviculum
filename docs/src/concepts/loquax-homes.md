@@ -56,11 +56,11 @@ Invariants (the study's 2.7):
 What exists today for one home and carries over:
 
 - The move to a new device, with each archive entry's kind, id and time:
-  `archive_moving` (`loquax/src/store.rs:2044`) and `archive_moved_in`
-  (`loquax/src/store.rs:2095`), which adds nothing on a second take-in.
+  `archive_moving` (`loquax/src/store.rs:2088`) and `archive_moved_in`
+  (`loquax/src/store.rs:2139`), which adds nothing on a second take-in.
   The sync generalises it to both directions and to paging from a cursor.
 - The rule that authority lives with the key, not with an admission:
-  `may_move` (`loquax/src/home/server.rs:1001`). Two homes recognise each
+  `may_move` (`loquax/src/home/server.rs:1057`). Two homes recognise each
   other the same way, by a signature only a key holder can make
   (planned: a `/sibling` request over a link).
 - The ratchet export and import of 1185, `take_over`
@@ -106,7 +106,7 @@ falsifies it:
 Measured on 2026-11-02: nothing lost and every message proven, but no
 home holds what reached another. In the own-ratchets arm each mailbox
 restart is followed within 50 ms by one `LXMF_RX_UNDECRYPTABLE` at the
-home that just announced (the event, `loquax/src/engine.rs:1499`): the
+home that just announced (the event, `loquax/src/engine.rs:1508`): the
 sender sealed to the other home's ratchet before the new announce reached
 it. The stock router's retry heals a single packet; a propagated message
 has no such retry, which is where the loss lives. E4 (hardware, LoRa or
@@ -166,7 +166,7 @@ lost phone is no longer a lost identity, since another home still holds
 the key and a new phone takes a copy by code.
 
 What exists: revoking an admitted client device, `revoke`
-(`loquax/src/store.rs:2488`), checked again on every request. What is
+(`loquax/src/store.rs:2532`), checked again on every request. What is
 new: revoking a device that was itself a home, from any other device, and
 the re-seed of (b). The honest limit stays: Reticulum has no revocation
 of an identity key, the key is the address. The finder can no longer read

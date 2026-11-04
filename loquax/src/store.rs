@@ -127,7 +127,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -393,6 +393,27 @@ const SCHEMA_V14: &str = "
 ALTER TABLE positions ADD COLUMN source INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// What schema 15 adds to schema 14 (1409): what the propagation node is
+/// still to be asked about (`pn_asks`, one row per open `transient_id`:
+/// our message id, the node it was uploaded to and when, unix seconds),
+/// and the nodes whose announce said they answer `/lev/status`
+/// (`pn_nodes`, with the version they said), so a restart asks about the
+/// uploads before it ([`crate::pn_status::Asker::restore`]).
+const SCHEMA_V15: &str = "
+CREATE TABLE pn_asks(
+    identity BLOB NOT NULL,
+    transient BLOB NOT NULL,
+    message BLOB NOT NULL,
+    node BLOB NOT NULL,
+    uploaded_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, transient));
+CREATE TABLE pn_nodes(
+    identity BLOB NOT NULL,
+    node BLOB NOT NULL,
+    version INTEGER NOT NULL,
+    PRIMARY KEY (identity, node));
+";
+
 pub mod groups;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -443,6 +464,9 @@ const TABLES_V11: [&str; 3] = ["groups", "group_members", "group_fanout"];
 
 /// The table schema 12 adds.
 const TABLES_V12: [&str; 1] = ["client_groups"];
+
+/// The tables schema 15 adds.
+const TABLES_V15: [&str; 2] = ["pn_asks", "pn_nodes"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -571,7 +595,7 @@ impl Store {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
-             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -663,6 +687,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 15 {
+            if let Some(missing) = missing(&TABLES_V15) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate(version);
         }
@@ -724,7 +753,10 @@ impl Store {
                 if version < 13 {
                     batch.push_str(SCHEMA_V13);
                 }
-                batch.push_str(SCHEMA_V14);
+                if version < 14 {
+                    batch.push_str(SCHEMA_V14);
+                }
+                batch.push_str(SCHEMA_V15);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -1007,6 +1039,18 @@ impl Store {
             apply(&tx, &identity, write).map_err(|e| failed(&path, e))?;
         }
         tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// What the propagation node is still to be asked about (1409), as
+    /// [`Store::save_pn_asks`] kept it.
+    pub fn pn_asks(&self) -> Result<crate::pn_status::AskerState, StoreError> {
+        read_pn_asks(&self.conn, &self.identity).map_err(|e| self.failed(e))
+    }
+
+    /// Keep what the propagation node is still to be asked about, all of
+    /// it in place of what was kept.
+    pub fn save_pn_asks(&mut self, state: &crate::pn_status::AskerState) -> Result<(), StoreError> {
+        self.write(&[StoreWrite::PnAsks(state.clone())])
     }
 
     /// Whether a message received with this id is already held: the
@@ -2893,6 +2937,94 @@ fn failed(path: &Path, error: impl fmt::Display) -> StoreError {
     }
 }
 
+fn read_pn_asks(
+    conn: &Connection,
+    identity: &[u8; 16],
+) -> rusqlite::Result<crate::pn_status::AskerState> {
+    let mut state = crate::pn_status::AskerState::default();
+    let mut asks = conn.prepare(
+        "SELECT transient, message, node, uploaded_at FROM pn_asks WHERE identity = ?1 \
+         ORDER BY uploaded_at, transient",
+    )?;
+    let rows = asks.query_map(params![&identity[..]], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (transient, message, node, uploaded_at) = row?;
+        // A row of another length is no id: passed over.
+        if let (Ok(transient_id), Ok(message_id), Ok(node)) = (
+            <[u8; 32]>::try_from(transient.as_slice()),
+            <[u8; 32]>::try_from(message.as_slice()),
+            <[u8; 16]>::try_from(node.as_slice()),
+        ) {
+            state.open.push(crate::pn_status::Open {
+                transient_id,
+                message_id,
+                node,
+                uploaded_at,
+            });
+        }
+    }
+    let mut nodes =
+        conn.prepare("SELECT node, version FROM pn_nodes WHERE identity = ?1 ORDER BY node")?;
+    let rows = nodes.query_map(params![&identity[..]], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (node, version) = row?;
+        if let Ok(node) = <[u8; 16]>::try_from(node.as_slice()) {
+            state
+                .answering
+                .push((node, u64::try_from(version).unwrap_or(0)));
+        }
+    }
+    Ok(state)
+}
+
+fn write_pn_asks(
+    tx: &rusqlite::Transaction<'_>,
+    identity: &[u8; 16],
+    state: &crate::pn_status::AskerState,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM pn_asks WHERE identity = ?1",
+        params![&identity[..]],
+    )?;
+    tx.execute(
+        "DELETE FROM pn_nodes WHERE identity = ?1",
+        params![&identity[..]],
+    )?;
+    for open in &state.open {
+        tx.execute(
+            "INSERT OR REPLACE INTO pn_asks(identity, transient, message, node, uploaded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &identity[..],
+                &open.transient_id[..],
+                &open.message_id[..],
+                &open.node[..],
+                open.uploaded_at
+            ],
+        )?;
+    }
+    for (node, version) in &state.answering {
+        tx.execute(
+            "INSERT OR REPLACE INTO pn_nodes(identity, node, version) VALUES (?1, ?2, ?3)",
+            params![
+                &identity[..],
+                &node[..],
+                i64::try_from(*version).unwrap_or(i64::MAX)
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn apply(
     tx: &rusqlite::Transaction<'_>,
     identity: &[u8; 16],
@@ -3018,6 +3150,7 @@ fn apply(
                 params![&identity[..], &peer[..]],
             )?;
         }
+        StoreWrite::PnAsks(state) => write_pn_asks(tx, identity, state)?,
         StoreWrite::Group(group) => {
             tx.execute(
                 "INSERT INTO client_groups(identity, address, name, admin_name, inviter, ours, \
@@ -4362,6 +4495,47 @@ mod tests {
         drop(conn);
         let text = refused(home.path());
         assert!(text.contains("table shares is missing"), "{text}");
+    }
+
+    /// 1409: what the propagation node is still to be asked about comes
+    /// back after a restart as it was kept, a write replaces all of it, and
+    /// another identity sees none.
+    #[test]
+    fn what_the_node_is_to_be_asked_survives_a_restart() {
+        use crate::pn_status::{AskerState, Open};
+        let home = tempfile::tempdir().expect("home");
+        let state = AskerState {
+            open: vec![
+                Open {
+                    transient_id: [0x81; 32],
+                    message_id: [0x61; 32],
+                    node: [0x9c; 16],
+                    uploaded_at: 1_800_000_000,
+                },
+                Open {
+                    transient_id: [0x82; 32],
+                    message_id: [0x62; 32],
+                    node: [0x9d; 16],
+                    uploaded_at: 1_800_000_100,
+                },
+            ],
+            answering: vec![([0x9c; 16], 1)],
+        };
+        {
+            let mut store = Store::open_in(home.path(), US).expect("open");
+            assert_eq!(store.pn_asks().expect("read"), AskerState::default());
+            store.save_pn_asks(&state).expect("kept");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("again");
+        assert_eq!(store.pn_asks().expect("read"), state);
+        let fewer = AskerState {
+            open: state.open[1..].to_vec(),
+            answering: Vec::new(),
+        };
+        store.save_pn_asks(&fewer).expect("replaced");
+        assert_eq!(store.pn_asks().expect("read"), fewer);
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert_eq!(other.pn_asks().expect("read"), AskerState::default());
     }
 
     /// 1307 G2, item 2: a group the model wrote comes back with every

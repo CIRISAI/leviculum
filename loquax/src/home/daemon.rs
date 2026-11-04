@@ -328,6 +328,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut relations = relations_at_start(&store, &home)?;
     let signer = identity.clone();
     let mut outgoing = Outgoing::new(policy);
+    // What the propagation node is still to be asked about (1409): the
+    // uploads before a restart are asked about after it.
+    let mut asker = crate::pn_status::Asker::restore(store.pn_asks().map_err(|e| e.to_string())?);
     for kept in store.outbox_open().map_err(|e| e.to_string())? {
         outgoing.add(
             kept.id,
@@ -498,6 +501,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut fanout = Fanout::default();
     let mut schedule = sync_bound_ms.map(|bound| Schedule::new(Some(bound)));
     let mut fetch: Option<tokio::task::JoinHandle<Option<usize>>> = None;
+    // The sync rounds finished, and the `/lev/status` questions in flight,
+    // one a node (1409).
+    let mut pn_round: u64 = 0;
+    let mut pn_asks: Vec<([u8; 16], tokio::task::JoinHandle<Option<PnAnswer>>)> = Vec::new();
     // The node the engine's router has selected, as its PnSelected said:
     // not `--pn` itself, which the router learns only from a SelectPn, and
     // with collections off nothing else sends one.
@@ -690,6 +697,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 // tries again, or propagates.
                                 continue;
                             };
+                            // A receipt names ours: their node is asked no
+                            // more (1409).
+                            for id in super::server::settles(&packed) {
+                                asker.settled(&id);
+                            }
                             crate::events::home_accept(
                                 &message_id,
                                 &source_of(&packed).unwrap_or([0; 16]),
@@ -722,6 +734,13 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
                         }
+                        // A node proved an upload (1409): asked about at the
+                        // end of the next sync rounds.
+                        OutboxEvent::Uploaded { message_id, transient_id, node: proved_by } => {
+                            if let Some(pn) = proved_by.or(selected_pn) {
+                                asker.uploaded(pn, message_id, transient_id, unix_now());
+                            }
+                        }
                         OutboxEvent::PnUnavailable { detail } => {
                             tracing::info!("HOME no propagation node: {detail}");
                         }
@@ -739,10 +758,16 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn, selected_pn);
                         }
                         OutboxEvent::Left { message_id, last, failure } => {
+                            if last == Some(MessageState::Delivered) {
+                                asker.settled(&message_id);
+                            }
                             let (outcome, reason) = left_outcome(last, failure);
                             sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, reason.as_deref(), selected_pn, selected_pn);
                         }
                         OutboxEvent::State { message_id, state } => {
+                            if state == MessageState::Delivered {
+                                asker.settled(&message_id);
+                            }
                             // A sign of the leg: the stall bound counts from now.
                             leg_sign(&mut outgoing, &message_id, state);
                         }
@@ -755,11 +780,13 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::KeyWanted { message_id, destination } => {
                             tracing::info!("{}", key_wanted_line(&message_id, &destination));
                         }
-                        OutboxEvent::NodeAnnounced { destination, .. }
-                            if Some(destination) == selected_pn =>
-                        {
-                            if let Some(schedule) = &mut schedule {
-                                schedule.on(SyncEvent::Announce, now_ms());
+                        OutboxEvent::NodeAnnounced { destination, status } => {
+                            // Whether it answers `/lev/status` (1409).
+                            asker.announced(destination, status);
+                            if Some(destination) == selected_pn {
+                                if let Some(schedule) = &mut schedule {
+                                    schedule.on(SyncEvent::Announce, now_ms());
+                                }
                             }
                         }
                         OutboxEvent::Broken { detail } => {
@@ -804,6 +831,26 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             tracing::info!("{}", pn_pull_line(n, selected_pn, schedule, now_ms()));
                         }
                     }
+                    // The end of a round that synced: what became of our
+                    // uploads (1409). One that failed found the node silent.
+                    if pulled.is_some() {
+                        pn_round += 1;
+                        ask_pns(&node, &mut asker, &mut pn_asks, pn_round);
+                    }
+                }
+                for (pn, answer) in pn_answered(&mut pn_asks).await {
+                    let (answers, line) = asker.answered(pn, answer.as_deref());
+                    tracing::info!("{line}");
+                    if let Some(seq) =
+                        super::server::keep_pn_status(&mut store, archive_cap_bytes, &answers, unix_now())
+                    {
+                        wakes.appended(seq);
+                    }
+                }
+                if let Some(state) = asker.take_changed() {
+                    if let Err(error) = store.save_pn_asks(&state) {
+                        tracing::warn!("HOME pn asks not kept: {error}");
+                    }
                 }
                 wakes.appended(sender.newest);
                 for due in wakes.due(now_ms()) {
@@ -832,12 +879,70 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     if let Some(task) = fetch {
         task.abort();
     }
+    for (_, task) in pn_asks {
+        task.abort();
+    }
     drop(node);
     attached.stop().await;
     for hosted in groups {
         hosted.engine.stop().await;
     }
     outcome
+}
+
+/// What a propagation node answered to `/lev/status`, by `transient_id`.
+type PnAnswer = Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>;
+
+/// How long one `/lev/status` question may take, path, link and answer: a
+/// node that does not answer in it is asked again the next round.
+const PN_ASK_BUDGET: Duration = Duration::from_secs(30);
+
+/// Ask every node that holds an open upload, once in sync round `round`,
+/// each on a task of its own over a link it never identifies (1409); say
+/// why a node is not asked. A node with a question still in flight is not
+/// asked again (`rate`).
+fn ask_pns(
+    node: &std::sync::Arc<ReticulumNode>,
+    asker: &mut crate::pn_status::Asker,
+    asks: &mut Vec<([u8; 16], tokio::task::JoinHandle<Option<PnAnswer>>)>,
+    round: u64,
+) {
+    for (pn, asked) in asker.round(round, unix_now()) {
+        if asks.iter().any(|(busy, _)| *busy == pn) {
+            tracing::info!("{}", crate::pn_status::Skip::Rate.line());
+            continue;
+        }
+        match asked {
+            Ok(ids) => {
+                let reticulum = std::sync::Arc::clone(node);
+                asks.push((
+                    pn,
+                    tokio::spawn(async move {
+                        super::client::pn_answer(&reticulum, pn, &ids, PN_ASK_BUDGET).await
+                    }),
+                ));
+            }
+            Err(skip) => tracing::info!("{}", skip.line()),
+        }
+    }
+}
+
+/// The questions that came back, each with its node; a task that failed
+/// says nothing, as silence does.
+async fn pn_answered(
+    asks: &mut Vec<([u8; 16], tokio::task::JoinHandle<Option<PnAnswer>>)>,
+) -> Vec<([u8; 16], Option<PnAnswer>)> {
+    let mut done = Vec::new();
+    let mut i = 0;
+    while i < asks.len() {
+        if asks[i].1.is_finished() {
+            let (pn, task) = asks.remove(i);
+            done.push((pn, task.await.ok().flatten()));
+        } else {
+            i += 1;
+        }
+    }
+    done
 }
 
 /// How a group's engine reaches the network: as the home's own does.

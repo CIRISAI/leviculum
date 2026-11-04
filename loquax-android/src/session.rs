@@ -1818,6 +1818,9 @@ impl Inner {
         let now = wall_now(offset);
         update(&mut model, UiEvent::Clock(now));
         model.restore(store.restore().map_err(|error| error.to_string())?);
+        // What the propagation node is still to be asked about (1409).
+        model.pn_asker =
+            loquax::pn_status::Asker::restore(store.pn_asks().map_err(|error| error.to_string())?);
         // A share runs on across a restart (1273); one whose time ran out
         // meanwhile ends at the next clock with its end report.
         model.restore_shares(store.shares().map_err(|error| error.to_string())?);
@@ -2276,7 +2279,13 @@ impl Inner {
                 }
                 // Every rotation of the session hears it (1298).
                 UiEffect::Network { kind, changed } => self.network.say(kind, changed),
-                UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
+                UiEffect::Log(line) | UiEffect::Notice(line) | UiEffect::PnLine(line) => {
+                    tracing::info!("{line}")
+                }
+                // A client of its home asks no propagation node (1409): the
+                // mailbox asks, its own or the app's, and the answer comes
+                // as a pulled entry.
+                UiEffect::AskPn { .. } => {}
                 // A petname set here or pulled (1139): the contacts file
                 // in the app's directory, which the next start reads.
                 UiEffect::Contact(contact) => {

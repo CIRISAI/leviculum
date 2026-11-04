@@ -323,6 +323,8 @@ impl<B> UiModel<B> {
     ) -> Vec<UiEffect> {
         let mut unknown = Vec::new();
         for id in &receipt.ids {
+            // The recipient said it: the node is asked no more (1409).
+            self.pn_asker.settled(id);
             if !self.witnessed(&peer, id, Witness::Receipt) {
                 unknown.push(*id);
             }

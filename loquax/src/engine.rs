@@ -563,9 +563,14 @@ impl Engine {
                 transient_id,
             } => {
                 if self.tracked.contains_key(&message_id) {
+                    let node = ready
+                        .router
+                        .outbound_propagation_node()
+                        .map(|node| *node.as_bytes());
                     self.emit(OutboxEvent::Uploaded {
                         message_id,
                         transient_id,
+                        node,
                     });
                 }
             }
@@ -749,6 +754,7 @@ impl Engine {
                 | Command::HomeSent { .. }
                 | Command::HomeMark { .. }
                 | Command::HomeStalled { .. }
+                | Command::HomePnStatus { .. }
                 | Command::HomeName { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
@@ -973,6 +979,9 @@ impl Engine {
                     }
                 }
                 Command::HomeMark { mark } => self.emit(OutboxEvent::HomeMarked { mark }),
+                Command::HomePnStatus { answers } => {
+                    self.emit(OutboxEvent::HomePnStatus { answers });
+                }
                 Command::HomeStalled { message_id } => {
                     self.emit(OutboxEvent::HomeStalled { message_id });
                 }

@@ -4,13 +4,14 @@ Status: concept and wire, decided 2026-11-04 (the reviewer's defaults
 for Lew over the study, order 1393, Refs #232, #450). The codec is built
 (`leviculum-lxmf/src/lev.rs`, key `0x07` and capability bit 2). Order
 1395 built the receipt in Loquax (sending, taking, the words on every
-target) and the asking rule of section B; the request on the wire and
-the home's word of the answer to its devices are not built yet (see
-Status at the end). The study behind this page is the reviewer's
+target) and the asking rule of section B; order 1409 put the request on
+the wire, the home's word of the answer into its archive for its
+devices, and the open ids into the store (see "Asking, as built" in
+section B and Status at the end). The study behind this page is the reviewer's
 `2026-11-04-empfangsbestaetigung-propagation` (German, every claim
 cited). The second half of its recommendation, asking lnpnd what became
 of a message, is section B below: built in lnpnd by order 1394, asked
-by nobody yet (1395).
+by Loquax since 1409.
 
 ## The problem
 
@@ -135,10 +136,10 @@ fields[0xFC] = map {
 
 - **Bit 2 on every send**: `groups::client_caps`
   (`loquax/src/ui/groups.rs:72`), which `mark_sends` puts on every
-  message (`loquax/src/ui.rs:1850-1854`); not switchable.
+  message (`loquax/src/ui.rs:1875-1879`); not switchable.
 - **The arrival**: the router hands a collected message on as
   `DeliveryMethod::Propagated`; the engine says so after the message
-  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:594`).
+  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:599`).
 - **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:122`):
   propagated, bit 2 in the message's own mark, no receipt of either kind,
   no group copy.
@@ -150,10 +151,10 @@ fields[0xFC] = map {
   message to that sender. Read wins: an id seen while read receipts go to
   that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:290`).
 - **On a home node**: the archive step of the daemon's pump
-  (`loquax/src/home/daemon.rs:716`) gathers one pump's arrivals per
+  (`loquax/src/home/daemon.rs:728`) gathers one pump's arrivals per
   sender, `owes_arrival` (`loquax/src/home/server.rs:662`) applies the
   rule to the packed message, and `propagation_receipts`
-  (`loquax/src/home/server.rs:677`) signs each alone into the outbox,
+  (`loquax/src/home/server.rs:733`) signs each alone into the outbox,
   direct first and then by the propagation node, logging
   `HOME propagation receipt to=… ids=… received_at=… message=…`.
 - **Taking it**: `take_lev` (`loquax/src/ui/receipts.rs:192`) hands a
@@ -206,7 +207,11 @@ ladder's ASCII rung, `vv` for two ticks, so a receipt and a proof look
 alike there, as they do everywhere; it has no Info view yet, so the words
 reach it only through the scene's mark words, which it does not draw
 today. When the M9 gets an Info, it takes `message_info` as the phone
-does and needs nothing of its own.
+does and needs nothing of its own. The M9 is a client of its home and
+asks no node (1409); its pull does not fold archive entries into its
+model yet, so the home's `pn-status` entry reaches it once it does,
+through the same `HomePnStatus` fold as the phone's, with nothing of its
+own.
 
 ## Who does what else
 
@@ -347,14 +352,69 @@ other key in either map (`lev_status::announced_version`).
   reached `collected`, `delivered` or a receipt is never asked again.
   Built as `pn_status::Asker` (`loquax/src/pn_status.rs`): a node is
   asked only after its announce said `{"lev": {"status": _}}`
-  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1936`);
+  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1945`);
   the ids come from the upload's proof (`RouterEvent::PropagationUploaded`
   → `OutboxEvent::Uploaded`); at most 64 ids a request, oldest first;
   `collected`, `delivered`, `expired` and `evicted` close an id, `held`
   and `unknown` leave it open; each answer logs
   `PN_STATUS_ASKED ids=N answered=N`, where answered counts the ids the
   node named with a word other than `unknown`. The answers fold into the
-  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:345`).
+  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:347`).
+
+### Asking, as built (1409)
+
+- **The request.** `home::client::ask_pn_status`
+  (`loquax/src/home/client.rs`) asks the path if there is none, takes the
+  node's key from its announce (`ReticulumNode::get_identity`), opens a
+  link to the node's `lxmf.propagation` destination and **never
+  identifies it**, sends `/lev/status` with `lev_status::encode_request`,
+  reads the answer with `pn_status::read_answer` (a refusal or bytes that
+  are no answer say nothing) and closes the link. One upload's question
+  is 35 bytes (`the_request_for_one_upload_is_35_bytes`):
+
+  ```
+  91 c4 20 <32-byte transient id>
+  ```
+
+- **When.** At the end of a sync round that synced (one that failed
+  found the node silent): `Asker::round` names, per node that holds an
+  open id, the ids to ask or why not, and every round that does not ask
+  says so: `PN_STATUS_SKIPPED reason=no_capability` (the node never
+  announced `/lev/status`, a stock `lxmd`), `no_open_ids` (nothing open
+  at all) or `rate` (asked this round, or its question still in flight).
+  A failed link or a refusal leaves every id open; the next round asks
+  again. The node an id is asked at is the one that proved the upload:
+  `OutboxEvent::Uploaded` carries the router's selected node.
+- **Settled without asking.** A proof (`State`/`Left` delivered), and a
+  read receipt or a propagation receipt naming the id
+  (`home::server::settles` on the home, `apply_arrival` on a device),
+  close it.
+- **On the home.** The daemon asks after each synced round on a task per
+  node (`ask_pns`, `loquax/src/home/daemon.rs`, budget 30 s), folds the
+  answer into its `Asker` and keeps the words that move a mark,
+  `collected`, `delivered`, `expired` and `evicted`, as archive entries
+  of the new kind `KIND_PN_STATUS` = 13 (`pn-status` in
+  `loquax mailbox archive`): `{ bin32 message id: str word, ... }`, the
+  answer's shape keyed by the message id every device knows, at most 64
+  an entry (`wire::pn_status_entry`), logged as
+  `HOME pn status ids=N seq=S`; the archive wakes the devices. `held` and
+  `unknown` are archived for nobody.
+- **On the devices.** A client's pull hands the entry to its engine as
+  `Command::HomePnStatus`, which says `OutboxEvent::HomePnStatus`, which
+  the model folds with `pn_answered`, as a device that asked itself. A
+  client from before skips the kind. The phone is always a client of a
+  home, its own mailbox in the app or a computer's, so the asking is the
+  home's; the phone session asks nothing.
+- **A device that is its own node** (the terminal and the window without
+  a home): the model keeps its own `Asker` (`UiModel::pn_asker`), asks on
+  `UiEvent::FetchDone(Ok)` with `UiEffect::AskPn { node, ids }`, which
+  the shell runs over the same `ask_pn_status` and answers with
+  `UiEvent::PnAnswered`; `UiEffect::PnLine` carries the log lines.
+- **Across a restart.** The store keeps the open ids and the nodes that
+  answer (schema 15, tables `pn_asks` and `pn_nodes`, written whole when
+  they change: `Asker::state`, `Asker::restore`), so an upload before a
+  restart is asked about after it
+  (`the_home_asks_its_node_what_became_of_a_message_across_a_restart`).
 
 ### For a later cell against lxmd (lane 2)
 
@@ -407,10 +467,15 @@ message, as for any reply. Nothing identifies the sender to the node.
   window and the phone; the asking rule (`pn_status::Asker`), the
   upload's transient id out of the router, the node's capability out of
   its announce, and the fold of the answers into the marks.
-- Not built yet: sending the `/lev/status` request over an unidentified
-  link of its own, from the home's sync round and from a phone that is
-  its own node, and the home's word of the answers to its devices (a mark
-  in the archive, as the seen mark is); until then nobody asks. The
-  `Asker` holds its open ids in memory, so ids uploaded before a restart
-  are not asked about; keeping them in the store comes with the request.
-  The cells on lane 2.
+- Built (1409): the `/lev/status` request over an unidentified link of
+  its own, from the home's sync round and from a device that is its own
+  node; the home's word of the answers to its devices as the archive kind
+  `pn-status`; the open ids in the store; `PN_STATUS_SKIPPED`. Tests: the
+  home against a real lnpnd across a restart and a stock Python recipient
+  (`loquax/tests/home_node.rs`), the stock `lxmd` never asked
+  (`a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once`),
+  the phone's row moving to "Collected from the propagation network"
+  through the home (`a_message_collected_at_the_node_shows_collected_on_the_phone`
+  in `loquax-android/tests/facade.rs`), the model's cadence with
+  `unknown`, a failed link and a stock node (`loquax/src/ui.rs`).
+- Not built yet: the M9 folding archive entries; the cells on lane 2.

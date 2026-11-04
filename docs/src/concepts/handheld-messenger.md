@@ -40,7 +40,7 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:457`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:471`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:253`, `loquax/Cargo.toml:257`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
@@ -344,7 +344,7 @@ a home. What that needs, measured against the code:
   (`loquax/src/home/client.rs:10`). The board port is the same request
   flow over `leviculum-core`'s links and the firmware's clock — a seam
   cut like the store's (`StoreWrite`, `loquax/src/ui/history.rs:112`)
-  and (`StoreRead`, `loquax/src/ui/history.rs:167`): the
+  and (`StoreRead`, `loquax/src/ui/history.rs:170`): the
   retry ladder and budgets move down to `no_std`, the waiting stays
   with the platform. Rendezvous over TCP does not exist here and is not
   needed: over LoRa the client reaches the home destination through the
@@ -636,12 +636,12 @@ half (1363, below) moved the rows up to the group verbs:
 | piece | where | what it needs on the board |
 |---|---|---|
 | the link loop: path, connect, identify | `open`, `loquax/src/home/client.rs:560` | nothing more: `Join` is its board form; other requests get the same steps |
-| one request and its answer | `request`, `loquax/src/home/client.rs:625` | the firmware's request over a core link, reported to `Join::answered` |
+| one request and its answer | `request`, `loquax/src/home/client.rs:720` | the firmware's request over a core link, reported to `Join::answered` |
 | the join | `join`, `loquax/src/home/client.rs:35` | none: `Join` replaces it |
 | the pull and its pages | `pull`, `loquax/src/home/client.rs:434`; `pages`, gone in 1363 | a `Pull` flow like `Join` with the page loop, and the batch size the session census fixes |
 | send, mark and the group verbs | `send`, `loquax/src/home/client.rs:155`; `mark`, `loquax/src/home/client.rs:178` | the same steps with their own request; slice five for the groups |
 | the client id | `client_id`, `loquax/src/home/client.rs:425` | a random source the firmware has |
-| being a client: the home's key, the cursor | `load_client`, `loquax/src/home/client.rs:657`; `save_client`, `loquax/src/home/client.rs:682`; `load_cursor`, `loquax/src/home/client.rs:688` | a record in flash beside the store, the device identity with it |
+| being a client: the home's key, the cursor | `load_client`, `loquax/src/home/client.rs:752`; `save_client`, `loquax/src/home/client.rs:777`; `load_cursor`, `loquax/src/home/client.rs:783` | a record in flash beside the store, the device identity with it |
 
 What moves to make the admit flow run on the board, in order: the
 pairing screen in `loquax-m9`, the typed code drawn grouped with its
@@ -784,14 +784,14 @@ bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
 resource (`leviculum-core/src/node/mod.rs:1811`), which is an
 advertisement, its parts and a proof. The home's own page bound is
-64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:306`). So
+64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:316`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
 that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 (`loquax/src/home/ask.rs:146`), 412, the longest answer that still fits
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
 says `more` (`fit_page`, `loquax/src/home/wire.rs:298`; the server's
-`sync`, `loquax/src/home/server.rs:1100`). A message larger than a page
+`sync`, `loquax/src/home/server.rs:1156`). A message larger than a page
 still comes alone, as a resource.
 
 **The bytes, measured** (`loquax-android/tests/m9_client.rs`). The
@@ -1147,7 +1147,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4375`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4462`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board

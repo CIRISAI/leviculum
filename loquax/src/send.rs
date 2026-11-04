@@ -439,6 +439,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::HomeSent { .. }
                 | OutboxEvent::HomeMarked { .. }
                 | OutboxEvent::HomeStalled { .. }
+                | OutboxEvent::HomePnStatus { .. }
                 | OutboxEvent::HomePetname { .. }
                 | OutboxEvent::HomePeerState { .. } => {}
             }
