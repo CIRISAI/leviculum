@@ -109,3 +109,20 @@ pixel for pixel.
 screens without the picture, drawn by
 `tui::tests::the_browse_tab_is_lnomads_terminal_screen`. Compared as
 text; one that moved is left in the temp dir likewise.
+
+`gui-tracks-hiking.png`, `gui-tracks-park.png`, `gui-tracks-park-dark.png`,
+`gui-tracks-convoy.png`, `gui-tracks-week-old.png`,
+`gui-tracks-outlier.png`, `gui-tracks-handbag.png`: the six track scenes
+of `loquax::ui::tracks::scenes` (1385, `docs/src/concepts/loquax-tracks.md`)
+through the window's own frames over the Florence fixture, 480 x 320,
+`Style::SCREEN`, the pins drawn in, drawn by
+`gui::map::tests::the_track_scenes_are_the_goldens`. Most of each scene
+lies outside the fixture's box, so the ground there is the outline's
+plain land: the tracks are what the pictures pin. OpenStreetMap data as
+above where the box shows.
+
+`tracks-hiking.txt` and the five like it: the same scenes in the
+terminal's braille cells, 72 x 22, the tracks and the pins as the text
+frame draws them, drawn by
+`ui::tracks::scenes::tests::the_track_scenes_in_cells_are_the_goldens`;
+`LOQUAX_WRITE_GOLDEN=1` writes them anew.

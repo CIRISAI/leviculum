@@ -5,7 +5,7 @@
 //! (1144); what is the window's own is its font measuring a label
 //! ([`measure`]), as iced sets the label on the canvas.
 
-pub use loquax::screenmap::{area, hit, setup, Placed, DRAG, LABEL, LINE, MARKER};
+pub use loquax::screenmap::{area, hit, pin_hue, setup, Placed, DRAG, LABEL, LINE, MARKER};
 
 /// The width of `text` at `size` pixels as the window sets it: iced's own
 /// paragraph over its font system, with nothing drawn, so it works without
@@ -84,6 +84,7 @@ pub(super) mod tests {
             selected,
             zooms: (0, 20),
             draw_pins: false,
+            tracks: &[],
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
@@ -219,6 +220,7 @@ pub(super) mod tests {
             selected: None,
             zooms: (0, 20),
             draw_pins: false,
+            tracks: &[],
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
@@ -349,6 +351,7 @@ pub(super) mod tests {
                         selected: None,
                         zooms: (0, 20),
                         draw_pins: false,
+                        tracks: &[],
                         measure: Some(measure),
                         now_ms: None,
                         scaled_while_moving: false,
@@ -373,6 +376,71 @@ pub(super) mod tests {
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
                 same_as(&format!("gui-buildings-{t}-z{zoom}.png"), &rgb, 480, 320);
+            }
+        }
+    }
+
+    /// The six track scenes (1385) through the window's own frames over
+    /// the Florence fixture, 480 x 320, the pins drawn in: each the
+    /// golden `gui-tracks-<name>.png`, the park also in the dark table.
+    /// With `LOQUAX_TRACK_PNG_DIR` set, every picture is written there
+    /// as well, for a look.
+    #[test]
+    fn the_track_scenes_are_the_goldens() {
+        use leviculum_mapfill::style::MapTheme;
+        use loquax::ui::tracks::{scenes, tracks, TrackWindow};
+        let out = std::env::var_os("LOQUAX_TRACK_PNG_DIR").map(PathBuf::from);
+        let mut frames = florence();
+        for scene in scenes::all() {
+            let themes: &[(MapTheme, &str)] = match scene.name {
+                "park" => &[(MapTheme::Light, ""), (MapTheme::Dark, "-dark")],
+                _ => &[(MapTheme::Light, "")],
+            };
+            let fitted = scenes::view_of(&scene, 480, 320, 28);
+            let view = ExactView::new(fitted.centre, u32::from(fitted.zoom()) * MILLI, 480, 320);
+            let unit = libm::exp2(24.0 - f64::from(fitted.zoom()));
+            let drawn = tracks(
+                &scenes::input(&scene),
+                TrackWindow::Episode,
+                &scene.now,
+                unit,
+                1.0,
+            );
+            let pins = scenes::pins(&scene);
+            for (theme, suffix) in themes {
+                let shot = frames.frame(&Ask {
+                    view,
+                    margin: (0, 0),
+                    moving: false,
+                    style: Style::SCREEN.in_theme(*theme),
+                    scale: 1.0,
+                    pins: &pins,
+                    tracks: &drawn,
+                    selected: None,
+                    zooms: (0, 20),
+                    draw_pins: true,
+                    measure: None,
+                    now_ms: None,
+                    scaled_while_moving: false,
+                });
+                let rgb: Vec<u8> = shot
+                    .rgba
+                    .chunks(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect();
+                let name = format!("gui-tracks-{}{suffix}.png", scene.name);
+                if let Some(dir) = &out {
+                    std::fs::create_dir_all(dir).expect("png dir");
+                    let mut bytes = Vec::new();
+                    let mut e = png::Encoder::new(&mut bytes, 480, 320);
+                    e.set_color(png::ColorType::Rgb);
+                    e.set_depth(png::BitDepth::Eight);
+                    let mut writer = e.write_header().expect("header");
+                    writer.write_image_data(&rgb).expect("data");
+                    writer.finish().expect("finish");
+                    std::fs::write(dir.join(&name), bytes).expect("write png");
+                }
+                same_as(&name, &rgb, 480, 320);
             }
         }
     }
@@ -409,6 +477,7 @@ pub(super) mod tests {
                         selected: None,
                         zooms: (0, 20),
                         draw_pins: false,
+                        tracks: &[],
                         measure: Some(measure),
                         now_ms: None,
                         scaled_while_moving: false,

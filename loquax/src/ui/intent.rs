@@ -647,6 +647,7 @@ impl Intent {
             Intent::Map(MapCmd::Close) => StrId::Close,
             Intent::Map(MapCmd::Drawing(_)) => StrId::MapDrawing,
             Intent::Map(MapCmd::GlyphTest) => StrId::GlyphTest,
+            Intent::Map(MapCmd::TrackWindow(_)) => StrId::TrackWindow,
             Intent::SelectPin(_) => StrId::SelectPin,
             Intent::LoadMapArea => StrId::LoadMapArea,
             Intent::MapDrawing => StrId::MapDrawing,

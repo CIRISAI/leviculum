@@ -90,6 +90,10 @@ pub struct Seen {
     /// The map's pins in `Tab` order: every peer with a position, our own
     /// named `you`, each by the display rule with its fix's age.
     pub pins: Vec<MapPin>,
+    /// The fixes the map draws tracks of, shared with the model (1385),
+    /// and the window the strip shows chosen.
+    pub tracks: loquax::ui::tracks::TrackInput,
+    pub track_window: loquax::ui::tracks::TrackWindow,
     /// The newest note the model holds, said in the bar.
     pub notice: Option<String>,
     /// The word while a map region loads.
@@ -162,6 +166,8 @@ impl Seen {
     fn of(shell: &Shell) -> Self {
         Self {
             pins: shell.model.map_pins(),
+            tracks: shell.model.track_input(),
+            track_window: shell.model.track_window,
             notice: shell.model.toasts.last().map(|t| t.text.clone()),
             loading: shell.model.map_loading.clone(),
             maps: shell.maps.epoch(),
@@ -455,6 +461,8 @@ pub enum Message {
     Intent(Intent),
     /// The top bar's gear: the settings page (1233).
     Settings,
+    /// A step of the map's strip of time windows (1385).
+    TrackWindow(loquax::ui::tracks::TrackWindow),
     /// The mouse on the photo viewer (1269).
     Viewer(viewer::Input),
     /// The viewer's Close.
@@ -561,6 +569,8 @@ pub struct Order {
     pub style: Style,
     pub scale: f32,
     pub pins: Vec<MapPin>,
+    /// The tracks at the view's zoom (1385).
+    pub tracks: Vec<loquax::ui::tracks::Track>,
     pub selected: Option<[u8; 16]>,
     pub zooms: (u8, u8),
     /// The maps directory's epoch it is asked at.
@@ -607,6 +617,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         style: order.style,
         scale: order.scale,
         pins: &order.pins,
+        tracks: &order.tracks,
         selected: order.selected,
         zooms: order.zooms,
         draw_pins: false,
@@ -658,8 +669,20 @@ struct Press {
 }
 
 /// The window's state.
+/// What the window's tracks were derived at ([`App::tracks`]).
+#[derive(Clone, Debug, PartialEq)]
+struct TrackKey {
+    zoom: u8,
+    scale: u32,
+    window: loquax::ui::tracks::TrackWindow,
+    minute: i64,
+    fixes: Vec<([u8; 16], usize, usize)>,
+}
+
 struct App {
     seen: Seen,
+    /// The tracks last derived, and at what.
+    track_cache: std::cell::RefCell<Option<(TrackKey, Vec<loquax::ui::tracks::Track>)>>,
     asks: Option<Asks>,
     /// The view the last fit chose: a region landing under it fits again.
     fitted_at: Option<(World, u32)>,
@@ -780,6 +803,8 @@ impl App {
         Self {
             seen: Seen {
                 pins: Vec::new(),
+                tracks: Vec::new(),
+                track_window: Default::default(),
                 notice: None,
                 loading: None,
                 maps: 0,
@@ -795,6 +820,7 @@ impl App {
                 copied: None,
             },
             asks,
+            track_cache: std::cell::RefCell::new(None),
             fitted_at: None,
             frames: Arc::new(Mutex::new(frames)),
             view: ExactView::new(centre, u32::from(setup.zooms.0) * MILLI, 1, 1),
@@ -1468,6 +1494,10 @@ impl App {
                 }
             }
             MapCmd::Close => self.screen = Screen::Chats,
+            MapCmd::TrackWindow(forward) => {
+                let next = self.seen.track_window.step(forward);
+                self.tell(UiEvent::TrackWindow(next));
+            }
             MapCmd::Drawing(_) | MapCmd::GlyphTest => {}
         }
     }
@@ -1752,6 +1782,10 @@ impl App {
                 }
                 return Task::none();
             }
+            Message::TrackWindow(pressed) => {
+                self.tell(UiEvent::TrackWindow(pressed));
+                return Task::none();
+            }
             Message::Settings => {
                 self.screen = Screen::Settings;
                 self.menu = None;
@@ -1884,11 +1918,51 @@ impl App {
             style: self.seen.style,
             scale: self.scale,
             pins: self.seen.pins.clone(),
+            tracks: self.tracks(),
             selected: self.selected,
             zooms: self.zooms(),
             epoch: self.seen.maps,
             motion: self.motion,
         })
+    }
+
+    /// The tracks at the view's tile zoom, as the frame draws them: kept
+    /// while the zoom step, the window, the minute and the fixes stay, so
+    /// a drag does not derive a year of fixes every frame.
+    fn tracks(&self) -> Vec<loquax::ui::tracks::Track> {
+        let Some(now) = self.seen.now else {
+            return Vec::new();
+        };
+        let key = TrackKey {
+            zoom: self.view.tile_zoom(),
+            scale: self.scale.to_bits(),
+            window: self.seen.track_window,
+            minute: now.unix_secs.div_euclid(60),
+            fixes: self
+                .seen
+                .tracks
+                .iter()
+                .map(|(peer, _, f)| (*peer, Arc::as_ptr(f) as usize, f.len()))
+                .collect(),
+        };
+        let mut cache = self.track_cache.borrow_mut();
+        if let Some((held, tracks)) = cache.as_ref() {
+            if *held == key {
+                return tracks.clone();
+            }
+        }
+        // A screen pixel at the tile zoom, so the decimation and the
+        // places' cells hold while the wheel turns within the step.
+        let unit = libm::exp2(24.0 - f64::from(key.zoom));
+        let tracks = loquax::ui::tracks::tracks(
+            &self.seen.tracks,
+            self.seen.track_window,
+            &now,
+            unit,
+            self.scale,
+        );
+        *cache = Some((key, tracks.clone()));
+        tracks
     }
 
     /// A drag or the wheel moves the view.
@@ -2333,6 +2407,7 @@ impl App {
                 .on_press(Message::Intent(Intent::Tab(TabId::Chats)))
                 .padding([0, 6])
                 .style(button::text),
+            self.track_strip(),
             // Always on screen: the region's credit, or the outline's.
             text(credit).size(13),
             container(
@@ -2373,6 +2448,37 @@ impl App {
             column![map, bar],
         ]
         .into()
+    }
+}
+
+impl App {
+    /// The map's strip of time windows (1385): today, yesterday, this
+    /// week, this month, all; the one shown marked, a press on it back to
+    /// the current movement.
+    fn track_strip(&self) -> Element<'_, Message> {
+        use loquax::ui::tracks::TrackWindow;
+        let word = |w: TrackWindow| match w {
+            TrackWindow::Today => StrId::TracksToday,
+            TrackWindow::Yesterday => StrId::TracksYesterday,
+            TrackWindow::Week => StrId::TracksWeek,
+            TrackWindow::Month => StrId::TracksMonth,
+            TrackWindow::All | TrackWindow::Episode => StrId::TracksAll,
+        };
+        TrackWindow::NAMED
+            .iter()
+            .fold(row![].spacing(2), |strip, &w| {
+                let style = match self.seen.track_window == w {
+                    true => button::primary,
+                    false => button::text,
+                };
+                strip.push(
+                    button(text(word(w).text(Lang::En)).size(13))
+                        .on_press(Message::TrackWindow(w))
+                        .padding([0, 6])
+                        .style(style),
+                )
+            })
+            .into()
     }
 }
 
@@ -2538,22 +2644,29 @@ impl canvas::Program<Message> for MapCanvas<'_> {
             )
         };
         for pin in &shown.placed {
+            // A peer with a track in its hue, the name too (1385).
+            let hue = map::pin_hue(&shown.order.tracks, &pin.peer, false)
+                .filter(|_| !pin.nearby)
+                .map(|[r, g, b]| Color::from_rgb8(r, g, b));
+            let blue = hue.unwrap_or(Color::from_rgb8(0x20, 0x50, 0xc0));
             let ink = match (pin.selected, pin.nearby, pin.stale) {
                 (true, ..) => Color::from_rgb8(0xd0, 0x30, 0x30),
                 // A node nearby that is no contact (1302): a neutral grey.
                 (false, true, false) => Color::from_rgb8(0x80, 0x80, 0x80),
                 (false, true, true) => Color::from_rgba8(0x80, 0x80, 0x80, 0.45),
-                (false, false, false) => Color::from_rgb8(0x20, 0x50, 0xc0),
-                (false, false, true) => Color::from_rgba8(0x20, 0x50, 0xc0, 0.45),
+                (false, false, false) => blue,
+                (false, false, true) => blue.scale_alpha(0.45),
             };
             let centre = to(pin.x, pin.y);
             let radius = map::MARKER / 2.0;
             frame.fill(&Path::circle(centre, radius + 1.5), Color::WHITE);
             frame.fill(&Path::circle(centre, radius), ink);
             if let Some((x, y, words)) = &pin.label {
-                let text_ink = match pin.stale {
-                    true => Color::from_rgba8(0x20, 0x20, 0x20, 0.55),
-                    false => Color::from_rgb8(0x10, 0x10, 0x10),
+                let text_ink = match (pin.stale, hue) {
+                    (true, Some(hue)) => hue.scale_alpha(0.55),
+                    (false, Some(hue)) => hue,
+                    (true, None) => Color::from_rgba8(0x20, 0x20, 0x20, 0.55),
+                    (false, None) => Color::from_rgb8(0x10, 0x10, 0x10),
                 };
                 let at = to(*x, *y);
                 let width = pin.width / scale;
@@ -2648,6 +2761,8 @@ mod tests {
         app.apply(Message::MapSize(Size::new(480.0, 320.0)));
         app.apply(Message::Seen(Box::new(Seen {
             pins,
+            tracks: Vec::new(),
+            track_window: Default::default(),
             notice: None,
             loading: None,
             maps,
@@ -2892,6 +3007,8 @@ mod tests {
     fn seen_of(model: &crate::shell::Model) -> Seen {
         Seen {
             pins: model.map_pins(),
+            tracks: model.track_input(),
+            track_window: model.track_window,
             notice: None,
             loading: None,
             maps: 0,

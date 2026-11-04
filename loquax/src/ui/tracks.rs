@@ -773,7 +773,9 @@ pub fn bearing_of(a: &TrackFix, b: &TrackFix) -> i32 {
 /// The quiet line (rule 8): when the newest fix is older than
 /// [`QUIET_INTERVALS`] times the median interval between the fixes inside
 /// the window, and older than [`QUIET_FLOOR_SECS`] in any case, "no fix
-/// for 3 h". It stays until the next fix.
+/// for 3 h". It stays until the next fix. Fewer than two fixes in the
+/// window have no interval: a position shared once is no stream that went
+/// quiet, and its pin's age says how old it is.
 pub fn quiet(fixes: &[TrackFix], (from, to): (i64, i64), now: i64) -> Option<String> {
     let newest = fixes.last()?;
     let inside: Vec<i64> = fixes
@@ -781,6 +783,9 @@ pub fn quiet(fixes: &[TrackFix], (from, to): (i64, i64), now: i64) -> Option<Str
         .filter(|f| f.t >= from && f.t < to)
         .map(|f| f.t)
         .collect();
+    if inside.len() < 2 {
+        return None;
+    }
     let mut gaps: Vec<i64> = inside.windows(2).map(|w| w[1] - w[0]).collect();
     gaps.sort_unstable();
     let median = gaps.get(gaps.len() / 2).copied().unwrap_or(0);
@@ -1288,6 +1293,11 @@ mod tests {
             "3 m = 3 h"
         );
         assert!(quiet(&hourly, all(), 9 * 3600 + 4 * 3600).is_some());
+        assert_eq!(
+            quiet(&fixes[..1], all(), 10 * 3600),
+            None,
+            "one fix is no stream"
+        );
     }
 
     #[test]

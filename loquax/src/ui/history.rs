@@ -764,6 +764,7 @@ impl<B> UiModel<B> {
         self.changed.retain(|(p, _)| *p != peer);
         self.changed_peers.remove(&peer);
         self.positions.remove(&peer);
+        self.tracks.remove(&peer);
         self.fixes_received.retain(|fix| fix.peer != peer);
         self.forgotten.push(StoreWrite::ForgetConversation { peer });
         if self.selected == c {

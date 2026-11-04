@@ -413,6 +413,8 @@ pub struct MapView {
     pub cell_px: (u16, u16),
     /// The pins in view, the selected one last so it is drawn on top.
     pub pins: Vec<PinCell>,
+    /// The tracks' cells under the pins (1385).
+    pub tracks: Vec<crate::ui::tracks::cells::TrackCell>,
 }
 
 /// Pixels the fit leaves free at each side, so a pin is not on the edge.

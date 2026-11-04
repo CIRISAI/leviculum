@@ -1667,6 +1667,26 @@ impl Session {
         self.lock().model.map_pins()
     }
 
+    /// The map's tracks on a view whose screen pixel spans `unit` world
+    /// units, drawn at `scale` (1385), after a chip `pressed`; and the
+    /// window they are drawn in.
+    pub fn map_tracks(
+        &self,
+        unit: f64,
+        scale: f32,
+        pressed: Option<loquax::ui::tracks::TrackWindow>,
+    ) -> (
+        Vec<loquax::ui::tracks::Track>,
+        loquax::ui::tracks::TrackWindow,
+    ) {
+        let mut inner = self.lock();
+        if let Some(pressed) = pressed {
+            inner.model.track_window = inner.model.track_window.toggled(pressed);
+        }
+        let window = inner.model.track_window;
+        (inner.model.map_tracks(unit, scale), window)
+    }
+
     /// The next event, waiting at most `wait`.
     pub fn next_event(&self, wait: Duration) -> Option<Event> {
         let events = self
@@ -2964,6 +2984,11 @@ pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
         model.names.link(peer, &link.name, &link.lookup);
     }
     model.restore_positions(store.positions().map_err(|error| error.to_string())?);
+    model.restore_tracks(
+        store
+            .fixes_between(None, i64::MIN, i64::MAX)
+            .map_err(|error| error.to_string())?,
+    );
     Ok(model)
 }
 

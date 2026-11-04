@@ -2406,6 +2406,12 @@ pub struct MapRequest {
     pub own_lat_e6: Option<i32>,
     #[serde(default)]
     pub own_lon_e6: Option<i32>,
+    /// A chip of the tracks' time windows pressed (1385): `today`,
+    /// `yesterday`, `week`, `month` or `all`; the one shown again goes
+    /// back to the current movement. The answer's `track_window` says
+    /// which the frame drew.
+    #[serde(default)]
+    pub track_window: Option<String>,
 }
 
 /// One region of the maps directory, for the Maps page (1201, 1207).
@@ -2555,6 +2561,10 @@ pub struct MapShown {
     /// in [`FILLING_MS`], when more of it may be there.
     #[serde(default)]
     pub filling: bool,
+    /// The tracks' time window the frame drew (1385): `now` for the
+    /// current movement, else the chip to mark.
+    #[serde(default)]
+    pub track_window: String,
 }
 
 /// How long after a frame that says [`MapShown::filling`] the app asks

@@ -329,6 +329,12 @@
     <string name="scene_select_pin">Stecknadel wählen</string>
     <string name="scene_map_drawing">Kartendarstellung</string>
     <string name="scene_glyph_test">Zeichentest</string>
+    <string name="scene_track_window">Zeitfenster der Spuren</string>
+    <string name="scene_tracks_today">Heute</string>
+    <string name="scene_tracks_yesterday">Gestern</string>
+    <string name="scene_tracks_week">Diese Woche</string>
+    <string name="scene_tracks_month">Dieser Monat</string>
+    <string name="scene_tracks_all">Alles</string>
     <string name="scene_load_map_area">Diesen Kartenausschnitt laden</string>
     <string name="scene_date">%1$s, %2$d. %3$s</string>
     <string name="scene_date_year">%1$s, %2$d. %3$s %4$d</string>

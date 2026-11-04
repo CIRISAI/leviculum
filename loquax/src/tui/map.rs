@@ -1311,6 +1311,17 @@ impl MapPainter {
                 name: true,
             })
             .collect();
+        // The tracks under the pins and over the map's names (1385).
+        let dark = matches!(painted.style.theme, MapTheme::Dark);
+        if fits {
+            labels.extend(shown.tracks.iter().map(|t| Label {
+                col: t.col,
+                row: t.row,
+                style: track_style(self.tier, dark, t.hue, t.level),
+                text: t.text.clone(),
+                name: false,
+            }));
+        }
         labels.extend(pins);
         let buf = frame.buffer_mut();
         if matches!(graphics, Graphics::Kitty | Graphics::Sixel) {
@@ -1367,6 +1378,44 @@ impl MapPainter {
             usize::from(area.width),
             muted,
         );
+    }
+}
+
+/// A track cell's style: the hue, brighter or fainter by its level of
+/// four ([`loquax::ui::tracks::Age::level`]): full, the hue blended a
+/// third, two thirds and three quarters into the map's ground; at sixteen
+/// colours the hue's ANSI colour, dim below the top two levels; no colour
+/// at all on a mono terminal, dim below the top two.
+fn track_style(tier: Tier, dark: bool, hue: Option<u8>, level: u8) -> Style {
+    use loquax::ui::tracks;
+    let style = Style::default();
+    match tier {
+        Tier::Mono => match level {
+            2..=3 => style,
+            _ => style.add_modifier(Modifier::DIM),
+        },
+        Tier::Ansi16 => {
+            let style = style.fg(Color::Indexed(tracks::ansi16(hue, dark)));
+            match level {
+                2..=3 => style,
+                _ => style.add_modifier(Modifier::DIM),
+            }
+        }
+        _ => {
+            let [r, g, b] = tracks::colour(hue, dark);
+            let ground: [u8; 3] = match dark {
+                true => [0x16, 0x16, 0x16],
+                false => [0xf2, 0xef, 0xe9],
+            };
+            let keep = [1.0, 0.65, 0.4, 0.25][usize::from(3 - level.min(3))];
+            let mix =
+                |c: u8, g: u8| (f32::from(c) * keep + f32::from(g) * (1.0 - keep)).round() as u8;
+            style.fg(Color::Rgb(
+                mix(r, ground[0]),
+                mix(g, ground[1]),
+                mix(b, ground[2]),
+            ))
+        }
     }
 }
 
@@ -1925,6 +1974,7 @@ mod tests {
             area,
             viewport: Viewport::new(at, 1, 30 * u32::from(cell_px.0), 8 * u32::from(cell_px.1)),
             cell_px,
+            tracks: Vec::new(),
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 16,
@@ -1999,6 +2049,7 @@ mod tests {
         let (w, h) = view.size();
         let (cols, rows) = (w as u16, (h / 2) as u16);
         let shown = MapView {
+            tracks: Vec::new(),
             area: leviculum_ui::Rect::new(1, 1, cols, rows),
             viewport: view,
             cell_px: (1, 2),
@@ -2064,6 +2115,7 @@ mod tests {
                 u32::from(rows) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2127,6 +2179,7 @@ mod tests {
             selected: false,
         };
         let shown = MapView {
+            tracks: Vec::new(),
             area,
             viewport: Viewport::new(
                 at,
@@ -2185,6 +2238,7 @@ mod tests {
                 u32::from(rows) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2940,6 +2994,7 @@ mod tests {
                 u32::from(area.height) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 39,
@@ -3058,6 +3113,7 @@ mod tests {
         let cell_px = painter.setup().cell_px;
         let (cols, rows) = (60u16, 20u16);
         MapView {
+            tracks: Vec::new(),
             area: leviculum_ui::Rect::new(0, 0, cols, rows),
             viewport: Viewport::new(
                 centre,

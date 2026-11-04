@@ -96,6 +96,7 @@ fn main() {
                 selected: None,
                 zooms: (3, 18),
                 draw_pins: false,
+                tracks: &[],
                 measure: None,
                 now_ms: None,
                 scaled_while_moving: true,

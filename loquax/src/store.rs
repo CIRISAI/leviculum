@@ -127,7 +127,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -385,6 +385,14 @@ const SCHEMA_V13: &str = "
 ALTER TABLE group_fanout ADD COLUMN propagated INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// What schema 14 adds to schema 13 (1385): how a position came
+/// (`positions.source`, 0 in a message's telemetry, 1 announced to the
+/// mesh), so the track keeps the announced fixes too and a restart gives
+/// them back as such.
+const SCHEMA_V14: &str = "
+ALTER TABLE positions ADD COLUMN source INTEGER NOT NULL DEFAULT 0;
+";
+
 pub mod groups;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -563,7 +571,7 @@ impl Store {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
-             {SCHEMA_V12} {SCHEMA_V13} PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -705,7 +713,10 @@ impl Store {
                 if version < 12 {
                     batch.push_str(SCHEMA_V12);
                 }
-                batch.push_str(SCHEMA_V13);
+                if version < 13 {
+                    batch.push_str(SCHEMA_V13);
+                }
+                batch.push_str(SCHEMA_V14);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -1077,17 +1088,30 @@ impl Store {
 
     /// Every position the store holds, or `peer`'s only.
     fn fixes(&self, peer: Option<[u8; 16]>) -> Result<Vec<Fix>, StoreError> {
+        self.fixes_between(peer, i64::MIN, i64::MAX)
+    }
+
+    /// The positions whose fix time is in `[from, to)`, `peer`'s or every
+    /// peer's, by fix time: the track's reader (1385). The table's key
+    /// starts with the peer and the fix time, so a window is a range.
+    pub fn fixes_between(
+        &self,
+        peer: Option<[u8; 16]>,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<Fix>, StoreError> {
         let mut statement = self
             .conn
             .prepare(
                 "SELECT peer, via, message, fix_time, received_at, lat_e6, lon_e6, alt_e2, \
-                 speed_e2, bearing_e2, accuracy_e2, telemetry FROM positions \
-                 WHERE identity = ?1 AND (?2 IS NULL OR peer = ?2)",
+                 speed_e2, bearing_e2, accuracy_e2, telemetry, source FROM positions \
+                 WHERE identity = ?1 AND (?2 IS NULL OR peer = ?2) \
+                 AND fix_time >= ?3 AND fix_time < ?4 ORDER BY fix_time",
             )
             .map_err(|e| self.failed(e))?;
         let peer = peer.map(|peer| peer.to_vec());
         let rows = statement
-            .query_map(params![&self.identity[..], peer], |row| {
+            .query_map(params![&self.identity[..], peer, from, to], |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
@@ -1103,22 +1127,25 @@ impl Store {
                     },
                     row.get::<_, Option<i64>>(4)?,
                     row.get::<_, Vec<u8>>(11)?,
+                    row.get::<_, i64>(12)?,
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
-            .map(|(peer, via, message, location, received_at, telemetry)| {
-                Ok(Fix {
-                    peer: self.address(&peer)?,
-                    via: self.address(&via)?,
-                    message: message.map(key_of),
-                    received_at,
-                    location,
-                    telemetry,
-                    source: crate::telemetry::Source::Telemetry,
-                })
-            })
+            .map(
+                |(peer, via, message, location, received_at, telemetry, source)| {
+                    Ok(Fix {
+                        peer: self.address(&peer)?,
+                        via: self.address(&via)?,
+                        message: message.map(key_of),
+                        received_at,
+                        location,
+                        telemetry,
+                        source: source_of(source),
+                    })
+                },
+            )
             .collect()
     }
 
@@ -3028,12 +3055,20 @@ fn apply(
         StoreWrite::Position(fix) => {
             let l = &fix.location;
             tx.execute(
-                "INSERT OR IGNORE INTO positions(identity, peer, via, message, fix_time, \
+                // One row a peer and fix time: the first to arrive stays,
+                // except that a fix a message carried takes the place of
+                // the same fix announced, so the row names its message.
+                "INSERT INTO positions(identity, peer, via, message, fix_time, \
                  received_at, lat_e6, lon_e6, alt_e2, speed_e2, bearing_e2, accuracy_e2, \
-                 telemetry) \
+                 telemetry, source) \
                  VALUES (?1, ?2, ?3, \
                  (SELECT seq FROM messages WHERE seq = ?4 AND identity = ?1), \
-                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT(identity, peer, fix_time) DO UPDATE SET \
+                 via = excluded.via, message = excluded.message, \
+                 received_at = excluded.received_at, telemetry = excluded.telemetry, \
+                 source = excluded.source \
+                 WHERE positions.source = 1 AND excluded.source = 0",
                 params![
                     &identity[..],
                     &fix.peer[..],
@@ -3048,11 +3083,29 @@ fn apply(
                     l.bearing_e2,
                     i64::from(l.accuracy_e2),
                     fix.telemetry,
+                    source_code(fix.source),
                 ],
             )?;
         }
     }
     Ok(())
+}
+
+/// `positions.source` of a fix's source (schema 14).
+fn source_code(source: crate::telemetry::Source) -> i64 {
+    match source {
+        crate::telemetry::Source::Telemetry => 0,
+        crate::telemetry::Source::Mesh => 1,
+    }
+}
+
+/// The source `positions.source` names; an unknown code reads as a
+/// message's, the column's default.
+fn source_of(code: i64) -> crate::telemetry::Source {
+    match code {
+        1 => crate::telemetry::Source::Mesh,
+        _ => crate::telemetry::Source::Telemetry,
+    }
 }
 
 /// The key of the received message with this id, other than `except`.
@@ -3771,6 +3824,105 @@ mod tests {
         // Scoped to our address like every table.
         let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
         assert!(other.positions().expect("positions").is_empty());
+    }
+
+    /// 1385: an announced fix is kept and comes back as announced; the
+    /// same fix in a message takes its row and names the message; the
+    /// reader gives a peer's window in fix-time order.
+    #[test]
+    fn announced_fixes_are_kept_and_a_message_takes_their_row() {
+        use crate::telemetry::Source;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, BOB, message(1, false, ""));
+        let mesh = |t: i64| Fix {
+            message: None,
+            telemetry: Vec::new(),
+            source: Source::Mesh,
+            ..fix(BOB, BOB, None, t)
+        };
+        store
+            .write(&[
+                StoreWrite::Position(mesh(3_000)),
+                StoreWrite::Position(mesh(5_000)),
+                StoreWrite::Position(mesh(5_000)),
+                StoreWrite::Position(mesh(4_000)),
+            ])
+            .expect("write");
+        assert_eq!(
+            store.track_len(BOB).expect("track"),
+            3,
+            "one row a fix time"
+        );
+        let told = fix(BOB, BOB, Some(key_of(1)), 5_000);
+        store
+            .write(&[StoreWrite::Position(told.clone())])
+            .expect("write");
+        // Announced again after the message: the message's row stays.
+        store
+            .write(&[StoreWrite::Position(mesh(5_000))])
+            .expect("write");
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        let window = store
+            .fixes_between(Some(BOB), 3_500, 6_000)
+            .expect("window");
+        assert_eq!(window, vec![mesh(4_000), told], "in fix-time order");
+        let all = store.fixes_between(None, i64::MIN, i64::MAX).expect("all");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].source, Source::Mesh);
+    }
+
+    /// 1385's store numbers: a day at a 5 min cadence is 288 rows; a year
+    /// of one peer is 105 120 rows, and the file it takes is printed for
+    /// the report (`-- --nocapture`). A stored announced fix carries no
+    /// Telemeter, so a row is the key, the integers and the column heads.
+    #[test]
+    fn a_year_of_one_peer_at_five_minutes() {
+        use crate::telemetry::Source;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let per_day = 86_400 / 300;
+        assert_eq!(per_day, 288);
+        let start = 1_700_000_000i64;
+        let rows: Vec<StoreWrite> = (0..365 * per_day)
+            .map(|i| {
+                let t = start + i * 300;
+                let mut f = fix(BOB, BOB, None, t);
+                f.source = Source::Mesh;
+                f.telemetry = Vec::new();
+                f.location.latitude_e6 += (i % 977) as i32 * 13;
+                f.location.longitude_e6 += (i % 1009) as i32 * 17;
+                f.location.speed_e2 = (i % 300) as u32;
+                f.location.bearing_e2 = (i % 36_000) as i32;
+                f.location.accuracy_e2 = 800;
+                StoreWrite::Position(f)
+            })
+            .collect();
+        for chunk in rows.chunks(10_000) {
+            store.write(chunk).expect("write");
+        }
+        assert_eq!(store.track_len(BOB).expect("track"), 105_120);
+        store
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+            .expect("vacuum");
+        let size = std::fs::metadata(home.path().join(STORE_FILE))
+            .expect("file")
+            .len();
+        let empty = {
+            let other = tempfile::tempdir().expect("other");
+            let s = Store::open_in(other.path(), US).expect("open");
+            s.conn.execute_batch("VACUUM;").expect("vacuum");
+            std::fs::metadata(other.path().join(STORE_FILE))
+                .expect("file")
+                .len()
+        };
+        let per_row = (size - empty) as f64 / 105_120.0;
+        std::println!(
+            "TRACK-STORE rows=105120 file={size} empty={empty} per_row={per_row:.1} bytes"
+        );
+        assert!(size - empty < 16 * 1024 * 1024, "{size}");
     }
 
     /// 1201: the positions we shared, newest first, each with whom and

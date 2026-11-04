@@ -308,12 +308,26 @@ struct PinInk {
     text: ([u8; 3], f64),
 }
 
+/// The hue of `peer`'s track in `tracks` (1385, rule 6), for its pin's
+/// marker and name; `None` for our own, grey track, and for a peer without
+/// one: its pin keeps the pins' blue.
+pub fn pin_hue(
+    tracks: &[crate::ui::tracks::Track],
+    peer: &[u8; 16],
+    dark: bool,
+) -> Option<[u8; 3]> {
+    let hue = tracks.iter().find(|t| t.peer == *peer)?.hue?;
+    Some(crate::ui::tracks::colour(Some(hue), dark))
+}
+
 /// The window's pin colours (`gui::Map::draw`), the label's ground and
-/// text turned for the dark table.
-fn pin_ink(pin: &Placed, theme: MapTheme) -> PinInk {
-    let ground = match pin.nearby {
-        true => [0x80, 0x80, 0x80],
-        false => [0x20, 0x50, 0xc0],
+/// text turned for the dark table; a peer with a track in its hue, the
+/// name too.
+fn pin_ink(pin: &Placed, theme: MapTheme, hue: Option<[u8; 3]>) -> PinInk {
+    let ground = match (pin.nearby, hue) {
+        (true, _) => [0x80, 0x80, 0x80],
+        (false, Some(hue)) => hue,
+        (false, None) => [0x20, 0x50, 0xc0],
     };
     let marker = match (pin.selected, pin.stale) {
         (true, _) => ([0xd0, 0x30, 0x30], 1.0),
@@ -323,6 +337,10 @@ fn pin_ink(pin: &Placed, theme: MapTheme) -> PinInk {
     let (ground, text) = match theme {
         MapTheme::Dark => ([0x18, 0x18, 0x18], [0xe6, 0xe6, 0xe6]),
         _ => ([0xff, 0xff, 0xff], [0x10, 0x10, 0x10]),
+    };
+    let text = match (pin.nearby, hue) {
+        (false, Some(hue)) => hue,
+        _ => text,
     };
     PinInk {
         marker,
@@ -370,13 +388,16 @@ fn disc(
 
 /// Draw the pins of `placed` into `rgba`, `w` by `h` pixels, as the window
 /// draws them over its picture: a marker with a white ring, and beside it
-/// the label on a light ground, dimmed when the fix is stale. In order, so
-/// the selected pin, which [`place`] puts last, comes out on top.
+/// the label on a light ground, dimmed when the fix is stale; a peer with
+/// a track in `tracks` in its hue ([`pin_hue`]). In order, so the selected
+/// pin, which [`place`] puts last, comes out on top.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_pins(
     rgba: &mut [u8],
     w: u32,
     h: u32,
     placed: &[Placed],
+    tracks: &[crate::ui::tracks::Track],
     scale: f32,
     theme: MapTheme,
     type_: &mut Typesetter,
@@ -384,7 +405,8 @@ pub fn draw_pins(
     let radius = MARKER * scale / 2.0;
     let line = LABEL * LINE * scale;
     for pin in placed {
-        let ink = pin_ink(pin, theme);
+        let hue = pin_hue(tracks, &pin.peer, theme == MapTheme::Dark);
+        let ink = pin_ink(pin, theme, hue);
         disc(
             rgba,
             w,
@@ -418,6 +440,207 @@ pub fn draw_pins(
     }
 }
 
+/// A track's line width in logical pixels (1385).
+pub const TRACK_WIDTH: f32 = 3.0;
+/// An outlier's dot's radius in logical pixels.
+pub const DOT_RADIUS: f32 = 2.0;
+/// A place's opacity: faint, under everything else.
+pub const PLACE_ALPHA: f32 = 0.22;
+/// The wedge's length and half width in logical pixels, beyond the
+/// marker's ring.
+pub const WEDGE: (f32, f32) = (8.0, 5.0);
+
+/// One track's coverage, the strongest a pixel gets, so two segments
+/// meeting at a fix do not darken it: the track is blended once.
+struct Cover {
+    w: u32,
+    h: u32,
+    alpha: Vec<u8>,
+    /// The pixels touched, to blend and clear.
+    reach: (i64, i64, i64, i64),
+}
+
+impl Cover {
+    fn new(w: u32, h: u32) -> Self {
+        Self {
+            w,
+            h,
+            alpha: vec![0; w as usize * h as usize],
+            reach: (i64::MAX, i64::MAX, i64::MIN, i64::MIN),
+        }
+    }
+
+    fn put(&mut self, x: i64, y: i64, a: f32) {
+        if x < 0 || y < 0 || x >= i64::from(self.w) || y >= i64::from(self.h) || a <= 0.0 {
+            return;
+        }
+        let i = y as usize * self.w as usize + x as usize;
+        let v = (a.min(1.0) * 255.0).round() as u8;
+        if v > self.alpha[i] {
+            self.alpha[i] = v;
+        }
+        let r = &mut self.reach;
+        *r = (r.0.min(x), r.1.min(y), r.2.max(x), r.3.max(y));
+    }
+
+    /// The segment from `a` to `b`, `width` wide, at `alpha`, its edges
+    /// smoothed over a pixel.
+    fn line(&mut self, a: (f64, f64), b: (f64, f64), width: f32, alpha: f32) {
+        let half = f64::from(width) / 2.0;
+        let (w, h) = (f64::from(self.w), f64::from(self.h));
+        let pad = half + 1.0;
+        let (x0, x1) = (a.0.min(b.0) - pad, a.0.max(b.0) + pad);
+        let (y0, y1) = (a.1.min(b.1) - pad, a.1.max(b.1) + pad);
+        if x1 < 0.0 || y1 < 0.0 || x0 > w || y0 > h {
+            return;
+        }
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len2 = dx * dx + dy * dy;
+        for y in y0.max(0.0).floor() as i64..=y1.min(h).ceil() as i64 {
+            for x in x0.max(0.0).floor() as i64..=x1.min(w).ceil() as i64 {
+                let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+                let t = match len2 > 0.0 {
+                    true => (((px - a.0) * dx + (py - a.1) * dy) / len2).clamp(0.0, 1.0),
+                    false => 0.0,
+                };
+                let d = (px - (a.0 + t * dx)).hypot(py - (a.1 + t * dy));
+                let c = (half + 0.5 - d).clamp(0.0, 1.0) as f32;
+                self.put(x, y, c * alpha);
+            }
+        }
+    }
+
+    /// A disc of `radius` about `c`, at `alpha`.
+    fn disc(&mut self, c: (f64, f64), radius: f32, alpha: f32) {
+        self.line(c, c, radius * 2.0, alpha);
+    }
+
+    /// Blend `colour` through the coverage into `rgba` and clear it.
+    fn blend(&mut self, rgba: &mut [u8], colour: [u8; 3]) {
+        let (x0, y0, x1, y1) = self.reach;
+        if x0 > x1 {
+            return;
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = y as usize * self.w as usize + x as usize;
+                let a = self.alpha[i];
+                if a > 0 {
+                    blend(rgba, self.w, self.h, x, y, colour, f64::from(a) / 255.0);
+                    self.alpha[i] = 0;
+                }
+            }
+        }
+        self.reach = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    }
+}
+
+/// Draw `tracks` into `rgba`, `w` by `h` pixels, under the pins (1385,
+/// `loquax-tracks.md`): the places faint, labelled where they are among
+/// the largest; the lines at their age's opacity; the dwells as blobs;
+/// the outliers as dots; the wedge beside the newest fix's marker and the
+/// quiet line under it. `at(world)` is where a point lands on the frame.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tracks(
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    tracks: &[crate::ui::tracks::Track],
+    at: impl Fn(leviculum_map::mercator::World) -> (f64, f64),
+    scale: f32,
+    theme: MapTheme,
+    type_: &mut Typesetter,
+) {
+    use crate::ui::tracks::{colour, Age};
+    if tracks.is_empty() || w == 0 || h == 0 {
+        return;
+    }
+    let dark = theme == MapTheme::Dark;
+    let mut cover = Cover::new(w, h);
+    // The places of every track first, under every line.
+    for t in tracks {
+        for p in &t.places {
+            cover.disc(at(p.at), f32::from(p.radius) * scale, PLACE_ALPHA);
+        }
+        cover.blend(rgba, colour(t.hue, dark));
+    }
+    let (ground, text) = match dark {
+        true => ([0x18, 0x18, 0x18], [0xe6, 0xe6, 0xe6]),
+        false => ([0xff, 0xff, 0xff], [0x10, 0x10, 0x10]),
+    };
+    let size = LABEL * 0.85 * scale;
+    for t in tracks {
+        for p in &t.places {
+            let Some(words) = &p.label else {
+                continue;
+            };
+            let (x, y) = at(p.at);
+            let mask = type_.mask(words, size, 0, false);
+            let centre = (x, y + f64::from(f32::from(p.radius) * scale + size * 0.7));
+            mapnames::paint_faded(rgba, w, h, &mask, centre, 0.0, ground, 0.6);
+            mapnames::paint_faded(rgba, w, h, &mask, centre, 0.0, text, 0.7);
+        }
+    }
+    let width = TRACK_WIDTH * scale;
+    for t in tracks {
+        let hue = colour(t.hue, dark);
+        // The oldest first, so a newer line is over an older one.
+        for age in [Age::Old, Age::Faint, Age::Half, Age::Strong, Age::Fresh] {
+            for s in t.segments.iter().filter(|s| s.age == age) {
+                cover.line(at(s.from), at(s.to), width, age.alpha());
+            }
+        }
+        for d in &t.dwells {
+            let r = f32::from(d.radius) * scale;
+            cover.disc(at(d.at), r, d.age.alpha() * 0.45);
+            // Its rim at the full step, so a blob reads as a stay.
+            let c = at(d.at);
+            let steps = 48;
+            for k in 0..steps {
+                let a0 = k as f64 / steps as f64 * core::f64::consts::TAU;
+                let a1 = (k + 1) as f64 / steps as f64 * core::f64::consts::TAU;
+                let p = |a: f64| (c.0 + f64::from(r) * a.cos(), c.1 + f64::from(r) * a.sin());
+                cover.line(p(a0), p(a1), 1.5 * scale, d.age.alpha());
+            }
+        }
+        for d in &t.dots {
+            cover.disc(at(d.at), DOT_RADIUS * scale, 0.45);
+        }
+        if let Some(wedge) = &t.wedge {
+            let c = at(wedge.at);
+            let b = f64::from(wedge.bearing).to_radians();
+            let (ux, uy) = (b.sin(), -b.cos());
+            let base = f64::from(MARKER * scale / 2.0 + 2.5 * scale);
+            let (len, half) = (f64::from(WEDGE.0 * scale), f64::from(WEDGE.1 * scale));
+            let root = (c.0 + ux * base, c.1 + uy * base);
+            let tip = (root.0 + ux * len, root.1 + uy * len);
+            // A filled triangle: lines from the tip to every point of the
+            // base, wide enough to leave no gap.
+            let n = (half * 2.0).ceil().max(2.0) as i32;
+            for k in 0..=n {
+                let s = -half + 2.0 * half * f64::from(k) / f64::from(n);
+                let p = (root.0 - uy * s, root.1 + ux * s);
+                cover.line(p, tip, 1.5 * scale, 1.0);
+            }
+        }
+        cover.blend(rgba, hue);
+        if let (Some(words), Some(head)) = (&t.quiet, t.head) {
+            let (x, y) = at(head);
+            let mask = type_.mask(words, size, 0, false);
+            let top = y + f64::from(MARKER * scale / 2.0 + 3.0 * scale);
+            let centre = (x, top + f64::from(size * LINE) / 2.0);
+            let half_w = mask.w as f64 / 2.0 + f64::from(3.0 * scale);
+            let half_h = f64::from(size * LINE) / 2.0;
+            for py in (centre.1 - half_h).floor() as i64..(centre.1 + half_h).ceil() as i64 {
+                for px in (centre.0 - half_w).floor() as i64..(centre.0 + half_w).ceil() as i64 {
+                    blend(rgba, w, h, px, py, ground, 0.75);
+                }
+            }
+            mapnames::paint_faded(rgba, w, h, &mask, centre, 0.0, hue, 1.0);
+        }
+    }
+}
+
 /// One view drawn whole for a screen that only hosts a bitmap: the
 /// picture with its names, and the pins drawn in.
 #[derive(Debug)]
@@ -430,8 +653,9 @@ pub struct Rendered {
 /// `view` drawn whole at `scale` in `style`: the pins of `pins` placed by
 /// the core's rule with `selected` on top and labelled, the map's names
 /// set after them (with `names`; a view still moving goes without), the
-/// pins drawn in last. The window does the same in two layers, the
-/// picture as an image and the pins on its canvas.
+/// tracks over the names ([`draw_tracks`]), the pins drawn in last. The
+/// window does the same in two layers, the picture as an image and the
+/// pins on its canvas.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     painter: &mut Painter,
@@ -440,6 +664,7 @@ pub fn render(
     style: Style,
     scale: f32,
     pins: &[MapPin],
+    tracks: &[crate::ui::tracks::Track],
     selected: Option<[u8; 16]>,
     names: bool,
 ) -> Rendered {
@@ -449,6 +674,30 @@ pub fn render(
     let after = names.then(|| taken(&placed, scale));
     let mut picture = paint(painter, view, style, scale, after, type_);
     let (w, h) = view.size();
-    draw_pins(&mut picture.rgba, w, h, &placed, scale, style.theme, type_);
+    let sub = leviculum_mapfill::SUBPIXEL as f64;
+    let at = |p| {
+        let (x, y) = view.to_screen_sub(p);
+        (x as f64 / sub, y as f64 / sub)
+    };
+    draw_tracks(
+        &mut picture.rgba,
+        w,
+        h,
+        tracks,
+        at,
+        scale,
+        style.theme,
+        type_,
+    );
+    draw_pins(
+        &mut picture.rgba,
+        w,
+        h,
+        &placed,
+        tracks,
+        scale,
+        style.theme,
+        type_,
+    );
     Rendered { picture, placed }
 }

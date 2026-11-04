@@ -66,6 +66,7 @@ use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
 use loquax::tiles::Stats;
 use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
+use loquax::ui::tracks::TrackWindow;
 use loquax::ui::viewload::ViewLoads;
 use loquax::when::WallTime;
 
@@ -529,6 +530,17 @@ impl Renderer {
         let flag = self.theme.or(Some(ThemeFlag::Auto));
         let table = map_theme(flag, Some(screen));
         let style = Style::SCREEN.in_theme(table);
+        // The running session's tracks at the view's tile zoom (1385);
+        // none without a session, as a test or a measuring tool draws.
+        let pressed = request
+            .track_window
+            .as_deref()
+            .and_then(TrackWindow::of_word);
+        let unit = (24.0 - f64::from(view.tile_zoom())).exp2();
+        let (tracks, window) = match crate::current() {
+            Some(session) => session.map_tracks(unit, scale, pressed),
+            None => (Vec::new(), TrackWindow::default()),
+        };
         let ask = Ask {
             view,
             margin: (mx, my),
@@ -536,6 +548,7 @@ impl Renderer {
             style,
             scale,
             pins,
+            tracks: &tracks,
             selected,
             zooms,
             draw_pins: !request.avatars,
@@ -607,6 +620,7 @@ impl Renderer {
             fling: self.fling,
             room_north,
             room_south,
+            track_window: window.word().to_string(),
         };
         shown
     }

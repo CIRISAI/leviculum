@@ -18,6 +18,7 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -87,6 +88,12 @@ final class MapPane implements MapView.Listener {
     /** The phone's own fix, while the map is in front and allowed to read it. */
     private Location fix;
     private final MapView map;
+    /**
+     * The tracks' time windows (1385), a row of chips under the event's
+     * chip: the words the library takes, and the chips in that order.
+     */
+    private static final String[] TRACK_WORDS = {"today", "yesterday", "week", "month", "all"};
+    private final TextView[] trackChips = new TextView[TRACK_WORDS.length];
     private final Runnable hide = new Runnable() {
         @Override
         public void run() {
@@ -141,7 +148,68 @@ final class MapPane implements MapView.Listener {
         });
         map = new MapView(activity, activity.getFilesDir().getAbsolutePath(), this);
         ((FrameLayout) activity.findViewById(R.id.map)).addView(map);
+        trackRow((FrameLayout) activity.findViewById(R.id.pane_map));
         refresh();
+    }
+
+    /**
+     * The row of the tracks' time windows (1385) on `pane`, below the
+     * event's chip: Java draws the chips and says which was pressed, the
+     * library keeps the window and draws the tracks.
+     */
+    private void trackRow(FrameLayout pane) {
+        int[] names = {
+            R.string.scene_tracks_today, R.string.scene_tracks_yesterday,
+            R.string.scene_tracks_week, R.string.scene_tracks_month, R.string.scene_tracks_all,
+        };
+        float dp = activity.getResources().getDisplayMetrics().density;
+        LinearLayout row = new LinearLayout(activity);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < TRACK_WORDS.length; i++) {
+            final String word = TRACK_WORDS[i];
+            TextView chipView = new TextView(activity);
+            chipView.setText(activity.getString(names[i]));
+            chipView.setTextSize(13);
+            chipView.setTextColor(activity.getColor(R.color.text));
+            chipView.setBackgroundResource(R.drawable.chip);
+            chipView.setElevation(2 * dp);
+            int h = Math.round(12 * dp);
+            int v = Math.round(6 * dp);
+            chipView.setPadding(h, v, h, v);
+            chipView.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    map.trackWindow(word);
+                }
+            });
+            LinearLayout.LayoutParams at = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            at.setMarginEnd(Math.round(6 * dp));
+            row.addView(chipView, at);
+            trackChips[i] = chipView;
+        }
+        HorizontalScrollView scroll = new HorizontalScrollView(activity);
+        scroll.setHorizontalScrollBarEnabled(false);
+        int side = Math.round(12 * dp);
+        scroll.setPadding(side, 0, side, 0);
+        scroll.setClipToPadding(false);
+        scroll.addView(row);
+        FrameLayout.LayoutParams place = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        place.topMargin = Math.round(60 * dp);
+        pane.addView(scroll, place);
+    }
+
+    /** The chip of the window the frame drew marked, the others not. */
+    private void markTrackWindow(String drawn) {
+        for (int i = 0; i < TRACK_WORDS.length; i++) {
+            if (trackChips[i] != null) {
+                boolean on = TRACK_WORDS[i].equals(drawn);
+                trackChips[i].setSelected(on);
+                trackChips[i].setAlpha(on ? 1f : 0.7f);
+            }
+        }
     }
 
     /**
@@ -389,6 +457,7 @@ final class MapPane implements MapView.Listener {
         }
         lastShown = shown;
         credit.setText(Core.str(shown, "attribution"));
+        markTrackWindow(Core.str(shown, "track_window"));
         if (shown.get("notice") != null) {
             say(Core.str(shown, "notice"));
         } else if (!eventShown) {

@@ -1394,6 +1394,7 @@ pub(crate) async fn start(
                 store.last_key()?,
                 store.positions()?,
                 store.unverified()?,
+                store.fixes_between(None, i64::MIN, i64::MAX)?,
             ))
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
@@ -1458,7 +1459,7 @@ pub(crate) async fn start(
     model.home_client = client.is_some();
     model.own_code = own_code(&own_key);
     model.names = loquax::names::Names::new(contacts);
-    let (restored, names, last_key, positions, unverified) = history;
+    let (restored, names, last_key, positions, unverified, track_fixes) = history;
     // The messages an earlier run kept unverified: the engine checks each
     // once its sender's key is known, and asks for it until then.
     for (message_id, source, packed) in unverified {
@@ -1486,6 +1487,7 @@ pub(crate) async fn start(
     update(&mut model, UiEvent::Clock(start));
     model.restore(restored);
     model.restore_positions(positions);
+    model.restore_tracks(track_fixes);
     model.activity = model.activity.max(last_key);
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;

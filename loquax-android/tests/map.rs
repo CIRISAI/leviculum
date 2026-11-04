@@ -157,6 +157,7 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
         Style::PC,
         1.0,
         &pins,
+        &[],
         None,
         true,
     );

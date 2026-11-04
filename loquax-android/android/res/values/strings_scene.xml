@@ -329,6 +329,12 @@
     <string name="scene_select_pin">Select pin</string>
     <string name="scene_map_drawing">Map drawing</string>
     <string name="scene_glyph_test">Glyph test</string>
+    <string name="scene_track_window">Tracks time window</string>
+    <string name="scene_tracks_today">Today</string>
+    <string name="scene_tracks_yesterday">Yesterday</string>
+    <string name="scene_tracks_week">This week</string>
+    <string name="scene_tracks_month">This month</string>
+    <string name="scene_tracks_all">All</string>
     <string name="scene_load_map_area">Load this map area</string>
     <string name="scene_date">%1$s %2$d %3$s</string>
     <string name="scene_date_year">%1$s %2$d %3$s %4$d</string>

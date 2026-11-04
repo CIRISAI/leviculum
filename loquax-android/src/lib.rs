@@ -52,7 +52,7 @@ use session::Session;
 /// The process's session, once started.
 static SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
 
-fn current() -> Option<Arc<Session>> {
+pub(crate) fn current() -> Option<Arc<Session>> {
     SESSION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

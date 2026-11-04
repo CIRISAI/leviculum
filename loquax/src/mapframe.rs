@@ -75,6 +75,8 @@ pub struct Ask<'a> {
     /// Screen pixels a logical one.
     pub scale: f32,
     pub pins: &'a [MapPin],
+    /// The tracks, drawn over the names and under the pins (1385).
+    pub tracks: &'a [crate::ui::tracks::Track],
     pub selected: Option<[u8; 16]>,
     /// The zooms the regions allow, the floor the screen's width sets
     /// first: how far a prefetch goes out and in.
@@ -713,8 +715,27 @@ impl Frames {
         }
         // A name fading in from nothing is not drawn yet, but fades.
         self.fading = !self.leaving.is_empty() || self.fades.iter().any(|fade| !fade.settled(now));
+        screenmap::draw_tracks(
+            rgba,
+            w,
+            h,
+            ask.tracks,
+            |p| drawn.to_screen(p),
+            scale,
+            theme,
+            &mut self.type_,
+        );
         if ask.draw_pins {
-            screenmap::draw_pins(rgba, w, h, &placed, scale, theme, &mut self.type_);
+            screenmap::draw_pins(
+                rgba,
+                w,
+                h,
+                &placed,
+                ask.tracks,
+                scale,
+                theme,
+                &mut self.type_,
+            );
         }
         self.placed = placed;
         Framed {
@@ -1222,6 +1243,7 @@ mod tests {
             selected: None,
             zooms: (10, 17),
             draw_pins: true,
+            tracks: &[],
             measure: None,
             now_ms: None,
             scaled_while_moving: false,

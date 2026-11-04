@@ -174,6 +174,8 @@ pub enum MapCmd {
     Drawing(bool),
     /// The glyph test pattern over the map, or away again.
     GlyphTest,
+    /// The tracks' next time window (`true`) or the previous one (1385).
+    TrackWindow(bool),
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -687,6 +689,16 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("map drawing"),
+        // 1385: the tracks' time window, a map control: now (the current
+        // episode), today, yesterday, this week, this month, all.
+        Row::new(
+            "next / previous time window of the tracks",
+            MAP_GROUP,
+            &[&[
+                key(Char('w'), Mods::Plain, Map(MapCmd::TrackWindow(true)), MAP),
+                key(Char('W'), Mods::Plain, Map(MapCmd::TrackWindow(false)), MAP),
+            ]],
+        ),
         Row::new(
             "the glyph test: which glyph sets the font draws",
             MAP_GROUP,

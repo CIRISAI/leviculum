@@ -1611,6 +1611,16 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
             }
         }
         (Some(shown), None) => {
+            // The tracks under the pins (1385), without colour here.
+            for t in &shown.tracks {
+                if !area.contains(Position::new(t.col, t.row)) {
+                    continue;
+                }
+                let room = usize::from((inner.x + inner.width).saturating_sub(t.col));
+                frame
+                    .buffer_mut()
+                    .set_stringn(t.col, t.row, &t.text, room, Style::default());
+            }
             for pin in &shown.pins {
                 let apart = pin.apart.iter().map(|a| (a.col, a.row, &a.text));
                 for (col, row, text) in std::iter::once((pin.col, pin.row, &pin.text)).chain(apart)

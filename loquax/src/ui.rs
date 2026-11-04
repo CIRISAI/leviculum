@@ -801,6 +801,14 @@ pub struct UiModel<B> {
     pub positions: BTreeMap<[u8; 16], Fix>,
     /// Positions received since the store last wrote, in arrival order.
     fixes_received: Vec<Fix>,
+    /// Every peer's fixes in time order, the track (1385): the store's at
+    /// start, then every fix received or announced; ours from the shell's
+    /// own fixes while it runs.
+    /// Shared, so a frontend takes them without a copy.
+    pub tracks: BTreeMap<[u8; 16], alloc::sync::Arc<Vec<tracks::TrackFix>>>,
+    /// The map's time window for the tracks' lines: a map control, the
+    /// current episode until the reader picks another.
+    pub track_window: tracks::TrackWindow,
     /// The map, when open: it takes the conversation pane.
     pub map: Option<map::MapState>,
     /// What the shell draws the map with ([`UiEvent::MapSetup`]).
@@ -951,6 +959,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             reveal_pending: None,
             positions: BTreeMap::new(),
             fixes_received: Vec::new(),
+            tracks: BTreeMap::new(),
+            track_window: tracks::TrackWindow::default(),
             map: None,
             map_setup: map::MapSetup::default(),
             map_picture: None,
@@ -1549,6 +1559,10 @@ pub enum UiEvent {
     /// The map's centre as the shell's map shows it, or none while it has
     /// no map (1371): what the position sheet's "map centre" row takes.
     MapCentre(Option<leviculum_lxmf::telemetry::Location>),
+    /// The tracks' time window, from the window's strip or the phone's
+    /// chips (1385): pressed, or back to the current episode when the
+    /// pressed one is shown ([`tracks::TrackWindow::toggled`]).
+    TrackWindow(tracks::TrackWindow),
     /// The position sheet's "map centre" row: the map's centre is the own
     /// fix (1371).
     FixAtMapCentre,
@@ -1938,11 +1952,38 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::OwnFix(fix) => {
+            if let (Some(own), Some(location)) = (model.address, fix) {
+                let at = model.now.map(|now| now.unix_secs);
+                let t = match at {
+                    Some(now) if location.last_update > now + telemetry::FUTURE_TOLERANCE_SECS => {
+                        now
+                    }
+                    _ => location.last_update,
+                };
+                let mut point = tracks::TrackFix::of(&Fix {
+                    peer: own,
+                    via: own,
+                    message: None,
+                    received_at: at,
+                    location,
+                    telemetry: Vec::new(),
+                    source: telemetry::Source::Telemetry,
+                });
+                point.t = t;
+                tracks::insert(
+                    alloc::sync::Arc::make_mut(model.tracks.entry(own).or_default()),
+                    point,
+                );
+            }
             model.bar.own_fix = fix;
             model.bar.by_hand = false;
             model.shares_due()
         }
         UiEvent::EnterPosition { text } => model.enter_position(&text),
+        UiEvent::TrackWindow(pressed) => {
+            model.track_window = model.track_window.toggled(pressed);
+            Vec::new()
+        }
         UiEvent::MapCentre(centre) => {
             model.bar.map_centre = centre;
             Vec::new()
@@ -2659,6 +2700,11 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
             }
         }
         MapCmd::GlyphTest => model.map_glyph_test = !model.map_glyph_test,
+        MapCmd::TrackWindow(forward) => {
+            model.track_window = model.track_window.step(forward);
+            let word = model.track_window.word();
+            model.toast(ToastKind::Info, format!("tracks: {word}"));
+        }
     }
     Vec::new()
 }
@@ -4379,11 +4425,23 @@ impl<B> UiModel<B> {
             state.selected,
             self.ascii,
         );
+        // The tracks under the pins: a pixel of the view is an image
+        // pixel, a place's cell two cells across.
+        let unit = libm::exp2(24.0 - f64::from(viewport.zoom()));
+        let scale = f32::from(self.map_setup.cell_px.0.max(1)) / 4.0;
+        let tracks = tracks::cells::cells(
+            &self.map_tracks(unit, scale),
+            &viewport,
+            area,
+            self.map_setup.cell_px,
+            self.ascii,
+        );
         Some(map::MapView {
             area,
             viewport,
             cell_px: self.map_setup.cell_px,
             pins,
+            tracks,
         })
     }
 
@@ -4397,7 +4455,46 @@ impl<B> UiModel<B> {
         if newer {
             self.positions.insert(fix.peer, fix.clone());
         }
+        tracks::insert(
+            alloc::sync::Arc::make_mut(self.tracks.entry(fix.peer).or_default()),
+            tracks::TrackFix::of(&fix),
+        );
         self.fixes_received.push(fix);
+    }
+
+    /// The store's fixes at start, every peer's in time order: the tracks.
+    pub fn restore_tracks(&mut self, fixes: Vec<Fix>) {
+        for fix in fixes {
+            tracks::insert(
+                alloc::sync::Arc::make_mut(self.tracks.entry(fix.peer).or_default()),
+                tracks::TrackFix::of(&fix),
+            );
+        }
+    }
+
+    /// The tracks of every peer the map shows a pin for (blocked peers
+    /// have none), drawn on a view whose screen pixel spans `unit` world
+    /// units at `scale` ([`tracks::track`]), in the model's window; none
+    /// before the shell has said the time.
+    pub fn map_tracks(&self, unit: f64, scale: f32) -> Vec<tracks::Track> {
+        let Some(now) = self.now else {
+            return Vec::new();
+        };
+        tracks::tracks(&self.track_input(), self.track_window, &now, unit, scale)
+    }
+
+    /// The fixes the map draws tracks of: every peer's but a blocked
+    /// one's, ours marked; shared, so a frontend that draws them at its
+    /// own zoom takes them without a copy.
+    pub fn track_input(&self) -> tracks::TrackInput {
+        self.tracks
+            .iter()
+            .filter(|(peer, fixes)| {
+                !fixes.is_empty()
+                    && (self.names.trust(peer) != Trust::Blocked || self.address == Some(**peer))
+            })
+            .map(|(peer, fixes)| (*peer, self.address == Some(*peer), fixes.clone()))
+            .collect()
     }
 
     /// The store's latest positions at start, one a peer.
@@ -4417,8 +4514,7 @@ impl<B> UiModel<B> {
     /// address of the identity that announced, so it joins the peer's
     /// telemetry positions, and the newest fix wins by [`Fix::newer_than`]
     /// whichever way it came; [`Fix::source`] says which. The store keeps
-    /// none of it: the node announces again at its cadence, and a node
-    /// nearby that is no contact leaves no trace once it is gone.
+    /// it for the track (1385), marked as announced.
     pub fn mesh_position(
         &mut self,
         identity: [u8; 16],
@@ -4445,6 +4541,13 @@ impl<B> UiModel<B> {
             .positions
             .get(&peer)
             .is_none_or(|held| fix.newer_than(held));
+        tracks::insert(
+            alloc::sync::Arc::make_mut(self.tracks.entry(peer).or_default()),
+            tracks::TrackFix::of(&fix),
+        );
+        // The track keeps it (1385): stored, one row a peer and fix time,
+        // so a node announcing the same fix again costs nothing.
+        self.fixes_received.push(fix.clone());
         if newer {
             self.positions.insert(peer, fix);
         }
@@ -10363,7 +10466,11 @@ pub(crate) mod tests {
             .iter()
             .filter(|w| matches!(w, StoreWrite::Position(_)))
             .count();
-        assert_eq!(positions, 0, "the store keeps no announced position");
+        // 1385: the track keeps every announced fix, the store one row a
+        // fix time, and the older one too, which the screen did not take.
+        assert_eq!(positions, 3, "the store keeps the announced positions");
+        let track: Vec<i64> = model.tracks[&peer].iter().map(|f| f.t).collect();
+        assert_eq!(track.len(), 4, "the report and three announced: {track:?}");
         // A newer report wins back.
         arrive(
             &mut model,

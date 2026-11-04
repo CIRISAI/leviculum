@@ -417,6 +417,14 @@ leviculum_ui::catalogue! {
     SelectPin = "scene_select_pin", "Select pin", "Stecknadel wählen";
     MapDrawing = "scene_map_drawing", "Map drawing", "Kartendarstellung";
     GlyphTest = "scene_glyph_test", "Glyph test", "Zeichentest";
+    // 1385: the tracks' time window, the window's strip and the phone's
+    // chips; none chosen is the current movement.
+    TrackWindow = "scene_track_window", "Tracks time window", "Zeitfenster der Spuren";
+    TracksToday = "scene_tracks_today", "Today", "Heute";
+    TracksYesterday = "scene_tracks_yesterday", "Yesterday", "Gestern";
+    TracksWeek = "scene_tracks_week", "This week", "Diese Woche";
+    TracksMonth = "scene_tracks_month", "This month", "Dieser Monat";
+    TracksAll = "scene_tracks_all", "All", "Alles";
     LoadMapArea = "scene_load_map_area", "Load this map area", "Diesen Kartenausschnitt laden";
     // The day line: the weekday, the day and the month, the year when it
     // is not this one.

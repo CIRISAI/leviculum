@@ -192,6 +192,8 @@ final class MapView extends View {
     private Long y;
     private Long zoomMilli;
     private String selected;
+    /** A chip of the tracks' time windows pressed and not yet drawn (1385). */
+    private String trackPressed;
     /** The last frame's marks (1200), in its view's pixels. */
     private List<Map<String, Object>> marks = Collections.emptyList();
     /** The last frame's view size and deepest zoom. */
@@ -523,6 +525,19 @@ final class MapView extends View {
             }
         });
         fly.start();
+    }
+
+    /**
+     * A chip of the tracks' time windows pressed (1385): the library
+     * takes the window, or goes back to the current movement when it is
+     * the one shown, and the frame's answer says which it drew.
+     */
+    void trackWindow(String word) {
+        synchronized (this) {
+            trackPressed = word;
+            owed = true;
+            notifyAll();
+        }
     }
 
     /** Draw the view anew: the pins changed, or a region is loading. */
@@ -868,6 +883,10 @@ final class MapView extends View {
                     request.put("zoom_milli", zoomMilli);
                 }
                 if (selected != null) request.put("selected", selected);
+                if (trackPressed != null) {
+                    request.put("track_window", trackPressed);
+                    trackPressed = null;
+                }
                 if (atLat != null) {
                     request.put("at_lat_e6", atLat);
                     request.put("at_lon_e6", atLon);
