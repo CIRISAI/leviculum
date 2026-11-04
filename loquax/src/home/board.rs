@@ -41,8 +41,12 @@ pub enum Report {
 
 /// The pull batch: the page a pull asks, and the largest answer the board
 /// takes in before it asks a smaller page instead (1414). The page is the
-/// LoRa page (`ask::LORA_PAGE_BYTES`) unless the census found less room;
-/// the answer ceiling is what the board's heap holds for one answer.
+/// LoRa page (`ask::LORA_PAGE_BYTES`) unless the board's census of a
+/// session's pull found less room than one LoRa page's pull takes. The
+/// answer ceiling is not the session's: one entry larger than a page comes
+/// alone and costs its own length, which is the message the store keeps
+/// (`loquax_m9::census::SESSION_PEAK`'s note), so it is what the board
+/// takes in for one message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Batch {
     /// The `/sync` page asked.
@@ -52,21 +56,20 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// The batch a board whose census measured `peak` heap bytes for one
-    /// LoRa page's pull may run with `room` bytes to spare: the LoRa page
-    /// when it fits, a page cut in proportion when it does not, never under
-    /// [`MIN_PAGE_BYTES`]. An answer may take what the room allows.
-    pub fn sized(peak: usize, room: usize) -> Self {
+    /// The batch of a board whose census measured `peak` heap bytes for a
+    /// session's pull in LoRa pages, held to `room`: the LoRa page when the
+    /// peak fits, a page cut in proportion when it does not, never under
+    /// [`MIN_PAGE_BYTES`]; answers of up to `max_answer` bytes.
+    pub fn sized(peak: usize, room: usize, max_answer: usize) -> Self {
         let lora = ask::LORA_PAGE_BYTES as u64;
-        let page_bytes = if peak == 0 || peak <= room {
+        let page_bytes = if peak <= room {
             lora
         } else {
             (lora.saturating_mul(room as u64) / peak as u64).clamp(MIN_PAGE_BYTES, lora)
         };
-        let per_byte = (peak / ask::LORA_PAGE_BYTES).max(1);
         Self {
             page_bytes,
-            max_answer: (room / per_byte).max(MIN_PAGE_BYTES as usize),
+            max_answer,
         }
     }
 

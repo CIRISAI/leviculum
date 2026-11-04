@@ -3509,6 +3509,7 @@ dependencies = [
  "leviculum-mapcut",
  "leviculum-mapfill",
  "leviculum-rrc",
+ "leviculum-serial-mux",
  "leviculum-std",
  "leviculum-ui",
  "lnomad",

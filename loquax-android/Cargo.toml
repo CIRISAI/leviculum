@@ -91,6 +91,9 @@ leviculum-mapcut = { path = "../leviculum-mapcut" }
 # The M9's renderer, whose heap and stack the M9 census counts beside the
 # scenes' (tests/m9_scene_census.rs).
 loquax-m9 = { path = "../loquax-m9" }
+# The M9's one-UART rules (1414): tests/m9_board_client.rs writes its line
+# as the board writes it, frames with their flow bytes escaped.
+leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
 # The test's propagation node (1409, loquax/tests/support/lnpnd.rs): lnpnd's
 # engine on the home's instance, which answers `/lev/status`.
 lnpnd = { path = "../lnpnd" }

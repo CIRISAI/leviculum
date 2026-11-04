@@ -543,11 +543,11 @@ fn an_answer_that_does_not_fit_asks_a_smaller_page_and_never_panics() {
 #[test]
 fn the_batch_follows_the_census_and_has_a_floor() {
     let lora = LORA_PAGE_BYTES as u64;
-    assert_eq!(Batch::sized(392, 64 * 1024).page_bytes, lora);
-    assert_eq!(Batch::sized(0, 0).page_bytes, lora);
-    assert_eq!(Batch::sized(4000, 2000).page_bytes, lora / 2);
-    assert_eq!(Batch::sized(4000, 10).page_bytes, MIN_PAGE_BYTES);
-    assert!(Batch::sized(392, 64 * 1024).max_answer >= 64 * 1024 / 2);
+    assert_eq!(Batch::sized(392, 1_000, 8192).page_bytes, lora);
+    assert_eq!(Batch::sized(1_000, 1_000, 8192).page_bytes, lora);
+    assert_eq!(Batch::sized(2_000, 1_000, 8192).page_bytes, lora / 2);
+    assert_eq!(Batch::sized(100_000, 10, 8192).page_bytes, MIN_PAGE_BYTES);
+    assert_eq!(Batch::sized(392, 1_000, 8192).max_answer, 8192);
     assert_eq!(Batch::halved(412), Some(206));
     assert_eq!(Batch::halved(100), Some(64));
     assert_eq!(Batch::halved(MIN_PAGE_BYTES), None);
