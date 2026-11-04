@@ -124,6 +124,7 @@ skip  leviculum-lxmf  delivery_promise           # delivery state machine; subje
 skip  leviculum-lxmf  direct_delivery_attempts   # delivery state machine; subject is the code
 skip  leviculum-lxmf  foreign_payload_encodings  # decodes foreign payloads; subject is the decoder
 skip  leviculum-lxmf  generated_field_pins       # pins generated field values; subject is the generator
+skip  leviculum-lxmf  held_proof_lost_link       # held-proof release over a closed link; subject is the router
 skip  leviculum-lxmf  inbound_link_promise       # link state machine; subject is the code
 skip  leviculum-lxmf  lev_position_airtime       # airtime arithmetic of the position announce; subject is the code
 skip  leviculum-lxmf  lev_vectors                # vector corpus of the lev namespace; subject is the codec
