@@ -104,6 +104,7 @@ mod proof_tests;
 mod propagation_node_interop_tests;
 mod protocol_tests;
 mod python_parity_tests;
+mod python_reconnect_link_interop_tests;
 mod python_rnstatus_server_tests;
 mod ratchet_rotation_tests;
 mod ratchet_tests;
