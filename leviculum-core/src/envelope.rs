@@ -4602,7 +4602,7 @@ mod tests {
 
     #[test]
     fn a_home_code_round_trips_and_no_other_board_takes_it() {
-        let code = "lqxh1abcde fghij@leviculum.network:4242";
+        let code = "lqxh1abcde fghij@rendezvous";
         let frame = encode_home_code(code).expect("frame");
         let decoded = decode_frame(&frame).expect("an envelope");
         assert_eq!(decoded.frame_type, TYPE_HOME_CODE);
