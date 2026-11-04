@@ -30,6 +30,10 @@ daemon" has to re-derive the argument from nothing.
 - [Conversation storage](loquax-storage.md) — SQLite, the schema, retention.
 - [The mailbox and who you talk to](loquax-mailbox.md) — propagation-node
   policy, trust, contacts and names.
+- [Reaching the mailbox from anywhere](loquax-reachability.md): the
+  ladder of ways from the same machine to the relayed rendezvous, the
+  race that keeps the most direct one, and the slices (widened
+  2026-11-04, Lew).
 - [Read receipts](loquax-read-receipts.md) and
   [receipts for propagated post](loquax-propagation-receipts.md): the
   `lev` namespace, what a message's ticks claim and who confirms them.

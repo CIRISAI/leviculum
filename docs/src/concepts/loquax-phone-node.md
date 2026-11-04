@@ -50,7 +50,11 @@ each with its own directory and store. There are two shapes:
   node has, because a path to `loquax.home` does not care which medium
   carries it.
 
-Section 5 leaves open which of the two shapes is the default.
+Section 5 leaves open which of the two shapes is the default. Which of
+the node's media carries the client's link to the mailbox, and how the
+most direct one is kept, is [Reaching the mailbox from anywhere](loquax-reachability.md):
+each medium this page adds (WiFi AutoInterface, BLE) becomes a rung of
+that ladder.
 
 ## 2. One interface per medium, behind the host seam
 

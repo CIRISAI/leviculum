@@ -63,8 +63,11 @@ refused before anything goes on the wire, in lower-case base32 behind the
 prefix `lqxh1` (140 characters). The home destination and the LXMF
 address both derive from the public key, so the code needs nothing else.
 
-A phone has no shared instance to reach the home node through, so it needs
-the home node's TCP server too. `loquax mailbox admit --server host:port`
+A device on the home node's own computer reaches it through the
+daemon's shared instance (rung 0 of
+[the ladder](loquax-reachability.md)). A phone has no shared instance to
+reach the home node through, so it needs the home node's TCP server
+too. `loquax mailbox admit --server host:port`
 writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
 brackets): the base32 alphabet has no `@`, so the split is unambiguous, a
 code without the address reads as before, and a desktop's `home join`
