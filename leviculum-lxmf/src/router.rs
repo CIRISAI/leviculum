@@ -326,6 +326,16 @@ pub enum RouterEvent {
         reason: AttemptFailure,
     },
     MessageReceived(Box<Message>),
+    /// A propagation node proved the upload of a queued message: its
+    /// `transient_id`, the id the node stores it under, which only the
+    /// sender and the nodes holding it know
+    /// (`reference/LXMF/LXMF/LXMessage.py:433-434`). A sender asks the node
+    /// by it what became of the message (`/lev/status`, 1394/1395). Comes
+    /// before the message's `AwaitingCollection` state.
+    PropagationUploaded {
+        message_id: [u8; 32],
+        transient_id: [u8; 32],
+    },
     InboundRejected {
         method: DeliveryMethod,
         reason: InboundRejection,

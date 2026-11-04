@@ -445,8 +445,14 @@ impl PropagationRuntime {
                 }
             }
             PropagationTransportEvent::UploadCompleted { message_id, .. } => {
-                if router.remove_outbound(&message_id).is_some() {
+                if let Some(entry) = router.remove_outbound(&message_id) {
                     router.persistence_dirty = true;
+                    if let Some(prepared) = entry.propagation() {
+                        output.events.push(RouterEvent::PropagationUploaded {
+                            message_id,
+                            transient_id: prepared.transient_id,
+                        });
+                    }
                     // The node has it, the recipient does not. Reporting
                     // `Sent` here would make this indistinguishable from a
                     // message handed to the recipient's own destination, and
