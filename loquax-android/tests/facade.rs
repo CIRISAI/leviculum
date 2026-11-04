@@ -387,7 +387,10 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("info"),
         )
         .expect("decode");
-        assert!(info.rows.iter().any(|r| r.contains(&reply.id)), "{info:?}");
+        assert!(
+            info.advanced.iter().any(|r| r.contains(&reply.id)),
+            "{info:?}"
+        );
         // The reaction sent and the emoji picked are the recents, newest
         // first, kept in the app's directory.
         session
@@ -446,7 +449,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         );
         let row = &list.conversations[1];
         assert_eq!(row.peer, peer);
-        assert_eq!(row.last, "you reacted \u{1F44D}");
+        assert_eq!(row.last, "You reacted \u{1F44D}");
         assert!(row.ours);
         assert_eq!(row.initials, peer[..2].to_uppercase());
         // The row's mark (1130): ours is last, so a delivery word, a text.
@@ -1322,7 +1325,7 @@ async fn every_keyed_request_reaches_an_imported_message_through_javas_codec() {
             let detail: schema::Info =
                 rmp_serde::from_slice(&session.query(query).expect("the detail")).expect("an Info");
             let id_row = format!("id     {}", row.id);
-            assert!(detail.rows.contains(&id_row), "{:?}", detail.rows);
+            assert!(detail.advanced.contains(&id_row), "{:?}", detail.advanced);
         }
 
         command(&[
@@ -1417,9 +1420,9 @@ async fn every_keyed_request_reaches_an_imported_message_through_javas_codec() {
                 let query = schema::decode::<schema::Query>(&info).expect("an info query");
                 let detail: schema::Info = rmp_serde::from_slice(&ask(query)).expect("an Info");
                 assert!(
-                    detail.rows.contains(&format!("id     {}", row.id)),
+                    detail.advanced.contains(&format!("id     {}", row.id)),
                     "{i}: {:?}",
-                    detail.rows
+                    detail.advanced
                 );
             }
             let detail: schema::Detail =
@@ -1719,7 +1722,7 @@ impl HomeNode {
                 wake: true,
                 stop: Some(stopped),
                 network: Default::default(),
-                lend: None,
+                lends: Vec::new(),
             },
         ));
         Self {
@@ -1810,9 +1813,9 @@ fn facade_shows_ugly(secs: u64) {
             ))
             .unwrap_or_else(|error| panic!("info on {:?}: {error}", row.body));
             assert!(
-                info.rows.iter().any(|r| r.contains(&row.id)),
+                info.advanced.iter().any(|r| r.contains(&row.id)),
                 "{:?}",
-                info.rows
+                info.advanced
             );
         }
     }
@@ -3670,6 +3673,51 @@ async fn a_draft_survives_another_chat_and_a_new_session() {
             .expect("a message of theirs")
             .id
             .clone();
+        // 1381, finding 19: Info on it is plain rows in German, the id
+        // only under Advanced.
+        let info = |session: &Session, peer: &str, id: &str| -> schema::Info {
+            let messages: schema::Messages = asked(
+                session,
+                schema::Query::Messages {
+                    peer: peer.to_string(),
+                },
+            );
+            let key = messages
+                .messages
+                .iter()
+                .find(|m| m.id == id)
+                .expect("the message")
+                .key;
+            asked(
+                session,
+                schema::Query::Info {
+                    peer: peer.to_string(),
+                    key,
+                },
+            )
+        };
+        let german = info(&session, &a, &target);
+        assert_eq!(german.rows[0].label, "Von", "{german:?}");
+        let size = german
+            .rows
+            .iter()
+            .find(|r| r.label == "Größe")
+            .unwrap_or_else(|| panic!("no size: {german:?}"));
+        assert!(
+            size.value.ends_with(" KB") && size.value.contains(','),
+            "{german:?}"
+        );
+        assert!(
+            german
+                .rows
+                .iter()
+                .all(|r| !r.value.contains(&target[..8]) && !r.value.contains(&a[..8])),
+            "hex in the plain rows: {german:?}"
+        );
+        assert!(
+            german.advanced.contains(&format!("id     {target}")),
+            "{german:?}"
+        );
         for typed in ["half", "half a thought"] {
             session
                 .request(Request::Draft {
@@ -3786,6 +3834,25 @@ async fn a_draft_survives_another_chat_and_a_new_session() {
             asked(&session, schema::Query::Messages { peer: a.clone() });
         assert_eq!(messages.draft, "half a thought");
         assert_eq!(messages.draft_reply, target);
+        // The same Info in an English session (1381).
+        let key = messages
+            .messages
+            .iter()
+            .find(|m| m.id == target)
+            .expect("the message")
+            .key;
+        let english: schema::Info = asked(
+            &session,
+            schema::Query::Info {
+                peer: a.clone(),
+                key,
+            },
+        );
+        assert_eq!(english.rows[0].label, "From", "{english:?}");
+        assert!(
+            english.rows.iter().any(|r| r.label == "Size"),
+            "{english:?}"
+        );
 
         // The reply sent takes the draft with it.
         session
@@ -4436,7 +4503,7 @@ async fn a_photo_travels_both_ways_with_python_lxmf_at_each_size() {
             .expect("listed");
         assert_eq!(
             (listed.last.as_str(), listed.kind.as_str()),
-            ("photo", "photo")
+            ("Photo", "photo")
         );
         let pixels: schema::PhotoPixels = rmp_serde::from_slice(
             &session
@@ -5069,7 +5136,7 @@ async fn a_voice_message_travels_both_ways_with_python_lxmf() {
             .expect("listed");
         assert_eq!(
             (listed.last.as_str(), listed.kind.as_str()),
-            ("voice message 0:02", "voice")
+            ("Voice message, 0:02", "voice")
         );
 
         // The sound is the reference decoder's.

@@ -142,6 +142,13 @@
             android:layout_height="match_parent"
             android:visibility="gone" />
 
+        <!-- The Rooms (1384): Reticulum Relay Chat on the config's hub. -->
+        <FrameLayout
+            android:id="@+id/pane_rooms"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
         <FrameLayout
             android:id="@+id/pane_map"
             android:layout_width="match_parent"
@@ -450,6 +457,32 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/tab_browse"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- The Rooms tab (1384), there only where the config names a hub. -->
+        <LinearLayout
+            android:id="@+id/tab_rooms"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackground"
+            android:contentDescription="@string/tab_rooms"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/tab_rooms_icon"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:importantForAccessibility="no" />
+
+            <TextView
+                android:id="@+id/tab_rooms_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tab_rooms"
                 android:textSize="12sp" />
         </LinearLayout>
     </LinearLayout>

@@ -190,7 +190,15 @@ tui = [
     "photos",
     "voice",
     "dep:zbus",
+    # The Browse tab (1369): its fetch, and lnomad's terminal view, which
+    # draws it.
+    "browse",
+    "lnomad/tui",
 ]
+# The Browse tab's fetch (`loquax::browse_fetch`, 1337 pass two, 1369):
+# lnomad's fetch session with its `std`, over the node the messenger runs.
+# The phone, the terminal and the window carry it; the core does not.
+browse = ["std", "lnomad/std"]
 # QR codes (`loquax::home::qr`): the admission code in the terminal, and an
 # address for the phone's contact screen to show (1146).
 qr = ["dep:qrcodegen"]
@@ -229,6 +237,10 @@ gui = [
     "photos",
     "voice",
     "dep:zbus",
+    # The Browse tab (1369): its fetch, and lnomad's window view, which
+    # draws it with its pictures.
+    "browse",
+    "lnomad/gui",
 ]
 
 [dependencies]
@@ -255,6 +267,9 @@ leviculum-ui = { path = "../leviculum-ui", default-features = false }
 lnomad = { path = "../lnomad", default-features = false }
 # The tab parses the page a fetch brought, so no platform parses micron.
 leviculum-micron = { path = "../leviculum-micron" }
+# The Rooms (1379, #232): Reticulum Relay Chat's envelope and a client's
+# link state, `no_std` plus `alloc`, so the model and the M9 carry it.
+leviculum-rrc = { path = "../leviculum-rrc" }
 # The map's model (`ui::map`): the projection, the viewport, fitting and
 # placing the pins. `no_std` with `alloc` without its `std` feature, held
 # there by `just map-core-no-std`, so the model stays core.

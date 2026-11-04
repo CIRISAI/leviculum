@@ -157,6 +157,49 @@ fn advanced_says_relay_for_the_propagation_node() {
     }
 }
 
+/// 1377, the second walk: the German app calls the device a Handy on
+/// every screen (the core's catalogue did, `strings.xml` said Telefon);
+/// the join screen's address field names no daemon; a move says what the
+/// old phone does afterwards in plain words.
+#[test]
+fn the_german_app_says_handy_and_the_join_screen_names_no_daemon() {
+    let de = resources("values-de");
+    let scene = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("android/res/values-de/strings_scene.xml"),
+    )
+    .expect("strings_scene.xml");
+    for (file, xml) in [("strings.xml", &de), ("strings_scene.xml", &scene)] {
+        for (name, _, text) in entries(xml) {
+            let said = text
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word == "Telefon" || word == "Telefons");
+            assert!(!said, "{file}: {name} {text:?} says Telefon");
+        }
+    }
+    for dir in LANGUAGES {
+        let xml = resources(dir);
+        let label = string(&xml, "server_label").unwrap_or_default();
+        assert!(!label.is_empty(), "{dir}: no server_label");
+        for word in ["lnsd", "TCP", "host:port", "Host:Port"] {
+            assert!(
+                !label.contains(word),
+                "{dir}: server_label {label:?} says {word:?}"
+            );
+        }
+        for name in ["move_text", "move_moved"] {
+            let text = string(&xml, name).unwrap_or_default();
+            for word in [
+                "stops then",
+                "has stopped",
+                "hört dann auf",
+                "hat aufgehört",
+            ] {
+                assert!(!text.contains(word), "{dir}: {name} {text:?} says {word:?}");
+            }
+        }
+    }
+}
+
 /// Each `<string>` and `<plurals>` of one resource file by name: its
 /// attributes after the name, and its text.
 fn entries(xml: &str) -> Vec<(String, String, String)> {

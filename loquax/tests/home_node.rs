@@ -2395,7 +2395,9 @@ async fn the_old_apps_imported_ratchets_open_what_the_sender_encrypts_to_them() 
 /// of a line unproven and, started again, makes it again from the archive
 /// and delivers it; Bob, slow, gets Lew's next two lines as one digest.
 /// Pass six: Bob's invitation says where Loquax is, Anna's (she wrote to
-/// Lew before, as Loquax) does not; Bob's answer reaches Anna too.
+/// Lew before, as Loquax) does not; Bob's answer reaches Anna too. 1387:
+/// Lew's reaction from the laptop reaches stock Bob too, from the group,
+/// its target the id Bob knows the line by.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
     use loquax::home::group;
@@ -2700,6 +2702,104 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    // 1387: Lew reacts from his laptop to the newest line of the group
+    // (the palette's `react`, then 1 for the thumb). The home copies the
+    // reaction to Bob as well, stock as he is: from the group, field 0x40
+    // alone, its target the id Bob's client knows the line by, his copy
+    // of Lew's line or his own original of the reply.
+    tui(
+        &mesh,
+        client.path(),
+        &group_hex,
+        "until ready 20\nuntil synced 1 30\nkey enter\nkey :\ntype react\nkey enter\n\
+         key 1\nsleep 1000\nkey q\n",
+        &node,
+    )
+    .await;
+    let reacted_to = {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        store
+            .archive_since(0, usize::MAX)
+            .expect("archive")
+            .entries
+            .iter()
+            .filter(|e| e.kind == loquax::home::KIND_GROUP)
+            .filter_map(|e| {
+                leviculum_lxmf::Message::unpack(
+                    &e.packed,
+                    None,
+                    None,
+                    leviculum_lxmf::DeliveryMethod::Direct,
+                )
+                .ok()
+            })
+            .filter(|m| m.source_hash == owner)
+            .find_map(|m| {
+                m.fields
+                    .iter()
+                    .find(|(k, _)| *k == leviculum_lxmf::constants::FIELD_REACTION)
+                    .and_then(|(_, v)| leviculum_lxmf::reaction::Reaction::decode_field_value(v))
+            })
+            .unwrap_or_else(|| panic!("Lew's reaction never reached the group:\n{}", node.log()))
+    };
+    let reply_id: [u8; 32] = hex::decode(&reply).expect("hex").try_into().expect("32");
+    let lews_copy_of_reply = Store::open_in(&home, owner)
+        .expect("the owner's store")
+        .group_copy_for(&hosted.group.address, &reply_id, &owner)
+        .expect("row")
+        .expect("Lew's copy of the reply")
+        .copy;
+    let bob_knows = match reacted_to.to {
+        to if to == lews_copy_of_reply => reply_id,
+        to if to == lews_line => hex::decode(&bobs_copy)
+            .expect("hex")
+            .try_into()
+            .expect("32"),
+        other => panic!(
+            "Lew reacted to {}, no line of the group",
+            hex::encode(other)
+        ),
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let thumbs = loop {
+        let found = peer.received().into_iter().find(|m| {
+            m.get("fields")
+                .and_then(|v| v.as_str())
+                .is_some_and(|f| f.starts_with("8140"))
+        });
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Bob never got Lew's reaction:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(thumbs["source_hash"], group_hex, "from the group: {thumbs}");
+    assert_eq!(thumbs["content"], "", "no name in front: {thumbs}");
+    let packed = hex::decode(thumbs["fields"].as_str().expect("fields")).expect("hex");
+    let seen = leviculum_lxmf::reaction::Reaction::decode_field_value(&packed[2..])
+        .expect("Bob's reaction field");
+    assert_eq!(seen.content, reacted_to.content);
+    assert_eq!(
+        hex::encode(seen.to),
+        hex::encode(bob_knows),
+        "the id Bob knows the line by"
+    );
+    // Anna's copy and Bob's are proven before the home is killed below.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while node.log().matches("GROUP copy delivered").count() < 6 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the reaction's two copies were never proven:\n{}\nAnna's home:\n{}",
+            node.log(),
+            anna_node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
     // G2, item 1: the home is killed between a fan-out and its proof.
     // Anna's home is away, so her copy of Lew's next line waits; Lew's
     // home dies with it unproven and, started again, makes it again from
@@ -2894,7 +2994,6 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         .expect("row")
         .expect("Anna's copy");
     assert_eq!(to_anna.state, groups::COPY_PROVEN, "Anna's home proved it");
-    let reply_id: [u8; 32] = hex::decode(&reply).expect("hex").try_into().expect("32");
     let to_lew = store
         .group_copy_for(&hosted.group.address, &reply_id, &owner)
         .expect("row")
@@ -2973,9 +3072,9 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         .collect();
     assert_eq!(
         originals.len(),
-        6,
-        "Anna's Join, Lew's line, Bob's reply and Lew's three after it: every message \
-         to the group is kept"
+        7,
+        "Anna's Join, Lew's line, Bob's reply, Lew's reaction and Lew's three after it: \
+         every message to the group is kept"
     );
 }
 

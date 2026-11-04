@@ -173,6 +173,8 @@ skip  leviculum-mapfill fill                   # pixel-exact reference images; s
 skip  leviculum-mapfill fixture                # reads the committed fixture, but the subject is the render pipeline (a golden count)
 skip  leviculum-mapfill frame                  # in-process framebuffer; subject is the code
 skip  leviculum-micron parser_tests              # reads README.mu for snippets, but the subject is the parser
+skip  leviculum-rrc   session                   # replays recorded envelopes; the subject is the session code
+skip  leviculum-rrc   vectors                   # a vector corpus; the subject is the codec
 skip  leviculum-proxy log_backpressure           # spawns the proxy binary
 skip  leviculum-proxy proxy_control              # binds sockets under a tokio runtime
 skip  leviculum-std   ble_handshake_primer       # btvirt + bluetoothd, no daemon; the #[ignore]d 1004 reproduction, run by name
@@ -224,6 +226,7 @@ skip  lnflash         vendored_softdevice        # close to the line: reads the 
 skip  loquax           home_node                  # spawns loquax --daemon and clients against Python over sockets; loquax-tui
 skip  loquax           import                     # its subject is the import code, and it spawns the loquax binary; loquax-tui
 skip  loquax           mailbox_cli                # spawns loquax against in-process daemons over sockets
+skip  loquax           rooms_hub                  # nodes, a daemon and a fake hub over sockets; subject is the hub link
 skip  loquax           mailbox_setup              # spawns the loquax binary over a temporary home; subject is the code; loquax-tui
 skip  loquax           python_interop             # drives Python over sockets; Tier 1
 skip  loquax           send_cli                   # spawns the loquax binary
@@ -243,15 +246,19 @@ skip  loquax-android   glyph                      # Glyph.java against the core'
 skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
-skip  loquax-android   m9_fixture_census          # counts the M9 image's two fixture screens and the client session's pull against the census budgets with a global allocator (1361, 1363); subject is the code
-skip  loquax-android   m9_client                  # the M9's no_std client against an in-process mailbox and transport over loopback TCP through a counting proxy (1363); subject is the code
+skip  loquax-android   m9_fixture_census          # counts the M9 image's fixture screens (the group's since 1366) and the client session's pull against the census budgets with a global allocator (1361, 1363); subject is the code
+skip  loquax-android   m9_client                  # the M9's no_std client against in-process mailboxes and a transport over loopback TCP, through a counting proxy (1363), and the group verbs from the board's keys (1366); subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
+skip  loquax-android   rooms                      # the Rooms tab's verbs and answer through the facade in Java's bytes, and its golden (1384); subject is the code
+skip  loquax-android   rooms_hub                  # the phone's session, its mailbox, a transport and a fake hub over loopback TCP (1384); subject is the hub link
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
 skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
 run   loquax-android   strings                    # reads the app's res/values*/strings.xml and asserts the words of walk findings 27 to 30 (1283)
 run   loquax-android   icon                       # reads the icon PNGs, the adaptive icon, the manifest and the deb's desktop entry and asserts their sizes and names (1336)
 skip  loquax-m9        golden                     # the M9 chats list drawn into the 320x240 frame and pinned as PNG (1351); subject is the renderer
 skip  loquax-m9        firmware                   # the M9 image's fixture screens drawn, dumped and read back against PNG goldens (1361); subject is the renderer and the dump
+skip  loquax-m9        groups                     # the M9's group screens and their key table walked through the model, frames drawn against each other (1366); subject is the renderer and the keys
+skip  loquax-m9        map                        # the M9's map screen, its key table and pins walked through the model, frames drawn against each other (1375); subject is the renderer and the keys
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer

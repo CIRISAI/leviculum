@@ -21,7 +21,7 @@ import android.graphics.drawable.Drawable;
 final class Glyph extends Drawable {
     enum Kind {
         BACK, MENU, EMOJI, SEND, CLOCK, TICK, TICKS, TICKS_READ, FAILED, SEARCH, CLOSE, PENCIL, CHAT,
-        PIN, PEOPLE, LOCATE, ATTACH, MIC, PLAY, PAUSE, CAMERA, PLUS, LOCK, UNLOCK, BIN, STOP, UP
+        PIN, PEOPLE, LOCATE, ATTACH, MIC, PLAY, PAUSE, CAMERA, PLUS, LOCK, UNLOCK, BIN, STOP, UP, HASH
     }
 
     private final Kind kind;
@@ -176,6 +176,13 @@ final class Glyph extends Drawable {
                 behind.moveTo(16.5f, 12);
                 behind.cubicTo(19.3f, 12, 21, 14, 21, 17.5f);
                 canvas.drawPath(behind, stroke);
+                break;
+            case HASH:
+                // A room's sign (1384): two slanted uprights, two bars.
+                canvas.drawLine(10, 4, 8, 20, stroke);
+                canvas.drawLine(16, 4, 14, 20, stroke);
+                canvas.drawLine(4.5f, 9, 19.5f, 9, stroke);
+                canvas.drawLine(4.5f, 15, 19.5f, 15, stroke);
                 break;
             case ATTACH:
                 // A paper clip: two nested rounded loops, open at the top.

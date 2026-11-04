@@ -1,6 +1,7 @@
 //! A client's ask of its home node without the waiting: the path ladder,
 //! the link's budget and an ask's steps (`/join`, `/sync` page by page,
-//! `/send`, `/mark`, `/group`), `no_std`, so the M9 runs the same flow the
+//! `/send`, `/mark`, and a group's `/group`, `/groupadd`, `/groupdelete`
+//! and state message), `no_std`, so the M9 runs the same flow the
 //! desktop and the phone run (`handheld-messenger.md`, "Networking: a
 //! client of a home, over LoRa"; 1359, 1363).
 //!
@@ -165,10 +166,29 @@ pub enum Verb {
     Send(wire::Submission),
     /// `/mark` messages read, deleted or seen.
     Mark(wire::Mark),
-    /// `/group`: make a group at the home. Asked again as a send is; a
-    /// home before 1307 that drops it ends in [`HomeError::Timeout`]
+    /// A group's verb: `/group`, `/groupadd`, `/groupdelete`, or a
+    /// member's state sent to the group. Asked again as a send is; a home
+    /// before 1307 that drops `/group` ends in [`HomeError::Timeout`]
     /// (`client` probes for that on the desktop, the board does not).
-    Group(wire::GroupRequest),
+    Group(GroupVerb),
+}
+
+/// What a client asks its home about a group (1366): the admin's three
+/// requests, and a member's Join, Leave or the admin's Remove, which are
+/// a state message to the group's address handed to the home as any
+/// message is (`UiModel::group_state`). The verbs the model's group
+/// effects become on a client without the desktop's executor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupVerb {
+    /// `/group`: make a group the home hosts and invite its members.
+    Create(wire::GroupRequest),
+    /// `/groupadd`: the admin's home adds members to its group.
+    Add(wire::GroupAddRequest),
+    /// `/groupdelete`: the admin's home deletes its group for everyone.
+    Delete(wire::GroupDeleteRequest),
+    /// `/send` of a state message to the group: the Join's mark alone, or
+    /// the membership naming the member who leaves or is removed.
+    State(wire::Submission),
 }
 
 impl Verb {
@@ -196,7 +216,7 @@ pub enum Outcome {
     Sent([u8; 32]),
     /// The home keeps the mark.
     Marked,
-    /// The group's address.
+    /// The group's address: the one made, added to or deleted.
     Group([u8; 16]),
 }
 
@@ -420,7 +440,16 @@ impl Ask {
             } => (super::SYNC_PATH, wire::sync_request(*cursor)),
             Verb::Send(submission) => (super::SEND_PATH, wire::send_request(submission)),
             Verb::Mark(mark) => (super::MARK_PATH, wire::mark_request(mark)),
-            Verb::Group(group) => (super::GROUP_PATH, wire::group_request(group)),
+            Verb::Group(GroupVerb::Create(group)) => {
+                (super::GROUP_PATH, wire::group_request(group))
+            }
+            Verb::Group(GroupVerb::Add(add)) => {
+                (super::GROUP_ADD_PATH, wire::group_add_request(add))
+            }
+            Verb::Group(GroupVerb::Delete(delete)) => {
+                (super::GROUP_DELETE_PATH, wire::group_delete_request(delete))
+            }
+            Verb::Group(GroupVerb::State(state)) => (super::SEND_PATH, wire::send_request(state)),
         };
         Step::Request { path, data }
     }
@@ -431,7 +460,16 @@ impl Ask {
             Verb::Join { .. } => join_outcome(answer).map(|()| Outcome::Joined),
             Verb::Send(_) => refused(wire::read_send_answer(answer)).map(Outcome::Sent),
             Verb::Mark(_) => join_outcome(answer).map(|()| Outcome::Marked),
-            Verb::Group(_) => refused(wire::read_group_answer(answer)).map(Outcome::Group),
+            Verb::Group(GroupVerb::Create(_) | GroupVerb::Add(_)) => {
+                refused(wire::read_group_answer(answer)).map(Outcome::Group)
+            }
+            Verb::Group(GroupVerb::Delete(delete)) => {
+                let group = delete.group;
+                join_outcome(answer).map(|()| Outcome::Group(group))
+            }
+            Verb::Group(GroupVerb::State(_)) => {
+                refused(wire::read_send_answer(answer)).map(Outcome::Sent)
+            }
             Verb::Pull { cursor, .. } => {
                 let page = match refused(wire::read_sync_answer(answer)) {
                     Ok(page) => page,
@@ -747,11 +785,75 @@ mod tests {
             name: String::from("Kletterhalle"),
             members: alloc::vec![([6; 16], String::from("Ana"))],
         };
-        let mut ask = Ask::new(&home(), Verb::Group(group), 0, 60_000).expect("ask");
+        let mut ask =
+            Ask::new(&home(), Verb::Group(GroupVerb::Create(group)), 0, 60_000).expect("ask");
         to_request(&mut ask);
         let refused = wire::status_answer(Status::NotAdmitted);
         assert_eq!(
             ask.answered(Ok(&refused)),
+            Step::Done(Err(HomeError::Refused(Status::NotAdmitted)))
+        );
+    }
+
+    /// 1366: the group's other verbs ask their own path and read their own
+    /// answer; a delete's `Ok` names the group it deleted, a state message
+    /// is a send.
+    #[test]
+    fn the_group_verbs_ask_their_paths_and_read_their_answers() {
+        let group = [9; 16];
+        let add = wire::GroupAddRequest {
+            client_id: [4; 16],
+            group,
+            members: alloc::vec![([6; 16], String::from("Ana"))],
+        };
+        let delete = wire::GroupDeleteRequest {
+            client_id: [5; 16],
+            group,
+        };
+        let state = wire::Submission {
+            client_id: [6; 16],
+            destination: group,
+            title: Vec::new(),
+            content: Vec::new(),
+            fields: Vec::new(),
+        };
+        let cases = [
+            (
+                GroupVerb::Add(add.clone()),
+                super::super::GROUP_ADD_PATH,
+                wire::group_add_request(&add),
+                wire::group_answer(&group),
+                Outcome::Group(group),
+            ),
+            (
+                GroupVerb::Delete(delete),
+                super::super::GROUP_DELETE_PATH,
+                wire::group_delete_request(&delete),
+                wire::status_answer(Status::Ok),
+                Outcome::Group(group),
+            ),
+            (
+                GroupVerb::State(state.clone()),
+                super::super::SEND_PATH,
+                wire::send_request(&state),
+                wire::send_answer(&[7; 32]),
+                Outcome::Sent([7; 32]),
+            ),
+        ];
+        for (verb, want_path, want_data, answer, outcome) in cases {
+            let mut ask = Ask::new(&home(), Verb::Group(verb), 0, 60_000).expect("ask");
+            let Step::Request { path, data } = to_request(&mut ask) else {
+                panic!("no request");
+            };
+            assert_eq!((path, &data), (want_path, &want_data));
+            assert_eq!(ask.answered(Ok(&answer)), Step::Done(Ok(outcome)));
+        }
+        // The control: a delete the home refuses is no group.
+        let mut ask =
+            Ask::new(&home(), Verb::Group(GroupVerb::Delete(delete)), 0, 60_000).expect("ask");
+        to_request(&mut ask);
+        assert_eq!(
+            ask.answered(Ok(&wire::status_answer(Status::NotAdmitted))),
             Step::Done(Err(HomeError::Refused(Status::NotAdmitted)))
         );
     }

@@ -51,6 +51,30 @@ pub enum Ask {
     DeleteGroup([u8; 16]),
     /// A member's name: `Enter` removes it from the group.
     RemoveMember([u8; 16]),
+    /// A friend's name (1371): `Enter` forwards the message `key` of
+    /// `from`'s conversation there.
+    Forward { from: [u8; 16], key: u64 },
+    /// The own position by hand (1371): `Enter` sets it, alone the map's
+    /// centre.
+    Position,
+    /// How long `peer`'s chat gets the position (1371): `Enter` alone
+    /// once, now.
+    Share([u8; 16]),
+    /// "delete all maps" (1371): `Enter` deletes them.
+    DeleteAllMaps,
+    /// A path the shell reads (1371): `Enter` hands it over.
+    Path(PathFor),
+}
+
+/// What a typed path is for (1371): the terminal's picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathFor {
+    /// A picture for `peer`'s chat, scaled at the photo size.
+    Picture([u8; 16]),
+    /// A file for `peer`'s chat, whole.
+    File([u8; 16]),
+    /// A picture of a friend's code: its conversation opens.
+    Code,
 }
 
 impl<B> UiModel<B> {
@@ -94,6 +118,9 @@ impl<B> UiModel<B> {
 
     /// The palette's rows while it asks: what for, and what `Enter` does.
     pub fn ask_rows(&self, ask: Ask) -> Vec<String> {
+        if let Some(rows) = self.verb_ask_rows(ask) {
+            return rows;
+        }
         match ask {
             Ask::Rename(peer) => vec![
                 format!("your name for {}", self.names.label(&peer)),
@@ -244,6 +271,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
 
     /// `Enter` in a palette that asks: what was asked is done with the text.
     pub(super) fn answer_ask(&mut self, ask: Ask, typed: String) -> Vec<UiEffect> {
+        if let Some(effects) = self.answer_verb_ask(ask, &typed) {
+            return effects;
+        }
         match ask {
             Ask::Rename(peer) => self.rename(peer, &typed),
             Ask::React { peer, target } => self.react(peer, target, &typed),
@@ -265,7 +295,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
     /// open with the cursor in compose, then the name asked for when
     /// `name`. A code that is none is said in a toast, the same sentence
     /// the phone shows.
-    fn take_code(&mut self, typed: &str, name: bool) -> Vec<UiEffect> {
+    pub(super) fn take_code(&mut self, typed: &str, name: bool) -> Vec<UiEffect> {
         let code = match crate::code::read(typed) {
             Ok(code) => code,
             Err(why) => {

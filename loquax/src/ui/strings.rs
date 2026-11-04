@@ -42,6 +42,30 @@ leviculum_ui::catalogue! {
     TabChatsUnread = "tab_chats_unread", "Chats, %1$d with unread messages", "Chats, %1$d mit ungelesenen Nachrichten";
     Map = "map", "Map", "Karte";
     TabBrowse = "tab_browse", "Browse", "Seiten";
+    // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
+    TabRooms = "tab_rooms", "Rooms", "Räume";
+    RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";
+    RoomsNoHub = "rooms_no_hub", "No hub yet. rooms_hub in the config names one.", "Noch kein Hub. rooms_hub in der Konfiguration nennt einen.";
+    RoomsLinking = "rooms_linking", "Connecting to the hub…", "Verbinde mit dem Hub…";
+    RoomsHub = "rooms_hub", "Hub %1$s", "Hub %1$s";
+    RoomsNoPath = "rooms_no_path", "The hub cannot be reached. Is it announced on this network?", "Der Hub ist nicht erreichbar. Wird er in diesem Netz angekündigt?";
+    RoomsNoAnswer = "rooms_no_answer", "The hub did not answer. Try again later.", "Der Hub hat nicht geantwortet. Versuch es später noch einmal.";
+    RoomsLost = "rooms_lost", "The connection to the hub broke. Open the Rooms again to reconnect.", "Die Verbindung zum Hub ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
+    RoomsLeft = "rooms_left", "You left the hub.", "Du hast den Hub verlassen.";
+    RoomsOff = "rooms_off", "There are no Rooms here; rooms_hub in the config turns them on.", "Hier gibt es keine Räume; rooms_hub in der Konfiguration schaltet sie ein.";
+    RoomsHowToJoin = "rooms_how_to_join", "Type a room's name, like #lab, to join it.", "Tipp den Namen eines Raums, etwa #lab, um ihm beizutreten.";
+    RoomsHintRoom = "rooms_hint_room", "Enter sends to the room. /me for an action, /part to leave.", "Enter schickt in den Raum. /me für eine Aktion, /part zum Verlassen.";
+    RoomsNotReady = "rooms_not_ready", "The hub has not answered yet. Wait a moment and try again.", "Der Hub hat noch nicht geantwortet. Warte kurz und versuch es noch einmal.";
+    RoomsNotIn = "rooms_not_in", "You are not in %1$s. Join it first.", "Du bist nicht in %1$s. Tritt ihm zuerst bei.";
+    RoomsTooLong = "rooms_too_long", "This line is %1$d bytes long and a room takes at most %2$d. Shorten it.", "Diese Zeile ist %1$d Bytes lang, ein Raum nimmt höchstens %2$d. Kürze sie.";
+    RoomsTooBig = "rooms_too_big", "This line needs %1$d bytes and the link carries %2$d. Shorten it.", "Diese Zeile braucht %1$d Bytes, die Verbindung trägt %2$d. Kürze sie.";
+    RoomsBadRoom = "rooms_bad_room", "A room name needs a few letters and no spaces.", "Ein Raumname braucht ein paar Buchstaben und keine Leerzeichen.";
+    RoomsTooMany = "rooms_too_many", "You are in %1$d rooms, as many as this hub allows. Leave one first.", "Du bist in %1$d Räumen, so vielen, wie dieser Hub erlaubt. Verlass zuerst einen.";
+    RoomsYou = "rooms_you", "you", "du";
+    RoomsCameIn = "rooms_came_in", "%1$s came in", "%1$s ist da";
+    // Our own join (1384): "du ist da" was the nick put into the line above.
+    RoomsWeCameIn = "rooms_we_came_in", "you came in", "du bist da";
+    RoomsWentOut = "rooms_went_out", "%1$s left", "%1$s ist gegangen";
     Settings = "settings", "Settings", "Einstellungen";
     MailboxConnected = "mailbox_connected", "You. Your mailbox is connected.", "Du. Dein Postfach ist verbunden.";
     MailboxNotConnected = "mailbox_not_connected", "You. Your mailbox is not connected.", "Du. Dein Postfach ist nicht verbunden.";
@@ -53,12 +77,12 @@ leviculum_ui::catalogue! {
     Archived = "archived", "Archived", "Archiviert";
     Pin = "pin", "Pin", "Fixieren";
     Unpin = "unpin", "Unpin", "Lösen";
-    Mute = "mute", "Mute", "Stumm schalten";
-    Unmute = "unmute", "Unmute", "Ton an";
+    Mute = "mute", "Mute", "Stummschalten";
+    Unmute = "unmute", "Unmute", "Stummschaltung aufheben";
     Archive = "archive", "Archive", "Archivieren";
     Unarchive = "unarchive", "Unarchive", "Aus dem Archiv holen";
-    MarkRead = "mark_read", "Mark as read", "Gelesen";
-    MarkUnread = "mark_unread", "Mark as unread", "Ungelesen";
+    MarkRead = "mark_read", "Mark as read", "Als gelesen markieren";
+    MarkUnread = "mark_unread", "Mark as unread", "Als ungelesen markieren";
     Delete = "delete", "Delete", "Löschen";
     // Times and the liveness words (1209).
     Today = "today", "Today", "Heute";
@@ -81,12 +105,23 @@ leviculum_ui::catalogue! {
     NearbyCard = "nearby_card", "Nearby, not in your contacts", "In der Nähe, nicht in deinen Kontakten";
     NearbyAdd = "nearby_add", "Add", "Hinzufügen";
     NearbyEnterAdds = "nearby_enter_adds", "Enter adds", "Enter fügt hinzu";
+    // The map on the M9 (1375): its pins in ASCII, the atlas has no ◉, and
+    // the keys a board without a palette or a pointer works it with.
+    MapLegend = "map_legend", "* person  @ chosen  grey: old or nearby", "* Person  @ gewählt  grau: alt oder in der Nähe";
+    MapKeys = "map_keys", "arrows pan  +- zoom  space pin  enter open", "Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
+    // The terminal's list line of our own last message (1381).
+    RowYou = "row_you", "you: %1$s", "du: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";
     QuoteYou = "quote_you", "You", "Du";
+    // A row's last line for a message without words (1377): the list and
+    // the phone's notification say these in the reader's language.
+    RowPhoto = "row_photo", "Photo", "Foto";
+    RowPositionShared = "row_position_shared", "Position shared", "Position geteilt";
+    RowPositionReport = "row_position_report", "Position report", "Positionsmeldung";
     // The chat: compose, the marks, a bubble's menu.
     ComposeHint = "compose_hint", "Message", "Nachricht";
     Send = "send", "Send", "Senden";
@@ -106,6 +141,35 @@ leviculum_ui::catalogue! {
     ActionInfo = "action_info", "Info", "Info";
     ActionDelete = "action_delete", "Delete", "Löschen";
     ActionSelect = "action_select", "Select", "Auswählen";
+    // A message's Info (1381): plain rows in the reader's language; the
+    // hex and the device's log only under Advanced.
+    InfoAdvanced = "info_advanced", "Advanced", "Erweitert";
+    InfoFrom = "info_from", "From", "Von";
+    InfoTo = "info_to", "To", "An";
+    InfoSent = "info_sent", "Sent", "Gesendet";
+    InfoReceived = "info_received", "Received", "Empfangen";
+    InfoState = "info_state", "Status", "Status";
+    InfoWaiting = "info_waiting", "Waiting to be sent", "Wartet auf den Versand";
+    InfoPreparing = "info_preparing", "Being prepared for sending", "Wird zum Senden vorbereitet";
+    InfoSending = "info_sending", "Being sent now", "Wird gerade gesendet";
+    InfoMailbox = "info_mailbox", "In the mailbox, delivered once %1$s is online", "Im Postfach, wird zugestellt, sobald %1$s online ist";
+    InfoDelivered = "info_delivered", "Arrived on %1$s's device", "Auf dem Gerät von %1$s angekommen";
+    InfoRefused = "info_refused", "Not sent: it was refused. Double tap to send again", "Nicht gesendet: es wurde abgelehnt. Doppeltippen, um es erneut zu senden";
+    InfoSender = "info_sender", "Sender", "Absender";
+    InfoSignatureOk = "info_signature_ok", "Confirmed by its signature", "Durch die Signatur bestätigt";
+    InfoSignatureUnchecked = "info_signature_unchecked", "Not confirmed yet: the sender's key is missing", "Noch nicht bestätigt: der Schlüssel des Absenders fehlt";
+    InfoSignatureBad = "info_signature_bad", "Signature invalid: it may not be from %1$s", "Signatur ungültig: sie ist vielleicht nicht von %1$s";
+    InfoRead = "info_read", "Read", "Gelesen";
+    InfoReceiptsOff = "info_receipts_off", "Read receipts are off: you send none and see none", "Lesebestätigungen sind aus: du sendest keine und siehst keine";
+    InfoNoReceipts = "info_no_receipts", "%1$s sends no read receipts", "%1$s sendet keine Lesebestätigungen";
+    InfoGroup = "info_group", "Group", "Gruppe";
+    InfoGroupNone = "info_group_none", "No member's copy is confirmed yet", "Noch bei keinem Mitglied bestätigt";
+    InfoGroupDelivered = "info_group_delivered", "Delivered to %1$d of %2$d", "Bei %1$d von %2$d angekommen";
+    InfoGroupRead = "info_group_read", "Read by %1$d of %2$d", "Von %1$d von %2$d gelesen";
+    InfoGroupNoReaders = "info_group_no_readers", "Nobody in it sends read receipts", "Niemand darin sendet Lesebestätigungen";
+    InfoGroupQuiet = "info_group_quiet", "%1$d send no read receipts and are not counted", "%1$d senden keine Lesebestätigungen und zählen nicht mit";
+    InfoSize = "info_size", "Size", "Größe";
+    InfoKb = "info_kb", "%1$d.%2$d KB", "%1$d,%2$d KB";
     // The verbs no Android string named yet: each intent's label
     // (`super::intent::Intent::label`), new keys under `scene_`.
     Back = "scene_back", "Back", "Zurück";
@@ -157,10 +221,10 @@ leviculum_ui::catalogue! {
     GroupNameHint = "group_name_hint", "Group name", "Name der Gruppe";
     GroupPickTitle = "group_pick_title", "Add members", "Mitglieder hinzufügen";
     GroupPicked = "group_picked", "%1$d selected", "%1$d ausgewählt";
-    GroupTrustCreate = "group_trust_create", "%1$s is kept on your mailbox. Messages in the group can be read there.", "%1$s liegt auf deinem Postfach. Dort sind die Nachrichten der Gruppe lesbar.";
-    GroupTrustJoin = "group_trust_join", "%1$s is kept on %2$s's mailbox. %2$s could read the group's messages.", "%1$s liegt auf dem Postfach von %2$s. %2$s könnte die Nachrichten der Gruppe lesen.";
+    GroupTrustCreate = "group_trust_create", "%1$s is kept on your mailbox. Messages in the group can be read there.", "%1$s liegt in deinem Postfach. Dort sind die Nachrichten der Gruppe lesbar.";
+    GroupTrustJoin = "group_trust_join", "%1$s is kept on %2$s's mailbox. %2$s could read the group's messages.", "%1$s liegt im Postfach von %2$s. %2$s könnte die Nachrichten der Gruppe lesen.";
     GroupInvited = "group_invited", "%1$s invited you to %2$s", "%1$s lädt dich zu %2$s ein";
-    GroupYouInvited = "group_you_invited", "You invited them to %1$s", "Du hast eingeladen zu %1$s";
+    GroupYouInvited = "group_you_invited", "You invited them to %1$s", "Du hast zu %1$s eingeladen";
     GroupJoin = "group_join", "Join", "Beitreten";
     GroupJoined = "group_joined_card", "You joined %1$s", "Du bist %1$s beigetreten";
     GroupInvitation = "group_invitation", "Invitation", "Einladung";
@@ -183,7 +247,7 @@ leviculum_ui::catalogue! {
     GroupStateWaiting = "group_state_waiting", "invited, waiting for them to come online", "eingeladen, wartet, bis das Mitglied online ist";
     GroupStateUndelivered = "group_state_undelivered", "invited, not delivered", "eingeladen, nicht zugestellt";
     GroupStateLeft = "group_state_left", "left", "ausgetreten";
-    GroupHomeTooOld = "group_home_too_old", "Your home cannot host groups yet. Update it.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere es.";
+    GroupHomeTooOld = "group_home_too_old", "Your mailbox cannot hold groups yet. Update Loquax there.", "Dein Postfach kann noch keine Gruppen führen. Aktualisiere Loquax dort.";
     GroupYouLeft = "group_you_left", "You left %1$s", "Du hast %1$s verlassen";
     GroupDelete = "group_delete", "Delete group", "Gruppe löschen";
     GroupDeleteAsk = "group_delete_ask", "Delete %1$s for everyone?", "%1$s für alle löschen?";
@@ -201,10 +265,12 @@ leviculum_ui::catalogue! {
     GroupNoteEnded = "group_note_ended", "%1$s ended the group.", "%1$s hat die Gruppe beendet.";
     GroupNoteYouEnded = "group_note_you_ended", "You ended the group.", "Du hast die Gruppe beendet.";
     GroupNoteAdminEnded = "group_note_admin_ended", "The admin ended the group.", "Der Admin hat die Gruppe beendet.";
-    GroupLeftOutPhoto = "group_left_out_photo", "sent a photo (too large for the radio)", "hat ein Foto geschickt (zu groß für Funk)";
-    GroupLeftOutVoice = "group_left_out_voice", "sent a voice message (too large for the radio)", "hat eine Sprachnachricht geschickt (zu groß für Funk)";
-    GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für Funk)";
+    GroupLeftOutPhoto = "group_left_out_photo", "sent a photo (too large for the radio)", "hat ein Foto geschickt (zu groß für die Funkstrecke)";
+    GroupLeftOutVoice = "group_left_out_voice", "sent a voice message (too large for the radio)", "hat eine Sprachnachricht geschickt (zu groß für die Funkstrecke)";
+    GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für die Funkstrecke)";
     GroupLeftOutGone = "group_left_out_gone", "a message (no longer here)", "eine Nachricht (nicht mehr da)";
+    // A group's status of our message in its ledger (1381): kept as numbers, said in the reader's language.
+    GroupStatusNote = "group_status_note", "Group: delivered to %1$d of %2$d, read by %3$d of %4$d", "Gruppe: bei %1$d von %2$d angekommen, von %3$d von %4$d gelesen";
     MyCode = "scene_my_code", "My code", "Mein Code";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";
@@ -244,7 +310,7 @@ leviculum_ui::catalogue! {
     OpenFile = "scene_open_file", "Open file", "Datei öffnen";
     FileTooLarge = "file_too_large", "This file is %1$s. A message carries at most %2$s.", "Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.";
     FileUnreadable = "file_unreadable", "This file could not be read.", "Diese Datei ließ sich nicht lesen.";
-    FileNoApp = "file_no_app", "No app here opens this file.", "Keine App hier öffnet diese Datei.";
+    FileNoApp = "file_no_app", "No app on this device opens this file.", "Keine App auf diesem Gerät kann diese Datei öffnen.";
     // Voice messages (1222): the bubble's words, its buttons, the
     // microphone's hint, the slide that cancels, the refusals, and what
     // the phone says without the microphone.
@@ -280,7 +346,7 @@ leviculum_ui::catalogue! {
     Attach = "scene_attach", "Attach", "Anhängen";
     Locate = "scene_locate", "My position", "Meine Position";
     Camera = "scene_camera", "Take a photo", "Foto aufnehmen";
-    CameraNoApp = "camera_no_app", "No camera app here takes a photo.", "Keine Kamera-App hier nimmt ein Foto auf.";
+    CameraNoApp = "camera_no_app", "There is no camera app on this device.", "Auf diesem Gerät gibt es keine Kamera-App.";
     Staged = "scene_staged", "Photo to send, %1$s", "Foto zum Senden, %1$s";
     Unstage = "scene_unstage", "Remove photo", "Foto entfernen";
     CaptionHint = "caption_hint", "Add a caption", "Bildunterschrift hinzufügen";
@@ -299,6 +365,11 @@ leviculum_ui::catalogue! {
     ShareNotice = "share_notice", "Loquax shares your position", "Loquax teilt deine Position";
     NoShares = "no_shares", "Your position is not shared with anyone.", "Deine Position wird mit niemandem geteilt.";
     LocationOn = "location_on", "Turn location on", "Standort einschalten";
+    // The position by hand on a desktop (1371).
+    EnterPosition = "enter_position", "Type my position", "Meine Position eingeben";
+    MapCentre = "map_centre", "The map's centre", "Die Kartenmitte";
+    PositionHint = "position_hint", "52.5163, 13.3777", "52.5163, 13.3777";
+    FixByHand = "fix_by_hand", "Set by hand", "Von Hand gesetzt";
     NoFix = "no_fix", "Loquax does not know where you are yet.", "Loquax weiß noch nicht, wo du bist.";
     FixAge = "fix_age", "Found %1$s", "Ermittelt %1$s";
     FixNow = "fix_now", "Found just now", "Gerade eben ermittelt";
@@ -306,6 +377,10 @@ leviculum_ui::catalogue! {
     // the palette say for one they cannot take.
     CodeForeign = "code_foreign", "That is not a Loquax code.", "Das ist kein Loquax-Code.";
     CodeDamaged = "code_damaged", "This code is damaged. Ask for it again.", "Dieser Code ist beschädigt. Lass ihn dir noch einmal geben.";
+    // A code read from a picture (1341, 1377): the chooser's title and
+    // what a picture without one says, without the file's path.
+    CodeFromPicture = "code_from_picture", "Read a code from a picture", "Code aus einem Bild lesen";
+    CodeNotInPicture = "code_not_in_picture", "There is no code in this picture.", "In diesem Bild ist kein Code.";
     CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a friend.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
     // The pencil's screen (1263): scan first, paste second, typing under
     // Advanced.
@@ -332,7 +407,7 @@ leviculum_ui::catalogue! {
     MoveFailed = "move_failed", "The move did not work. Your old phone still has everything.", "Der Umzug hat nicht geklappt. Dein altes Handy hat noch alles.";
     MoveHasAddress = "move_has_address", "This phone already has an address. Only a new phone can take one over.", "Dieses Handy hat schon eine Adresse. Nur ein neues Handy kann eine übernehmen.";
     MovedAway = "moved_away", "This phone has moved. Your mailbox is on your new phone now, and this phone sends nothing.", "Dieses Handy ist umgezogen. Dein Postfach ist jetzt auf deinem neuen Handy, und dieses Handy sendet nichts mehr.";
-    RestoreLive = "restore_live", "This address is in use on another device right now. Restored here too, both lose messages. Move from the old phone instead, or stop Loquax there first.", "Diese Adresse ist gerade auf einem anderen Gerät in Betrieb. Hier auch wiederhergestellt, verlieren beide Nachrichten. Zieh lieber vom alten Handy um, oder beende Loquax dort zuerst.";
+    RestoreLive = "restore_live", "This address is in use on another device right now. If you restore it here too, both devices lose messages. Move from the old phone instead, or stop Loquax there first.", "Diese Adresse ist gerade auf einem anderen Gerät in Betrieb. Stellst du sie hier auch wieder her, verlieren beide Geräte Nachrichten. Zieh lieber vom alten Handy um, oder beende Loquax dort zuerst.";
     Details = "details", "Details", "Details";
     ZoomIn = "scene_zoom_in", "Zoom in", "Vergrößern";
     ZoomOut = "scene_zoom_out", "Zoom out", "Verkleinern";

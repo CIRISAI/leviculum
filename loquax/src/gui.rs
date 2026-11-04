@@ -43,7 +43,9 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::advanced::image::{FilterMethod, Handle};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
-use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor};
+use iced::widget::{
+    button, column, container, row, scrollable, stack, text, text_editor, text_input, Space,
+};
 use iced::{
     keyboard, mouse, window, Color, Element, Length, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
@@ -59,6 +61,7 @@ use loquax::keys::{self, MapCmd};
 use loquax::mapframe::{hold, onto, Ask, Frames};
 use loquax::picture::map_theme;
 use loquax::tiles::Motion;
+use loquax::ui::browse::BrowseEvent;
 use loquax::ui::compose::Sheet;
 use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
@@ -70,6 +73,9 @@ use loquax::when::WallTime;
 use crate::desktop;
 use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 
+/// The tabs' bar under a narrow window, in logical pixels: what the Browse
+/// tab's page leaves it (1369).
+const COMPACT_TABS: f32 = 72.0;
 /// The list of peers on the left, in logical pixels.
 const LIST_WIDTH: f32 = 260.0;
 /// The window's size when it opens.
@@ -104,9 +110,52 @@ pub struct Seen {
     /// The reader's switch "Send read receipts" (1233), the settings'
     /// row.
     pub receipts: bool,
+    /// The reader's photo size (1220), the settings' row (1371).
+    pub photo_size: loquax::ui::photos::PhotoSize,
+    /// Our own contact code, what "My code" shows (1371).
+    pub own_code: Option<String>,
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
+    /// The Browse tab while it is in front (1369): the browser the model
+    /// hosts, drawn by lnomad's window code.
+    pub browse: Option<Browsed>,
+    /// The newest text the browser copied, with its serial (1369): a new
+    /// one goes to the window's clipboard.
+    pub copied: Option<(u64, String)>,
+}
+
+/// The hosted browser as the window draws it (1369): lnomad's model as
+/// the shell holds it, its scene, and the pictures the shell's half of
+/// lnomad's picture code took for it.
+#[derive(Clone)]
+pub struct Browsed {
+    pub model: Arc<lnomad::Model>,
+    pub scene: lnomad::app::scene::Scene,
+    pub pictures: crate::browsing::Pictures,
+    /// Moves with every picture taken, so a picture is drawn when it lands.
+    pub epoch: u64,
+}
+
+impl PartialEq for Browsed {
+    /// What the window draws moved: the scene, a picture, the pictures'
+    /// slots, the help's scroll, the theme.
+    fn eq(&self, other: &Self) -> bool {
+        self.scene == other.scene
+            && self.epoch == other.epoch
+            && self.model.images == other.model.images
+            && self.model.help_scroll == other.model.help_scroll
+            && self.model.theme == other.model.theme
+    }
+}
+
+impl std::fmt::Debug for Browsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Browsed")
+            .field("title", &self.model.title)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Seen {
@@ -121,7 +170,19 @@ impl Seen {
             scene: shell.model.scene(LayoutClass::Wide),
             now: shell.model.now,
             receipts: shell.model.reading.on,
+            photo_size: shell.model.photo_size,
+            own_code: shell.model.own_code.as_ref().map(|c| c.code.clone()),
             photo: None,
+            browse: match (shell.model.browse.showing(), &shell.browsing.pictures) {
+                (true, Some(pictures)) => Some(Browsed {
+                    model: Arc::new(shell.model.browse.model.clone()),
+                    scene: shell.model.browse.model.scene(),
+                    pictures: Arc::clone(pictures),
+                    epoch: shell.browsing.epoch,
+                }),
+                _ => None,
+            },
+            copied: shell.browsing.copied.clone(),
         }
     }
 }
@@ -161,6 +222,12 @@ pub async fn run(options: ShellOptions) -> ExitCode {
     // The desktop's portal is the window's picker (1341): Gallery and
     // File in the plus, as on the phone.
     shell.model.bar.abilities.picker = true;
+    // No receiver on a desktop (1371): the position sheet takes it by
+    // hand, typed or the map's centre.
+    shell.model.bar.abilities.manual = true;
+    // The Browse tab's pictures (1369): lnomad's window code holds them in
+    // the shell, which the window draws them from.
+    shell.browsing.pictures = Some(Arc::default());
     let frames = Frames::new(shell.maps.clone());
     let (seen_tx, seen_rx) = unbounded();
     let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -219,6 +286,13 @@ async fn drive(
                     }
                 },
                 shell::Output::File(path) => path,
+                // A page's link out of NomadNet, from the Browse tab (1369).
+                shell::Output::Open(url) => {
+                    if let Err(error) = open::that(&url) {
+                        tracing::warn!("could not open {url}: {error}");
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             if let Err(error) = open::that(&path) {
@@ -313,6 +387,9 @@ fn window(taken: Option<(Frames, UnboundedReceiver<Seen>, Asks)>, probe: bool) -
         App::view,
     )
     .title("Loquax")
+    // The Browse tab's page face (1369), as lnomad's own window loads it.
+    .font(lnomad::gui::MONO_BYTES)
+    .font(lnomad::gui::MONO_BOLD_BYTES)
     .subscription(App::subscription)
     .theme(App::theme)
     .window(iced::window::Settings {
@@ -365,6 +442,12 @@ pub enum Message {
     NewAddress(String),
     /// What the new group's name field holds now (1307).
     GroupName(String),
+    /// What the position sheet's field holds now (1371).
+    Position(String),
+    /// What the row menu's rename field holds now (1371).
+    Renaming(String),
+    /// A bubble menu's Forward (1371): pick the conversation.
+    ForwardPick(NodeId),
     NewGo,
     Compose(text_editor::Action),
     /// What the user asks (1218): a press on a scene node raises the
@@ -401,6 +484,12 @@ pub enum Message {
     CodePicked(Result<Option<std::path::PathBuf>, String>),
     /// A frame is due while the packaging probe runs ([`probe`]).
     Probed,
+    /// The Browse tab's view said this (1369): lnomad's window message,
+    /// for the browser the model hosts.
+    Browse(lnomad::gui::Message),
+    /// The Rooms tab said this (1379): the input's text, its Enter, a
+    /// room chosen.
+    Rooms(loquax::ui::rooms::RoomsEvent),
 }
 
 impl Message {
@@ -427,6 +516,8 @@ impl Message {
                 | Message::PickCode
                 | Message::CodePicked(_)
                 | Message::Probed
+                | Message::Browse(_)
+                | Message::Rooms(_)
         )
     }
 }
@@ -438,6 +529,11 @@ pub enum Screen {
     Map,
     /// The settings (1233): one page, "Send read receipts" on it.
     Settings,
+    /// The Browse tab (1369): lnomad's window over the browser the model
+    /// hosts, while the model has it in front.
+    Browse,
+    /// The Rooms tab (1379), while the model has it in front.
+    Rooms,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -604,6 +700,21 @@ struct App {
     search: String,
     /// The new conversation's field while it is open.
     new_address: Option<String>,
+    /// The position sheet's field while it is open (1371).
+    position: Option<String>,
+    /// The row menu's rename field while it is open (1371): whose, and
+    /// what it holds.
+    renaming: Option<([u8; 16], String)>,
+    /// The map was shown once: the position sheet offers its centre.
+    map_shown: bool,
+    /// The keys' help over the window while it is open (1371), at this
+    /// line.
+    help: Option<usize>,
+    /// "My code" over the window while it is open (1371).
+    code_open: bool,
+    /// The bubble whose Forward was pressed (1371): its menu lists the
+    /// conversations to send the copy to.
+    forwarding: Option<NodeId>,
     compose: text_editor::Content,
     /// The message a reply being written answers, with its first line.
     reply: Option<([u8; 32], String)>,
@@ -635,6 +746,12 @@ struct App {
     /// The packaging probe's frames so far ([`probe`]); `None` in a window
     /// a person uses.
     probe: Option<u32>,
+    /// The reader left the Browse tab (1369) and the model has not said
+    /// so yet: a [`Seen`] from before still holds the browser.
+    browse_left: bool,
+    /// The reader left the Rooms tab (1379) and the model has not said so
+    /// yet, as [`App::browse_left`].
+    rooms_left: bool,
 }
 
 impl App {
@@ -671,7 +788,11 @@ impl App {
                 scene: empty.clone(),
                 now: None,
                 receipts: true,
+                photo_size: loquax::ui::photos::PhotoSize::default(),
+                own_code: None,
                 photo: None,
+                browse: None,
+                copied: None,
             },
             asks,
             fitted_at: None,
@@ -697,6 +818,12 @@ impl App {
             flipped: false,
             search: String::new(),
             new_address: None,
+            position: None,
+            renaming: None,
+            map_shown: false,
+            help: None,
+            code_open: false,
+            forwarding: None,
             compose: text_editor::Content::new(),
             reply: None,
             compose_for: None,
@@ -712,6 +839,8 @@ impl App {
             rec_origin: None,
             rec_over_lock: false,
             probe: None,
+            browse_left: false,
+            rooms_left: false,
         }
     }
 
@@ -815,6 +944,13 @@ impl App {
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
             Message::Search(query) => self.search = query,
             Message::NewAddress(typed) => self.new_address = Some(typed),
+            Message::Position(typed) => self.position = Some(typed),
+            Message::ForwardPick(id) => self.forwarding = Some(id),
+            Message::Renaming(typed) => {
+                if let Some((_, name)) = self.renaming.as_mut() {
+                    *name = typed;
+                }
+            }
             Message::GroupName(typed) => {
                 self.tell(UiEvent::Group(loquax::ui::groups::Verb::Name(typed)));
             }
@@ -939,8 +1075,29 @@ impl App {
             // The plus's sheet and the position sheet (1270) are the
             // model's; the window draws them from the scene.
             Intent::Attach { peer } => self.tell(UiEvent::OpenSheet(Sheet::Attach { peer })),
-            Intent::Locate { peer } => self.tell(UiEvent::OpenSheet(Sheet::Position { peer })),
-            Intent::CloseSheet => self.tell(UiEvent::CloseSheet),
+            Intent::Locate { peer } => {
+                self.tell_map_centre();
+                self.tell(UiEvent::OpenSheet(Sheet::Position { peer }));
+            }
+            Intent::CloseSheet => {
+                self.position = None;
+                self.tell(UiEvent::CloseSheet);
+            }
+            // The position by hand (1371): the sheet's field, then what
+            // it holds goes to the model, which reads it.
+            Intent::EnterPosition { text: None } => {
+                self.position = Some(String::new());
+                return iced::widget::operation::focus(chat::POSITION_FIELD);
+            }
+            Intent::EnterPosition { text: Some(text) } => {
+                self.position = None;
+                self.tell(UiEvent::EnterPosition { text });
+            }
+            Intent::FixAtMapCentre => {
+                self.position = None;
+                self.tell_map_centre();
+                self.tell(UiEvent::FixAtMapCentre);
+            }
             // Gallery and File: the desktop's chooser picks (1341).
             Intent::SendPhoto { peer, .. } => {
                 return self.pick(peer, desktop::Pick::Picture, StrId::AttachPhoto)
@@ -948,6 +1105,29 @@ impl App {
             Intent::SendFile { peer, .. } => {
                 return self.pick(peer, desktop::Pick::File, StrId::AttachFile)
             }
+            // The keys' help (1371), the terminal's overlay in the window
+            // as lnomad's window draws it; Back or a click closes it.
+            Intent::Help => self.help = Some(0),
+            Intent::Back | Intent::Dismiss if self.help.is_some() => self.help = None,
+            // Our own code and its QR (1371), as the phone's profile and
+            // the terminal's `my code` show it.
+            Intent::MyCode => match self.seen.own_code {
+                Some(_) => self.code_open = true,
+                None => self.seen.notice = Some(loquax::ui::NO_OWN_CODE.to_string()),
+            },
+            Intent::Back | Intent::Dismiss if self.code_open => self.code_open = false,
+            Intent::Copy if self.code_open => {
+                if let Some(code) = self.seen.own_code.clone() {
+                    return iced::clipboard::write(code);
+                }
+            }
+            Intent::Scroll(cmd) if self.help.is_some() => {
+                let (viewport, max) =
+                    leviculum_ui::help::scroll_bounds(&loquax::ui::help_groups(), self.help_area());
+                let at = self.help.unwrap_or_default();
+                self.help = Some(leviculum_ui::keymap::scrolled(at, cmd, viewport, max));
+            }
+            Intent::PhotoSize(size) => self.tell(UiEvent::PhotoSize(size)),
             Intent::Back | Intent::Dismiss if self.menu.is_none() && self.scene.sheet.is_some() => {
                 self.tell(UiEvent::CloseSheet)
             }
@@ -958,6 +1138,10 @@ impl App {
                 }
                 (None, Screen::Settings) if self.maps_asked => self.maps_asked = false,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
+                (None, Screen::Browse | Screen::Rooms) => {
+                    self.leave_browse();
+                    self.screen = Screen::Chats;
+                }
                 // A stacked chat goes back to the list, as its bar's back
                 // does; beside the list Back has nothing to leave.
                 (None, Screen::Chats) => {
@@ -1034,6 +1218,7 @@ impl App {
             }
             Intent::ShowMap { peer } => {
                 self.screen = Screen::Map;
+                self.map_shown = true;
                 if let Some(peer) = peer {
                     self.apply(Message::Select(peer));
                 }
@@ -1045,14 +1230,74 @@ impl App {
                 let peer = self.target(peer);
                 return self.intent(Intent::ShowMap { peer });
             }
-            Intent::Tab(TabId::Map) => return self.intent(Intent::ShowMap { peer: None }),
-            Intent::Tab(TabId::Chats) => self.screen = Screen::Chats,
-            // lnomad is its own program on a PC (1337): the window enables
-            // no Browse tab and hosts no browser.
-            Intent::Tab(TabId::Browse) | Intent::Browse(_) => {}
+            Intent::Tab(TabId::Map) => {
+                self.leave_browse();
+                return self.intent(Intent::ShowMap { peer: None });
+            }
+            Intent::Tab(TabId::Chats) => {
+                self.leave_browse();
+                self.screen = Screen::Chats;
+            }
+            // The Browse tab (1369): the model brings it to the front, and
+            // the window follows what it says.
+            Intent::Tab(TabId::Browse) => {
+                self.browse_left = false;
+                self.tell(UiEvent::Tab(TabId::Browse));
+            }
+            // The Rooms tab (1379): as the Browse tab, the model brings it.
+            Intent::Tab(TabId::Rooms) => {
+                self.rooms_left = false;
+                self.tell(UiEvent::Tab(TabId::Rooms));
+            }
+            Intent::Browse(intent) => self.tell(UiEvent::Browse(BrowseEvent::Intent(intent))),
             Intent::Menu(id) => {
                 self.menu = id;
                 self.deleting = None;
+                self.renaming = None;
+                self.forwarding = None;
+            }
+            // A copy of the message to the conversation picked (1371).
+            Intent::Forward { from, key, to } => {
+                self.menu = None;
+                self.forwarding = None;
+                self.tell(UiEvent::Forward { from, key, to });
+            }
+            // A row menu's verbs on a peer (1371): the model's, as the
+            // terminal's palette does them; a forget asks once, a rename
+            // opens its field.
+            Intent::Forget {
+                peer: Target::Peer(peer),
+                confirmed: false,
+                ..
+            } => self.deleting = Some(NodeId::Row(peer)),
+            Intent::Rename {
+                peer: Target::Peer(peer),
+                name: None,
+            } => {
+                let name = self
+                    .scene
+                    .list
+                    .iter()
+                    .flat_map(|list| &list.rows)
+                    .find(|r| r.id == NodeId::Row(peer))
+                    .map(|r| r.row.name.clone())
+                    .unwrap_or_default();
+                self.renaming = Some((peer, name));
+            }
+            word @ (Intent::Pin { .. }
+            | Intent::Mute { .. }
+            | Intent::Archive { .. }
+            | Intent::Block { .. }
+            | Intent::Verify { .. }
+            | Intent::MarkUnread { .. }
+            | Intent::Rename { .. }
+            | Intent::Forget { .. }) => {
+                self.menu = None;
+                self.deleting = None;
+                self.renaming = None;
+                if let Some((peer, verb)) = loquax::ui::verbs::PeerVerb::of(&word) {
+                    self.tell(UiEvent::PeerWord { peer, verb });
+                }
             }
             Intent::React {
                 to,
@@ -1152,6 +1397,16 @@ impl App {
         Task::none()
     }
 
+    /// The map's centre, once the map was shown, for the position sheet
+    /// (1371).
+    fn tell_map_centre(&self) {
+        if self.map_shown {
+            let now = self.seen.now.map_or(0, |now| now.unix_secs);
+            let centre = loquax::ui::by_hand::of_world(self.view.centre, now);
+            self.tell(UiEvent::MapCentre(Some(centre)));
+        }
+    }
+
     /// The layout class the window's width gives (1218): the list beside
     /// the chat from [`WIDE_FROM`] logical pixels, stacked below.
     fn class(&self) -> LayoutClass {
@@ -1225,6 +1480,8 @@ impl App {
         let key = leviculum_ui_iced::key::chord(event)?;
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
+            // The Rooms' input field has the keys while it is in front.
+            (Screen::Browse | Screen::Rooms, _) => return None,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
             (Screen::Chats | Screen::Settings, _) => Pane::Conversations,
         };
@@ -1277,6 +1534,142 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // What the Browse tab copied goes to the window's clipboard (1369).
+        let copy = match &message {
+            Message::Seen(seen) if seen.copied.is_some() && seen.copied != self.seen.copied => seen
+                .copied
+                .as_ref()
+                .map(|(_, text)| iced::clipboard::write(text.clone())),
+            _ => None,
+        };
+        let task = self.update_inner(message);
+        self.browse_sync();
+        self.rooms_sync();
+        match copy {
+            Some(copy) => Task::batch([copy, task]),
+            None => task,
+        }
+    }
+
+    /// The window's screen follows the model's Browse tab (1369): in front
+    /// while the model has it so, unless the reader just left it; the
+    /// browser told the window's light or dark and the page's cells.
+    fn browse_sync(&mut self) {
+        match (&self.seen.browse, self.screen) {
+            (None, _) => {
+                self.browse_left = false;
+                if self.screen == Screen::Browse {
+                    self.screen = Screen::Chats;
+                }
+            }
+            (Some(_), Screen::Browse) => {}
+            (Some(_), _) if self.browse_left => {}
+            (Some(_), _) => {
+                self.screen = Screen::Browse;
+                self.menu = None;
+            }
+        }
+        let Some(browsed) = self
+            .seen
+            .browse
+            .as_ref()
+            .filter(|_| self.screen == Screen::Browse)
+        else {
+            return;
+        };
+        let theme = match self.dark() {
+            true => lnomad::Theme::Dark,
+            false => lnomad::Theme::Light,
+        };
+        let mut said = Vec::new();
+        if browsed.model.theme != theme {
+            said.push(BrowseEvent::Theme(theme));
+        }
+        let (cols, rows) = self.browse_cells();
+        if browsed.model.size != (cols, rows) {
+            said.push(BrowseEvent::Resize { cols, rows });
+        }
+        for event in said {
+            self.tell(UiEvent::Browse(event));
+        }
+    }
+
+    /// The Browse tab's page in cells: the window less the tabs' rail or
+    /// bar, as lnomad's window counts its own.
+    fn browse_cells(&self) -> (u16, u16) {
+        match self.class() {
+            LayoutClass::Wide => {
+                lnomad::gui::cells(self.window.width - chat::RAIL, self.window.height)
+            }
+            LayoutClass::Compact => {
+                lnomad::gui::cells(self.window.width, self.window.height - COMPACT_TABS)
+            }
+        }
+    }
+
+    /// The reader left the Browse tab for another: the model is told, and
+    /// the window does not follow a [`Seen`] from before back into it.
+    fn leave_browse(&mut self) {
+        if self.screen == Screen::Browse || self.seen.browse.is_some() {
+            self.browse_left = true;
+            self.tell(UiEvent::Tab(TabId::Chats));
+        }
+        if self.screen == Screen::Rooms || self.seen.scene.rooms.is_some() {
+            self.rooms_left = true;
+            self.tell(UiEvent::Tab(TabId::Chats));
+        }
+    }
+
+    /// The window follows the model's Rooms tab (1379), but for a [`Seen`]
+    /// from before the reader left it.
+    fn rooms_sync(&mut self) {
+        match (self.seen.scene.rooms.is_some(), self.screen) {
+            (false, _) => {
+                self.rooms_left = false;
+                if self.screen == Screen::Rooms {
+                    self.screen = Screen::Chats;
+                }
+            }
+            (true, Screen::Rooms) => {}
+            (true, _) if self.rooms_left => {}
+            (true, _) => {
+                self.screen = Screen::Rooms;
+                self.menu = None;
+            }
+        }
+    }
+
+    /// What lnomad's window view said, for the browser the model hosts
+    /// (1369), as lnomad's own window folds it: a press its intent, the
+    /// address field's text and Enter, the wheel's notches and the
+    /// pointer's cell as the model's mouse.
+    fn browse(&self, message: lnomad::gui::Message) {
+        use lnomad::gui::Message as Said;
+        let events = match message {
+            Said::Intent(intent) => vec![UiEvent::Browse(BrowseEvent::Intent(intent))],
+            Said::Address(value) => vec![UiEvent::Browse(BrowseEvent::Address(value))],
+            Said::AddressGo => vec![UiEvent::Browse(BrowseEvent::Intent(lnomad::Intent::Go {
+                url: None,
+            }))],
+            Said::Wheel(lines) => lnomad::gui::wheel_mice(lines)
+                .into_iter()
+                .map(UiEvent::Mouse)
+                .collect(),
+            Said::Pointer(at) => vec![UiEvent::Mouse(lnomad::gui::pointer_mouse(at))],
+            // The view says nothing else: the keys, the size, the frames
+            // and the transfers are the window's and the shell's here.
+            Said::Key(_)
+            | Said::Resized(_)
+            | Said::Outcome(_)
+            | Said::Frame(_)
+            | Said::SystemTheme(_) => Vec::new(),
+        };
+        for event in events {
+            self.tell(event);
+        }
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         // The viewer is over everything: a key is its Esc or nothing.
         if let (Some(viewer), Message::Key(event)) = (&mut self.viewer, &message) {
             if leviculum_ui_iced::key::chord(event).is_some_and(|k| k.code == KeyCode::Esc)
@@ -1332,7 +1725,7 @@ impl App {
                 );
             }
             Message::CodePicked(path) => {
-                match path.and_then(|p| p.map(|p| read_code(&p)).transpose()) {
+                match path.and_then(|p| p.map(|p| read_code(&p, self.lang)).transpose()) {
                     Ok(Some(code)) => {
                         self.new_address = Some(code);
                         return self.chat(Message::NewGo);
@@ -1343,6 +1736,22 @@ impl App {
                 return Task::none();
             }
             Message::Intent(intent) => return self.intent(intent),
+            Message::Browse(said) => {
+                self.browse(said);
+                return Task::none();
+            }
+            Message::Rooms(said) => {
+                self.tell(UiEvent::Rooms(said));
+                return Task::none();
+            }
+            // The Browse tab in front has the keys, as the model routes
+            // them (1369).
+            Message::Key(event) if self.screen == Screen::Browse => {
+                if let Some(key) = leviculum_ui_iced::key::chord(&event) {
+                    self.tell(UiEvent::Key(key));
+                }
+                return Task::none();
+            }
             Message::Settings => {
                 self.screen = Screen::Settings;
                 self.menu = None;
@@ -1654,6 +2063,8 @@ impl App {
         }
         let body = match (self.screen, self.class(), &self.scene.chat) {
             (Screen::Map, _, _) => self.map_view(),
+            (Screen::Browse, _, _) => self.browse_view(),
+            (Screen::Rooms, _, _) => self.rooms_view(),
             (Screen::Settings, _, _) => self.settings_pane(),
             // A group's screens (1307) take the chat's place, or the
             // whole stack's on a narrow window.
@@ -1667,11 +2078,212 @@ impl App {
             (Screen::Chats, LayoutClass::Compact, Some(_)) => self.chat_pane(),
             (Screen::Chats, LayoutClass::Compact, None) => self.list_pane(),
         };
-        match (self.tabs(), self.class()) {
+        let window: Element<'_, Message> = match (self.tabs(), self.class()) {
             (Some(tabs), LayoutClass::Wide) => row![tabs, body].into(),
             (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
             (None, _) => body,
+        };
+        match (self.help, self.code_open) {
+            (Some(scroll), _) => stack![window, self.help_layer(scroll)].into(),
+            (None, true) => stack![window, self.code_layer()].into(),
+            (None, false) => window,
         }
+    }
+
+    /// "My code" over the window (1371): the code's QR, the code as
+    /// text, Copy and Close.
+    fn code_layer(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let Some(code) = &self.seen.own_code else {
+            return Space::new().into();
+        };
+        let qr: Element<'_, Message> = match loquax::home::qr::verbatim_modules(code) {
+            Ok((size, modules)) => Canvas::new(QrCanvas { size, modules })
+                .width(QR_SIDE)
+                .height(QR_SIDE)
+                .into(),
+            Err(why) => text(why).into(),
+        };
+        let words = column![
+            text(StrId::MyCode.text(self.lang))
+                .size(18)
+                .color(chat::colour(t.text)),
+            qr,
+            text(code.clone())
+                .size(13)
+                .wrapping(text::Wrapping::Glyph)
+                .align_x(iced::Alignment::Center)
+                .width(Length::Fill)
+                .color(chat::colour(t.text_secondary)),
+            row![
+                button(
+                    text(StrId::ActionCopy.text(self.lang))
+                        .size(15)
+                        .color(chat::colour(t.accent))
+                )
+                .on_press(Message::Intent(Intent::Copy))
+                .style(|_: &Theme, _| button::Style::default()),
+                button(
+                    text(StrId::Close.text(self.lang))
+                        .size(15)
+                        .color(chat::colour(t.accent))
+                )
+                .on_press(Message::Intent(Intent::Back))
+                .style(|_: &Theme, _| button::Style::default()),
+            ]
+            .spacing(12),
+        ]
+        .spacing(10)
+        .align_x(iced::Alignment::Center)
+        .width(Length::Fixed(380.0));
+        let panel = container(words)
+            .padding(20)
+            .style(move |_: &Theme| container::Style {
+                background: Some(iced::Background::Color(chat::colour(t.panel))),
+                border: iced::border::rounded(12),
+                ..container::Style::default()
+            });
+        container(panel).center(Length::Fill).into()
+    }
+
+    /// The window in the help's cells.
+    fn help_area(&self) -> leviculum_ui::Rect {
+        let cells = |px: f32, cell: f32| (px / cell).clamp(0.0, f32::from(u16::MAX)) as u16;
+        leviculum_ui::Rect::new(
+            0,
+            0,
+            cells(self.window.width, lnomad::gui::CELL_W),
+            cells(self.window.height, lnomad::gui::CELL_H),
+        )
+    }
+
+    /// The keys' help over the window (1371): the keymap's rows in the
+    /// shared overlay, on the cell grid lnomad's window lays its help on;
+    /// a click closes it.
+    fn help_layer(&self, scroll: usize) -> Element<'_, Message> {
+        let grid = leviculum_ui_iced::help::Grid {
+            regular: lnomad::gui::MONO,
+            bold: lnomad::gui::MONO_BOLD,
+            size: lnomad::gui::PAGE_TEXT,
+            cell_w: lnomad::gui::CELL_W,
+            cell_h: lnomad::gui::CELL_H,
+        };
+        let overlay = leviculum_ui_iced::help::overlay(
+            &loquax::ui::help_groups(),
+            StrId::Help.text(self.lang),
+            scroll,
+            self.help_area(),
+            grid,
+            chat::palette(self.tokens()),
+        );
+        iced::widget::mouse_area(container(overlay).center(Length::Fill))
+            .on_press(Message::Intent(Intent::Dismiss))
+            .into()
+    }
+
+    /// The Browse tab (1369): lnomad's window view of the browser the
+    /// model hosts, with the pictures the shell's half of lnomad's picture
+    /// code holds. No second renderer: the page, its bars, its places
+    /// sheet and its help are lnomad's.
+    fn browse_view(&self) -> Element<'_, Message> {
+        let Some(browsed) = &self.seen.browse else {
+            return Space::new().into();
+        };
+        let pictures = browsed
+            .pictures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        lnomad::gui::view(&browsed.model, &pictures).map(Message::Browse)
+    }
+
+    /// The Rooms tab (1379): the hub's line, the rooms beside the open
+    /// room, its one line on what a room is not over its lines, and the
+    /// input with what it does under it. Drawn from the scene's Rooms node.
+    fn rooms_view(&self) -> Element<'_, Message> {
+        use loquax::ui::rooms::{RoomLineKind, RoomsEvent};
+        let Some(node) = &self.seen.scene.rooms else {
+            return Space::new().into();
+        };
+        let t = self.tokens();
+        let lang = self.lang;
+        let ink = chat::colour(t.text);
+        let quiet = chat::colour(t.text_secondary);
+        let rows = node
+            .rows
+            .iter()
+            .enumerate()
+            .fold(column![].spacing(2), |list, (i, room)| {
+                let label = match room.unread {
+                    0 => room.name.clone(),
+                    n => format!("{}  {n}", room.name),
+                };
+                // The list's own row, its selection the chats' (1379).
+                list.push(leviculum_ui_iced::chrome::list_item(
+                    container(text(label).size(15).color(ink)).padding([6, 10]),
+                    room.selected,
+                    Message::Rooms(RoomsEvent::Show(Some(i))),
+                    chat::palette(t),
+                ))
+            });
+        let list = container(scrollable(rows))
+            .width(Length::Fixed(200.0))
+            .height(Length::Fill)
+            .padding(8);
+        let room: Element<'_, Message> = match &node.open {
+            Some(open) => {
+                let lines = open.lines.iter().fold(column![].spacing(4), |lines, line| {
+                    let who = line.who.resolve(lang);
+                    let said = line.text.resolve(lang);
+                    let words = match line.kind {
+                        RoomLineKind::Said(leviculum_rrc::LineKind::Msg) => {
+                            format!("{who}: {said}")
+                        }
+                        RoomLineKind::Said(leviculum_rrc::LineKind::Action) => {
+                            format!("* {who} {said}")
+                        }
+                        RoomLineKind::Said(leviculum_rrc::LineKind::Notice) => {
+                            format!("-{who}- {said}")
+                        }
+                        RoomLineKind::Error => format!("! {said}"),
+                        _ => format!("— {said}"),
+                    };
+                    let colour = match line.kind {
+                        RoomLineKind::Said(_) => ink,
+                        _ => quiet,
+                    };
+                    lines.push(text(words).size(15).color(colour))
+                });
+                column![
+                    text(open.name.clone()).size(18).color(ink),
+                    text(open.live.resolve(lang)).size(13).color(quiet),
+                    scrollable(lines).height(Length::Fill),
+                ]
+                .spacing(8)
+                .into()
+            }
+            None => container(text(node.hint.resolve(lang)).size(15).color(quiet))
+                .center(Length::Fill)
+                .into(),
+        };
+        let input = text_input(&node.hint.resolve(lang), &node.input)
+            .on_input(|typed| Message::Rooms(RoomsEvent::Typed(typed)))
+            .on_submit(Message::Rooms(RoomsEvent::Submit))
+            .size(15)
+            .padding(8);
+        let foot = self
+            .seen
+            .notice
+            .clone()
+            .unwrap_or_else(|| node.hint.resolve(lang));
+        column![
+            text(node.hub.resolve(lang)).size(15).color(quiet),
+            row![list, container(room).width(Length::Fill).padding(8)].height(Length::Fill),
+            input,
+            text(foot).size(13).color(quiet),
+        ]
+        .spacing(6)
+        .padding(10)
+        .into()
     }
 
     fn map_view(&self) -> Element<'_, Message> {
@@ -1767,6 +2379,44 @@ impl App {
 /// The frame on screen, where the view moved it.
 struct PictureCanvas<'a> {
     app: &'a App,
+}
+
+/// The side of "My code"'s QR, in logical pixels.
+const QR_SIDE: f32 = 260.0;
+
+/// A QR code's modules drawn dark on white with a quiet zone of four.
+struct QrCanvas {
+    size: u32,
+    modules: Vec<bool>,
+}
+
+impl canvas::Program<Message> for QrCanvas {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), Color::WHITE);
+        let size = self.size as usize;
+        let cell = bounds.width.min(bounds.height) / (size + 8) as f32;
+        for (i, dark) in self.modules.iter().enumerate() {
+            if *dark {
+                let (x, y) = ((i % size + 4) as f32, (i / size + 4) as f32);
+                frame.fill_rectangle(
+                    Point::new(x * cell, y * cell),
+                    Size::new(cell, cell),
+                    Color::BLACK,
+                );
+            }
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 impl canvas::Program<Message> for PictureCanvas<'_> {
@@ -1959,28 +2609,25 @@ fn held_pointer(
     }
 }
 
-/// The language the desktop's locale names: the scene's words are said in
-/// it.
 /// The chooser's title for a picture of a code, in the window's words.
 pub(crate) fn code_title(lang: Lang) -> &'static str {
-    match lang {
-        Lang::De => "Code aus einem Bild lesen",
-        Lang::En => "Read a code from a picture",
-    }
+    StrId::CodeFromPicture.text(lang)
 }
 
 /// The first QR code in the picture at `path` (1341), the phone's
 /// scanner's decoder over the file's pixels; a picture without one is
-/// said.
-fn read_code(path: &std::path::Path) -> Result<String, String> {
+/// said in the reader's words, without the file's path (1377).
+fn read_code(path: &std::path::Path, lang: Lang) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     loquax::scan::image_codes(&bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .into_iter()
         .next()
-        .ok_or_else(|| format!("{}: no QR code in this picture", path.display()))
+        .ok_or_else(|| StrId::CodeNotInPicture.text(lang).to_string())
 }
 
+/// The language the desktop's locale names: the scene's words are said in
+/// it.
 fn locale() -> Lang {
     loquax::engine::locale()
 }
@@ -2009,7 +2656,11 @@ mod tests {
             scene: crate::shell::Model::new(&[]).scene(LayoutClass::Wide),
             now: None,
             receipts: true,
+            photo_size: loquax::ui::photos::PhotoSize::default(),
+            own_code: None,
             photo: None,
+            browse: None,
+            copied: None,
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -2249,8 +2900,239 @@ mod tests {
             scene: model.scene(LayoutClass::Wide),
             now: model.now,
             receipts: model.reading.on,
+            photo_size: model.photo_size,
+            own_code: model.own_code.as_ref().map(|c| c.code.clone()),
             photo: None,
+            browse: None,
+            copied: None,
         }
+    }
+
+    /// 1371: the desktop's position sheet. Without a fix it offers the
+    /// entry (the phone's "turn location on" is no row here); the entry
+    /// opens the field, pixel for pixel the golden; Enter hands the typed
+    /// position to the model, after which the sheet offers the shares,
+    /// the golden too, and "now" sends the report. Once the map was shown
+    /// its centre is a row, and a press on it makes that the fix.
+    #[test]
+    fn the_position_sheet_takes_a_typed_position_and_the_maps_centre() {
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        model.bar.abilities = loquax::ui::compose::Abilities::desktop();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let seen = |app: &mut App, model: &mut crate::shell::Model, rx: &mut _| {
+            for event in told(rx) {
+                update(model, event);
+            }
+            app.apply(Message::Seen(Box::new(seen_of(model))));
+        };
+        seen(&mut app, &mut model, &mut rx);
+        let _ = app.update(Message::Intent(Intent::Locate { peer: ANNA }));
+        seen(&mut app, &mut model, &mut rx);
+        let rows = |app: &App| -> Vec<StrId> {
+            let sheet = app.scene.sheet.as_ref().expect("the sheet");
+            sheet.actions.iter().map(|a| a.label_key).collect()
+        };
+        assert_eq!(rows(&app), [StrId::EnterPosition], "no map yet, no centre");
+
+        let _ = app.update(Message::Intent(Intent::EnterPosition { text: None }));
+        assert_eq!(app.position.as_deref(), Some(""));
+        let _ = app.update(Message::Position("52.5163, 13.3777".to_string()));
+        map::tests::same_as("gui-position-entry-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::EnterPosition {
+            text: app.position.clone(),
+        }));
+        assert_eq!(app.position, None);
+        seen(&mut app, &mut model, &mut rx);
+        let fix = model.bar.own_fix.expect("the typed fix");
+        assert_eq!(
+            (fix.latitude_e6, fix.longitude_e6),
+            (52_516_300, 13_377_700)
+        );
+        assert_eq!(
+            rows(&app),
+            [
+                StrId::ShareNow,
+                StrId::ShareFor15,
+                StrId::ShareFor1h,
+                StrId::ShareFor8h,
+                StrId::ShareUntilStopped,
+                StrId::EnterPosition
+            ]
+        );
+        map::tests::same_as("gui-position-sheet-light.png", &shoot(&app, w, h), w, h);
+        let sent = update(&mut model, UiEvent::ShareFix { peer: ANNA });
+        assert!(
+            sent.iter()
+                .any(|e| matches!(e, loquax::ui::UiEffect::Send { to, .. } if *to == ANNA)),
+            "the report goes: {sent:?}"
+        );
+
+        app.map_shown = true;
+        let _ = app.update(Message::Intent(Intent::Locate { peer: ANNA }));
+        seen(&mut app, &mut model, &mut rx);
+        assert_eq!(rows(&app).last(), Some(&StrId::MapCentre));
+        let _ = app.update(Message::Intent(Intent::FixAtMapCentre));
+        seen(&mut app, &mut model, &mut rx);
+        let centre = loquax::ui::by_hand::of_world(app.view.centre, 0);
+        let fix = model.bar.own_fix.expect("the centre");
+        assert_eq!(
+            (fix.latitude_e6, fix.longitude_e6),
+            (centre.latitude_e6, centre.longitude_e6)
+        );
+    }
+
+    /// 1371: a bubble's menu forwards it: Forward lists the
+    /// conversations, a press on one hands the copy to the model, which
+    /// sends it there. Control: the menu without Forward pressed lists
+    /// none.
+    #[test]
+    fn a_bubble_is_forwarded_to_the_conversation_picked() {
+        let mut model = chat_model();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(900.0, 560.0);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let key = bubble_key(&app, [2; 32]);
+        let bubble = NodeId::Bubble(key);
+        let _ = app.update(Message::Intent(Intent::Menu(Some(bubble))));
+        assert_eq!(app.forwarding, None, "control: no list yet");
+        let _ = app.update(Message::ForwardPick(bubble));
+        assert_eq!(app.forwarding, Some(bubble));
+        let forward = Intent::Forward {
+            from: ANNA,
+            key,
+            to: BERT,
+        };
+        let _ = app.update(Message::Intent(forward));
+        assert_eq!((app.menu, app.forwarding), (None, None));
+        let told = told(&mut rx);
+        assert_eq!(
+            told,
+            [UiEvent::Forward {
+                from: ANNA,
+                key,
+                to: BERT
+            }]
+        );
+        let sent: Vec<_> = told
+            .into_iter()
+            .flat_map(|event| update(&mut model, event))
+            .collect();
+        assert!(
+            sent.iter().any(|e| matches!(
+                e,
+                loquax::ui::UiEffect::Send { to, body, .. } if *to == BERT && body == "Good morning!"
+            )),
+            "{sent:?}"
+        );
+    }
+
+    /// 1371: "My code" in the window: the settings' row opens the code
+    /// and its QR over the window, pixel for pixel the golden, the QR
+    /// reading back as the code; Copy hands the code to the clipboard
+    /// and Back closes it. Control: without a code only the notice.
+    #[test]
+    fn my_code_shows_the_code_and_its_qr() {
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        let (mut app, _rx) = {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                App::new(Frames::new(loquax::picture::Maps::default()), Some(tx)),
+                rx,
+            )
+        };
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let _ = app.update(Message::Intent(Intent::MyCode));
+        assert!(!app.code_open, "control: no code yet");
+        assert_eq!(app.seen.notice.as_deref(), Some(loquax::ui::NO_OWN_CODE));
+
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key).expect("a code");
+        model.own_code = Some(loquax::ui::OwnCode {
+            code: code.clone(),
+            qr: Vec::new(),
+        });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let _ = app.update(Message::Intent(Intent::MyCode));
+        assert!(app.code_open);
+        let shot = shoot(&app, w, h);
+        map::tests::same_as("gui-my-code-light.png", &shot, w, h);
+        let luma: Vec<u8> = shot.chunks(3).map(|px| px[1]).collect();
+        let read = loquax::scan::decode(w as usize, h as usize, w as usize, &luma);
+        assert_eq!(read, [code], "the QR reads as the code");
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert!(!app.code_open);
+    }
+
+    /// 1371: a right click on a row opens its menu with the scene's verbs
+    /// and the contact's; pin and mute reach the model, a forget asks
+    /// once, a rename takes its field. The help opens and Back closes it;
+    /// the settings' photo size is told to the model.
+    #[test]
+    fn a_rows_menu_reaches_the_model_and_the_help_and_photo_size_are_there() {
+        let mut model = chat_model();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(900.0, 560.0);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let row = NodeId::Row(ANNA);
+        let _ = app.update(Message::Intent(Intent::Menu(Some(row))));
+        assert_eq!(app.menu, Some(row));
+        let pin = Intent::Pin {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            on: loquax::ui::intent::Switch::On,
+        };
+        let _ = app.update(Message::Intent(pin));
+        assert_eq!(app.menu, None, "a verb closes the menu");
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        assert!(model.peer_state(&ANNA).pinned);
+        let mute = Intent::Mute {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            secs: -1,
+        };
+        let _ = app.update(Message::Intent(mute));
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        assert!(model.muted(&ANNA));
+
+        let _ = app.update(Message::Intent(Intent::Menu(Some(row))));
+        let forget = Intent::Forget {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            everywhere: false,
+            confirmed: false,
+        };
+        let _ = app.update(Message::Intent(forget));
+        assert_eq!(app.deleting, Some(row), "it asks once");
+        assert!(told(&mut rx).is_empty(), "control: nothing forgotten yet");
+        let _ = app.update(Message::Intent(Intent::Rename {
+            peer: loquax::ui::intent::Target::Peer(ANNA),
+            name: None,
+        }));
+        assert_eq!(
+            app.renaming.as_ref().map(|(p, _)| *p),
+            Some(ANNA),
+            "the field opens"
+        );
+
+        let _ = app.update(Message::Intent(Intent::Help));
+        assert_eq!(app.help, Some(0));
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert_eq!(app.help, None);
+
+        let small = loquax::ui::photos::PhotoSize::Small;
+        let _ = app.update(Message::Intent(Intent::PhotoSize(small)));
+        assert_eq!(told(&mut rx), [UiEvent::PhotoSize(small)]);
     }
 
     /// A press on a bubble's photo (1269): the shell's file decoded for
@@ -2822,7 +3704,7 @@ mod tests {
             .seen
             .notice
             .as_deref()
-            .is_some_and(|n| n.ends_with("no QR code in this picture")));
+            .is_some_and(|n| n == "There is no code in this picture."));
     }
 
     /// A photo, a file and a voice message without words (1268): each is
@@ -3338,5 +4220,257 @@ mod tests {
         assert!(!app.dark());
         let _ = app.update(Message::SystemTheme(iced::theme::Mode::Light));
         assert!(app.dark());
+    }
+
+    /// A PNG of `w` by `h` pixels, a gradient, for a page's picture.
+    fn png_of(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        let mut writer = e.write_header().expect("header");
+        let data: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).flat_map(move |x| [(x * 255 / w) as u8, (y * 255 / h) as u8, 160]))
+            .collect();
+        writer.write_image_data(&data).expect("data");
+        writer.finish().expect("finish");
+        out
+    }
+
+    /// 1369: the Browse tab in the window is lnomad's window view beside
+    /// the rail, the browser the model hosts with the pictures the shell's
+    /// half of lnomad's picture code holds. The window tells the model its
+    /// light or dark and the page's cells; the list it opens on and a page
+    /// with a picture are the goldens; a press on the page, the wheel and
+    /// the pointer go to the model as lnomad's window folds them; leaving
+    /// for the chats tells the model, and a picture of the model from
+    /// before does not pull the window back (the control: one from after
+    /// leaves it in the chats).
+    /// 1379: the Rooms tab in the window: the tab press goes to the
+    /// model, the model's Rooms bring the window there, the open room is
+    /// drawn from the scene's Rooms node (the golden), the input's text and
+    /// Enter and a room's press go to the model; leaving for the chats is
+    /// told, and a picture from before does not pull the window back (the
+    /// control: one from after leaves it in the chats).
+    #[test]
+    fn the_rooms_tab_is_the_scenes_rooms_beside_the_rail() {
+        use leviculum_rrc::LineKind;
+        use loquax::ui::rooms::RoomsEvent;
+        let (w, h) = (1100u32, 640u32);
+        let mut model = chat_model();
+        model.rooms.enabled = true;
+        model.rooms.hub = Some([0x07; 16]);
+        let seen = |model: &crate::shell::Model| Box::new(seen_of(model));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Rooms)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Rooms)]);
+        update(&mut model, UiEvent::Tab(TabId::Rooms));
+        for event in [
+            RoomsEvent::Welcomed {
+                name: Some("periculum".into()),
+                body_limit: 350,
+            },
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: None,
+            },
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: Some("bob".into()),
+            },
+            RoomsEvent::Line {
+                room: "#lab".into(),
+                kind: LineKind::Msg,
+                text: "rrc line, thirty-one bytes long".into(),
+                nick: Some("bob".into()),
+                ours: false,
+                ts_ms: 1_793_702_757_876,
+            },
+            RoomsEvent::Line {
+                room: "#lab".into(),
+                kind: LineKind::Msg,
+                text: "hello bob".into(),
+                nick: Some("lew".into()),
+                ours: true,
+                ts_ms: 1_793_702_759_000,
+            },
+        ] {
+            update(&mut model, UiEvent::Rooms(event));
+        }
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Rooms);
+        let room = shoot(&app, w, h);
+        map::tests::same_as("gui-rooms-room.png", &room, w, h);
+
+        let _ = app.update(Message::Rooms(RoomsEvent::Typed("hi".into())));
+        let _ = app.update(Message::Rooms(RoomsEvent::Submit));
+        let _ = app.update(Message::Rooms(RoomsEvent::Show(Some(0))));
+        assert_eq!(
+            told(&mut rx),
+            vec![
+                UiEvent::Rooms(RoomsEvent::Typed("hi".into())),
+                UiEvent::Rooms(RoomsEvent::Submit),
+                UiEvent::Rooms(RoomsEvent::Show(Some(0))),
+            ]
+        );
+
+        // Leaving: told, and a stale picture keeps the window in the chats.
+        let stale = seen(&model);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Chats)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Chats)]);
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Seen(stale));
+        assert_eq!(app.screen, Screen::Chats, "a picture from before");
+        update(&mut model, UiEvent::Tab(TabId::Chats));
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Chats);
+        assert!(app.seen.scene.rooms.is_none());
+    }
+
+    #[test]
+    fn the_browse_tab_is_lnomads_window_beside_the_rail() {
+        use lnomad::app::scene::NodeId as Node;
+        use lnomad::DiscoveredNode;
+        const MARCEL: [u8; 16] = [0x5a; 16];
+        lnomad::gui::load_mono();
+        let node = |dest_hash, name: &str, hops| DiscoveredNode {
+            dest_hash,
+            name: Some(name.to_string()),
+            first_seen: 1_800_000_000,
+            last_seen: 1_800_000_000,
+            hops: Some(hops),
+        };
+        let (w, h) = (1100u32, 640u32);
+        let mut model = chat_model();
+        model.browse.enabled = true;
+        model.browse.model.clock = Some(1_800_000_060);
+        for found in [
+            node(MARCEL, "Marcel's node", 2),
+            node([0x7c; 16], "Relay Süd", 1),
+        ] {
+            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+        }
+        let pictures: crate::browsing::Pictures = Arc::default();
+        let seen = |model: &crate::shell::Model, epoch: u64| {
+            let mut seen = seen_of(model);
+            seen.browse = model.browse.showing().then(|| Browsed {
+                model: Arc::new(model.browse.model.clone()),
+                scene: model.browse.model.scene(),
+                pictures: Arc::clone(&pictures),
+                epoch,
+            });
+            Box::new(seen)
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Seen(seen(&model, 0)));
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Browse)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Browse)]);
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        let _ = app.update(Message::Seen(seen(&model, 0)));
+        assert_eq!(app.screen, Screen::Browse);
+        let (cols, rows) = app.browse_cells();
+        let said = told(&mut rx);
+        assert!(
+            said.contains(&UiEvent::Browse(BrowseEvent::Resize { cols, rows })),
+            "{said:?}"
+        );
+        for event in said {
+            update(&mut model, event);
+        }
+        assert_eq!(model.browse.model.theme, lnomad::Theme::Light);
+        let _ = app.update(Message::Seen(seen(&model, 0)));
+        assert_eq!(told(&mut rx), vec![], "nothing more to say");
+        let list = shoot(&app, w, h);
+        map::tests::same_as("gui-browse-list.png", &list, w, h);
+
+        // Marcel's row, pressed: the model's to fold.
+        let row = lnomad::app::places(&model.browse.model)
+            .iter()
+            .position(
+                |p| matches!(p, lnomad::app::Place::Node { dest_hash, .. } if *dest_hash == MARCEL),
+            )
+            .expect("Marcel's row");
+        let press = lnomad::Intent::Activate(Node::Place(row));
+        let _ = app.update(Message::Browse(lnomad::gui::Message::Intent(press.clone())));
+        let said = told(&mut rx);
+        assert_eq!(said, vec![UiEvent::Browse(BrowseEvent::Intent(press))]);
+        for event in said {
+            update(&mut model, event);
+        }
+        let micron = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../lnomad/tests/fixtures/sample.mu"),
+        )
+        .expect("lnomad's sample page");
+        let effects = update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Loaded {
+                micron: format!("{micron}\n`[map.png`:/file/map.png]\n\nUnder the picture."),
+                title: "Marcel's node".to_string(),
+            }),
+        );
+        // The shell's half: the picture asked for, its bytes taken by
+        // lnomad's picture code, its event folded into the model.
+        let requests = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                loquax::ui::UiEffect::Browse(lnomad::Effect::FetchImages(requests)) => {
+                    Some(requests)
+                }
+                _ => None,
+            })
+            .expect("the page's picture asked for");
+        let request = requests[0].clone();
+        let event = {
+            let mut held = pictures.lock().unwrap_or_else(PoisonError::into_inner);
+            let (cached, pending) = held.cached(&model.browse.model, requests);
+            assert!(cached.is_empty() && pending.len() == 1);
+            held.arrived(
+                &model.browse.model,
+                request.link,
+                request.target,
+                lnomad::gui::Picture::Bytes(png_of(240, 96)),
+            )
+        };
+        loquax::ui::browse::app(&mut model, event);
+        let _ = app.update(Message::Seen(seen(&model, 1)));
+        let page = shoot(&app, w, h);
+        assert_ne!(page, list);
+        map::tests::same_as("gui-browse-page.png", &page, w, h);
+
+        // The wheel and the pointer are the model's mouse.
+        let _ = app.update(Message::Browse(lnomad::gui::Message::Wheel(3.0)));
+        let _ = app.update(Message::Browse(lnomad::gui::Message::Pointer(None)));
+        let said = told(&mut rx);
+        assert_eq!(
+            said,
+            vec![
+                UiEvent::Mouse(lnomad::gui::wheel_mice(3.0)[0]),
+                UiEvent::Mouse(lnomad::gui::pointer_mouse(None)),
+            ]
+        );
+
+        // Leaving for the chats tells the model; the window stays there
+        // through a picture from before, and one from after.
+        let before = seen(&model, 1);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Chats)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Chats)]);
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Seen(before));
+        assert_eq!(app.screen, Screen::Chats, "not pulled back");
+        update(&mut model, UiEvent::Tab(TabId::Chats));
+        let _ = app.update(Message::Seen(seen(&model, 1)));
+        assert_eq!(app.screen, Screen::Chats);
+        // A page link in a chat brings it to the front again.
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        let _ = app.update(Message::Seen(seen(&model, 1)));
+        assert_eq!(app.screen, Screen::Browse);
     }
 }

@@ -25,9 +25,12 @@
 //! palette's `read receipts` write it (1233). `photo_size`, `small`,
 //! `phone` (the default) or `original` (1220): how far a photo is scaled
 //! before it goes (`crate::photo`), which the settings' Chats page
-//! writes. `browse_tab`, `off` (the default) or `on` (1337): whether
-//! the phone shows its Browse tab, held back until the tab's fetch has
-//! been seen on a device. And one key a terminal context for the map's
+//! writes. `browse_tab`, `off` (the default) or `on` (1337, 1369):
+//! whether the phone, the window and the terminal show the Browse tab,
+//! held back until the tab's fetch has been seen on a device.
+//! `rooms_hub`, a hub's `rrc.hub` destination hash (1379): the Reticulum
+//! Relay Chat hub the Rooms tab links to; unset, there is no Rooms tab.
+//! And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`
@@ -141,6 +144,9 @@ impl core::error::Error for ConfigError {}
 pub struct Config {
     /// The persisted default propagation node, `--pn`'s fallback.
     pub propagation_node: Option<[u8; 16]>,
+    /// `rooms_hub` (1379): the `rrc.hub` destination of the Reticulum
+    /// Relay Chat hub the Rooms tab links to; unset, there is no tab.
+    pub rooms_hub: Option<[u8; 16]>,
     /// `send_on_enter`, when the file sets it; unset is on.
     pub send_on_enter: Option<bool>,
     /// `home_wake`, when the file sets it; unset is on.
@@ -173,9 +179,10 @@ pub struct Config {
     pub map_fling: Option<bool>,
     /// `read_receipts`, when the file sets it; unset is on.
     pub read_receipts: Option<bool>,
-    /// `browse_tab`, when the file sets it; unset is off (1337 pass two):
-    /// the phone's Browse tab, held back until its fetch has landed on a
-    /// device, and switched on by this key alone meanwhile.
+    /// `browse_tab`, when the file sets it; unset is off (1337 pass two,
+    /// 1369): the Browse tab of the phone, the window and the terminal,
+    /// held back until its fetch has landed on a device, and switched on
+    /// by this key alone meanwhile.
     pub browse_tab: Option<bool>,
     /// `photo_size`, when the file sets it; unset is `phone`.
     pub photo_size: Option<crate::ui::photos::PhotoSize>,
@@ -513,14 +520,20 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             }
             config.home_address = Some(entry.to_string());
         }
-        if key.trim() == "propagation_node" {
+        for (name, slot) in [
+            ("propagation_node", &mut config.propagation_node),
+            ("rooms_hub", &mut config.rooms_hub),
+        ] {
+            if key.trim() != name {
+                continue;
+            }
             let value = value.trim().trim_matches('"');
             match address::parse(value) {
-                Ok(hash) => config.propagation_node = Some(hash),
+                Ok(hash) => *slot = Some(hash),
                 Err(error) => {
                     return Err(ConfigError::BadValue {
                         line: index + 1,
-                        key: "propagation_node",
+                        key: name,
                         detail: error.to_string(),
                     });
                 }
@@ -724,6 +737,21 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn rooms_hub_is_a_hash_and_unset_is_none() {
+        assert_eq!(parse_str("").expect("empty").rooms_hub, None);
+        assert_eq!(
+            parse_str("rooms_hub = 076b76c29219f0cac81fb511039a6ad5\n")
+                .expect("a hub")
+                .rooms_hub,
+            Some([
+                0x07, 0x6b, 0x76, 0xc2, 0x92, 0x19, 0xf0, 0xca, 0xc8, 0x1f, 0xb5, 0x11, 0x03, 0x9a,
+                0x6a, 0xd5
+            ])
+        );
+        assert!(parse_str("rooms_hub = lab\n").is_err(), "the control");
     }
 
     #[test]

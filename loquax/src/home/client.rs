@@ -146,7 +146,12 @@ pub async fn run_ask(
 
 /// Hand one message to the home node to send: link, identify as `device`,
 /// `/send`. The message id the home node gave it, also when the same
-/// `client_id` was handed in before.
+/// `client_id` was handed in before. The [`Ask`] the M9 runs (1371), with
+/// its one retry policy: a lost answer (the request or its answer failed,
+/// or ran out of time) asks again with the same submission on a fresh
+/// link, [`super::ask::ATTEMPTS`] times in all within `budget`, and the
+/// home node answers a client id it has seen with the message it made
+/// then, so a retry never sends twice.
 pub async fn send(
     node: &ReticulumNode,
     public_key: &[u8; 64],
@@ -154,56 +159,21 @@ pub async fn send(
     submission: &wire::Submission,
     budget: Duration,
 ) -> Result<[u8; 32], HomeError> {
-    let deadline = tokio::time::Instant::now() + budget;
-    let link = open(node, public_key, device, deadline).await?;
-    let answer = request(
-        node,
-        &link,
-        super::SEND_PATH,
-        &wire::send_request(submission),
-        deadline,
-    )
-    .await;
-    let _ = node.close_link(&link).await;
-    wire::read_send_answer(&answer?)
-        .map_err(|_| HomeError::Malformed)?
-        .map_err(HomeError::Refused)
-}
-
-/// [`send`], asked again with the same submission when the answer was lost
-/// (the request or its answer failed, or ran out of time), up to three times
-/// within `budget`: the home node answers a client id it has seen with the
-/// message it made then, so a retry never sends twice.
-pub async fn send_retrying(
-    node: &ReticulumNode,
-    public_key: &[u8; 64],
-    device: &Identity,
-    submission: &wire::Submission,
-    budget: Duration,
-) -> Result<[u8; 32], HomeError> {
-    let deadline = tokio::time::Instant::now() + budget;
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match send(node, public_key, device, submission, left).await {
-            Err(HomeError::Transfer(detail)) if attempt < 3 && !left.is_zero() => {
-                tracing::info!("HOME send attempt {attempt} lost its answer: {detail}");
-            }
-            Err(HomeError::Timeout) if attempt < 3 && !left.is_zero() => {
-                tracing::info!("HOME send attempt {attempt} ran out of time");
-            }
-            other => return other,
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(HomeError::Timeout);
-        }
+    let ask = Ask::new(
+        public_key,
+        Verb::Send(submission.clone()),
+        0,
+        millis(budget),
+    )?;
+    match run_ask(node, device, ask, |_| {}).await? {
+        Outcome::Sent(id) => Ok(id),
+        _ => Err(HomeError::Malformed),
     }
 }
 
 /// Hand the home node one mark: link, identify as `device`, `/mark`,
 /// asked again up to three times when the answer was lost, as
-/// [`send_retrying`] does: the home node keeps a mark it has once. The
+/// [`send`] does: the home node keeps a mark it has once. The
 /// [`Ask`] the M9 runs.
 pub async fn mark(
     node: &ReticulumNode,
@@ -1225,6 +1195,34 @@ mod tests {
         [u8; 64],
         Vec<tempfile::TempDir>,
     ) {
+        let (home, phone, key, dirs, _) = fake_home_sending(groups, Sends::Unknown).await;
+        (home, phone, key, dirs)
+    }
+
+    /// What the fake home does with a `/send`.
+    #[derive(Clone, Copy)]
+    enum Sends {
+        /// No handler: the core drops it.
+        Unknown,
+        /// Answers with `SENT` as the message's id.
+        Answer,
+        /// Closes the link the request came on, so its answer is lost
+        /// every time: a dead home behind a live path.
+        Hang,
+    }
+
+    /// [`fake_home`] with `sends` for `/send`, and the count of the
+    /// `/send` requests it saw.
+    async fn fake_home_sending(
+        groups: bool,
+        sends: Sends,
+    ) -> (
+        std::sync::Arc<ReticulumNode>,
+        ReticulumNode,
+        [u8; 64],
+        Vec<tempfile::TempDir>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         use leviculum_core::RequestPolicy;
         use leviculum_std::driver::ReticulumNodeBuilder;
         const GROUP: [u8; 16] = [0x6c; 16];
@@ -1251,6 +1249,9 @@ mod tests {
         if groups {
             home.register_request_handler(hash, super::super::GROUP_PATH, RequestPolicy::AllowAll);
         }
+        if !matches!(sends, Sends::Unknown) {
+            home.register_request_handler(hash, super::super::SEND_PATH, RequestPolicy::AllowAll);
+        }
         let mut phone = ReticulumNodeBuilder::new()
             .add_tcp_client(port)
             .storage_path(phone_dir.path().to_path_buf())
@@ -1260,6 +1261,8 @@ mod tests {
         phone.start().await.expect("start the phone");
         let home = std::sync::Arc::new(home);
         let answering = std::sync::Arc::clone(&home);
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = std::sync::Arc::clone(&seen);
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
                 let leviculum_core::NodeEvent::RequestReceived {
@@ -1273,6 +1276,14 @@ mod tests {
                 };
                 let answer = match path.as_str() {
                     super::super::SYNC_PATH => wire::sync_answer(&wire::Page::default()),
+                    super::super::SEND_PATH => {
+                        counting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if matches!(sends, Sends::Hang) {
+                            let _ = answering.close_link(&link_id).await;
+                            continue;
+                        }
+                        wire::send_answer(&SENT)
+                    }
                     _ => wire::group_answer(&GROUP),
                 };
                 let _ = answering
@@ -1287,7 +1298,51 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        (home, phone, public_key, vec![home_dir, phone_dir])
+        (home, phone, public_key, vec![home_dir, phone_dir], seen)
+    }
+
+    /// The message id the fake home gives every `/send` it answers.
+    const SENT: [u8; 32] = [0x5e; 32];
+
+    /// 1371: a send is one ask with one retry policy. A home whose answer
+    /// is lost every time is asked `ATTEMPTS` (3) times in all, not the
+    /// nine the old loop around the ask would have made, and the error
+    /// is the lost answer's. Control: a live home is asked once and
+    /// gives its id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dead_home_is_asked_three_times_and_a_live_one_once() {
+        let device = Identity::generate(&mut rand_core::OsRng);
+        let submission = wire::Submission {
+            client_id: [3; 16],
+            destination: [0x5a; 16],
+            title: Vec::new(),
+            content: b"hallo".to_vec(),
+            fields: Vec::new(),
+        };
+        let budget = Duration::from_secs(30);
+
+        let (_home, phone, key, _dirs, seen) = fake_home_sending(false, Sends::Hang).await;
+        let started = tokio::time::Instant::now();
+        let sent = send(&phone, &key, &device, &submission, budget).await;
+        assert!(
+            matches!(sent, Err(HomeError::Transfer(_))),
+            "the lost answer's error: {sent:?}"
+        );
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(super::super::ask::ATTEMPTS)
+        );
+        assert_eq!(super::super::ask::ATTEMPTS, 3);
+        assert!(
+            started.elapsed() < budget,
+            "gave up on the attempts, not the budget: {:?}",
+            started.elapsed()
+        );
+
+        let (_home, phone, key, _dirs, seen) = fake_home_sending(false, Sends::Answer).await;
+        let sent = send(&phone, &key, &device, &submission, budget).await;
+        assert_eq!(sent, Ok(SENT));
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// 1307 pass five, Lew's phone on the old miauhaus home: `/group` is

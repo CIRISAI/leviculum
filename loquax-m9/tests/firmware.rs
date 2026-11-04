@@ -1,7 +1,9 @@
 //! What the M9's first image shows, proven on the host (slice four, 1361,
 //! `handheld-messenger.md`, "Slice four, host half"): the fixture model
-//! the board starts with ([`loquax_m9::fixture`]), each of its two screens
-//! walked to with the board's keys, drawn by the board's renderer, dumped
+//! the board starts with ([`loquax_m9::fixture`]), each of its screens
+//! (the two of slice four, the group's seven of slice six, 1366, the
+//! map's two of slice seven, 1375) walked to
+//! with the board's keys, drawn by the board's renderer, dumped
 //! as the board dumps it ([`loquax_m9::dump`]), read back and compared in
 //! bytes with a PNG golden under `tests/golden/`. The rig compares the
 //! board's dump with the same files. The census the board prints runs over
@@ -16,18 +18,33 @@ use support::{check, through_dump};
 
 use loquax::ui::{update, UiEvent, UiModel};
 use loquax_m9::field::Field;
-use loquax_m9::fixture::Screen;
+use loquax_m9::fixture::{Screen, SCREENS};
 use loquax_m9::frame::{Frame, WIDTH};
 use loquax_m9::keys::event;
+use loquax_m9::map::{Map, FIXTURE};
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look};
 
 /// What `model` shows, drawn by a fresh renderer into a fresh frame.
 fn drawn(model: &UiModel<Field>) -> Frame {
+    drawn_at(model, 0)
+}
+
+/// What `model` shows with the M9's cursor over a group's rows on `row`,
+/// the map in pixels where it is open, as the board draws it.
+fn drawn_at(model: &UiModel<Field>, row: usize) -> Frame {
     let mut frame = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("the fixture region");
     Renderer::new(&mut frame)
         .expect("renderer")
-        .draw(&screen::scene(model), &Look::of(model))
+        .show(
+            model,
+            &Look {
+                row,
+                ..Look::of(model)
+            },
+            &mut map,
+        )
         .expect("draw");
     frame
 }
@@ -38,9 +55,10 @@ fn golden_name(screen: Screen) -> String {
 }
 
 #[test]
-fn the_boards_two_screens_through_the_dump_are_the_golden_frames() {
-    for screen in [Screen::Chats, Screen::Chat] {
-        let frame = drawn(&screen.model());
+fn the_boards_screens_through_the_dump_are_the_golden_frames() {
+    for screen in SCREENS {
+        let (model, row) = screen.walk();
+        let frame = drawn_at(&model, row);
         let (_, bytes) = through_dump(&frame);
         println!("{}: dump {bytes} B", screen.name());
         check(&golden_name(screen), &frame);
@@ -54,10 +72,10 @@ fn the_boards_two_screens_through_the_dump_are_the_golden_frames() {
 
 #[test]
 fn a_screen_byte_names_the_screen_and_nothing_else() {
-    for screen in [Screen::Chats, Screen::Chat] {
+    for screen in SCREENS {
         assert_eq!(Screen::of(screen.byte()), Some(screen));
     }
-    assert_eq!(Screen::of(2), None);
+    assert_eq!(Screen::of(SCREENS.len() as u8), None);
 }
 
 /// The board's loop: one renderer over one frame, a key, a draw, a flush

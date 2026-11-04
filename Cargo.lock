@@ -3145,6 +3145,13 @@ name = "leviculum-queue-budget"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-rrc"
+version = "0.10.0-dev.4"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "leviculum-serial-mux"
 version = "0.1.0"
 dependencies = [
@@ -3461,6 +3468,7 @@ dependencies = [
  "leviculum-mapcut",
  "leviculum-mapfill",
  "leviculum-micron",
+ "leviculum-rrc",
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-iced",
@@ -3493,12 +3501,14 @@ name = "loquax-android"
 version = "0.1.3"
 dependencies = [
  "embedded-graphics",
+ "hex",
  "jni",
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-map",
  "leviculum-mapcut",
  "leviculum-mapfill",
+ "leviculum-rrc",
  "leviculum-std",
  "leviculum-ui",
  "lnomad",
@@ -3521,6 +3531,8 @@ version = "0.1.0"
 dependencies = [
  "embedded-graphics",
  "leviculum-lxmf",
+ "leviculum-map",
+ "leviculum-mapfill",
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-ratatui",

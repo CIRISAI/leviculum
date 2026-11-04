@@ -387,7 +387,7 @@ async fn a_tapped_node_brings_its_page_and_a_file_through_the_phones_leaf() {
             wake: true,
             stop: Some(stopped),
             network: Default::default(),
-            lend: None,
+            lends: Vec::new(),
         },
     ));
 

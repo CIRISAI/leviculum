@@ -21,6 +21,8 @@
 //! (`loquax/src/send.rs`, `EXIT_PROPAGATED`).
 
 #[cfg(any(feature = "tui", feature = "gui"))]
+mod browsing;
+#[cfg(any(feature = "tui", feature = "gui"))]
 mod desktop;
 mod front;
 #[cfg(feature = "gui")]
@@ -1813,7 +1815,7 @@ async fn run_client_send(
         content: message.body,
         fields: message.fields,
     };
-    let accepted = loquax::home::client::send_retrying(
+    let accepted = loquax::home::client::send(
         &node,
         &public_key,
         &device,
@@ -2004,7 +2006,7 @@ async fn run_daemon(args: RunArgs) -> ExitCode {
         // A desktop or server mailbox has no platform that says a network
         // change; its connection's keepalive (1176) finds a dead one.
         network: Default::default(),
-        lend: None,
+        lends: Vec::new(),
     })
     .await;
     match outcome {

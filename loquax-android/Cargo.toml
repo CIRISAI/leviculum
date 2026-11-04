@@ -38,7 +38,7 @@ crate-type = ["cdylib", "rlib"]
 # for the paperclip's photo and the bubbles' thumbnails (1220), `voice`
 # for the microphone's voice messages and their player (1222), `scan`
 # for the scanner's QR decoder (1152), shared with the desktop (1341).
-loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr", "scan", "photos", "voice"] }
+loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr", "scan", "photos", "voice", "browse"] }
 # The map's types the screen's call passes to loquax's.
 leviculum-map = { path = "../leviculum-map", features = ["std"] }
 leviculum-mapfill = { path = "../leviculum-mapfill" }
@@ -49,9 +49,12 @@ leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, feature
 leviculum-std = { path = "../leviculum-std" }
 # The Browse tab (1337): lnomad's browser core, which loquax hosts, and
 # with `std` its fetch session, which runs over the phone's own node
-# (pass two, `src/browse_fetch.rs`).
+# (pass two, `loquax::browse_fetch`, shared with the desktop since 1369).
 lnomad = { path = "../lnomad", default-features = false, features = ["std"] }
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The Rooms tab (1384): the kind of a room's line the schema words, from
+# Reticulum Relay Chat's client state that loquax's model carries.
+leviculum-rrc = { path = "../leviculum-rrc" }
 # The admission token the phone's own mailbox issues its screens (1152).
 rand_core = { workspace = true, features = ["getrandom"] }
 # The runtime the leaf node and the session's runners run on.
@@ -70,8 +73,11 @@ jni = { version = "0.22.4", default-features = false }
 tokio = { workspace = true, features = ["full"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 tempfile = "3"
-# The Python LXMF peer's JSON-RPC (loquax/tests/support/python_peer.rs).
+# The Python LXMF peer's JSON-RPC (loquax/tests/support/python_peer.rs),
+# and the Rooms' facade golden (tests/rooms.rs).
 serde_json = "1"
+# The fake RRC hub's recorded envelopes (loquax/tests/support/rrc_hub.rs).
+hex = "0.4"
 # The map's golden is a PNG, and its test turns loquax's Rgb565 picture
 # into RGBA as the window does (1128); both in the lock through loquax.
 png = "0.18"

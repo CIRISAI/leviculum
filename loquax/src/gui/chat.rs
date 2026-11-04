@@ -54,6 +54,9 @@ pub const LIST_WIDTH: f32 = 340.0;
 /// The search field's id: the top bar's search focuses it.
 pub const SEARCH_FIELD: &str = "search";
 
+/// The position sheet's field's id (1371): "Type my position" focuses it.
+pub const POSITION_FIELD: &str = "position";
+
 /// The tokens of the theme the window is in.
 pub fn tokens(dark: bool) -> Colours {
     match dark {
@@ -259,9 +262,12 @@ impl App {
         let icon = match tab.id {
             TabId::Chats => Icon::Chats,
             TabId::Map => Icon::Map,
-            // The window has no Browse tab (lnomad is its own program on a
-            // PC, 1337); should one be enabled, it borrows the chats' icon.
-            TabId::Browse => Icon::Chats,
+            // The Browse tab (1369): the shared icons have no globe yet,
+            // and a page is what one looks for.
+            TabId::Browse => Icon::Search,
+            // The Rooms (1379): talk, as the chats, until a room icon is
+            // drawn.
+            TabId::Rooms => Icon::Chats,
         };
         let badge = tab.badge.map(|count| {
             chrome::badge(count, size::BADGE_TEXT - 2.0, size::BADGE_CORNER, p).padding([0, 5])
@@ -285,6 +291,8 @@ impl App {
         let active = match self.screen {
             super::Screen::Chats | super::Screen::Settings => TabId::Chats,
             super::Screen::Map => TabId::Map,
+            super::Screen::Browse => TabId::Browse,
+            super::Screen::Rooms => TabId::Rooms,
         };
         let items = tabs
             .items
@@ -349,7 +357,16 @@ impl App {
                     .padding([0, 12])
                     .align_y(Alignment::Center),
                 receipts,
+                self.photo_rows(t),
                 self.maps_rows(t),
+                container(
+                    column![
+                        link(self.word(StrId::MyCode), Message::Intent(Intent::MyCode), t),
+                        link(self.word(StrId::Help), Message::Intent(Intent::Help), t),
+                    ]
+                    .spacing(4)
+                )
+                .padding([12, 16]),
             ]
             .width(Length::Fill),
         )
@@ -360,6 +377,34 @@ impl App {
             ..container::Style::default()
         })
         .into()
+    }
+
+    /// The phone's photo size in the window (1371): its title and the
+    /// three tiers, the one in use marked; a press sets another.
+    fn photo_rows(&self, t: Colours) -> Element<'_, Message> {
+        use loquax::ui::photos::PhotoSize;
+        let mut rows = column![text(self.word(StrId::PhotoSize))
+            .size(16)
+            .color(colour(t.text))]
+        .spacing(4)
+        .padding([12, 16]);
+        for size in PhotoSize::ALL {
+            let words = match size {
+                PhotoSize::Small => StrId::PhotoSmall,
+                PhotoSize::Phone => StrId::PhotoPhone,
+                PhotoSize::Original => StrId::PhotoOriginal,
+            };
+            let mark = match self.seen.photo_size == size {
+                true => "●",
+                false => "○",
+            };
+            rows = rows.push(link(
+                &format!("{mark} {}", self.word(words)),
+                Message::Intent(Intent::PhotoSize(size)),
+                t,
+            ));
+        }
+        rows.into()
     }
 
     /// The phone's Maps page in the window (1290): its title, the storage
@@ -453,7 +498,15 @@ impl App {
         }
         let empty = (self.scene.list.as_ref()).is_none_or(|list| list.rows.is_empty());
         let rows = self.listed().into_iter().fold(column![], |rows, r| {
-            rows.push(list_row(r, self.seen.now, self.lang, t))
+            // A right click opens the row's menu (1371), as a long press
+            // does on the phone.
+            let item = mouse_area(list_row(r, self.seen.now, self.lang, t))
+                .on_right_press(Message::Intent(Intent::Menu(Some(r.id))));
+            let rows = rows.push(item);
+            match self.menu == Some(r.id) {
+                true => rows.push(self.row_actions(r, t)),
+                false => rows,
+            }
         });
         let words = (self.scene.list.as_ref()).map(|list| list.empty.resolve(self.lang));
         let body: Element<'_, Message> = match empty {
@@ -941,7 +994,7 @@ impl App {
         // A voice message (1222): its length, a press plays it in the
         // system's player.
         if let Some(voice) = &node.voice {
-            let line = text(format!("♪ voice message · {}", voice.duration))
+            let line = text(format!("♪ {}", voice.words.resolve(self.lang)))
                 .size(size::BODY - 2.0)
                 .color(ink);
             let line: Element<'_, Message> = match &voice.toggle {
@@ -1076,6 +1129,92 @@ impl App {
     /// The menu under a bubble a right click opened: the scene's actions
     /// of the bubble, a reaction as the quick row, a delete asked once
     /// before it deletes, and a close.
+    /// A row's menu (1371): the scene's verbs on the conversation (mark
+    /// unread, pin, mute, archive, forget), then the contact's the phone
+    /// has on its contact screen (block, verify, rename). Forget asks
+    /// once; rename opens its field.
+    fn row_actions<'a>(&'a self, r: &'a Row, t: Colours) -> Element<'a, Message> {
+        let scene::NodeId::Row(peer) = r.id else {
+            return Space::new().into();
+        };
+        let target = loquax::ui::intent::Target::Peer(peer);
+        let contact = [
+            Intent::Block {
+                peer: target,
+                on: Switch::On,
+            },
+            Intent::Verify {
+                peer: target,
+                on: Switch::Toggle,
+            },
+            Intent::Rename {
+                peer: target,
+                name: None,
+            },
+        ];
+        let mut verbs = column![].spacing(2);
+        let intents = r
+            .item
+            .menu
+            .iter()
+            .filter(|a| a.enabled)
+            .map(|a| a.intent.clone())
+            .chain(contact);
+        for intent in intents {
+            let label = self.word(intent.label());
+            let line = match intent {
+                Intent::Forget {
+                    peer, everywhere, ..
+                } if self.deleting == Some(r.id) => flat(
+                    text(format!("{label}, sure?"))
+                        .size(15)
+                        .color(colour(t.failed_mark_on_panel)),
+                    Message::Intent(Intent::Forget {
+                        peer,
+                        everywhere,
+                        confirmed: true,
+                    }),
+                )
+                .padding([4, 8])
+                .into(),
+                intent => link(label, Message::Intent(intent), t),
+            };
+            verbs = verbs.push(line);
+        }
+        if let Some((_, name)) = self.renaming.as_ref().filter(|(p, _)| *p == peer) {
+            let field = chrome::search_field(
+                self.word(StrId::Rename),
+                name,
+                size::COMPOSE_CORNER,
+                palette(t),
+            )
+            .on_input(Message::Renaming)
+            .on_submit(Message::Intent(Intent::Rename {
+                peer: target,
+                name: Some(name.clone()),
+            }));
+            verbs = verbs.push(field);
+        }
+        verbs = verbs.push(link(
+            self.word(StrId::Close),
+            Message::Intent(Intent::Menu(None)),
+            t,
+        ));
+        container(verbs)
+            .padding(8)
+            .width(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.panel))),
+                border: Border {
+                    radius: border::radius(12),
+                    width: 1.0,
+                    color: colour(t.bar),
+                },
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     fn actions<'a>(&'a self, node: &'a BubbleNode, t: Colours) -> Element<'a, Message> {
         let mut reactions = row![].spacing(6);
         let mut actions = row![].spacing(4);
@@ -1119,12 +1258,35 @@ impl App {
                 }
             }
         }
+        // Forward (1371): the phone's picker of conversations, here the
+        // list's rows under the menu.
+        actions = actions.push(link(
+            self.word(StrId::ActionForward),
+            Message::ForwardPick(node.id),
+            t,
+        ));
         actions = actions.push(link(
             self.word(StrId::Close),
             Message::Intent(Intent::Menu(None)),
             t,
         ));
-        let panel = container(column![reactions, actions].spacing(4))
+        let mut panel = column![reactions, actions].spacing(4);
+        if let (Some(from), scene::NodeId::Bubble(key), true) = (
+            self.scene.chat.as_ref().map(|c| c.peer),
+            node.id,
+            self.forwarding == Some(node.id),
+        ) {
+            for r in self.listed() {
+                if let scene::NodeId::Row(to) = r.id {
+                    panel = panel.push(link(
+                        &r.row.name,
+                        Message::Intent(Intent::Forward { from, key, to }),
+                        t,
+                    ));
+                }
+            }
+        }
+        let panel = container(panel)
             .padding(8)
             .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(colour(t.panel))),
@@ -1195,6 +1357,22 @@ impl App {
                     Message::Intent(action.intent.clone()),
                     t,
                 ));
+            }
+            // The position by hand (1371): latitude and longitude typed or
+            // pasted, Enter sets them.
+            if let Some(typed) = &self.position {
+                let field = chrome::search_field(
+                    self.word(StrId::PositionHint),
+                    typed,
+                    size::COMPOSE_CORNER,
+                    palette(t),
+                )
+                .id(POSITION_FIELD)
+                .on_input(Message::Position)
+                .on_submit(Message::Intent(Intent::EnterPosition {
+                    text: Some(typed.clone()),
+                }));
+                rows = rows.push(field);
             }
             bar = bar.push(container(rows).padding([8, 12]).width(Length::Fill).style(
                 move |_: &Theme| container::Style {

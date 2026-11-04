@@ -23,14 +23,18 @@ use leviculum_core::packet::{Packet, PacketContext, PacketType};
 use leviculum_core::rnode::{derive_preamble_symbols, packet_airtime_ms};
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 use leviculum_ui::input::KeyEvent;
-use loquax::home::ask::{Ask, Outcome, Verb, LORA_PAGE_BYTES};
+use loquax::home::ask::{Ask, GroupVerb, Outcome, Verb, LORA_PAGE_BYTES};
 use loquax::home::client;
 use loquax::home::code::{HomeCode, Typing};
 use loquax::home::watch::{self, WatchEvent};
 use loquax::home::wire;
+use loquax::outbox::OutboxEvent;
+use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel};
+use loquax_m9::field::Field;
+use loquax_m9::group;
 use loquax_m9::kbraw::provisional_layout;
 use loquax_m9::keyboard::{Cap, Keyboard, Layout, Scan, COLUMNS, POLL_MS, ROWS};
-use loquax_m9::keys::M9Key;
+use loquax_m9::keys::{event, M9Key};
 use loquax_m9::pair::Pairing;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -641,5 +645,300 @@ async fn the_board_pairs_by_its_keys_and_pulls_sends_and_marks_in_lora_pages() {
     drop(events);
     watching.abort();
     mailbox.stop().await;
+    relay.stop().await;
+}
+
+/// Press `keys` on the board's model as the board presses them, and keep
+/// what the model hands out.
+fn press(model: &mut UiModel<Field>, row: &mut usize, keys: &[M9Key]) -> Vec<UiEffect> {
+    keys.iter()
+        .flat_map(|key| group::press(model, row, &event(*key)))
+        .collect()
+}
+
+/// The board's ask for the one group effect among `effects`, run against
+/// its home: what the home answered.
+async fn ask_group(
+    node: &ReticulumNode,
+    device: &leviculum_core::Identity,
+    home: &[u8; 64],
+    effects: &[UiEffect],
+) -> Outcome {
+    let verbs: Vec<GroupVerb> = effects
+        .iter()
+        .filter_map(|effect| group::ask_of(effect, client::client_id()))
+        .collect();
+    let [verb] = verbs.as_slice() else {
+        panic!("one group ask among {effects:?}");
+    };
+    ask(node, device, home, Verb::Group(verb.clone())).await
+}
+
+/// Move the picker's cursor to the friend called `name` and tick it.
+fn tick(model: &mut UiModel<Field>, row: &mut usize, name: &str) {
+    let scene = loquax_m9::screen::scene(model);
+    let rows = &scene.new_group.as_ref().expect("New group").rows;
+    let at = rows
+        .iter()
+        .position(|r| r.name.starts_with(name))
+        .unwrap_or_else(|| panic!("no {name} among the friends"));
+    while *row > at {
+        press(model, row, &[M9Key::Up]);
+    }
+    while *row < at {
+        press(model, row, &[M9Key::Down]);
+    }
+    press(model, row, &[M9Key::Char(' ')]);
+}
+
+/// The members a home keeps of a group it hosts: each one's flags, and
+/// whether it left.
+fn hosted_members(mailbox: &Mailbox, group: &[u8; 16]) -> Vec<([u8; 16], i64, bool)> {
+    let address = loquax::home::lxmf_address(&mailbox.public_key).expect("address");
+    loquax::store::Store::open_in(mailbox.dir.path(), address)
+        .expect("the store")
+        .group_members(group)
+        .expect("members")
+        .iter()
+        .map(|m| (m.address, m.flags, m.left_at.is_some()))
+        .collect()
+}
+
+/// Wait until `mailbox` keeps `member` of `group` as `wanted` says, by
+/// its flags and whether it left.
+async fn wait_member(
+    mailbox: &Mailbox,
+    group: &[u8; 16],
+    member: &[u8; 16],
+    what: &str,
+    wanted: impl Fn(i64, bool) -> bool,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let members = hosted_members(mailbox, group);
+        if members
+            .iter()
+            .any(|(address, flags, left)| address == member && wanted(*flags, *left))
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the home never kept the member {what}: {members:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Pull everything after `*cursor` in LoRa pages and hand each received
+/// message to the board's model, as the engine hands what it ingests.
+async fn pull_into_model(
+    node: &ReticulumNode,
+    device: &leviculum_core::Identity,
+    home: &[u8; 64],
+    cursor: &mut u64,
+    model: &mut UiModel<Field>,
+) {
+    let mut entries = Vec::new();
+    let pull = Ask::new(
+        home,
+        Verb::Pull {
+            cursor: *cursor,
+            page_bytes: Some(LORA_PAGE_BYTES as u64),
+        },
+        0,
+        30_000,
+    )
+    .expect("ask");
+    let pulled = client::run_ask(node, device, pull, |page| {
+        entries.extend(page.entries.iter().cloned())
+    })
+    .await
+    .expect("pull");
+    if let Outcome::Pulled { cursor: at, .. } = pulled {
+        *cursor = at;
+    }
+    for entry in entries {
+        if entry.kind != loquax::home::KIND_RECEIVED {
+            continue;
+        }
+        let Ok(message) = leviculum_lxmf::Message::unpack(
+            &entry.packed,
+            None,
+            None,
+            leviculum_lxmf::DeliveryMethod::Direct,
+        ) else {
+            continue;
+        };
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: message.message_id,
+                source: message.source_hash,
+                title: message.title,
+                body: message.content,
+                fields: message.fields,
+                verified: true,
+            }),
+        );
+    }
+}
+
+/// Slice six, host half (1366): every group verb the board's keys reach,
+/// asked of a real home over the mesh by the `no_std` ask
+/// (`Verb::Group`). The board's home is Lew's. As its admin the board
+/// makes "Seilschaft" with Anna (`/group`), adds Bob (`/groupadd`) and
+/// deletes it (`/groupdelete`), each a walk of keys on the member sheet
+/// and the picker; Lew's home hosts it, keeps Bob, and hosts nothing after
+/// the delete. Then Anna, on a home of her own, makes "Chor" with Lew: the
+/// invitation reaches Lew's home, the board pulls it in LoRa pages, Enter
+/// on the card joins and `l`, `y` on the sheet leaves; Anna's home keeps
+/// Lew joined, then left.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_boards_group_keys_make_join_add_leave_and_delete_on_real_homes() {
+    use loquax::store::groups::MEMBER_JOINED;
+    use M9Key::{Char, Enter};
+    logs();
+    let relay = Relay::start(&[]).await;
+    let lew = Mailbox::start(vec![entry(relay.peer)]).await;
+    let anna = Mailbox::start(vec![entry(relay.peer)]).await;
+    let dir = tempfile::tempdir().expect("board dir");
+    let node = board_node(relay.peer, dir.path()).await;
+    let device = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let anna_dir = tempfile::tempdir().expect("Anna's phone dir");
+    let anna_node = board_node(relay.peer, anna_dir.path()).await;
+    let anna_device = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    for (node, device, mailbox) in [(&node, &device, &lew), (&anna_node, &anna_device, &anna)] {
+        let code = HomeCode {
+            public_key: mailbox.public_key,
+            token: mailbox.token,
+        };
+        let join = Pairing::join(&code, 0, 30_000).expect("join");
+        let joined = client::run_ask(node, device, join, |_| {}).await;
+        assert_eq!(joined, Ok(Outcome::Joined));
+    }
+    let lew_address = loquax::home::lxmf_address(&lew.public_key).expect("address");
+    let anna_address = loquax::home::lxmf_address(&anna.public_key).expect("address");
+    let bob = [0xb0; 16];
+
+    // The board: Lew's model, Anna and Bob among its friends.
+    let mut model = UiModel::<Field>::new(&[anna_address, bob]);
+    model.address = Some(lew_address);
+    model.names.remember(anna_address, "Anna");
+    model.names.remember(bob, "Bob");
+    model.focus = Pane::Conversations;
+    let mut row = 0;
+
+    // Create: n, Anna ticked, Enter, the name, Enter.
+    press(&mut model, &mut row, &[Char('n')]);
+    tick(&mut model, &mut row, "Anna");
+    let mut keys = vec![Enter];
+    keys.extend("Seilschaft".chars().map(Char));
+    keys.push(Enter);
+    let created = press(&mut model, &mut row, &keys);
+    let Outcome::Group(seil) = ask_group(&node, &device, &lew.public_key, &created).await else {
+        panic!("/group made nothing");
+    };
+    update(&mut model, UiEvent::GroupMade(Ok(seil)));
+    let members = hosted_members(&lew, &seil);
+    assert!(
+        members.iter().any(|(a, ..)| *a == anna_address),
+        "Lew's home hosts Seilschaft with Anna: {members:?}"
+    );
+    assert!(
+        !members.iter().any(|(a, ..)| *a == bob),
+        "control: not Bob yet"
+    );
+
+    // Add: the sheet's a, Bob ticked, Enter.
+    update(&mut model, UiEvent::Open { peer: seil });
+    model.focus = Pane::Messages;
+    press(&mut model, &mut row, &[Char('m'), Char('a')]);
+    tick(&mut model, &mut row, "Bob");
+    let added = press(&mut model, &mut row, &[Enter]);
+    let outcome = ask_group(&node, &device, &lew.public_key, &added).await;
+    assert_eq!(outcome, Outcome::Group(seil));
+    update(&mut model, UiEvent::MembersAdded(Ok(seil)));
+    assert!(
+        hosted_members(&lew, &seil).iter().any(|(a, ..)| *a == bob),
+        "Lew's home keeps Bob after the add"
+    );
+
+    // Delete: the sheet's d and y.
+    model.focus = Pane::Messages;
+    press(&mut model, &mut row, &[Char('m')]);
+    let deleted = press(&mut model, &mut row, &[Char('d'), Char('y')]);
+    let outcome = ask_group(&node, &device, &lew.public_key, &deleted).await;
+    assert_eq!(outcome, Outcome::Group(seil));
+    let store = loquax::store::Store::open_in(lew.dir.path(), lew_address).expect("store");
+    let hosted = loquax::home::group::hosted(lew.dir.path(), &store).expect("hosted");
+    assert!(
+        hosted.iter().all(|h| h.group.address != seil),
+        "Lew's home hosts no Seilschaft after the delete"
+    );
+
+    // Anna's Chor, with Lew: made on Anna's home by her phone's ask.
+    let chor = wire::GroupRequest {
+        client_id: client::client_id(),
+        name: "Chor".into(),
+        members: vec![(lew_address, "Lew".into())],
+    };
+    let Outcome::Group(chor) = ask(
+        &anna_node,
+        &anna_device,
+        &anna.public_key,
+        Verb::Group(GroupVerb::Create(chor)),
+    )
+    .await
+    else {
+        panic!("Anna's /group made nothing");
+    };
+
+    // The invitation reaches Lew's home; the board pulls it in LoRa pages.
+    let mut cursor = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    while model.group(&chor).is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Anna's invitation never reached the board"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        pull_into_model(&node, &device, &lew.public_key, &mut cursor, &mut model).await;
+    }
+
+    // The control: Anna's home keeps Lew invited, not joined, until the
+    // board's Join.
+    let lew_in_chor = || {
+        hosted_members(&anna, &chor)
+            .into_iter()
+            .find(|(address, ..)| *address == lew_address)
+            .expect("Lew is a member of Chor")
+    };
+    let (_, flags, left) = lew_in_chor();
+    assert!(flags & MEMBER_JOINED == 0 && !left, "{flags:#x} {left}");
+
+    // Join: Enter on Chor's card.
+    update(&mut model, UiEvent::Open { peer: chor });
+    model.focus = Pane::Messages;
+    let joined = press(&mut model, &mut row, &[Enter]);
+    let Outcome::Sent(_) = ask_group(&node, &device, &lew.public_key, &joined).await else {
+        panic!("the Join was not sent");
+    };
+    wait_member(&anna, &chor, &lew_address, "joined", |flags, left| {
+        flags & MEMBER_JOINED != 0 && !left
+    })
+    .await;
+
+    assert!(!lew_in_chor().2, "control: not left before the Leave");
+
+    // Leave: the sheet's l and y.
+    let left = press(&mut model, &mut row, &[Char('m'), Char('l'), Char('y')]);
+    let Outcome::Sent(_) = ask_group(&node, &device, &lew.public_key, &left).await else {
+        panic!("the Leave was not sent");
+    };
+    wait_member(&anna, &chor, &lew_address, "left", |_, left| left).await;
+
+    lew.stop().await;
+    anna.stop().await;
     relay.stop().await;
 }

@@ -21,7 +21,7 @@ use std::time::Duration;
 use leviculum_lxmf::Field;
 use leviculum_ui::commands::Command as PaletteCommand;
 use leviculum_ui::input::{InputBuffer, KeyEvent};
-use loquax::engine::{attach_leaf, Attached, LeafConfig, Role};
+use loquax::engine::{attach_leaf, Attached, LeafConfig, Lender, Role};
 use loquax::fanout::Fanout;
 use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
@@ -166,11 +166,13 @@ struct Inner {
     /// here and the page says it is loading.
     browse_owed: Vec<lnomad::Effect>,
     /// The fetch they go to, over the phone's own node (1337 pass two).
-    fetching: Option<crate::browse_fetch::Fetching>,
+    fetching: Option<loquax::browse_fetch::Fetching>,
     /// What the tab hands Java once, with the next [`schema::Query::Browse`]:
     /// a text for the clipboard, and a downloaded file's path and name.
     browse_copy: Option<String>,
     browse_file: Option<(String, String)>,
+    /// The Rooms' hub link (1384), where the config names a hub.
+    rooming: Option<loquax::rooms_link::Linking>,
     sending: bool,
     pull_owed: bool,
     pulling: bool,
@@ -325,12 +327,18 @@ impl Session {
         // The platform's word on the network (1298), heard by the leaf's
         // rotation and the phone's own mailbox's alike.
         let network = loquax::home::rendezvous::Network::new();
-        // The node the Browse tab fetches through (1337 pass two): the
-        // phone's mailbox's when it is here, else the leaf's.
+        // The node the Browse tab fetches through (1337 pass two) and the
+        // Rooms link to their hub over (1384): the phone's mailbox's when
+        // it is here, else the leaf's.
         let (lend, lends) = tokio::sync::mpsc::unbounded_channel();
+        let (rooms_lend, rooms_lends) = tokio::sync::mpsc::unbounded_channel();
         let (start, here) = if start.here || mailbox::is_here(&home) {
+            let lending = Vec::from([
+                (Lender::Browse, lend.clone()),
+                (Lender::Rooms, rooms_lend.clone()),
+            ]);
             let (start, here) =
-                Self::start_here(start, &home, runtime.handle(), &network, lend.clone())?;
+                Self::start_here(start, &home, runtime.handle(), &network, lending)?;
             (start, Some(here))
         } else {
             (start.clone(), None)
@@ -432,10 +440,12 @@ impl Session {
             Some(_) => mailbox::identity(&home).map_err(StartError::other)?,
             None => {
                 let _ = lend.send(attached.lend());
+                let _ = rooms_lend.send(attached.lend_to(Lender::Rooms));
                 device.clone()
             }
         };
         drop(lend);
+        drop(rooms_lend);
         let client = HomeClient {
             node: attached.node(),
             public_key,
@@ -517,12 +527,30 @@ impl Session {
         inner.redials_seen = network.redials();
         inner.costs.opened = Some(opened_rx);
         inner.network = network.clone();
-        inner.fetching = Some(crate::browse_fetch::start(
+        // The Rooms (1384), where the config names a hub, as on the
+        // desktop: identified as the Browse tab identifies, and shown by
+        // the mailbox's name when it is here.
+        if inner.model.rooms.enabled {
+            let nick = match &here {
+                Some(_) => Some(mailbox::name(&home)).filter(|name| !name.is_empty()),
+                None => None,
+            };
+            inner.rooming = Some(loquax::rooms_link::start(
+                runtime.handle(),
+                loquax::rooms_link::Options {
+                    lends: rooms_lends,
+                    identity: browse_identity.clone(),
+                    nick,
+                },
+                Arc::clone(&wake),
+            ));
+        }
+        inner.fetching = Some(loquax::browse_fetch::start(
             runtime.handle(),
-            crate::browse_fetch::Options {
+            loquax::browse_fetch::Options {
                 lends,
                 identity: browse_identity,
-                identify: home.join(crate::browse_fetch::IDENTIFY_FILE),
+                identify: home.join(loquax::browse_fetch::IDENTIFY_FILE),
             },
             Arc::clone(&wake),
         ));
@@ -574,7 +602,7 @@ impl Session {
         home: &Path,
         runtime: &tokio::runtime::Handle,
         network: &loquax::home::rendezvous::Network,
-        lend: tokio::sync::mpsc::UnboundedSender<loquax::engine::Lent>,
+        lends: loquax::home::daemon::Lends,
     ) -> Result<(schema::Start, mailbox::Here), StartError> {
         let lang = Lang::of_tag(start.lang.as_deref().unwrap_or_default());
         if let Some(text) = start.moving.as_deref() {
@@ -647,7 +675,7 @@ impl Session {
                     .encode(),
             ),
         };
-        let here = mailbox::Here::start(home, runtime, network.clone(), Some(lend))
+        let here = mailbox::Here::start(home, runtime, network.clone(), lends)
             .map_err(StartError::other)?;
         let start = schema::Start {
             server: Some(here.server()),
@@ -1271,6 +1299,13 @@ impl Session {
                 self.lock().apply(event);
                 Ok(())
             }
+            Platform::Rooms(events) => {
+                let mut inner = self.lock();
+                for event in events {
+                    inner.apply(event);
+                }
+                Ok(())
+            }
             Platform::Unlink { peer } => self.lock().unlink(peer),
             Platform::NotNow { peer } => {
                 let mut inner = self.lock();
@@ -1524,11 +1559,20 @@ impl Session {
             schema::Query::Group => schema::encode(&inner.group_screen()),
             schema::Query::Info { peer, key } => {
                 let peer = parse_peer(&peer)?;
-                let detail = loquax::ui::message_detail(&inner.model, peer, schema::model_key(key))
-                    .ok_or_else(|| "no such message".to_string())?;
+                let info =
+                    loquax::ui::info::message_info(&inner.model, peer, schema::model_key(key))
+                        .ok_or_else(|| "no such message".to_string())?;
                 schema::encode(&schema::Info {
                     v: VERSION,
-                    rows: detail.rows,
+                    rows: info
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            let (label, value) = row.resolve(inner.lang);
+                            schema::InfoRow { label, value }
+                        })
+                        .collect(),
+                    advanced: info.advanced,
                 })
             }
             schema::Query::Run { peer, key } => schema::encode(&run(
@@ -1603,6 +1647,8 @@ impl Session {
             | schema::Query::Voice { .. } => return Err("answered above".to_string()),
             // The viewer's zoom needs no session: `lib.rs` answers it.
             schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
+            // The Rooms tab (1384).
+            schema::Query::Rooms => crate::rooms::encode(&inner.model, inner.lang, VERSION),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -1718,6 +1764,10 @@ impl Inner {
         // config's `browse_tab` until the fetch through the phone's own
         // node (pass two) has been seen on a device: off in the APK.
         model.browse.enabled = config.browse_tab.unwrap_or(false);
+        // The Rooms tab is there where the config names a hub (1384), as
+        // on the terminal and the window.
+        model.rooms.hub = config.rooms_hub;
+        model.rooms.enabled = config.rooms_hub.is_some();
         model.reading.on = config.read_receipts.unwrap_or(true);
         model.photo_size = config.photo_size.unwrap_or_default();
         model.bar.abilities = compose::Abilities::phone(camera);
@@ -1765,6 +1815,7 @@ impl Inner {
             fetching: None,
             browse_copy: None,
             browse_file: None,
+            rooming: None,
             sending: false,
             pull_owed: false,
             pulling: false,
@@ -1809,21 +1860,23 @@ impl Inner {
             .and_then(|fetching| fetching.told.try_recv().ok())
         {
             match told {
-                crate::browse_fetch::Told::Browse(event) => self.apply(UiEvent::Browse(event)),
-                crate::browse_fetch::Told::File { name, bytes } => {
+                loquax::browse_fetch::Told::Browse(event) => self.apply(UiEvent::Browse(event)),
+                loquax::browse_fetch::Told::File { name, bytes } => {
                     let event = self.keep_download(&name, &bytes);
                     self.apply(UiEvent::Browse(event));
                 }
+                // The phone asks for no pictures yet (below).
+                loquax::browse_fetch::Told::Picture { .. } => {}
             }
         }
         for effect in std::mem::take(&mut self.browse_owed) {
             let ask = match effect {
-                lnomad::Effect::Navigate(target) => crate::browse_fetch::Ask::Navigate(target),
-                lnomad::Effect::Download(target) => crate::browse_fetch::Ask::Download(target),
+                lnomad::Effect::Navigate(target) => loquax::browse_fetch::Ask::Navigate(target),
+                lnomad::Effect::Download(target) => loquax::browse_fetch::Ask::Download(target),
                 lnomad::Effect::SetIdentify { dest, on } => {
-                    crate::browse_fetch::Ask::Identify { dest, on }
+                    loquax::browse_fetch::Ask::Identify { dest, on }
                 }
-                lnomad::Effect::Cancel => crate::browse_fetch::Ask::Cancel,
+                lnomad::Effect::Cancel => loquax::browse_fetch::Ask::Cancel,
                 // The browser said "copied" already; Java writes it.
                 lnomad::Effect::Copy(text) => {
                     self.browse_copy = Some(text);
@@ -1845,6 +1898,17 @@ impl Inner {
                 // A fetch that ended has nothing more to bring either.
                 let _ = fetching.asks.send(ask);
             }
+        }
+    }
+
+    /// The Rooms' turn (1384): what the hub link said goes to the model.
+    fn rooms(&mut self) {
+        while let Some(told) = self
+            .rooming
+            .as_mut()
+            .and_then(|rooming| rooming.told.try_recv().ok())
+        {
+            self.apply(UiEvent::Rooms(told));
         }
     }
 
@@ -1925,6 +1989,7 @@ impl Inner {
             }
         }
         self.browse();
+        self.rooms();
         // The network first: a re-dial is said before the link it dropped
         // and brought back (1346).
         self.look_at_network();
@@ -2168,6 +2233,13 @@ impl Inner {
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
                 UiEffect::Browse(effect) => self.browse_owed.push(effect),
+                // The Rooms (1384): the hub link does it; what the hub says
+                // comes back on the pump.
+                UiEffect::Rooms(ask) => {
+                    if let Some(rooming) = &self.rooming {
+                        let _ = rooming.asks.send(ask);
+                    }
+                }
                 // Every rotation of the session hears it (1298).
                 UiEffect::Network { kind, changed } => self.network.say(kind, changed),
                 UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
@@ -3264,6 +3336,9 @@ pub enum Platform {
     /// A verb of the Browse tab (1337), as the model's event: lnomad's
     /// intent carried, the tab switch, or the page view's size.
     Browse(UiEvent),
+    /// A verb of the Rooms tab (1384), as the model's events: the tab
+    /// switch, a room opened, or the input line typed and sent.
+    Rooms(Vec<UiEvent>),
 }
 
 /// `request` as an intent, with its addresses and ids parsed: every
@@ -3378,6 +3453,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         } => {
             return crate::browser::event(&verb, &node, &text, cols, rows)
                 .map(|event| Decoded::Platform(Platform::Browse(event)))
+        }
+        R::Rooms { verb, text, index } => {
+            return crate::rooms::events(&verb, &text, index)
+                .map(|events| Decoded::Platform(Platform::Rooms(events)))
         }
         R::Rename { peer, name } => Intent::Rename {
             peer: Target::Peer(parse_peer(&peer)?),
@@ -3726,6 +3805,9 @@ fn redraws(event: &UiEvent) -> bool {
             // arrives.
             | UiEvent::GroupMade(_)
             | UiEvent::MembersAdded(_)
+            // What the hub said, or a verb of the Rooms tab (1384): the
+            // pane is drawn again.
+            | UiEvent::Rooms(_)
     )
 }
 

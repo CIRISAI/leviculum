@@ -133,6 +133,7 @@ use leviculum_lxmf::Field;
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
 pub mod browse;
+pub mod by_hand;
 pub mod chat;
 pub mod compose;
 pub mod contacts;
@@ -141,6 +142,7 @@ pub mod group_scene;
 pub mod groups;
 pub mod history;
 pub mod hit;
+pub mod info;
 pub mod intent;
 pub mod layout;
 pub mod liveness;
@@ -150,11 +152,13 @@ pub mod reactions;
 pub mod receipts;
 pub mod recording;
 pub mod replies;
+pub mod rooms;
 pub mod scene;
 pub mod search;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod verbs;
 pub mod viewload;
 pub mod voice;
 pub mod zoom;
@@ -800,6 +804,11 @@ pub struct UiModel<B> {
     pub map: Option<map::MapState>,
     /// What the shell draws the map with ([`UiEvent::MapSetup`]).
     pub map_setup: map::MapSetup,
+    /// Where the map's picture is, in cells, on a shell that does not lay
+    /// out the terminal's panes (the M9 draws it under its bar, the whole
+    /// width, 1375); `None` for the terminal's conversation pane. The fit,
+    /// the pan's step and the pins' cells go by it ([`UiModel::map_area`]).
+    pub map_picture: Option<Rect>,
     /// The left button held down on the map, a click or a drag.
     pub map_press: Option<map::MapPress>,
     /// Whether going to a place loads its region by itself (`map_autoload`,
@@ -857,6 +866,8 @@ pub struct UiModel<B> {
     groups_changed: BTreeSet<[u8; 16]>,
     /// The Browse tab and the browser in it (1337).
     pub browse: browse::Browse,
+    /// The Rooms tab: Reticulum Relay Chat on a hub (1379).
+    pub rooms: rooms::Rooms,
     /// The language the model's own sentences from the catalogue are said
     /// in ([`strings::StrId`]): English unless the shell knows better, as
     /// the phone does.
@@ -941,6 +952,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             fixes_received: Vec::new(),
             map: None,
             map_setup: map::MapSetup::default(),
+            map_picture: None,
             map_press: None,
             map_autoload: false,
             map_theme: None,
@@ -963,6 +975,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             group_sheet: None,
             groups_changed: BTreeSet::new(),
             browse: browse::Browse::default(),
+            rooms: rooms::Rooms::default(),
             lang: strings::Lang::En,
         };
         for peer in peers {
@@ -1529,6 +1542,25 @@ pub enum UiEvent {
     /// The shell's newest own fix, or none (1270): the position sheet
     /// shows it and its age.
     OwnFix(Option<leviculum_lxmf::telemetry::Location>),
+    /// A position typed or pasted on a shell without a receiver (1371):
+    /// read by [`by_hand::parse`], it becomes the own fix.
+    EnterPosition { text: String },
+    /// The map's centre as the shell's map shows it, or none while it has
+    /// no map (1371): what the position sheet's "map centre" row takes.
+    MapCentre(Option<leviculum_lxmf::telemetry::Location>),
+    /// The position sheet's "map centre" row: the map's centre is the own
+    /// fix (1371).
+    FixAtMapCentre,
+    /// A peer verb of a frontend without the model at hand (1371, the
+    /// window's row menu): what [`UiModel::peer_word`] makes of it, or
+    /// nothing.
+    PeerWord {
+        peer: intent::Target,
+        verb: verbs::PeerVerb,
+    },
+    /// A friend's code the shell read from a picture (1371): its
+    /// conversation opens, as a code typed into the palette does.
+    CodeRead(String),
     /// A node announced its position to the mesh (1302,
     /// [`crate::mesh_position`]): `identity` the hash of the identity the
     /// announce proved, `fix` its position, `name` the name a shell knows
@@ -1617,6 +1649,9 @@ pub enum UiEvent {
     /// What the hosted browser of the Browse tab is told (1337): a verb,
     /// the page a fetch brought, a NomadNet node an announce named.
     Browse(browse::BrowseEvent),
+    /// What the Rooms are told (1379): what the hub said, and the
+    /// reader's verbs in the Rooms tab.
+    Rooms(rooms::RoomsEvent),
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1668,6 +1703,8 @@ pub enum UiEffect {
     /// [`lnomad::Effect::Write`] or [`lnomad::Effect::Quit`], which the
     /// core does itself ([`browse::effects_of`]).
     Browse(lnomad::Effect),
+    /// What the Rooms ask of their hub link (1379, `crate::rooms_link`).
+    Rooms(rooms::RoomAsk),
     /// Make the contacts file say this about its peer, its other lines kept
     /// ([`crate::names::save_contact`]).
     Contact(Contact),
@@ -1738,6 +1775,22 @@ pub enum UiEffect {
     /// Ask the home to delete its group `group` for everyone (1307 pass
     /// four, `/groupdelete`); answered with [`UiEvent::GroupDeleted`].
     DeleteGroup { group: [u8; 16] },
+    /// Delete every map region on this device (1371, the palette's
+    /// `delete all maps` once asked): the shell's, which holds the files,
+    /// and tells the model the regions left with [`UiEvent::MapSetup`].
+    DeleteAllMaps,
+    /// Send the picture (`photo`) or file at `path` to `peer` (1371, the
+    /// terminal's typed path): the shell reads it as the window's chooser
+    /// hands one over, and answers with [`UiEvent::SendPhoto`] or
+    /// [`UiEvent::SendFile`], or a notice.
+    Attach {
+        peer: [u8; 16],
+        path: String,
+        photo: bool,
+    },
+    /// Read the friend's code in the picture at `path` (1371): the shell
+    /// answers with [`UiEvent::CodeRead`], or a notice.
+    ScanCode { path: String },
     /// What the recorder of `peer`'s chat is to do (1276): start, pause,
     /// resume, stop, hand over, drop, play the preview, tick the haptics.
     Recording {
@@ -1776,8 +1829,13 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
 
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
-        UiEvent::Tab(tab) => browse::tab(model, tab),
+        UiEvent::Tab(tab) => {
+            let mut effects = browse::tab(model, tab);
+            effects.extend(rooms::tab(model, tab));
+            effects
+        }
         UiEvent::Browse(event) => browse::fold(model, event),
+        UiEvent::Rooms(event) => rooms::fold(model, event),
         UiEvent::MapSetup(setup) => {
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
@@ -1796,6 +1854,17 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::Key(key) if key.kind == KeyEventKind::Release => Vec::new(),
+        // The Browse tab in front owns the keys and the mouse, as lnomad's
+        // own screen does (1369): its quit leaves the tab.
+        UiEvent::Key(key) if model.browse.showing() => {
+            model.touched();
+            browse::app(model, lnomad::AppEvent::Key(key))
+        }
+        // The Rooms tab in front: its input line has the keys (1379).
+        UiEvent::Key(key) if model.rooms.showing() => {
+            model.touched();
+            rooms::key(model, key)
+        }
         UiEvent::Key(key) => {
             model.touched();
             on_key(model, key)
@@ -1826,7 +1895,14 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             // A taller screen brings the overlays' bottoms nearer.
             model.help_scroll = model.help_scroll.min(help_bounds(model).1);
             model.detail_scroll = model.detail_scroll.min(detail_bounds(model).1);
-            Vec::new()
+            // The terminal's screen is the Browse tab's whole page, which
+            // lnomad's own screen fills (1369); only the terminal says
+            // this event, the phone and the window name the tab's cells.
+            browse::app(model, lnomad::AppEvent::Resize(width, height))
+        }
+        UiEvent::Mouse(mouse) if model.browse.showing() => {
+            model.touched();
+            browse::app(model, lnomad::AppEvent::Mouse(mouse))
         }
         UiEvent::Mouse(mouse) => {
             let effects = on_mouse(model, mouse);
@@ -1862,8 +1938,20 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::OwnFix(fix) => {
             model.bar.own_fix = fix;
+            model.bar.by_hand = false;
             model.shares_due()
         }
+        UiEvent::EnterPosition { text } => model.enter_position(&text),
+        UiEvent::MapCentre(centre) => {
+            model.bar.map_centre = centre;
+            Vec::new()
+        }
+        UiEvent::FixAtMapCentre => model.fix_at_map_centre(),
+        UiEvent::CodeRead(code) => model.take_code(&code, false),
+        UiEvent::PeerWord { peer, verb } => match model.peer_verb(peer, verb) {
+            Some(event) => update(model, event),
+            None => Vec::new(),
+        },
         UiEvent::MeshPosition {
             identity,
             fix,
@@ -3510,6 +3598,48 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             Vec::new()
         }
         PaletteCommand::Pin => model.toggle_pin(),
+        // The verbs the terminal lacked against the phone (1371).
+        PaletteCommand::Reply => model.start_reply(),
+        PaletteCommand::SendAgain => model.send_again_here(),
+        PaletteCommand::Forward => {
+            model.ask_forward();
+            Vec::new()
+        }
+        PaletteCommand::Mute => model.toggle_mute(),
+        PaletteCommand::Verify => {
+            model.toggle_verified();
+            Vec::new()
+        }
+        PaletteCommand::MarkUnread => {
+            model.toggle_unread();
+            Vec::new()
+        }
+        PaletteCommand::PhotoSize => model.next_photo_size(),
+        PaletteCommand::Position => {
+            model.ask_position();
+            Vec::new()
+        }
+        PaletteCommand::SharePosition => {
+            model.ask_share();
+            Vec::new()
+        }
+        PaletteCommand::StopSharing => model.stop_share_here(),
+        PaletteCommand::DeleteAllMaps => {
+            model.ask_delete_all_maps();
+            Vec::new()
+        }
+        PaletteCommand::SendPicture => {
+            model.ask_path(true, false);
+            Vec::new()
+        }
+        PaletteCommand::SendFile => {
+            model.ask_path(false, false);
+            Vec::new()
+        }
+        PaletteCommand::CodeFromPicture => {
+            model.ask_path(false, true);
+            Vec::new()
+        }
         PaletteCommand::Archive => model.toggle_archive(),
         PaletteCommand::Archived => {
             model.toggle_archived_view();
@@ -3523,6 +3653,8 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             open_map(model);
             Vec::new()
         }
+        PaletteCommand::Browse => browse::open(model),
+        PaletteCommand::Rooms => rooms::open(model),
         PaletteCommand::MapDrawing => {
             if model.map_setup.drawings.is_empty() {
                 model.toast(ToastKind::Info, "the map is drawn one way here".to_string());
@@ -3704,6 +3836,10 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         return Vec::new();
     }
     let body = model.compose.take();
+    // A reply the palette's `reply` started (1371) answers its message.
+    if let Some((peer, target)) = model.open_reply() {
+        return model.reply_to(peer, target, body);
+    }
     send_body(model, body)
 }
 
@@ -4136,7 +4272,7 @@ impl<B> UiModel<B> {
     /// The map's pins in `Tab` order: every peer with a position, our own
     /// named `you`.
     pub fn map_pins(&self) -> Vec<map::MapPin> {
-        let shown: BTreeMap<[u8; 16], Fix> = self
+        let mut shown: BTreeMap<[u8; 16], Fix> = self
             .positions
             .iter()
             .filter(|(peer, _)| {
@@ -4144,6 +4280,23 @@ impl<B> UiModel<B> {
             })
             .map(|(peer, fix)| (*peer, fix.clone()))
             .collect();
+        // The shell's own fix (its receiver, or typed by hand) is our pin
+        // where it is newer than the last we shared (1375): a board with a
+        // GNSS shows where it is before it shared anything.
+        if let (Some(own), Some(location)) = (self.address, self.bar.own_fix) {
+            let fix = Fix {
+                peer: own,
+                via: own,
+                message: None,
+                received_at: self.now.map(|now| now.unix_secs),
+                location,
+                telemetry: Vec::new(),
+                source: telemetry::Source::Telemetry,
+            };
+            if shown.get(&own).is_none_or(|held| fix.newer_than(held)) {
+                shown.insert(own, fix);
+            }
+        }
         map::pins_of(
             &shown,
             |peer| self.names.label(peer),
@@ -4194,12 +4347,18 @@ impl<B> UiModel<B> {
         }
     }
 
-    /// The cells the map's picture covers.
+    /// The cells the map's picture covers: the shell's own place for it
+    /// ([`UiModel::map_picture`]), else inside the conversation pane.
     pub fn map_area(&self) -> Rect
     where
         B: InputBuffer,
     {
-        map::picture_area(Screen::of(self.screen.0, self.screen.1, self.compose_rows()).messages)
+        match self.map_picture {
+            Some(picture) => picture,
+            None => map::picture_area(
+                Screen::of(self.screen.0, self.screen.1, self.compose_rows()).messages,
+            ),
+        }
     }
 
     /// The map is being dragged: the shell draws it at its tick, not at
@@ -4976,7 +5135,10 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
             .at
             .map(|at| at.hh_mm_ss())
             .unwrap_or_else(|| "--:--:--".to_string());
-        rows.push(format!("{at}  {}", entry.what));
+        rows.push(format!(
+            "{at}  {}",
+            groups::ledger_line(&entry.what, model.lang)
+        ));
     }
     Some(DetailView {
         title: "message".to_string(),
@@ -7605,6 +7767,9 @@ pub(crate) mod tests {
             "▌<abababab…>"
         );
         assert_eq!(text(&view(&model).conversations[1]).trim_end(), "▌you: hi");
+        // 1381, finding 22: the terminal's list speaks the reader's language.
+        model.lang = strings::Lang::De;
+        assert_eq!(text(&view(&model).conversations[1]).trim_end(), "▌du: hi");
     }
 
     /// `Alt-Enter` puts a line break in the compose pane, `Enter` still
@@ -10468,6 +10633,45 @@ pub(crate) mod tests {
         model
     }
 
+    /// The shell's own fix is our pin where it is newer than the one we
+    /// shared (1375): a board's GNSS shows it before it shared anything,
+    /// and the older one does not move it back. The map's picture is the
+    /// shell's own place where it says one, else the terminal's pane.
+    #[test]
+    fn the_own_fix_is_our_pin_and_a_shell_places_the_picture() {
+        let mut model = mapped();
+        let ours = |m: &UiModel<Field>| {
+            let pins = m.map_pins();
+            pins.iter()
+                .find(|p| p.peer == [0x01; 16])
+                .map(|p| (p.label.clone(), p.at))
+        };
+        let shared = ours(&model).expect("the shared fix");
+        let gnss = fix_at(43_777_000, 11_255_000, two_pm() - 5)
+            .location
+            .expect("a location");
+        update(&mut model, UiEvent::OwnFix(Some(gnss)));
+        let (label, at) = ours(&model).expect("our pin");
+        assert_eq!(label, "you");
+        assert_ne!(at, shared.1, "the newer fix moved it");
+        // Control: an own fix older than the share leaves the share's pin.
+        let old = fix_at(43_777_000, 11_255_000, two_pm() - 3_600)
+            .location
+            .expect("a location");
+        update(&mut model, UiEvent::OwnFix(Some(old)));
+        assert_eq!(ours(&model), Some(shared));
+        // Control: none at all, no position of ours stored, no pin.
+        model.positions.remove(&[0x01; 16]);
+        update(&mut model, UiEvent::OwnFix(None));
+        assert_eq!(ours(&model), None);
+
+        let pane = model.map_area();
+        let picture = Rect::new(0, 1, 53, 21);
+        model.map_picture = Some(picture);
+        assert_eq!(model.map_area(), picture);
+        assert_ne!(pane, picture, "control: the terminal's pane is another");
+    }
+
     fn selected_label(model: &UiModel<Field>) -> String {
         let peer = model.map.and_then(|m| m.selected).expect("a pin selected");
         let pins = model.map_pins();
@@ -12607,5 +12811,296 @@ pub(crate) mod tests {
         );
         assert!(detail.rows.iter().any(|r| r == "signature verified"));
         assert!(message_detail(&model, PEER, 999).is_none());
+    }
+
+    /// 1381, finding 19: the phone's Info is plain rows in the reader's
+    /// language, no hex; the terminal's lines with the id come along for
+    /// Advanced. Control: the same message in English.
+    #[test]
+    fn the_info_speaks_the_readers_language_and_keeps_the_hex_for_advanced() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, UiEvent::Clock(at(25, 14, 0)));
+        received(&mut model, ID, "one");
+        let key = model.conversations[0].messages[0].activity;
+        let info = info::message_info(&model, PEER, key).expect("info");
+        let said =
+            |lang| -> Vec<(String, String)> { info.rows.iter().map(|r| r.resolve(lang)).collect() };
+        let de = said(strings::Lang::De);
+        let name = model.names.label(&PEER);
+        assert_eq!(de[0], ("Von".to_string(), name.clone()));
+        assert_eq!(
+            de[1],
+            ("Empfangen".to_string(), "Heute · 14:00".to_string())
+        );
+        assert_eq!(
+            de[2],
+            (
+                "Absender".to_string(),
+                "Durch die Signatur bestätigt".to_string()
+            )
+        );
+        assert_eq!(de[3], ("Größe".to_string(), "0,1 KB".to_string()));
+        assert_eq!(de.len(), 4, "{de:?}");
+        let hex = to_hex(&ID);
+        assert!(
+            de.iter()
+                .all(|(l, v)| !l.contains(&hex[..8]) && !v.contains(&hex[..8])),
+            "{de:?}"
+        );
+        assert!(
+            info.advanced.contains(&format!("id     {hex}")),
+            "{:?}",
+            info.advanced
+        );
+        let en = said(strings::Lang::En);
+        assert_eq!(en[0], ("From".to_string(), name));
+        assert_eq!(en[3], ("Size".to_string(), "0.1 KB".to_string()));
+        assert!(info::message_info(&model, PEER, 999).is_none());
+    }
+
+    /// The terminal's verbs of 1371, on two restored chats: PEER's
+    /// message 5 under the cursor, PEER open.
+    fn two_chats() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![
+            restored(PEER, vec![stored(5, false, "lunch?", None)], 0),
+            restored(OTHER, vec![stored(2, false, "older", None)], 0),
+        ]);
+        update(&mut model, UiEvent::Clock(at(25, 14, 0)));
+        model.message_cursor = 0;
+        model
+    }
+
+    fn sends(effects: &[UiEffect]) -> Vec<([u8; 16], String, Vec<i64>)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                UiEffect::Send { to, body, fields } => {
+                    Some((*to, body.clone(), fields.iter().map(|(k, _)| *k).collect()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1371: `reply` makes the next send answer the message under the
+    /// cursor. Control: the same send without it carries no reply field.
+    #[test]
+    fn the_palette_replies_to_the_message_under_the_cursor() {
+        use leviculum_lxmf::constants::FIELD_REPLY_TO;
+        let mut model = two_chats();
+        model.focus = Pane::Compose;
+        typed(&mut model, "plain");
+        let plain = update(&mut model, UiEvent::Run(PaletteCommand::Send));
+        let plain = sends(&plain);
+        assert_eq!(plain.len(), 1);
+        assert!(!plain[0].2.contains(&FIELD_REPLY_TO), "control: no reply");
+
+        model.message_cursor = 0;
+        update(&mut model, UiEvent::Run(PaletteCommand::Reply));
+        assert_eq!(model.open_reply(), Some((PEER, [5; 32])));
+        typed(&mut model, "yes");
+        let answered = sends(&update(&mut model, UiEvent::Run(PaletteCommand::Send)));
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].0, PEER);
+        assert!(answered[0].2.contains(&FIELD_REPLY_TO), "{answered:?}");
+        assert_eq!(model.open_reply(), None, "the reply is spent");
+    }
+
+    /// `forward` asks a name and sends the copy there; a name nobody has
+    /// sends nothing. `send again` does nothing to a message that did not
+    /// fail.
+    #[test]
+    fn the_palette_forwards_and_sends_again_only_a_failed_one() {
+        let mut model = two_chats();
+        update(&mut model, UiEvent::Run(PaletteCommand::Forward));
+        let ask = model.palette.as_ref().and_then(|p| p.ask);
+        assert_eq!(ask, Some(contacts::Ask::Forward { from: PEER, key: 5 }));
+        let label = model.names.label(&OTHER);
+        let none = model.answer_ask(ask.expect("asked"), "nobody at all".to_string());
+        assert!(sends(&none).is_empty(), "control: no such friend");
+        let forwarded = model.answer_ask(ask.expect("asked"), label);
+        let forwarded = sends(&forwarded);
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!((forwarded[0].0, forwarded[0].1.as_str()), (OTHER, "lunch?"));
+
+        assert!(update(&mut model, UiEvent::Run(PaletteCommand::SendAgain)).is_empty());
+        let mut failed = UiModel::<Field>::new(&[]);
+        failed.restore(vec![restored(
+            PEER,
+            vec![stored(7, true, "lost", Some(DeliveryState::Failed))],
+            0,
+        )]);
+        failed.message_cursor = 0;
+        let again = sends(&update(
+            &mut failed,
+            UiEvent::Run(PaletteCommand::SendAgain),
+        ));
+        assert_eq!(again.len(), 1);
+        assert_eq!((again[0].0, again[0].1.as_str()), (PEER, "lost"));
+    }
+
+    /// `mute`, `verify` and `mark unread` swap the open chat's state and
+    /// back; the window's row menu reaches the same through `peer_word`,
+    /// and a forget still asking is no event.
+    #[test]
+    fn mute_verify_and_unread_swap_and_the_window_gets_the_same_events() {
+        let mut model = two_chats();
+        assert!(!model.muted(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Mute));
+        assert!(model.muted(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Mute));
+        assert!(!model.muted(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Verify));
+        assert!(model.verified(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::Verify));
+        assert!(!model.verified(&PEER));
+        update(&mut model, UiEvent::Run(PaletteCommand::MarkUnread));
+        assert_eq!(model.conversations[model.selected].unread, 1);
+        update(&mut model, UiEvent::Run(PaletteCommand::MarkUnread));
+        assert_eq!(model.conversations[model.selected].unread, 0);
+
+        let target = intent::Target::Peer(OTHER);
+        let pin = model.peer_word(&intent::Intent::Pin {
+            peer: target,
+            on: intent::Switch::On,
+        });
+        match pin {
+            Some(UiEvent::PeerState { peer, state }) => {
+                assert_eq!(peer, OTHER);
+                assert!(state.pinned);
+            }
+            other => panic!("not the pin: {other:?}"),
+        }
+        let mute = model.peer_word(&intent::Intent::Mute {
+            peer: target,
+            secs: -1,
+        });
+        assert!(matches!(
+            mute,
+            Some(UiEvent::PeerState { state, .. }) if state.muted_until == Some(state::MUTED_ALWAYS)
+        ));
+        let asking = intent::Intent::Forget {
+            peer: target,
+            everywhere: false,
+            confirmed: false,
+        };
+        assert_eq!(model.peer_word(&asking), None, "control: it still asks");
+        assert_eq!(model.peer_word(&intent::Intent::Copy), None);
+    }
+
+    /// `photo size` steps through the three tiers and keeps each;
+    /// `position` reads a typed fix, `share position` sends it once or
+    /// starts a share, `stop sharing` ends it.
+    #[test]
+    fn the_palette_sets_the_photo_size_and_shares_a_typed_position() {
+        let mut model = two_chats();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let effects = update(&mut model, UiEvent::Run(PaletteCommand::PhotoSize));
+            assert!(effects.iter().any(|e| matches!(
+                e,
+                UiEffect::Remember {
+                    key: "photo_size",
+                    ..
+                }
+            )));
+            seen.push(model.photo_size);
+        }
+        assert_eq!(
+            seen,
+            [
+                photos::PhotoSize::Original,
+                photos::PhotoSize::Small,
+                photos::PhotoSize::Phone
+            ]
+        );
+
+        update(&mut model, UiEvent::Run(PaletteCommand::SharePosition));
+        let share = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert!(
+            sends(&model.answer_ask(share, String::new())).is_empty(),
+            "no fix yet"
+        );
+
+        update(&mut model, UiEvent::Run(PaletteCommand::Position));
+        let position = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert_eq!(position, contacts::Ask::Position);
+        model.answer_ask(position, "52.5163, 13.3777".to_string());
+        assert!(model.bar.by_hand);
+        let once = sends(&model.answer_ask(share, String::new()));
+        assert_eq!(once.len(), 1);
+        assert!(once[0]
+            .2
+            .contains(&leviculum_lxmf::constants::FIELD_TELEMETRY));
+
+        model.answer_ask(share, "1h".to_string());
+        assert!(model.share(&PEER).is_some());
+        update(&mut model, UiEvent::Run(PaletteCommand::StopSharing));
+        assert!(model.share(&PEER).is_none());
+    }
+
+    /// `delete all maps` asks first and only where there are maps; once
+    /// answered the shell is told.
+    #[test]
+    fn delete_all_maps_asks_and_then_tells_the_shell() {
+        const FLORENCE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.lmr");
+        let mut model = two_chats();
+        update(&mut model, UiEvent::Run(PaletteCommand::DeleteAllMaps));
+        assert!(model.palette.is_none(), "control: no maps, no question");
+        let region = *leviculum_map::region::Region::from_bytes(FLORENCE)
+            .expect("the fixture")
+            .header();
+        model.map_setup.regions = vec![region];
+        update(&mut model, UiEvent::Run(PaletteCommand::DeleteAllMaps));
+        let ask = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert!(model.ask_rows(ask)[0].contains("delete all 1 maps"));
+        assert_eq!(
+            model.answer_ask(ask, String::new()),
+            [UiEffect::DeleteAllMaps]
+        );
+    }
+
+    /// `send picture`, `send file` and `code in a picture` ask a path and
+    /// hand it to the shell; an empty one hands nothing over, and a code
+    /// the shell read opens its conversation.
+    #[test]
+    fn a_typed_path_goes_to_the_shell_and_a_read_code_opens_its_chat() {
+        let mut model = two_chats();
+        for (command, photo) in [
+            (PaletteCommand::SendPicture, true),
+            (PaletteCommand::SendFile, false),
+        ] {
+            update(&mut model, UiEvent::Run(command));
+            let ask = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+            assert!(
+                model.answer_ask(ask, "  ".to_string()).is_empty(),
+                "control"
+            );
+            assert_eq!(
+                model.answer_ask(ask, "~/hill.jpg".to_string()),
+                [UiEffect::Attach {
+                    peer: PEER,
+                    path: "~/hill.jpg".to_string(),
+                    photo
+                }]
+            );
+        }
+        update(&mut model, UiEvent::Run(PaletteCommand::CodeFromPicture));
+        let ask = model.palette.as_ref().and_then(|p| p.ask).expect("asked");
+        assert_eq!(
+            model.answer_ask(ask, "code.png".to_string()),
+            [UiEffect::ScanCode {
+                path: "code.png".to_string()
+            }]
+        );
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = crate::lxma::encode(&key).expect("a code");
+        let peer = crate::home::lxmf_address(&key).expect("an address");
+        update(&mut model, UiEvent::CodeRead(code));
+        assert_eq!(model.conversations[model.selected].peer, peer);
     }
 }

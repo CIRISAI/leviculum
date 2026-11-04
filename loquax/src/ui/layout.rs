@@ -34,7 +34,6 @@ use super::recording::{Fold, LevelTrack, Verb};
 use super::scene::{PositionBadge, RecordingBar};
 use super::strings::{Arg, Lang, StrId, Text};
 use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
-use crate::names::Names;
 use crate::telemetry;
 use crate::when::{date_label, list_time, WallTime};
 
@@ -657,7 +656,7 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
     for &index in &order[first..] {
         let conversation = &model.conversations[index];
         let here = index == model.selected;
-        let [top, bottom] = entry(conversation, &model.names, width, model.now, here);
+        let [top, bottom] = entry(model, conversation, width, here);
         for mut row in [top, bottom] {
             if here {
                 if let Some(cell) = row.cells.first_mut() {
@@ -719,14 +718,17 @@ pub fn badge_cells(conversation: &Conversation, width: usize) -> Option<(usize, 
 /// and one blank last: the name and the last message's time, the last line's
 /// preview (`you:` when ours) and the unread count in brackets, reversed.
 /// A conversation not `open` with a message typed and not sent shows that
-/// instead of the last line, `Draft: …` in italics (1219).
-fn entry(
+/// instead of the last line, `Draft: …` in italics (1219). The words are
+/// the reader's language's, the last line the one the phone and the window
+/// show ([`super::chat::list_row`], 1381): an invitation says who invited
+/// to what, never the wire's English with its code.
+fn entry<B>(
+    model: &UiModel<B>,
     conversation: &Conversation,
-    names: &Names,
     width: usize,
-    now: Option<WallTime>,
     open: bool,
 ) -> [RLine; 2] {
+    let (names, now, lang) = (&model.names, model.now, model.lang);
     let room = width.saturating_sub(2);
     let last = conversation
         .messages
@@ -755,7 +757,6 @@ fn entry(
         n => format!("[{n}]"),
     };
     let preview = match last {
-        Some(message) if message.is_reaction() => reactions::preview(message).unwrap_or_default(),
         // Whether the position is alive, not how many came (1209).
         Some(message) if message.is_report() => format!(
             "{} position · {}",
@@ -765,9 +766,13 @@ fn entry(
                 .list_words(now.map(|now| now.unix_secs))
         ),
         Some(message) => {
-            let first = message.body.split('\n').next().unwrap_or("");
-            match message.outbound {
-                true => format!("you: {first}"),
+            let row = super::chat::list_row(model, &conversation.peer);
+            let first = row.last.split('\n').next().unwrap_or("");
+            // A reaction and an invitation say who did it themselves.
+            let invite = leviculum_lxmf::lev::Lev::from_fields(&message.fields)
+                .is_some_and(|lev| lev.invite.is_some());
+            match message.outbound && !message.is_reaction() && !invite {
+                true => Text::Key(StrId::RowYou, vec![Arg::Str(first.into())]).resolve(lang),
                 false => first.into(),
             }
         }
@@ -782,7 +787,7 @@ fn entry(
         &conversation.liveness(now_secs),
         now_secs,
     )
-    .map(|_| format!("{} ", StrId::PositionMarker.text(Lang::En)))
+    .map(|_| format!("{} ", StrId::PositionMarker.text(lang)))
     .unwrap_or_default();
     let marks = pin.chars().count() + badge.chars().count();
     let budget = match marks {
@@ -791,7 +796,7 @@ fn entry(
     };
     let draft = conversation.draft.line().filter(|_| !open);
     let preview = match &draft {
-        Some(line) => Text::Key(StrId::DraftRow, vec![Arg::Str(line.clone())]).resolve(Lang::En),
+        Some(line) => Text::Key(StrId::DraftRow, vec![Arg::Str(line.clone())]).resolve(lang),
         None => preview,
     };
     let preview = leviculum_ui::text::truncate_to_cols(&preview, budget);

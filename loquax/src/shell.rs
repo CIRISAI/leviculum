@@ -254,6 +254,11 @@ pub(crate) struct Shell {
     /// The desktop's microphone (1276): the system's recorder, run on the
     /// model's recording effects and pumped on every poll.
     mic: crate::mic::Mic,
+    /// The Browse tab's fetch and what the browser asks of the desktop
+    /// (1369).
+    pub(crate) browsing: crate::browsing::Browsing,
+    /// The Rooms' hub link (1379), where the config names a hub.
+    rooming: loquax::rooms_link::Rooming,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -286,8 +291,32 @@ impl Shell {
     /// comes back.
     pub(crate) fn apply(&mut self, event: UiEvent) {
         let effects = update(&mut self.model, event);
+        self.run(effects);
+    }
+
+    /// Fold one of lnomad's own events into the hosted browser (1369): a
+    /// picture's, which no event of Loquax's carries.
+    fn apply_app(&mut self, event: lnomad::AppEvent) {
+        let effects = loquax::ui::browse::app(&mut self.model, event);
+        self.run(effects);
+    }
+
+    /// The browser's events the desktop has for it: the fetch's, and what
+    /// its effects answered at once.
+    fn fold_browsed(&mut self, browsed: Vec<crate::browsing::Folded>) {
+        for folded in browsed {
+            match folded {
+                crate::browsing::Folded::Ui(event) => self.apply(event),
+                crate::browsing::Folded::App(event) => self.apply_app(event),
+            }
+        }
+    }
+
+    /// Write what a fold changed to the store, and run what came back.
+    fn run(&mut self, effects: Vec<UiEffect>) {
         self.persist();
         let mut answers = Vec::new();
+        let mut browsed = Vec::new();
         for effect in effects {
             match effect {
                 UiEffect::Store(read) => answers.extend(self.read(read)),
@@ -309,10 +338,19 @@ impl Shell {
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
                 UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
-                // The terminal and the window enable no Browse tab (1337):
-                // lnomad is its own program on a PC, and the model drops a
-                // browser verb while the tab is off.
-                UiEffect::Browse(_) => {}
+                // The Browse tab (1369): the fetch, the clipboard, the
+                // downloads and the tab's files; what the browser is told
+                // at once is folded after this fold.
+                UiEffect::Browse(effect) => {
+                    browsed.extend(self.browsing.effect(
+                        &mut self.model,
+                        effect,
+                        &mut self.outputs,
+                    ));
+                }
+                // The Rooms (1379): the hub link does it; what the hub says
+                // comes back on the pump.
+                UiEffect::Rooms(ask) => self.rooming.ask(ask),
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
                 UiEffect::MapDrawing(n) => self.outputs.push(Output::MapDrawing(n)),
@@ -334,6 +372,37 @@ impl Shell {
                 }
                 UiEffect::Log(line) => tracing::warn!("{line}"),
                 UiEffect::LoadMap(want) => self.map_ask(want),
+                // The palette's `delete all maps` (1371): the files go, as
+                // the window's settings button deletes them, and the model
+                // learns the regions left.
+                // A path typed into the terminal's palette (1371): read as
+                // the window's chooser hands one over.
+                UiEffect::Attach { peer, path, photo } => {
+                    self.attach(peer, &home_path(&path), photo);
+                }
+                UiEffect::ScanCode { path } => {
+                    let path = home_path(&path);
+                    let read = std::fs::read(&path)
+                        .map_err(|e| format!("{}: {e}", path.display()))
+                        .and_then(|bytes| loquax::scan::image_codes(&bytes));
+                    answers.push(match read.map(|codes| codes.into_iter().next()) {
+                        Ok(Some(code)) => UiEvent::CodeRead(code),
+                        Ok(None) => UiEvent::Notice(
+                            loquax::ui::strings::StrId::CodeNotInPicture
+                                .text(self.model.lang)
+                                .to_string(),
+                        ),
+                        Err(line) => UiEvent::Notice(line),
+                    });
+                }
+                UiEffect::DeleteAllMaps => {
+                    let line = match self.maps.delete_all() {
+                        Ok(gone) => format!("deleted {gone} maps"),
+                        Err(why) => why,
+                    };
+                    self.regions_changed();
+                    answers.push(UiEvent::Notice(line));
+                }
                 UiEffect::Import => answers.extend(self.import()),
                 // A photo whole (1220): the terminal has no pixels for it,
                 // so the system's viewer shows it, from a file under the
@@ -460,6 +529,7 @@ impl Shell {
         for answer in answers {
             self.apply(answer);
         }
+        self.fold_browsed(browsed);
         self.start_next();
     }
 
@@ -729,6 +799,11 @@ impl Shell {
         self.map_steps(steps);
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
         self.listen();
+        let browsed = self.browsing.told(&self.model);
+        self.fold_browsed(browsed);
+        for told in self.rooming.told() {
+            self.apply(told);
+        }
     }
 
     /// The microphone's windows since the last poll, as levels, and the
@@ -769,7 +844,6 @@ impl Shell {
     /// stripped at the reader's photo size, any other file whole up to
     /// what a receiver takes; what will not go is said in the reader's
     /// words, as the phone's status line says it.
-    #[cfg(feature = "gui")]
     pub(crate) fn attach(&mut self, peer: [u8; 16], path: &std::path::Path, photo: bool) {
         let lang = self.model.lang;
         let event = std::fs::metadata(path)
@@ -818,6 +892,10 @@ impl Shell {
         }
         *clocks = read;
         self.apply(UiEvent::Tick);
+        // The browser's spinner and its toast's age, while it is shown.
+        if self.model.browse.showing() {
+            self.apply(UiEvent::Browse(loquax::ui::browse::BrowseEvent::Tick));
+        }
     }
 
     /// The schedule's clock: tokio's, which on Linux stands still in
@@ -867,6 +945,18 @@ impl Shell {
         self.map_steps(steps);
     }
 
+    /// The regions on disk, told to the model's map setup.
+    fn regions_changed(&mut self) {
+        let regions = self.maps.headers();
+        let zooms = leviculum_map::choice::view_zooms(regions.iter());
+        let setup = MapSetup {
+            zooms: (*zooms.start(), *zooms.end()),
+            regions,
+            ..self.model.map_setup.clone()
+        };
+        self.apply(UiEvent::MapSetup(setup));
+    }
+
     /// The loader's steps: one `tui.log` line each, and the model told. A
     /// region that landed reaches the model's setup before its `Done`, so
     /// the fit that follows sees it.
@@ -898,14 +988,7 @@ impl Shell {
                         landed.name,
                         landed.evicted.len()
                     );
-                    let regions = self.maps.headers();
-                    let zooms = leviculum_map::choice::view_zooms(regions.iter());
-                    let setup = MapSetup {
-                        zooms: (*zooms.start(), *zooms.end()),
-                        regions,
-                        ..self.model.map_setup.clone()
-                    };
-                    self.apply(UiEvent::MapSetup(setup));
+                    self.regions_changed();
                     self.apply(UiEvent::MapLoad(MapLoad::Done(want)));
                 }
                 Step::Failed {
@@ -1342,6 +1425,9 @@ pub(crate) async fn start(
         None => identity.public_key_bytes(),
     };
     let device = identity.clone();
+    // The identity a NomadNet node is shown when the reader identifies to
+    // it from the Browse tab: the one this node runs on, as on the phone.
+    let browse_identity = identity.clone();
     let role = match client {
         Some(_) => Role::Client { address },
         None => Role::Messenger,
@@ -1352,7 +1438,7 @@ pub(crate) async fn start(
             config_dir: Some(config_dir.clone()),
             storage_dir,
             identity,
-            display_name: display_name.name.into_bytes(),
+            display_name: display_name.name.clone().into_bytes(),
             notices: effects.clone(),
         },
         role,
@@ -1406,6 +1492,27 @@ pub(crate) async fn start(
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     model.reading.on = config.read_receipts.unwrap_or(true);
     model.photo_size = config.photo_size.unwrap_or_default();
+    // The Browse tab (1369), behind the config's `browse_tab` as on the
+    // phone: off unless the file says on. On, its fetch runs over the
+    // node attached above; off, the node is lent to nobody, as before.
+    let browse_tab = config.browse_tab.unwrap_or(false);
+    crate::browsing::set_up(&mut model, &home, browse_tab);
+    let browsing = match browse_tab {
+        true => crate::browsing::Browsing::start(&attached, browse_identity.clone(), &home),
+        false => crate::browsing::Browsing::off(),
+    };
+    // The Rooms (1379): a tab and a hub link where the config names a hub,
+    // over the node attached above, identified with the reader's identity
+    // and shown by the reader's name; without one nothing is lent.
+    model.rooms.hub = config.rooms_hub;
+    model.rooms.enabled = config.rooms_hub.is_some();
+    let rooming = match config.rooms_hub {
+        Some(_) => {
+            let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
+            loquax::rooms_link::Rooming::start(&attached, browse_identity, nick)
+        }
+        None => loquax::rooms_link::Rooming::off(),
+    };
     // The microphone (1276): the system's recorder, where it has one; the
     // window offers the microphone only then.
     let mic = crate::mic::Mic::of_process();
@@ -1520,6 +1627,8 @@ pub(crate) async fn start(
         watching: false,
         fallback: Fallback::default(),
         mic,
+        browsing,
+        rooming,
     };
     Ok((shell, config))
 }
@@ -1544,5 +1653,13 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => crate::failure(error, "failed"),
+    }
+}
+
+/// A path as typed (1371): a leading `~` is the home directory.
+fn home_path(typed: &str) -> std::path::PathBuf {
+    match (typed.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+        _ => std::path::PathBuf::from(typed),
     }
 }

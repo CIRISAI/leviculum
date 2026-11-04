@@ -36,10 +36,10 @@ use super::{Pane, UiEffect, UiModel};
 /// them when the tab comes back.
 #[derive(Clone, Debug)]
 pub struct Browse {
-    /// The host shows a Browse tab: the phone and the M9 (Lew,
-    /// 2026-11-02). The terminal and the window leave it off, since lnomad
-    /// is its own program on a PC; off, the tab bar has no Browse tab and a
-    /// page link in a chat is copied for lnomad as before.
+    /// The host shows a Browse tab: the config's `browse_tab` on the
+    /// phone, the terminal and the window (1369), the M9 by its own word
+    /// (Lew, 2026-11-02). Off, the tab bar has no Browse tab and a page
+    /// link in a chat is copied for lnomad as before.
     pub enabled: bool,
     /// The Browse tab is the one in front.
     pub open: bool,
@@ -78,6 +78,11 @@ impl Browse {
         if self.model.title.is_empty() {
             show_start_screen(&mut self.model);
         }
+    }
+
+    /// The tab is on this host and in front: the browser has the keys.
+    pub fn showing(&self) -> bool {
+        self.enabled && self.open
     }
 
     /// Fold one of the browser's events, returning what the host does.
@@ -124,16 +129,25 @@ pub enum BrowseEvent {
     Node(DiscoveredNode),
     /// The page's area in cells, columns by rows.
     Resize { cols: u16, rows: u16 },
+    /// The platform draws in this theme now (the window's light or dark,
+    /// 1369): the page is laid out again in its accents, as lnomad's own
+    /// toggle does.
+    Theme(leviculum_ui::theme::Theme),
+    /// The platform's own address field holds this now (the window's,
+    /// 1369): what lnomad's window says on every edit
+    /// ([`lnomad::app::type_address`]).
+    Address(String),
     /// The shell's tick: the spinner, the toast's age.
     Tick,
 }
 
 impl BrowseEvent {
     /// The browser's event for this, but the identify word, which is no
-    /// event of the browser's but a note in its model.
-    fn into_app(self) -> Result<AppEvent, ([u8; 16], bool)> {
+    /// event of the browser's but a note in its model, and the address
+    /// field's text, which the browser takes as the window's does.
+    fn into_app(self) -> Result<AppEvent, Aside> {
         Ok(match self {
-            BrowseEvent::Identifying { dest, on } => return Err((dest, on)),
+            BrowseEvent::Identifying { dest, on } => return Err(Aside::Identify(dest, on)),
             BrowseEvent::FailedText(text) => AppEvent::LoadFailedText(text),
             BrowseEvent::Downloaded { name, bytes, dir } => {
                 AppEvent::DownloadDone { name, bytes, dir }
@@ -147,9 +161,18 @@ impl BrowseEvent {
             BrowseEvent::Failed(why) => AppEvent::LoadFailed(why),
             BrowseEvent::Node(node) => AppEvent::NodeDiscovered(node),
             BrowseEvent::Resize { cols, rows } => AppEvent::Resize(cols, rows),
+            BrowseEvent::Address(value) => return Err(Aside::Typed(value)),
+            BrowseEvent::Theme(theme) => return Err(Aside::Theme(theme)),
             BrowseEvent::Tick => AppEvent::Tick,
         })
     }
+}
+
+/// What a [`BrowseEvent`] is when it is no event of the browser's.
+enum Aside {
+    Identify([u8; 16], bool),
+    Typed(String),
+    Theme(leviculum_ui::theme::Theme),
 }
 
 /// A tab chosen: Browse comes to the front, any other sends it back.
@@ -157,7 +180,7 @@ pub(super) fn tab<B: InputBuffer + Default>(model: &mut UiModel<B>, tab: TabId) 
     match tab {
         TabId::Browse if model.browse.enabled => model.browse.show(model.lang),
         TabId::Browse => {}
-        TabId::Chats | TabId::Map => model.browse.open = false,
+        TabId::Chats | TabId::Map | TabId::Rooms => model.browse.open = false,
     }
     Vec::new()
 }
@@ -175,12 +198,45 @@ pub(super) fn fold<B: InputBuffer + Default>(
     model.browse.model.lang = model.lang;
     let effects = match event.into_app() {
         Ok(event) => model.browse.fold(event),
-        Err((dest, on)) => {
+        Err(Aside::Identify(dest, on)) => {
             model.browse.model.note_identify(dest, on);
+            Vec::new()
+        }
+        Err(Aside::Typed(value)) => lnomad::app::type_address(&mut model.browse.model, &value),
+        Err(Aside::Theme(theme)) => {
+            if model.browse.model.theme != theme {
+                model.browse.model.toggle_theme();
+            }
             Vec::new()
         }
     };
     effects_of(model, effects)
+}
+
+/// Fold one of lnomad's own events into the hosted browser: a key or the
+/// mouse while the tab is in front (1369), or what a desktop's picture
+/// code says of a picture. Dropped while the host has no Browse tab.
+pub fn app<B: InputBuffer + Default>(model: &mut UiModel<B>, event: AppEvent) -> Vec<UiEffect> {
+    if !model.browse.enabled {
+        return Vec::new();
+    }
+    model.browse.model.lang = model.lang;
+    let effects = model.browse.fold(event);
+    effects_of(model, effects)
+}
+
+/// The palette's `browse` and the terminal's `B` (1369): the tab comes to
+/// the front where the host has one, and where it has none the reader is
+/// told how to switch it on.
+pub(super) fn open<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    if model.browse.enabled {
+        return tab(model, TabId::Browse);
+    }
+    model.toast(
+        leviculum_ui::toast::ToastKind::Info,
+        "the Browse tab is off; browse_tab = on in the config turns it on".into(),
+    );
+    Vec::new()
 }
 
 /// Open the Browse tab at the NomadNet page `url` a chat linked to.
@@ -305,7 +361,8 @@ mod tests {
 
     #[test]
     fn a_host_without_the_tab_has_none_and_drops_its_verbs() {
-        // The control of every test here: the terminal and the window.
+        // The control of every test here: a host whose config leaves
+        // `browse_tab` off, the default on every target.
         let mut model = UiModel::<Buffer>::new(&[]);
         update(&mut model, UiEvent::Tab(TabId::Browse));
         let scene = model.scene(LayoutClass::Compact);
@@ -567,6 +624,136 @@ mod tests {
         update(&mut terminal, UiEvent::Tab(TabId::Browse));
         let lines = words(&terminal);
         assert!(lines.contains("Terminal"), "the control: {lines:?}");
+    }
+
+    fn key(c: char) -> UiEvent {
+        UiEvent::Key(leviculum_ui::input::KeyEvent::new(
+            leviculum_ui::input::KeyCode::Char(c),
+            leviculum_ui::input::KeyModifiers::NONE,
+        ))
+    }
+
+    /// 1369: on the desktop the tab in front has the keys and the mouse,
+    /// as lnomad's own screen does: `?` is the browser's help, its `q`
+    /// leaves the tab, and with the tab behind the same keys are the
+    /// messenger's again (the control).
+    #[test]
+    fn the_tab_in_front_has_the_keys_and_the_mouse() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        browse(
+            &mut model,
+            BrowseIntent::Go {
+                url: Some(format!("{}:/page/index.mu", hex(&NODE))),
+            },
+        );
+        page(&mut model, &"line\n".repeat(80));
+        // Esc closes the places list, which owns the keys while open.
+        update(
+            &mut model,
+            UiEvent::Key(leviculum_ui::input::KeyEvent::new(
+                leviculum_ui::input::KeyCode::Esc,
+                leviculum_ui::input::KeyModifiers::NONE,
+            )),
+        );
+        assert!(!model.browse.model.show_places);
+        update(&mut model, key('?'));
+        assert!(model.browse.model.show_help, "the browser's help");
+        assert!(!model.help, "not the messenger's");
+        update(&mut model, key('?'));
+        assert!(!model.browse.model.show_help);
+        // `/` is the page's own search.
+        update(&mut model, key('/'));
+        assert_eq!(model.browse.model.mode, lnomad::app::Mode::Search);
+        assert!(model.search.is_none(), "not the messenger's search");
+        update(
+            &mut model,
+            UiEvent::Key(leviculum_ui::input::KeyEvent::new(
+                leviculum_ui::input::KeyCode::Esc,
+                leviculum_ui::input::KeyModifiers::NONE,
+            )),
+        );
+        let scrolled = model.browse.model.scroll;
+        let wheel = leviculum_ui::input::MouseEvent {
+            kind: leviculum_ui::input::MouseEventKind::ScrollDown,
+            column: 1,
+            row: 3,
+            modifiers: leviculum_ui::input::KeyModifiers::NONE,
+        };
+        update(&mut model, UiEvent::Mouse(wheel));
+        assert!(
+            model.browse.model.scroll > scrolled,
+            "the wheel scrolls the page"
+        );
+        update(&mut model, key('q'));
+        assert!(!model.browse.open, "its quit leaves the tab");
+        assert!(!model.quit);
+        // Behind, `?` is the messenger's help.
+        update(&mut model, key('?'));
+        assert!(model.help);
+        assert!(!model.browse.model.show_help);
+    }
+
+    /// The terminal's screen is the tab's page: its size reaches the
+    /// browser where the host has the tab, and not where it has none.
+    #[test]
+    fn the_terminals_size_is_the_pages() {
+        let mut model = phone();
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        assert_eq!(model.browse.model.size, (100, 30));
+        let mut off = UiModel::<Buffer>::new(&[]);
+        update(
+            &mut off,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        assert_eq!(off.browse.model.size, CELLS, "the control");
+    }
+
+    /// The palette's `browse` (the terminal's `B`) brings the tab to the
+    /// front where the host has it, and says how to switch it on where
+    /// it has none.
+    #[test]
+    fn the_palettes_browse_opens_the_tab_or_says_how() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Run(crate::ui::PaletteCommand::Browse));
+        assert!(model.browse.showing());
+        let mut off = UiModel::<Buffer>::new(&[]);
+        update(&mut off, UiEvent::Run(crate::ui::PaletteCommand::Browse));
+        assert!(!off.browse.open);
+        let said = off.toasts.last().expect("a toast").text.clone();
+        assert!(said.contains("browse_tab = on"), "{said}");
+    }
+
+    /// The window's address field and its light or dark (1369): the text
+    /// enters the address bar as lnomad's window enters it, and a theme
+    /// lays the page out again only when it differs.
+    #[test]
+    fn the_windows_field_and_theme_reach_the_browser() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Address("5a5a:/page/x.mu".to_string())),
+        );
+        assert_eq!(model.browse.model.mode, lnomad::app::Mode::Address);
+        assert_eq!(
+            leviculum_ui::input::InputBuffer::value(&model.browse.model.input),
+            "5a5a:/page/x.mu"
+        );
+        let other = model.browse.model.theme.toggle();
+        update(&mut model, UiEvent::Browse(BrowseEvent::Theme(other)));
+        assert_eq!(model.browse.model.theme, other);
+        update(&mut model, UiEvent::Browse(BrowseEvent::Theme(other)));
+        assert_eq!(model.browse.model.theme, other, "the same theme stays");
     }
 
     fn hex(bytes: &[u8; 16]) -> String {

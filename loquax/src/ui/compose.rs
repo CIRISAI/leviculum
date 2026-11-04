@@ -42,6 +42,9 @@ pub struct Abilities {
     pub picker: bool,
     /// It can read its own position and ask for the permission.
     pub location: bool,
+    /// It takes the own position by hand, typed or the map's centre
+    /// (1371): a desktop, which has no receiver.
+    pub manual: bool,
 }
 
 impl Abilities {
@@ -52,7 +55,26 @@ impl Abilities {
             microphone: true,
             picker: true,
             location: true,
+            manual: false,
         }
+    }
+
+    /// A desktop (1371): the system's picker and the microphone, the
+    /// position by hand; no camera and no receiver.
+    pub fn desktop() -> Self {
+        Abilities {
+            camera: false,
+            microphone: true,
+            picker: true,
+            location: false,
+            manual: true,
+        }
+    }
+
+    /// Whether the position sheet has something to offer: a fix read or
+    /// one set by hand.
+    pub fn locates(self) -> bool {
+        self.location || self.manual
     }
 }
 
@@ -121,7 +143,7 @@ impl Button {
 /// order drawn.
 pub fn buttons(abilities: Abilities, round: Round) -> Vec<Button> {
     let mut out = Vec::from([Button::Emoji]);
-    if abilities.location {
+    if abilities.locates() {
         out.push(Button::Locate);
     }
     if abilities.camera {
@@ -153,6 +175,10 @@ pub enum SheetRow {
     ShareFor(Span),
     /// No fix known: turn location on (the 1201 permission flow).
     LocationOn,
+    /// Type or paste the position (1371), on a shell without a receiver.
+    EnterPosition,
+    /// The map's centre is the position (1371), once a map was open.
+    MapCentre,
 }
 
 impl SheetRow {
@@ -168,6 +194,8 @@ impl SheetRow {
             SheetRow::ShareFor(Span::Hours8) => "share_8_h",
             SheetRow::ShareFor(Span::UntilStopped) => "share_until_stopped",
             SheetRow::LocationOn => "location_on",
+            SheetRow::EnterPosition => "enter_position",
+            SheetRow::MapCentre => "map_centre",
         }
     }
 }
@@ -180,21 +208,31 @@ pub fn attach_rows(abilities: Abilities) -> Vec<SheetRow> {
         rows.push(SheetRow::Gallery);
         rows.push(SheetRow::File);
     }
-    if abilities.location {
+    if abilities.locates() {
         rows.push(SheetRow::Position);
     }
     rows
 }
 
 /// The position sheet's rows: with a fix, once and the four shares
-/// (1273); without one, location on.
-pub fn position_rows(fix: Option<&Location>) -> Vec<SheetRow> {
-    match fix {
+/// (1273); without one, location on where the shell reads its own. A
+/// shell that takes it by hand (1371) offers the entry after those, and
+/// the map's centre when `centre`, a map having been open.
+pub fn position_rows(fix: Option<&Location>, abilities: Abilities, centre: bool) -> Vec<SheetRow> {
+    let mut rows = match fix {
         Some(_) => core::iter::once(SheetRow::ShareNow)
             .chain(Span::ALL.into_iter().map(SheetRow::ShareFor))
             .collect(),
-        None => Vec::from([SheetRow::LocationOn]),
+        None if abilities.location || !abilities.manual => Vec::from([SheetRow::LocationOn]),
+        None => Vec::new(),
+    };
+    if abilities.manual {
+        rows.push(SheetRow::EnterPosition);
+        if centre {
+            rows.push(SheetRow::MapCentre);
+        }
     }
+    rows
 }
 
 /// Which sheet the bar opened, over whose chat.
@@ -242,6 +280,10 @@ pub struct Bar {
     pub staged: BTreeMap<[u8; 16], Staged>,
     /// The shell's newest own fix, for the position sheet.
     pub own_fix: Option<Location>,
+    /// The own fix was set by hand (1371), not read.
+    pub by_hand: bool,
+    /// The shell's map's centre, once it showed a map (1371).
+    pub map_centre: Option<Location>,
 }
 
 impl<B> UiModel<B> {
@@ -496,7 +538,7 @@ mod tests {
             UiEvent::OpenSheet(Sheet::Position { peer: PEER }),
         );
         assert_eq!(
-            position_rows(model.bar.own_fix.as_ref()),
+            position_rows(model.bar.own_fix.as_ref(), model.bar.abilities, false),
             [SheetRow::LocationOn]
         );
         assert!(update(&mut model, UiEvent::ShareFix { peer: PEER }).is_empty());
@@ -512,7 +554,7 @@ mod tests {
         };
         update(&mut model, UiEvent::OwnFix(Some(fix)));
         assert_eq!(
-            position_rows(model.bar.own_fix.as_ref()),
+            position_rows(model.bar.own_fix.as_ref(), model.bar.abilities, false),
             [
                 SheetRow::ShareNow,
                 SheetRow::ShareFor(Span::Minutes15),

@@ -183,8 +183,12 @@ copies are made again from the archived original, byte for byte), each
 group announces every hour on its own clock beside the announce at its
 engine's start, a member whose last three proofs each took more than
 2 s gets its lines held for 60 s and sent as one digest (`lev` key
-`0x06`), and a reaction goes to the members that understand groups with
-its target rewritten to each one's own copy (stock members get none).
+`0x06`), and a reaction goes to every other member that is not slow
+with its target rewritten to the id each one knows the message by: its
+own copy, or its own original when it wrote the line. A stock member
+gets it too, since Columba and Sideband draw reactions (1387, Lew
+2026-11-03; G2 had given stock members none); a slow one gets none, as
+a digest carries text only.
 
 The writer's ticks (1307 pass four): the group's proof says the group
 has it, one tick. Once every copy of a line sent alone is proven the
@@ -317,8 +321,8 @@ then and may sleep.
 - **Idempotent by the client's id.** The same id handed in again is
   answered from the outbox with the message it made the first time, also
   after a restart; nothing is signed twice. A client whose answer was lost
-  asks again with the same id, up to three times
-  (`home::client::send_retrying`).
+  asks again with the same id, three times in all (`home::client::send`,
+  the ask's `ATTEMPTS`).
 - **The outbox is a table** (`home_outbox`, schema 5 of the store), one row
   a message: the client's id, the message id, the destination, the packed
   bytes, when it came, whether it is still retried, and whether a

@@ -65,6 +65,8 @@ pub const VERSION: &str = env!("LEVICULUM_VERSION");
 
 pub mod address;
 pub mod body;
+#[cfg(feature = "browse")]
+pub mod browse_fetch;
 pub mod clock;
 pub mod code;
 pub mod config;
@@ -103,6 +105,8 @@ pub mod outbox;
 pub mod photo;
 #[cfg(feature = "picture")]
 pub mod picture;
+#[cfg(feature = "std")]
+pub mod rooms_link;
 #[cfg(feature = "scan")]
 pub mod scan;
 #[cfg(feature = "screenmap")]

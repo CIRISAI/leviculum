@@ -1,0 +1,38 @@
+# Fuzz harness for the RRC envelope decoder. Detached from the parent
+# workspace (own `[workspace]` table) because it builds only on nightly with
+# libFuzzer/ASan and is excluded from `just standard`. Build/run with the glibc
+# host target, not the workspace musl default:
+#   cargo +nightly fuzz run <target> --target x86_64-unknown-linux-gnu
+#
+# Separate from the other fuzz crates because the decoder under test lives in
+# its own crate, and what it reads is a hub's packet: Loquax hands every link
+# packet from `rrc.hub` straight to `Session::receive`.
+[package]
+name = "leviculum-rrc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+# A detached workspace, so `license.workspace = true` has nothing to inherit.
+license = "AGPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.leviculum-rrc]
+path = ".."
+
+# Detach from the repo workspace: nightly-only, not a workspace member.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "rrc_envelope"
+path = "fuzz_targets/rrc_envelope.rs"
+test = false
+doc = false
+bench = false

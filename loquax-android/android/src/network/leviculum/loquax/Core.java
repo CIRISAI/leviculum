@@ -236,6 +236,21 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "browse"))));
     }
 
+    /**
+     * A verb of the Rooms tab (1384): `tab`, `chats`, `show` with the
+     * list's index of a room (-1 for the list), `say` with the input
+     * field's text, which the library reads as the terminal's input line;
+     * the error in words, or null.
+     */
+    static String rooms(String verb, String text, int index) {
+        return command(map("t", "rooms", "verb", verb, "text", text, "index", index));
+    }
+
+    /** The Rooms tab as the library words it (1384). */
+    static Map<String, Object> roomsScreen() {
+        return answer(Native.query(MsgPack.pack(map("t", "rooms"))));
+    }
+
     /** One request; the error in words, or null. */
     static String command(Map<String, Object> request) {
         Map<String, Object> done = answer(Native.command(MsgPack.pack(request)));
@@ -501,16 +516,18 @@ final class Core {
         return command(map("t", "used", "emoji", emoji));
     }
 
-    /** A message's detail lines, the terminal's `v` view; null with the error in `error[0]`. */
-    @SuppressWarnings("unchecked")
-    static List<String> info(String peer, long key, String[] error) {
+    /**
+     * A message's Info (1381): `rows`, each a `label` and a `value` in the phone's language, and
+     * `advanced`, the terminal's `v` lines; null with the error in `error[0]`.
+     */
+    static Map<String, Object> info(String peer, long key, String[] error) {
         Map<String, Object> answer = answer(Native.query(MsgPack.pack(
                 map("t", "info", "peer", peer, "key", key))));
         if (!(answer.get("rows") instanceof List)) {
             error[0] = str(answer, "error");
             return null;
         }
-        return strings(answer.get("rows"));
+        return answer;
     }
 
     /** The emoji used last, newest first; none without a session. */

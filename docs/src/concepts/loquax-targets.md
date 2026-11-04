@@ -10,7 +10,7 @@ page is the measured state of that rule, feature by feature (1341).
 
 Each row is a user-facing feature of the phone build, found by walking the
 Android facade's `Request` and `Query` enums
-(`loquax-android/src/schema.rs:261`, `loquax-android/src/schema.rs:679`),
+(`loquax-android/src/schema.rs:265`, `loquax-android/src/schema.rs:698`),
 the bridge methods Java calls (`Core.java`), the activities that call them,
 and the scene's node kinds (`loquax/src/ui/scene.rs`). For every target a
 cell names the place that does it, `file:line`, or says MISSING. A MISSING
@@ -49,85 +49,102 @@ the hardware, which is no gap.
 
 ## The table
 
-Rows marked (1341) were MISSING before this pass and are closed by it.
+Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 
 | # | Feature | Android | Window | Terminal |
 |---|---------|---------|--------|----------|
-| 1 | Chats: list, open, send text | `ChatActivity.java:1825` | `loquax/src/gui.rs:1006` | `loquax/src/ui.rs:2148` |
-| 2 | Drafts | `ChatActivity.java:2321` | `loquax/src/gui.rs:848` | `loquax/src/ui.rs:1029` |
-| 3 | React | `ChatActivity.java:1952` | `loquax/src/gui.rs:1057` | `loquax/src/ui.rs:3542` (palette `react`) |
-| 4 | Reply | `ChatActivity.java:1825` | `loquax/src/gui.rs:1071` | MISSING |
-| 5 | Forward | `ChatActivity.java:2053` | MISSING | MISSING |
-| 6 | Send again | `ChatActivity.java:2445` | `loquax/src/gui.rs:1117` | MISSING |
-| 7 | Delete a message | `ChatActivity.java:2129` | `loquax/src/gui.rs:1128` | `loquax/src/ui.rs:3504` |
-| 8 | Copy a message | `ChatActivity.java:2073` | `loquax/src/gui.rs:1107` | `loquax/src/ui.rs:2339` (OSC 52) |
-| 9 | Search | `ConversationsActivity.java:65` | `loquax/src/gui.rs:996` | `loquax/src/ui.rs:3500` |
-| 10 | Read receipts on/off | `SettingsActivity.java:589` | `loquax/src/gui.rs:980` | `loquax/src/ui.rs:3478` |
-| 11 | Send a picture (Gallery) | `ChatActivity.java:1355` | `loquax/src/gui.rs:945`, `loquax/src/desktop.rs:158` (1341) | MISSING |
-| 12 | Photo size, three tiers | `SettingsActivity.java:316` | MISSING | MISSING (config key `photo_size` only) |
-| 13 | View a photo | `ChatActivity.java:1675` | `loquax/src/gui.rs:1118` (own viewer) | `loquax/src/ui.rs:2367`, `loquax/src/shell.rs:341` (system viewer) |
+| 1 | Chats: list, open, send text | `ChatActivity.java:1825` | `loquax/src/gui.rs:1190` | `loquax/src/ui.rs:2236` |
+| 2 | Drafts | `ChatActivity.java:2354` | `loquax/src/gui.rs:984` | `loquax/src/ui.rs:1042` |
+| 3 | React | `ChatActivity.java:1952` | `loquax/src/gui.rs:1302` | `loquax/src/ui.rs:3674` (palette `react`) |
+| 4 | Reply | `ChatActivity.java:1825` | `loquax/src/gui.rs:1083` | `loquax/src/ui.rs:3602` (palette `reply`) (1371) |
+| 5 | Forward | `ChatActivity.java:2053` | `loquax/src/gui/chat.rs:1265`, `loquax/src/gui.rs:1260` (1371) | `loquax/src/ui.rs:3604` (palette `forward`) (1371) |
+| 6 | Send again | `ChatActivity.java:2478` | `loquax/src/gui.rs:1117` | `loquax/src/ui.rs:3603` (palette `send again`) (1371) |
+| 7 | Delete a message | `ChatActivity.java:2129` | `loquax/src/gui.rs:1373` | `loquax/src/ui.rs:3592` |
+| 8 | Copy a message | `ChatActivity.java:2073` | `loquax/src/gui.rs:1352` | `loquax/src/ui.rs:2427` (OSC 52) |
+| 9 | Search | `ConversationsActivity.java:65` | `loquax/src/gui.rs:1180` | `loquax/src/ui.rs:3588` |
+| 10 | Read receipts on/off | `SettingsActivity.java:589` | `loquax/src/gui.rs:1164` | `loquax/src/ui.rs:3566` |
+| 11 | Send a picture (Gallery) | `ChatActivity.java:1355` | `loquax/src/gui.rs:957`, `loquax/src/desktop.rs:158` (1341) | `loquax/src/ui.rs:3631` (palette `send picture`, a typed path), `loquax/src/shell.rs:380` (1371) |
+| 12 | Photo size, three tiers | `SettingsActivity.java:316` | `loquax/src/gui/chat.rs:384` (settings) (1371) | `loquax/src/ui.rs:3617` (palette `photo size`) (1371) |
+| 13 | View a photo | `ChatActivity.java:1675` | `loquax/src/gui.rs:1363` (own viewer) | `loquax/src/ui.rs:2455`, `loquax/src/shell.rs:410` (system viewer) |
 | 14 | Camera | `ChatActivity.java:988` | n/a | n/a |
-| 15 | Send a file | `ChatActivity.java:1408` | `loquax/src/gui.rs:948`, `loquax/src/shell.rs:773` (1341) | MISSING |
-| 16 | Open and save a received file | `ChatActivity.java:1575` | `loquax/src/gui.rs:1119`, `loquax/src/shell.rs:348` | `loquax/src/ui.rs:2378`, `loquax/src/shell.rs:348` |
-| 17 | Record a voice message | `RecordingBar.java:369` | `loquax/src/gui/chat.rs:1255`, `loquax/src/shell.rs:435`, `mic.rs` | `loquax/src/ui.rs:2850`, `loquax/src/shell.rs:445`, `mic.rs` |
-| 18 | Play a voice message | `ChatActivity.java:1526` | `loquax/src/gui.rs:1122`, `loquax/src/shell.rs:367` | `loquax/src/ui.rs:2387`, `loquax/src/shell.rs:367` |
-| 19 | Groups: new, join, members, add, remove, leave, delete, start again | `GroupDialogs.java:34` | `loquax/src/gui.rs:973` (all verbs) | `loquax/src/ui.rs:3569` to `loquax/src/ui.rs:3651` |
-| 20 | Map with positions | `MapPane.java:350` | `loquax/src/gui.rs:1035` | `loquax/src/ui.rs:3522`, `tui/map.rs` |
+| 15 | Send a file | `ChatActivity.java:1408` | `loquax/src/gui.rs:960`, `loquax/src/shell.rs:782` (1341) | `loquax/src/ui.rs:3635` (palette `send file`, a typed path), `loquax/src/shell.rs:380` (1371) |
+| 16 | Open and save a received file | `ChatActivity.java:1575` | `loquax/src/gui.rs:1364`, `loquax/src/shell.rs:417` | `loquax/src/ui.rs:2466`, `loquax/src/shell.rs:348` |
+| 17 | Record a voice message | `RecordingBar.java:369` | `loquax/src/gui/chat.rs:1433`, `loquax/src/shell.rs:504`, `mic.rs` | `loquax/src/ui.rs:2938`, `loquax/src/shell.rs:435`, `mic.rs` |
+| 18 | Play a voice message | `ChatActivity.java:1526` | `loquax/src/gui.rs:1367`, `loquax/src/shell.rs:436` | `loquax/src/ui.rs:2475`, `loquax/src/shell.rs:367` |
+| 19 | Groups: new, join, members, add, remove, leave, delete, start again | `GroupDialogs.java:34` | `loquax/src/gui.rs:1157` (all verbs) | `loquax/src/ui.rs:3701` to `loquax/src/ui.rs:3783` |
+| 20 | Map with positions | `MapPane.java:350` | `loquax/src/gui.rs:1219` | `loquax/src/ui.rs:3652`, `tui/map.rs` |
 | 21 | Buildings on the map | `loquax/src/picture.rs:44` (shared) | `loquax/src/picture.rs:44` | `loquax/src/picture.rs:44` (sixel, kitty) |
-| 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1143` | `loquax/src/ui.rs:3518` |
-| 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:987` | MISSING |
-| 24 | Mesh positions (nodes nearby) | `MapPane.java:370` | `loquax/src/gui.rs:1310` | `loquax/src/tui/map.rs:1398` |
-| 25 | Share the position, once or timed | `ChatActivity.java:910`, `ShareService.java:39` | MISSING | MISSING |
-| 26 | Pin | `ConversationsActivity.java:481` | MISSING | `loquax/src/ui.rs:3512` |
-| 27 | Mute | `ContactActivity.java:444` | MISSING | MISSING |
-| 28 | Archive | `ConversationsActivity.java:485` | MISSING | `loquax/src/ui.rs:3513` |
-| 29 | Block | `ContactActivity.java:353` | MISSING | `loquax/src/ui.rs:3546` |
-| 30 | Verify | `ContactActivity.java:299` | MISSING | MISSING |
-| 31 | Mark unread | `ConversationsActivity.java:479` | MISSING | MISSING |
-| 32 | Rename | `ContactActivity.java:493` | MISSING | `loquax/src/ui.rs:3538` |
-| 33 | Forget a conversation | `ContactActivity.java:411` | MISSING | `loquax/src/ui.rs:3508` |
-| 34 | Add a contact by code, typed or pasted | `AddContact.java:76` | `loquax/src/gui.rs:821` | `loquax/src/ui.rs:3563` |
-| 35 | A contact code from a QR | `loquax-android/src/lib.rs:326` (the scanner screen's decoder) | `loquax/src/gui.rs:1327`, `loquax/src/gui/chat.rs:441`, `loquax/src/scan.rs:39` (1341) | MISSING |
-| 36 | My code | `ProfileActivity.java:232` | MISSING | `loquax/src/ui.rs:3668` |
-| 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:193`) | CLI (`loquax/src/main.rs:193`) |
-| 38 | Link a device | `ProfileActivity.java:319` | CLI (`loquax/src/main.rs:207`, `loquax/src/main.rs:223`) | CLI (`loquax/src/main.rs:207`, `loquax/src/main.rs:223`) |
+| 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1388` | `loquax/src/ui.rs:3648` |
+| 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:999` | `loquax/src/ui.rs:3627` (palette `delete all maps`), `loquax/src/shell.rs:398` (1371) |
+| 24 | Mesh positions (nodes nearby) | `MapPane.java:370` | `loquax/src/gui.rs:1703` | `loquax/src/tui/map.rs:1398` |
+| 25 | Share the position, once or timed | `ChatActivity.java:910`, `ShareService.java:39` | `loquax/src/gui.rs:1088`, `loquax/src/gui.rs:1096`, position by hand `loquax/src/ui/by_hand.rs:27` (1371) | `loquax/src/ui.rs:3618` (palette `position`), `loquax/src/ui.rs:3622` (`share position`, `stop sharing`) (1371) |
+| 26 | Pin | `ConversationsActivity.java:551` | row menu `loquax/src/gui/chat.rs:1136`, `loquax/src/gui.rs:1287` (1371) | `loquax/src/ui.rs:3512` |
+| 27 | Mute | `ContactActivity.java:444` | row menu (1371) | `loquax/src/ui.rs:3608` (palette `mute`) (1371) |
+| 28 | Archive | `ConversationsActivity.java:555` | row menu (1371) | `loquax/src/ui.rs:3539` |
+| 29 | Block | `ContactActivity.java:353` | row menu (1371) | `loquax/src/ui.rs:3546` |
+| 30 | Verify | `ContactActivity.java:299` | row menu (1371) | `loquax/src/ui.rs:3609` (palette `verify`) (1371) |
+| 31 | Mark unread | `ConversationsActivity.java:549` | row menu (1371) | `loquax/src/ui.rs:3613` (palette `mark unread`) (1371) |
+| 32 | Rename | `ContactActivity.java:493` | row menu, its field (1371) | `loquax/src/ui.rs:3544` |
+| 33 | Forget a conversation | `ContactActivity.java:411` | row menu, asked once (1371) | `loquax/src/ui.rs:3534` |
+| 34 | Add a contact by code, typed or pasted | `AddContact.java:76` | `loquax/src/gui.rs:957` | `loquax/src/ui.rs:3695` |
+| 35 | A contact code from a QR | `loquax-android/src/lib.rs:327` (the scanner screen's decoder) | `loquax/src/gui.rs:1344`, `loquax/src/gui/chat.rs:441`, `loquax/src/scan.rs:39` (1341) | `loquax/src/ui.rs:3639` (palette `code in a picture`, a typed path), `loquax/src/shell.rs:383` (1371) |
+| 36 | My code | `ProfileActivity.java:232` | `loquax/src/gui.rs:1114`, `loquax/src/gui.rs:2095` (settings row, QR) (1371) | `loquax/src/ui.rs:3695` |
+| 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:195`) | CLI (`loquax/src/main.rs:193`) |
+| 38 | Link a device | `ProfileActivity.java:319` | CLI (`loquax/src/main.rs:209`, `loquax/src/main.rs:225`) | CLI (`loquax/src/main.rs:207`, `loquax/src/main.rs:223`) |
 | 39 | Move the phone | `ProfileActivity.java:346` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:117` | MISSING | MISSING |
-| 41 | Help | `ConversationsActivity.java:421` | MISSING | `loquax/src/ui.rs:3446` |
-| 42 | Settings | `SettingsActivity.java` | `loquax/src/gui.rs:1346` | palette (`loquax/src/ui.rs:3678`, `loquax/src/ui.rs:3478`) |
-| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | off (`loquax/src/gui.rs:1052`) | off (`loquax/src/shell.rs:315`) |
-| 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:240`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:412`, bell and `loquax/src/desktop.rs:118` (1341) |
-| 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:324` (1341) | n/a |
+| 41 | Help | `ConversationsActivity.java:491` | `loquax/src/gui.rs:1110`, `loquax/src/gui.rs:2163` (the shared overlay) (1371) | `loquax/src/ui.rs:3472` |
+| 42 | Settings | `SettingsActivity.java` | `loquax/src/gui.rs:1755` | palette (`loquax/src/ui.rs:3810`, `loquax/src/ui.rs:3566`) |
+| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | `loquax/src/gui.rs:2188`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1382`, behind `browse_tab` (1369) |
+| 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:310`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:417`, bell and `loquax/src/desktop.rs:118` (1341) |
+| 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:401` (1341) | n/a |
+| 46 | Rooms tab (RRC) | `RoomsPane.java:171`, behind `rooms_hub` (1384) | `loquax/src/gui.rs:2202`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1405`, behind `rooms_hub` (1379) |
 
 ## Counts
 
-| | MISSING before 1341 | MISSING after 1341 |
-|---|---|---|
-| Window | 20 | 15 |
-| Terminal | 15 | 14 |
+| | MISSING before 1341 | after 1341 | after 1371 |
+|---|---|---|---|
+| Window | 20 | 15 | 2 |
+| Terminal | 15 | 14 | 2 |
 
-Counted are the MISSING cells of the table; the Browse tab (row 43) is
-off on both desktop targets by decision, not counted, and "CLI" and "n/a"
-are no gaps.
+Counted are the MISSING cells of the table; "CLI" and "n/a" are no gaps.
+A cell marked (1371) names its place as of that pass; the unmarked ones
+name it as 1341 measured it, and those lines have moved since.
+The Browse tab (row 43) was off on both desktop targets until 1369 and was
+not counted; since 1369 it is built on all three, behind the same
+`browse_tab` switch, which stays off until Lew flips it.
+The Rooms tab (row 46, 1379) is Reticulum Relay Chat on the hub the
+config's `rooms_hub` names; without one there is no tab. The model, the
+scene's `RoomsNode` and the hub link (`loquax/src/rooms_link.rs`, over the
+node the engine lends to `Lender::Rooms`) are shared; the window and the
+terminal draw the node. The phone draws it since 1384: the schema's
+`RoomsScreen` (`loquax-android/src/rooms.rs`) flattens the node, the
+session lends the phone's node (the mailbox's when it is on the phone,
+else the leaf's) to the Rooms and runs the same hub link, and
+`RoomsPane.java` draws it beside `BrowsePane`, its tab shown only where
+`rooms_hub` is set, as on the desktop. The M9 needs a renderer screen for
+the node in `loquax-m9`, rows in its key table, and the hub link over its
+own node; what each takes is written down on [the handheld
+page](handheld-messenger.md), "The Rooms on the M9".
 
 ## What 1341 brought, and how
 
 - **Pictures and files in the window.** The window sets the core's
-  `Abilities::picker` (`loquax/src/gui.rs:163`), so the scene gives it the plus and
+  `Abilities::picker` (`loquax/src/gui.rs:224`), so the scene gives it the plus and
   the attachment sheet with Gallery and File, which the window draws over
-  the bar (`loquax/src/gui/chat.rs:1171`). A row asks the XDG desktop portal's
+  the bar (`loquax/src/gui/chat.rs:1333`). A row asks the XDG desktop portal's
   `FileChooser.OpenFile` over the session bus (`loquax/src/desktop.rs:158`), the
   dialog the desktop draws for every program. The crate is zbus, already
   in the lock through the window's theme reader (leviculum-ui-iced, mundy);
   neither `rfd` nor another dialog crate is in the tree, and zbus needs no
   GTK. The shell sends the pick as the phone sends its picker's
-  (`loquax/src/shell.rs:773`): a picture scaled at the reader's photo size, a file
+  (`loquax/src/shell.rs:847`): a picture scaled at the reader's photo size, a file
   whole up to what a receiver takes. Saving a received file is the
   existing save under the home's `files/` and the system's handler
-  (`loquax/src/shell.rs:348`), the same in both desktop targets.
+  (`loquax/src/shell.rs:417`), the same in both desktop targets.
 - **Voice** was already on both desktop targets: recording through the
   system's recorder (`pw-record`, `parecord`, `arecord`, `mic.rs`),
-  playback as a WAV file for the system's player (`loquax/src/shell.rs:367`). No
+  playback as a WAV file for the system's player (`loquax/src/shell.rs:436`). No
   audio crate was added.
 - **QR without a camera.** The phone's decoder (rqrr) moved from
   `loquax-android` into `loquax::scan`, and `scan::image_codes` reads a
@@ -145,45 +162,66 @@ are no gaps.
   (`packaging/loquax/loquax.desktop`), so Wayland matches the window to
   the launcher entry and its icon. No asset moved.
 
-## GNSS on the desktop
+## The position on the desktop
 
-A desktop has no position of its own. The core's position sheet needs an
-own fix (`compose::position_rows`), so row 25 stays MISSING on both
-desktop targets: the fix will be entered by hand on the desktop (a map
-click or typed coordinates), never read from a receiver, and that entry
-is not built yet.
+A desktop has no receiver, and that is no gap (1371): the core takes the
+own fix by hand (`loquax/src/ui/by_hand.rs`). A shell that has no
+receiver sets `Abilities::manual`, and its position sheet offers "Type my
+position" (latitude and longitude, typed or pasted, `geo:` links too,
+read digit by digit without a float) and, once the map was shown, "The
+map's centre". From then on the sheet offers "Now, once" and the four
+timed shares, and the fix goes out as the phone's GNSS fix does, the
+same telemetry report. The sheet says "Set by hand" over them. The
+terminal has the same through its palette: `position` asks for it
+(Enter alone takes the map's centre), `share position` asks how long
+(`now`, `15m`, `1h`, `8h`, `until`), `stop sharing` ends it. A chat's
+report is telemetry, which carries no source; where the fix goes into a
+`lev.position` announce it is `Source::Manual`
+(`loquax/src/mesh_position.rs`).
 
 ## The Browse tab
 
-1337b's fetch through the phone's own node landed, but in the Android
-crate (`loquax-android/src/browse_fetch.rs`); the desktop shell has no
-fetch of its own and drops the browser's effects (`loquax/src/shell.rs:315`). The
-tab stays off in the window and the terminal until the fetch moves into
-the shared shell; on a PC lnomad remains its own program meanwhile.
+Before 1369, 1337b's fetch through the phone's own node lived in the
+Android crate and the desktop shell dropped the browser's effects. 1369
+moved the fetch into the shared crate (`loquax/src/browse_fetch.rs`,
+feature `browse`), which the phone, the terminal and the window now run
+alike over the node each already has; the desktop shell drains the
+browser's effects (`loquax/src/browsing.rs:128`) as the phone's session
+does. The window draws the tab with lnomad's window view
+(`lnomad/src/gui.rs:681`), pictures included, and the terminal with
+lnomad's terminal view (`loquax/src/tui.rs:1382`); neither has a renderer
+of its own. The switch is the phone's, `browse_tab`, off by default on
+all three until Lew flips it. Details in
+`lnomad-everywhere.md`, "The tab on the desktop".
+
+## What 1371 brought, and how
+
+- **The terminal's verbs.** Reply, send again, forward, mute, verify,
+  mark unread, the photo size, the position, sharing it, deleting all
+  maps, and a picture, a file or a code by a typed path are palette
+  commands (`leviculum-ui/src/commands.rs`, `loquax/src/ui/verbs.rs`),
+  each the handler the phone's request reaches. The terminal has no
+  picker, so a path typed into the palette goes to the shell as
+  `UiEffect::Attach` or `UiEffect::ScanCode`, read by the attach the
+  window's chooser uses (`loquax/src/shell.rs`).
+- **The window's row menu.** A right click on a conversation opens the
+  scene's row verbs (mark unread, pin, mute, archive, forget) and the
+  contact's the phone keeps on its contact screen (block, verify,
+  rename). They reach the model as `UiEvent::PeerWord`, resolved by
+  `UiModel::peer_verb`, the terminal's resolver too; forget asks once,
+  rename opens a field.
+- **The window's forward, help, photo size and code.** The bubble menu's
+  Forward lists the conversations; the keys' help is the shared overlay
+  lnomad's window draws; the settings page has the photo size's three
+  tiers, My code (the code and a QR the test scans back) and Help.
 
 ## The remaining gaps, with their reason
 
-- **Window, rows 26 to 33 (pin, mute, archive, block, verify, mark unread,
-  rename, forget):** the scene offers them on a row's menu, the window
-  draws no row menu and no contact screen yet. Next window pass.
-- **Window, row 5 (forward):** needs a conversation picker in the window.
-- **Window, row 12 (photo size) and row 41 (help):** the settings page has
-  no row for them yet; help needs the shared help page of
-  leviculum-ui-iced wired in.
-- **Window, row 36 (my code):** the window draws no QR yet; `qr` is in its
-  features since 1341, so the code can come.
-- **Terminal, rows 11, 15 and 35 (send a picture, a file, a code from a
-  picture):** the terminal has no picker and its palette's asks are
-  answered inside the core, which reads no files. The shell's attach
-  (`loquax/src/shell.rs:773`) and the decoder (`loquax/src/scan.rs:39`) are in place; what is
-  missing is a palette command and an effect that hands a typed path to
-  the shell, a change to the core's intents.
-- **Terminal, rows 4, 6, 27, 30, 31 (reply, send again, mute, verify, mark
-  unread) and 23 (delete all maps):** no key and no palette entry; each is
-  a `Command` and its arm in `ui.rs`.
-- **Both desktop targets, rows 39 and 40 (move the phone, backup):** the
-  phone's flows; on a computer the mailbox is the CLI's `loquax mailbox`,
-  and a backup of a desktop identity has no screen yet.
+- **Both desktop targets, rows 39 and 40 (move the phone, backup):** not
+  built in 1371; both are possible, but each is a flow of its own (the
+  phone's transfer by code with its guard against two live copies, and a
+  backup file with its restore), and on a computer the identity lives in
+  Loquax's home directory, which the system's backup already copies.
 
 ## The M9
 
@@ -202,9 +240,9 @@ has the Heltec V4 alone). What the board can carry once it has one, from
   camera; a received photo can be drawn small, a file only listed.
 - Rows 17 and 18 (voice): the board has no microphone and only a buzzer,
   so it neither records nor plays a voice message; it shows that one came.
-- Rows 20 to 25 (map, positions, sharing): the GNSS gives an own fix, so
-  sharing a position is possible there, unlike on the desktop; the map is
-  steps 6 and 7.
+  This is the one hardware reason; everything else is order of work.
+- Rows 20 to 25 (map, positions, sharing): the GNSS gives an own fix, as
+  the desktop's is typed by hand since 1371; the map is steps 6 and 7.
 - Row 44 (notifications): the buzzer and the screen.
 - Rows 37 to 40 (home setup, link, move, backup): through the phone or
   the CLI, not on the device.

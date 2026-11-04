@@ -78,6 +78,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     /** The Browse tab is in front (1337), and its pane once built. */
     private boolean onBrowse;
     private BrowsePane browsePane;
+    /** The Rooms tab is in front (1384), and its pane once built. */
+    private boolean onRooms;
+    private RoomsPane roomsPane;
     private MapPane mapPane;
     /** The map was opened on a friend from a pin: Back goes to the chats. */
     private boolean mapFromPin;
@@ -246,7 +249,78 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         // APK until its fetch through the phone's own node was seen on a device.
         findViewById(R.id.tab_browse).setVisibility(
                 Core.bool(Core.browseScreen(), "enabled") ? View.VISIBLE : View.GONE);
+        findViewById(R.id.tab_rooms).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                rooms();
+            }
+        });
+        tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
+        // The tab shows where the config names a hub (1384), as on the
+        // terminal and the window: the library says so.
+        findViewById(R.id.tab_rooms).setVisibility(
+                Core.bool(Core.roomsScreen(), "enabled") ? View.VISIBLE : View.GONE);
         select(map);
+    }
+
+    /**
+     * The Rooms tab (1384): Reticulum Relay Chat on the config's hub, its
+     * pane drawn by {@link RoomsPane} from the library's surface. Chats or
+     * Map leaves it.
+     */
+    private void rooms() {
+        if (query.getVisibility() == View.VISIBLE) {
+            searching(false);
+        }
+        if (onMap && mapPane != null) {
+            mapPane.pause();
+        }
+        leaveBrowse();
+        onMap = false;
+        onRooms = true;
+        if (roomsPane == null) {
+            roomsPane = new RoomsPane(this, new RoomsPane.Host() {
+                @Override
+                public void left() {
+                    if (onRooms) {
+                        select(false);
+                    }
+                }
+            });
+        }
+        findViewById(R.id.pane_chats).setVisibility(View.GONE);
+        findViewById(R.id.pane_map).setVisibility(View.GONE);
+        findViewById(R.id.pane_rooms).setVisibility(View.VISIBLE);
+        title.setText(R.string.tab_rooms);
+        tint(R.id.tab_chats_icon, R.id.tab_chats_label, Glyph.Kind.CHAT, false);
+        tint(R.id.tab_map_icon, R.id.tab_map_label, Glyph.Kind.PIN, false);
+        tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, true);
+        findViewById(R.id.tab_chats).setSelected(false);
+        findViewById(R.id.tab_map).setSelected(false);
+        findViewById(R.id.tab_rooms).setSelected(true);
+        roomsPane.show();
+    }
+
+    /** The Rooms tab gives way, if it is in front. */
+    private void leaveRooms() {
+        if (onRooms) {
+            onRooms = false;
+            Core.rooms("chats", "", 0);
+            findViewById(R.id.pane_rooms).setVisibility(View.GONE);
+            tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
+            findViewById(R.id.tab_rooms).setSelected(false);
+        }
+    }
+
+    /** The Browse tab gives way, if it is in front. */
+    private void leaveBrowse() {
+        if (onBrowse) {
+            onBrowse = false;
+            Core.browse("chats", "", "");
+            findViewById(R.id.pane_browse).setVisibility(View.GONE);
+            tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
+            findViewById(R.id.tab_browse).setSelected(false);
+        }
     }
 
     /**
@@ -260,6 +334,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         if (onMap && mapPane != null) {
             mapPane.pause();
         }
+        leaveRooms();
         onMap = false;
         onBrowse = true;
         if (browsePane == null) {
@@ -291,13 +366,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             searching(false);
         }
         onMap = map;
-        if (onBrowse) {
-            onBrowse = false;
-            Core.browse("chats", "", "");
-            findViewById(R.id.pane_browse).setVisibility(View.GONE);
-            tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
-            findViewById(R.id.tab_browse).setSelected(false);
-        }
+        leaveBrowse();
+        leaveRooms();
         if (map && mapPane == null) {
             mapPane = new MapPane(this, new MapPane.Host() {
                 @Override
@@ -516,6 +586,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             searching(false);
             return;
         }
+        // An open room's back to the list, then the chats (1384).
+        if (onRooms) {
+            if (!roomsPane.back()) {
+                select(false);
+            }
+            return;
+        }
         // The browser's back while it has one, then the chats (1337).
         if (onBrowse) {
             if (!browsePane.back()) {
@@ -659,6 +736,10 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         String kind = Core.str(event, "t");
         if ("changed".equals(kind)) {
             refresh();
+            if (onRooms) {
+                // A line the hub brought, or how the link stands.
+                roomsPane.draw();
+            }
             if (onMap) {
                 // A position that came moves its pin.
                 mapPane.ask();

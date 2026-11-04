@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording`, `browse` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked`, `browse` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording`, `browse`, `rooms` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked`, `browse`, `rooms` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -159,6 +159,10 @@
 //! A region filling in while it arrives (1291) came within version 1 too:
 //! [`MapShown::filling`]. An older app asks again every 1.5 s while
 //! `loading`, and sees the map fill in at that pace.
+//! The Rooms (1384) came within version 1 too: [`Request::Rooms`] and
+//! [`Query::Rooms`] with its [`RoomsScreen`]. An older app sends neither
+//! and shows no Rooms tab; the session links to no hub until the tab is
+//! opened.
 
 use serde::{Deserialize, Serialize};
 
@@ -506,6 +510,21 @@ pub enum Request {
         #[serde(default)]
         rows: u16,
     },
+    /// A verb of the Rooms tab (1384), Reticulum Relay Chat on the hub
+    /// the config's `rooms_hub` names: `tab` (it comes to the front),
+    /// `chats` (it leaves), `show` with the list's `index` of the room to
+    /// open (`-1` for the list), and `say` with the input field's `text`,
+    /// which the model reads as the terminal's input line: `#room` or
+    /// `/join #room key` joins, a line goes to the open room, `/me` acts,
+    /// `/part` leaves. A line the hub would not take stays in
+    /// [`RoomsScreen::input`].
+    Rooms {
+        verb: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        index: i64,
+    },
     #[serde(rename = "addcontact")]
     AddContact {
         lxma: String,
@@ -812,6 +831,8 @@ pub enum Query {
     Group,
     /// The Browse tab (1337); answered as [`BrowseScreen`].
     Browse,
+    /// The Rooms tab (1384); answered as [`RoomsScreen`].
+    Rooms,
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -1456,14 +1477,23 @@ pub struct LinkRow {
     pub name: String,
 }
 
-/// A message's detail, what the terminal's `v` shows: who, the peer, the
-/// id, the size, the delivery state or the signature, the fields read and
-/// what this device saw happen to it, one line each, an empty one between
-/// the parts.
+/// A message's Info (1381): plain rows in the phone's language, a label
+/// and its value each (who, when, where it stands, the group's counts, the
+/// size), and under `advanced` the terminal's `v` lines: the peer, the id,
+/// the fields read and what this device saw happen to it, one line each,
+/// an empty one between the parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Info {
     pub v: u32,
-    pub rows: Vec<String>,
+    pub rows: Vec<InfoRow>,
+    pub advanced: Vec<String>,
+}
+
+/// One plain row of a message's Info.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InfoRow {
+    pub label: String,
+    pub value: String,
 }
 
 /// The recent emoji, newest first.
@@ -2090,6 +2120,69 @@ pub struct BrowseRow {
     pub node: String,
     #[serde(default)]
     pub selected: bool,
+}
+
+/// What [`Query::Rooms`] answers (1384): the Rooms surface of the model
+/// (`loquax::ui::rooms::node`) in the phone's language, flat for
+/// `MsgPack.java`. Java draws it and decides nothing: which room is open,
+/// who said a line, and what the input does are the library's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsScreen {
+    pub v: u32,
+    /// The phone has the tab at all: the config names a hub
+    /// (`rooms_hub`), as on the desktop. Java shows its button only then.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The tab is in front.
+    pub open: bool,
+    /// The bar's title.
+    #[serde(default)]
+    pub title: String,
+    /// How the hub stands, in one line: connecting, its name, or why it
+    /// is down.
+    #[serde(default)]
+    pub hub: String,
+    /// The rooms we are in.
+    #[serde(default)]
+    pub rows: Vec<RoomsRow>,
+    /// The open room's name, empty while the list is shown; the one line
+    /// said when a room is opened (what a room is not); its lines.
+    #[serde(default)]
+    pub room: String,
+    #[serde(default)]
+    pub live: String,
+    #[serde(default)]
+    pub lines: Vec<RoomsLine>,
+    /// What the input field holds, and what it does here.
+    #[serde(default)]
+    pub input: String,
+    #[serde(default)]
+    pub hint: String,
+}
+
+/// A room of [`RoomsScreen`]'s list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsRow {
+    pub name: String,
+    #[serde(default)]
+    pub unread: u32,
+    #[serde(default)]
+    pub selected: bool,
+}
+
+/// One line of the open room.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsLine {
+    /// The nick, the reader's own word for us ("you"), or empty for the
+    /// hub's lines and the comings and goings.
+    #[serde(default)]
+    pub who: String,
+    pub text: String,
+    /// `msg`, `notice`, `action`, `hub`, `joined`, `parted` or `error`.
+    pub kind: String,
+    /// Our own line, as the hub echoed it.
+    #[serde(default)]
+    pub ours: bool,
 }
 
 /// One row of [`GroupScreen`].

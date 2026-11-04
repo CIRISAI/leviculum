@@ -421,6 +421,19 @@ pub fn show_start_screen(model: &mut Model) {
     model.show_places = true;
 }
 
+/// The platform's own address field now holds `value`: the address bar
+/// is entered first, as a press on it enters it, and then holds the text,
+/// its cursor at the end. What a window's text field says on every edit,
+/// the standalone window's and the Browse tab's in Loquax's (1369).
+pub fn type_address(model: &mut Model, value: &str) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    if model.mode != Mode::Address {
+        effects = apply(model, Intent::Activate(super::scene::NodeId::Address));
+    }
+    model.input = super::input::field_with(value);
+    effects
+}
+
 /// Split a trailing `#anchor` off a target's path, returning the anchor-free
 /// target and the anchor name (when non-empty). The initial URL keeps its
 /// `#anchor` inside `path` after [`crate::url::parse_url`]; stripping

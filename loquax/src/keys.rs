@@ -583,6 +583,21 @@ pub const ROWS: &[Row<Action>] = {
             ],
         )
         .palette("map"),
+        // The Browse tab (1369): NomadNet pages, lnomad's own screen.
+        Row::new(
+            "the NomadNet pages (the Browse tab)",
+            MAP_GROUP,
+            &[&[key(Char('B'), Mods::Plain, run(C::Browse), COMMAND_PANES)]],
+        )
+        .palette("browse"),
+        // The Rooms tab (1379): Reticulum Relay Chat on the config's hub.
+        // In the tab its input line has the keys (`crate::ui::rooms::key`).
+        Row::new(
+            "the live rooms on a hub (the Rooms tab)",
+            MAP_GROUP,
+            &[&[key(Char('R'), Mods::Plain, run(C::Rooms), COMMAND_PANES)]],
+        )
+        .palette("rooms"),
         Row::new(
             "this conversation's peer on the map",
             MAP_GROUP,
@@ -865,6 +880,85 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("start again"),
+        Row::new(
+            "answer the message under the cursor: the next send replies to it",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("reply"),
+        Row::new(
+            "send the message under the cursor again, one of ours that failed",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("send again"),
+        Row::new(
+            "forward the message under the cursor to a friend by name",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("forward"),
+        Row::new("mute the open conversation, or unmute it", EVERYWHERE, &[]).palette("mute"),
+        Row::new(
+            "mark the open peer as compared in person, or no longer",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("verify"),
+        Row::new(
+            "mark the open conversation unread, or read",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("mark unread"),
+        Row::new(
+            "the next photo size: small, phone, original (the photo_size key)",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("photo size"),
+        Row::new(
+            "your position by hand: latitude, longitude, or the map's centre",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("position"),
+        Row::new(
+            "share your position with the open conversation: now, 15m, 1h, 8h, until",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("share position"),
+        Row::new(
+            "stop sharing your position with the open conversation",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("stop sharing"),
+        Row::new(
+            "delete every map on this device, after asking",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("delete all maps"),
+        Row::new(
+            "send a picture to the open conversation: type its path",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("send picture"),
+        Row::new(
+            "send a file to the open conversation: type its path",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("send file"),
+        Row::new(
+            "a friend's code from a picture of its QR: type the picture's path",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("code in a picture"),
     ]
 };
 
