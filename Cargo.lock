@@ -3512,6 +3512,7 @@ dependencies = [
  "leviculum-std",
  "leviculum-ui",
  "lnomad",
+ "lnpnd",
  "loquax",
  "loquax-m9",
  "png",

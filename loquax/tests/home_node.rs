@@ -123,15 +123,12 @@ impl HomeNode {
         let stderr = home.join("daemon.stderr");
         let file = std::fs::File::create(&stderr).expect("the daemon's stderr file");
         let mut command = Command::new(LNMSG);
+        command.args(["mailbox", "run", "--instance", instance]);
+        // Off unless the test names its own interval (1409).
+        if !more.contains(&"--sync-interval") {
+            command.args(["--sync-interval", "off"]);
+        }
         command
-            .args([
-                "mailbox",
-                "run",
-                "--instance",
-                instance,
-                "--sync-interval",
-                "off",
-            ])
             .args(more)
             .env("LNMSG_HOME", home)
             .stdin(Stdio::null())
@@ -1324,7 +1321,9 @@ async fn a_watching_client_hears_new_mail_within_two_seconds_and_the_old_way_sti
 /// `propagated`. The recipient comes up, collects from the node and
 /// announces; the home node's direct retry gets its proof, which the
 /// recipient answers for a message it already holds. The recipient keeps
-/// one message, and the client sees `delivered`.
+/// one message, and the client sees `delivered`. 1409, the unhappy twin of
+/// the status query: the stock node announces no `/lev/status`, so the
+/// home's sync rounds say `no_capability` and never ask it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once() {
     let node_peer = PythonPeer::start();
@@ -1341,7 +1340,14 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     node_peer.rpc("lxmf_announce_propagation_node", serde_json::json!({}));
     let home = mesh.home.path().to_path_buf();
     let code = admit(&home, "laptop");
-    let node = HomeNode::start_with(&home, &mesh.instance, &["--pn", &pn_hash]).await;
+    // Sync rounds on (1409): a stock lxmd never says it answers
+    // `/lev/status`, so the home never asks it.
+    let node = HomeNode::start_with(
+        &home,
+        &mesh.instance,
+        &["--pn", &pn_hash, "--sync-interval", "10s"],
+    )
+    .await;
     let client = joined(&mesh, &node, &code).await;
 
     let recipient = leviculum_std::generate_identity();
@@ -1414,6 +1420,9 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
             .contains(&format!("message {message_id} propagated")),
         "{fetched}"
     );
+    node.wait_for("PN_STATUS_SKIPPED reason=no_capability", 60)
+        .await;
+    assert!(!node.log().contains("PN_STATUS_ASKED"), "{}", node.log());
 
     // The recipient comes up and collects from the propagation node. Its
     // identity moves from that loquax run to a Python router, and its
@@ -1627,6 +1636,125 @@ async fn a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_no
     assert_eq!(collected[0]["method"], "propagated", "{collected:?}");
 
     drop(node);
+    drop(pn);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// 1409: the home asks its lnpnd what became of a message it propagated,
+/// over a link it never identifies, at the end of each sync round. Before
+/// the stock recipient collects, the node says `held`, which closes
+/// nothing and is archived for nobody; the home restarts between the upload
+/// and the answer and still asks, from what its store kept; once the stock
+/// Python recipient (which sends no `0x07`) collected, the node says
+/// `collected`, the home archives the word for its devices and asks no
+/// more.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_home_asks_its_node_what_became_of_a_message_across_a_restart() {
+    let recipient_peer = PythonPeer::start();
+    let mut mesh = Mesh::start(recipient_peer.rns_port).await;
+    let pn = lnpnd_node::PropagationNode::start(&mesh.instance, 8).await;
+    let pn_hash = pn.hex();
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "laptop");
+    let args = ["--pn", pn_hash.as_str(), "--sync-interval", "10s"];
+    let node = HomeNode::start_with(&home, &mesh.instance, &args).await;
+    let client = joined(&mesh, &node, &code).await;
+
+    // The recipient is heard once and leaves, as in the costly node's test.
+    let recipient = leviculum_std::generate_identity();
+    let recipient_address =
+        hex::encode(loquax::engine::delivery_address(&recipient).expect("address"));
+    let once = tempfile::tempdir().expect("the recipient's earlier home");
+    std::fs::write(
+        once.path().join("identity"),
+        leviculum_core::identity_store::encode_identity(&recipient).expect("storable"),
+    )
+    .expect("the recipient's identity");
+    let heard = mesh
+        .run(
+            "fetch",
+            once.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+                "--timeout".to_string(),
+                "10".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(heard.code, Some(1), "{heard}");
+
+    let body = "was wurde aus mir";
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![
+                recipient_address.clone(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            body.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let message_id = sent.enqueued_id();
+    node.wait_for_direct_end(&message_id, 90).await;
+    node.wait_for(
+        &format!("HOME outbox propagated message={message_id} seq="),
+        120,
+    )
+    .await;
+    // Held at the node: asked, answered, nothing for the devices.
+    node.wait_for("PN_STATUS_ASKED ids=1 answered=1", 60).await;
+    assert!(!node.log().contains("HOME pn status"), "{}", node.log());
+
+    // A restart between the upload and the answer: the store kept the id.
+    drop(node);
+    let node = HomeNode::start_with(&home, &mesh.instance, &args).await;
+    node.wait_for("PN_STATUS_ASKED ids=1", 60).await;
+    assert!(!node.log().contains("reason=no_open_ids"), "{}", node.log());
+
+    // The recipient comes back as a stock Python client and collects.
+    let ratchets = std::fs::read(leviculum_std::dest_ratchet_keys_path(
+        &once.path().join("storage"),
+        &loquax::engine::delivery_address(&recipient).expect("address"),
+    ))
+    .expect("the loquax run kept its ratchets");
+    recipient_peer.rpc(
+        "lxmf_init",
+        serde_json::json!({
+            "identity_prv": hex::encode(recipient.private_key_bytes().expect("private key")),
+            "ratchets": hex::encode(ratchets),
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Err(error) = recipient_peer.try_rpc(
+        "lxmf_set_propagation_node",
+        serde_json::json!({ "dest_hash": pn_hash }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never heard the propagation node: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    recipient_peer.rpc("lxmf_request_from_propagation_node", serde_json::json!({}));
+    received_by(&recipient_peer, body, 60, &node).await;
+
+    // The node's word reaches the archive, once, and nothing is open.
+    node.wait_for("HOME pn status ids=1 seq=", 60).await;
+    node.wait_for("PN_STATUS_SKIPPED reason=no_open_ids", 60)
+        .await;
+    assert_eq!(count(&node, "HOME pn status ids=1"), 1, "{}", node.log());
+    drop(node);
+    let archive = local(&home, &["mailbox", "archive"]);
+    assert_eq!(
+        archive.stdout.matches(" pn-status ").count(),
+        1,
+        "{archive}"
+    );
     drop(pn);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }

@@ -90,6 +90,8 @@ reference/LXMF/LXMF/__init__.py loquax/python_interop
 # that recipe reads these lines through scripts/with-prerequisites.sh.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_message_collected_at_the_node_shows_collected_on_the_phone
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_message_collected_at_the_node_shows_collected_on_the_phone
 # The voice round trip (1222) starts the same Python peer, and makes and
 # judges its sounds with the reference codecs: opus-tools and codec2 from
 # apt (scripts/install-ci.sh). Looked up on PATH, not at /usr/bin: a host
@@ -119,6 +121,8 @@ reference/Reticulum/RNS/__init__.py loquax/home_node a_message_the_recipient_can
 reference/LXMF/LXMF/__init__.py loquax/home_node a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once
 reference/Reticulum/RNS/__init__.py loquax/home_node a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_node
 reference/LXMF/LXMF/__init__.py loquax/home_node a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_node
+reference/Reticulum/RNS/__init__.py loquax/home_node the_home_asks_its_node_what_became_of_a_message_across_a_restart
+reference/LXMF/LXMF/__init__.py loquax/home_node the_home_asks_its_node_what_became_of_a_message_across_a_restart
 reference/Reticulum/RNS/__init__.py loquax/home_node a_group_copy_for_an_offline_member_reaches_the_homes_node
 reference/LXMF/LXMF/__init__.py loquax/home_node a_group_copy_for_an_offline_member_reaches_the_homes_node
 reference/Reticulum/RNS/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other

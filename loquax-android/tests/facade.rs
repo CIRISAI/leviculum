@@ -20,6 +20,9 @@ mod nomadnet_tree;
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
 
+#[path = "../../loquax/tests/support/lnpnd.rs"]
+mod lnpnd_node;
+
 mod support {
     pub mod java;
 }
@@ -1673,6 +1676,8 @@ struct HomeNode {
     daemon: tokio::task::JoinHandle<Result<(), String>>,
     /// The daemon's stop: dropping it stops the daemon too.
     stop: tokio::sync::oneshot::Sender<()>,
+    /// The home's own propagation node on the transport's instance (1409).
+    pn: Option<lnpnd_node::PropagationNode>,
 }
 
 impl HomeNode {
@@ -1694,6 +1699,20 @@ impl HomeNode {
         home: &Path,
         python: Option<u16>,
     ) -> Self {
+        Self::start_full(listener, instance, rns, home, python, None).await
+    }
+
+    /// [`HomeNode::start_linked`] with the home's own propagation node
+    /// (1409): lnpnd on the transport's instance, asking stamp cost `.0`,
+    /// as the daemon's `--pn`, and a sync round every `.1` ms.
+    async fn start_full(
+        listener: std::net::TcpListener,
+        instance: &str,
+        rns: &Path,
+        home: &Path,
+        python: Option<u16>,
+        pn: Option<(u8, u64)>,
+    ) -> Self {
         let mut builder = ReticulumNodeBuilder::new()
             .enable_transport(true)
             .share_instance(true)
@@ -1711,6 +1730,14 @@ impl HomeNode {
             .expect("the transport node");
         transport.start().await.expect("start it");
         tokio::time::sleep(Duration::from_millis(500)).await;
+        let (pn, pn_setup) = match pn {
+            Some((cost, sync_ms)) => {
+                let node = lnpnd_node::PropagationNode::start(instance, cost).await;
+                let hash = node.hash;
+                (Some(node), Some((hash, sync_ms)))
+            }
+            None => (None, None),
+        };
 
         let identity = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
         let daemon_storage = home.join("storage");
@@ -1734,9 +1761,9 @@ impl HomeNode {
                 archive_cap_bytes: 1 << 20,
                 token_ttl_secs: 3600,
                 policy: loquax::home::policy(&loquax::config::Config::default()),
-                preferred_pn: None,
-                pn_source: "none",
-                sync_bound_ms: None,
+                preferred_pn: pn_setup.map(|(hash, _)| hash),
+                pn_source: if pn_setup.is_some() { "--pn" } else { "none" },
+                sync_bound_ms: pn_setup.map(|(_, sync_ms)| sync_ms),
                 fetch_budget: Duration::from_secs(10),
                 wake: true,
                 stop: Some(stopped),
@@ -1748,6 +1775,7 @@ impl HomeNode {
             transport,
             daemon,
             stop,
+            pn,
         }
     }
 
@@ -4484,6 +4512,220 @@ fn a_propagation_receipt_shows_its_own_words_on_the_phone_and_survives_the_store
         restored,
         Some(format!("Delivered via the propagation network at {at}"))
     );
+}
+
+/// 1409 end to end: the phone sends through its home to a stock recipient
+/// that is not there; the home propagates it to its lnpnd, which announces
+/// `/lev/status`. The stock Python recipient comes up and collects, and
+/// sends no receipt of its own. The home's next sync round asks the node
+/// over a link it never identifies, archives the node's `collected`, and
+/// the phone's row moves from one tick to two grey ticks, its Info saying
+/// "Collected from the propagation network", which only the node's word
+/// gives (a proof would say "Arrived on …"). The phone, a client of its
+/// home, asks nothing itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_collected_at_the_node_shows_collected_on_the_phone() {
+    let recipient_peer = python_peer::PythonPeer::start();
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start_full(
+        listener,
+        &instance,
+        rns.path(),
+        home.path(),
+        Some(recipient_peer.rns_port),
+        Some((8, 10_000)),
+    )
+    .await;
+    let pn = node.pn.as_ref().expect("the home's node");
+    let pn_hash = pn.hex();
+
+    // The recipient's key reaches the home by its contact code; the
+    // recipient itself is not up, so the direct leg finds nobody.
+    let recipient = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let recipient_code = loquax::lxma::encode(&recipient.public_key_bytes()).expect("code");
+    let recipient_address = loquax::address::to_hex(
+        &loquax::home::lxmf_address(&recipient.public_key_bytes()).expect("address"),
+    );
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let body = "abgeholt am Knoten";
+    let peer = recipient_address.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session
+            .request(Request::AddContact {
+                lxma: recipient_code,
+                name: Some("Anna".to_string()),
+            })
+            .expect("added");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while session.keys_told() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the home node never took the key"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+        session
+            .request(Request::Send {
+                peer: peer.clone(),
+                body: body.to_string(),
+            })
+            .expect("send");
+        wait_for(
+            &session,
+            schema::Query::Messages { peer },
+            60,
+            |m: &schema::Messages| m.messages.last().is_some_and(|b| !b.id.is_empty()),
+        );
+        session
+    })
+    .await
+    .expect("the send");
+
+    // The node takes it once the direct leg ended.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
+    loop {
+        match pn.events.try_recv() {
+            Ok(lnpnd::engine::EngineEvent::Accepted { .. }) => break,
+            Ok(_) => {}
+            Err(_) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the node never took the message"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    let row_peer = recipient_address.clone();
+    let row_state = move |session: &Session| -> (String, String) {
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: row_peer.clone(),
+                })
+                .expect("messages"),
+        )
+        .expect("decode");
+        let bubble = messages
+            .messages
+            .iter()
+            .find(|m| m.body == body)
+            .expect("the bubble");
+        (bubble.state.clone(), bubble.id.clone())
+    };
+    let (before, _) = row_state(&session);
+    assert_ne!(before, "delivered", "nobody collected it yet");
+    let row_state = std::sync::Arc::new(row_state);
+    let row_state_later = std::sync::Arc::clone(&row_state);
+
+    // The stock recipient comes up and collects from the node.
+    recipient_peer.rpc(
+        "lxmf_init",
+        serde_json::json!({
+            "identity_prv": hex(&recipient.private_key_bytes().expect("private key")),
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Err(error) = recipient_peer.try_rpc(
+        "lxmf_set_propagation_node",
+        serde_json::json!({ "dest_hash": pn_hash }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never heard the propagation node: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    recipient_peer.rpc("lxmf_request_from_propagation_node", serde_json::json!({}));
+    let content = hex(body.as_bytes());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !recipient_peer
+        .received()
+        .iter()
+        .any(|m| m.get("content").and_then(|v| v.as_str()) == Some(content.as_str()))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never collected it"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // The home asks at its next round; the phone's row moves.
+    let (session, id) = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let (state, id) = row_state_later(&session);
+            if state == "delivered" {
+                break (session, id);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the row never moved past {state}"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+    })
+    .await
+    .expect("the row");
+    let session = tokio::task::spawn_blocking(move || {
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: loquax::address::to_hex(
+                        &loquax::home::lxmf_address(&recipient.public_key_bytes())
+                            .expect("address"),
+                    ),
+                })
+                .expect("messages"),
+        )
+        .expect("decode");
+        let bubble = messages
+            .messages
+            .iter()
+            .find(|m| m.id == id)
+            .expect("the bubble");
+        // The phone's language is the session's, English here; the German
+        // words are the catalogue's, tested beside the model.
+        let info: schema::Info = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Info {
+                    peer: loquax::address::to_hex(
+                        &loquax::home::lxmf_address(&recipient.public_key_bytes())
+                            .expect("address"),
+                    ),
+                    key: bubble.key,
+                })
+                .expect("info"),
+        )
+        .expect("decode");
+        assert!(
+            info.rows.iter().any(|row| row
+                .value
+                .starts_with("Collected from the propagation network at ")),
+            "{info:?}"
+        );
+        session
+    })
+    .await
+    .expect("the info");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+    node.stop().await;
 }
 
 /// The photo fixture (1220, `loquax/tests/fixtures/make-photo.py`): 1800 x 2400

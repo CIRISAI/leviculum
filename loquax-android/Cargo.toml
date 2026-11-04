@@ -91,3 +91,6 @@ leviculum-mapcut = { path = "../leviculum-mapcut" }
 # The M9's renderer, whose heap and stack the M9 census counts beside the
 # scenes' (tests/m9_scene_census.rs).
 loquax-m9 = { path = "../loquax-m9" }
+# The test's propagation node (1409, loquax/tests/support/lnpnd.rs): lnpnd's
+# engine on the home's instance, which answers `/lev/status`.
+lnpnd = { path = "../lnpnd" }
