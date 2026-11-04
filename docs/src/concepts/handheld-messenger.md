@@ -875,7 +875,7 @@ board that is SRAM beside the node and not the UI's PSRAM.
 All targets:
 
 - **M9:** the ask, the pairing screen and the session census. The
-  board's executor and its flash record are still to come.
+  board's executor and its flash record came in 1414.
 - **Desktop (TUI and window):** `join`, `pull` and `mark` run the same
   ask through `run_ask`, in the home's own pages over TCP.
 - **Android:** the same `client`, through its runner (the facade cells
@@ -1297,6 +1297,116 @@ and a room keeps up to 500 lines of up to 350 bytes (`LINES_KEPT`,
 `loquax/src/ui/rooms.rs:30`), which the census has to count before the
 M9 keeps as many.
 
+### The board's node and the client's board half (1414)
+
+Lew, 2026-11-04: the M9 runs Loquax under the same identity as Lew's phone
+and pulls from the same mailbox, so that several devices of one person
+get tested. In this page's model that is the second-device flow of
+[Reaching the mailbox from anywhere](loquax-reachability.md) ("A second
+device for a phone's mailbox"): the M9 becomes a device of the home,
+joins with an admission code, pulls the archive the phone pulls and
+sends as the home's identity. This pass is the first of two; typing the
+code on the board and the bench walk are 1415.
+
+**The node in the image.** `thinknode_m9` now carries a `leviculum-core`
+node (`Handheld`, `leviculum-esp/src/handheld.rs:54`): its identity in a
+flash sector of its own, saved on the first boot and loaded on every
+later one, said as `[IDENTITY] identity=<hash> ... source=<flash|generated>
+stored=<yes|no>`; one interface, the host's serial line
+(`SerialIface`, `leviculum-esp/src/serial_iface.rs`), Gateway mode and
+HW_MTU 564 as an LNode's. On the bench the line is lnsd on
+schneckenschreck, the rendezvous `leviculum.network:4242` and the home
+behind it. The LR1110 in Mesh mode is the node's second interface and
+the next step: until then nothing goes on the air.
+
+**One UART for both.** The CH340K is the board's only port, so the node's
+frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
+share it under the rules of `leviculum-nrf/serial-mux`, which were made
+for this board (1238): text is written in whole lines between frames and
+never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:423`);
+the capability report states `serial_mux=1`, so lnsd escapes its own
+flow bytes and strips the line's. A frame that is not the control
+envelope is a packet for the node. The board sends no flow bytes: esp-hal
+1.2 keeps `SwFlowControl` in its config and never programs it. Instead
+every write drains the 128-byte receive FIFO into 8 KiB of memory between
+96-byte pieces (`drain_rx`, `leviculum-esp/src/lib.rs:447`), so a frame
+that arrives during a 5.7 s dump is read afterwards and not lost. What
+the bench pays: the keyboard lines are about 6 KB/s of the 11.5 KB/s the
+line carries at 115200 baud, so the node has the rest, which is more
+than a LoRa interface carries and less than a TCP one.
+
+**The stores need a table.** espflash's default table gives the
+application all of the flash, so the M9 ships its own,
+`leviculum-esp/partitions-m9.csv`: an 8 MiB application, then `identity`
+and `loquax_client`, one 4 KiB sector each. `just build-m9` and `just
+flash-m9` pass it to espflash; the firmware finds both by label
+(`leviculum-esp/src/flash.rs`) and says `[FLASH] identity=none/no-entry`
+under any other table, running without persistence. Every buffer the
+flash routines touch is on the stack, because the heap is PSRAM behind
+the cache those routines switch off.
+
+**The client's board half.** `loquax::home::board` (`no_std`):
+
+- **The executor** (`Executor`, `loquax/src/home/board.rs:84`) performs
+  an `Ask`'s steps over a `NodeCore` and the events the node raises:
+  path requests, `connect`, `identify_link`, `send_request`, the
+  response or its timeout, a closed link. The board's loop hands it the
+  node, its clock and every event; it only adds to the loop's
+  `TickOutput`. A link that closes with a request in flight is a lost
+  answer, so the ask opens a fresh link and asks again from the last
+  entry it took (`ATTEMPTS` = 3).
+- **The session** (`Session`, `loquax/src/home/board.rs:309`): an ask
+  that does not get through waits 30 s before the next, doubling up to
+  15 min; one that gets through resets it, and a pull goes every 5 min
+  while no wake says sooner. What it shows is the phone's sentence
+  (`notice`, `loquax/src/home/board.rs:355`): "Your mailbox is not
+  connected" for no path, no link, no answer or a refusal.
+- **The batch** (`Batch`, `loquax/src/home/board.rs:51`): the page is
+  the LoRa page while the board's session census keeps `SESSION_PEAK`,
+  a smaller one in proportion when it does not (`census::batch`,
+  `loquax-m9/src/census.rs:332`); the board runs the census at boot and
+  picks its batch from what it measured. An answer longer than the
+  board takes asks the same page smaller on the same link
+  (`Ask::refit`, `loquax/src/home/ask.rs:434`) down to 64 B; a single
+  message that fits no page ends the pull with an error, never a panic
+  and never a skipped message. The answer ceiling is the largest message
+  the board takes in, 256 KiB on the PSRAM heap, not the session's room.
+- **The record** (`ClientRecord`, `loquax/src/home/record.rs:72`), the
+  board's form of the desktop's three files: the device identity's
+  private key, the home's public key, the admission (pending with its
+  token, or admitted), the sync cursor and the device name, 196 bytes
+  with four bytes of SHA-256, so a write cut by a power loss reads as no
+  record. A pending record joins, an admitted one pulls; the cursor is
+  written once per pull, not per page. The board has no message store
+  yet, so a page's entries are counted (`[HOME] page entries=...`) and
+  dropped; keeping them is the store's step.
+
+**Tests.** On the host, the executor against a fake home on a second
+core node (`loquax/src/home/board/tests.rs`): a join and a pull in LoRa
+pages; the link closed by the home with a `/sync` in flight, resumed
+from the cursor on a fresh link before any timeout; a home that answers
+nothing, ending in `NoPath` after the ladder's requests and the session
+backing off 30, 60, 120, 240, 480, 900, 900 s; answers larger than the
+board takes, asked smaller until they fit, and one message that fits no
+page ending in an error. Positive controls: with the executor deaf to a
+closed link the resume test fails, with the size check off the batch
+test does. Against the real mailbox daemon behind a Rust transport node
+(`loquax-android/tests/m9_board_client.rs`): the board's core node joins,
+sends three messages, pulls them back in LoRa pages of one packet each,
+and a second pull from the saved cursor brings nothing, with a debug
+line written before every frame and the flow bytes escaped as the M9
+writes its UART.
+
+**The image** (`just build-m9`, 1414): `FLASH_HEADROOM board=thinknode_m9
+used=1782944 free=6605664` of the 8 MiB application, 481,968 B more than
+the UI-only image; `STACK_HEADROOM board=thinknode_m9 stack=310964
+need=184000`. The boot lines it adds: `[FLASH]`, `[IDENTITY]`, `[CENSUS]
+node held=... box=... links=8 max_answer=262144`, `[NODE] state=up
+iface=serial hw_mtu=564 serial_mux=1`, `[CENSUS] session=pull ...`, and
+`[HOME] client=none page=<n>` on a board that is no device of a home yet.
+What the board's census measures with the node up is the rig's to read.
+
 ### Tracks on the M9 (1385, not built)
 
 The tracks ([Loquax: tracks on the map](loquax-tracks.md)) are derived
@@ -1347,10 +1457,11 @@ the renderer, built, its board half not yet run) and of slice five
 session census, measured on the host), of slice six (1366, the group
 screens, their keys and the group verbs asked of real homes) and of
 slice seven (1375, the map measured and drawn in pixels, its pins and
-keys). Of the
-client seam, the client's
-record in flash and the board's executor over `leviculum-core` are
-still to build (the table under "Slice five, host half"). Of the 2026-10-21 list that stood
+keys). The
+client's record in flash and the board's executor over `leviculum-core`
+are built and in the image since 1414 ("The board's node and the
+client's board half"); the board has not run them yet, and typing the
+admission code on it is 1415. Of the 2026-10-21 list that stood
 here, the rest has landed since: the core builds `no_std`
 (`just loquax-core-no-std`), the desktop window ships beside the
 terminal, Android went through the JNI facade rather than the C
