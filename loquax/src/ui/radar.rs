@@ -248,7 +248,7 @@ pub fn cells(
             level,
         });
     };
-    let cell = |x: f64, y: f64| ((x / cw).floor() as i64, (y / ch).floor() as i64);
+    let cell = |x: f64, y: f64| (libm::floor(x / cw) as i64, libm::floor(y / ch) as i64);
     let (c0, r0) = cell(cx, cy);
     put(c0, r0, String::from("+"), 2, &mut out);
     // The labels first, so a ring's dots go round them.
@@ -264,7 +264,7 @@ pub fn cells(
         let px = f64::from(r) / per_px;
         // A dot every second cell along the ring: faint, a ring and not a
         // wall, under the tracks.
-        let n = ((core::f64::consts::TAU * px / cw / 2.0).ceil() as i64).clamp(12, 20_000);
+        let n = (libm::ceil(core::f64::consts::TAU * px / cw / 2.0) as i64).clamp(12, 20_000);
         let mut last = None;
         for k in 0..n {
             let a = k as f64 / n as f64 * core::f64::consts::TAU;
