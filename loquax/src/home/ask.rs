@@ -426,6 +426,47 @@ impl Ask {
         }
     }
 
+    /// The answer to a pull's page came larger than the device takes: ask
+    /// the same page again, at most `page_bytes` (1414). Only a smaller
+    /// page than the one asked; a page that cannot shrink any more ends the
+    /// pull with a [`HomeError::Transfer`], never a request that asks for
+    /// the same answer again.
+    pub fn refit(&mut self, page_bytes: u64) -> Step {
+        if self.state != State::Asking {
+            return self.out_of_turn();
+        }
+        match &mut self.verb {
+            Verb::Pull {
+                page_bytes: Some(asked),
+                ..
+            } if page_bytes < *asked => {
+                *asked = page_bytes;
+                self.request()
+            }
+            Verb::Pull { .. } => self.finish(Err(HomeError::Transfer(String::from(
+                "a page larger than this device takes",
+            )))),
+            _ => self.out_of_turn(),
+        }
+    }
+
+    /// The page a pull asks now, when it asks one.
+    pub fn page_bytes(&self) -> Option<u64> {
+        match &self.verb {
+            Verb::Pull { page_bytes, .. } => *page_bytes,
+            _ => None,
+        }
+    }
+
+    /// Where a pull stands: the newest sequence taken so far, which a
+    /// pull asked again after a broken link starts from.
+    pub fn cursor(&self) -> Option<u64> {
+        match &self.verb {
+            Verb::Pull { cursor, .. } => Some(*cursor),
+            _ => None,
+        }
+    }
+
     /// The request the verb makes; a pull's from where it stands.
     fn request(&self) -> Step {
         let (path, data) = match &self.verb {

@@ -9,6 +9,9 @@
 //! - [`code`]: the admission code `loquax mailbox admit` prints.
 //! - [`ask`]: a client's ask without the waiting, the path ladder and the
 //!   join's steps, which `client` and the M9 drive alike.
+//! - [`board`]: the M9's executor of an ask over a core node, the session
+//!   that backs off between asks, and the pull batch.
+//! - [`record`]: what makes a board a client, one record in flash.
 //! - `admit`: opening one, on a computer's mailbox and a phone's alike.
 //! - [`wire`]: the five requests, `/join`, `/sync`, `/send`, `/mark` and
 //!   `/watch`, their answers, and the wake.
@@ -33,9 +36,11 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 pub mod admit;
 pub mod ask;
 pub mod backup;
+pub mod board;
 pub mod code;
 pub mod keepalive;
 pub mod outgoing;
+pub mod record;
 pub mod relation;
 pub mod wake;
 pub mod wire;
