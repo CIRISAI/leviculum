@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:151`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:154`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -336,10 +336,10 @@ The M9 is a full node in Mesh mode (the propagation-node decision on
 a home. What that needs, measured against the code:
 
 - **The wire is ready.** The five requests and their answers are
-  `no_std` (`wire`, `loquax/src/home.rs:41`), as are the admission
+  `no_std` (`wire`, `loquax/src/home.rs:46`), as are the admission
   code's codec (`code`), the archive relation and the wake rules.
 - **The client's ask loop is not.** `home::client` is gated `std`
-  (`loquax/src/home.rs:43`): it waits on tokio time and drives
+  (`loquax/src/home.rs:48`): it waits on tokio time and drives
   `leviculum_std::ReticulumNode`'s link API
   (`loquax/src/home/client.rs:10`). The board port is the same request
   flow over `leviculum-core`'s links and the firmware's clock — a seam
@@ -408,7 +408,7 @@ The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
 `thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
 m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
 positive control). It words the chats list scene in cells
-(`lines`, `loquax-m9/src/screen.rs:122`) and draws them through
+(`lines`, `loquax-m9/src/screen.rs:127`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
 mousefood (`draw`, `loquax-m9/src/render.rs:64`). Mousefood's own
@@ -426,10 +426,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:365`).
+  (`narrow`, `loquax-m9/src/screen.rs:387`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:310`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:332`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -493,8 +493,8 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   the cursor nine bubbles, opens the line and types an emoji with one
   renderer, and must equal a fresh draw.
 - **What the M9 shows of a model** (`scene`,
-  `loquax-m9/src/screen.rs:105`, and `Look::of`,
-  `loquax-m9/src/screen.rs:83`). The Compact scene, which is the open chat
+  `loquax-m9/src/screen.rs:110`, and `Look::of`,
+  `loquax-m9/src/screen.rs:88`). The Compact scene, which is the open chat
   alone, with the cursor of the pane the keys are in; and the list while
   the keys are on the list. The model's back from the chat moves the keys
   to the list and keeps the chat open, as the terminal's panes do, so a
@@ -630,7 +630,7 @@ yet. Both end in the same join.
   out of turn ends the join instead of being read as the home's word.
 
 What of `home::client` was not `no_std` then, all of it behind
-`#[cfg(feature = "std")]` (`loquax/src/home.rs:43`); slice five's host
+`#[cfg(feature = "std")]` (`loquax/src/home.rs:48`); slice five's host
 half (1363, below) moved the rows up to the group verbs:
 
 | piece | where | what it needs on the board |
@@ -663,7 +663,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:173`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:176`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -671,7 +671,7 @@ draws is the scene the terminal, the window and the phone already draw.
   goes through mousefood into `loquax-m9`'s frame, which keeps the band
   of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:73`), and the
   board sends only that band through the row window (`flush`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:158`): the full frame's 30.8 ms
+  `leviculum-esp/src/bin/thinknode_m9.rs:193`): the full frame's 30.8 ms
   is the first draw's cost, a moved cursor sends two entries. The
   redraw test drives one renderer through four keys and must equal a
   fresh draw, its band flushed into a second frame
@@ -784,13 +784,13 @@ bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
 resource (`leviculum-core/src/node/mod.rs:1811`), which is an
 advertisement, its parts and a proof. The home's own page bound is
-64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:316`). So
+64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:321`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
 that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 (`loquax/src/home/ask.rs:146`), 412, the longest answer that still fits
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
-says `more` (`fit_page`, `loquax/src/home/wire.rs:298`; the server's
+says `more` (`fit_page`, `loquax/src/home/wire.rs:308`; the server's
 `sync`, `loquax/src/home/server.rs:1156`). A message larger than a page
 still comes alone, as a resource.
 
@@ -1143,7 +1143,7 @@ buildings). A draw is the cells first with the picture's rows blank,
 then the map over them, then the pins; ratatui draws only cells that
 changed, so the next map leaves the blank rows alone, and the renderer
 clears its cells when the screen leaves the map
-(`leave_map`, `loquax-m9/src/render.rs:93`), or the list would keep
+(`leave_map`, `loquax-m9/src/render.rs:103`), or the list would keep
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
@@ -1271,7 +1271,7 @@ All targets:
 The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
-a branch in `lines` (`loquax-m9/src/screen.rs:122`) for the scene's
+a branch in `lines` (`loquax-m9/src/screen.rs:127`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:592`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1074`), and its tab in the tab bar the screen
@@ -1309,13 +1309,13 @@ sends as the home's identity. This pass is the first of two; typing the
 code on the board and the bench walk are 1415.
 
 **The node in the image.** `thinknode_m9` now carries a `leviculum-core`
-node (`Handheld`, `leviculum-esp/src/handheld.rs:54`): its identity in a
+node (`Handheld`, `leviculum-esp/src/handheld.rs:86`): its identity in a
 flash sector of its own, saved on the first boot and loaded on every
 later one, said as `[IDENTITY] identity=<hash> ... source=<flash|generated>
 stored=<yes|no>`; one interface, the host's serial line
 (`SerialIface`, `leviculum-esp/src/serial_iface.rs`), Gateway mode and
 HW_MTU 564 as an LNode's. On the bench the line is lnsd on
-schneckenschreck, the rendezvous `leviculum.network:4242` and the home
+schneckenschreck, the rendezvous on `leviculum.network`, port 4242, and the home
 behind it. The LR1110 in Mesh mode is the node's second interface and
 the next step: until then nothing goes on the air.
 
@@ -1348,7 +1348,7 @@ the cache those routines switch off.
 
 **The client's board half.** `loquax::home::board` (`no_std`):
 
-- **The executor** (`Executor`, `loquax/src/home/board.rs:84`) performs
+- **The executor** (`Executor`, `loquax/src/home/board.rs:85`) performs
   an `Ask`'s steps over a `NodeCore` and the events the node raises:
   path requests, `connect`, `identify_link`, `send_request`, the
   response or its timeout, a closed link. The board's loop hands it the
@@ -1356,16 +1356,16 @@ the cache those routines switch off.
   `TickOutput`. A link that closes with a request in flight is a lost
   answer, so the ask opens a fresh link and asks again from the last
   entry it took (`ATTEMPTS` = 3).
-- **The session** (`Session`, `loquax/src/home/board.rs:309`): an ask
+- **The session** (`Session`, `loquax/src/home/board.rs:321`): an ask
   that does not get through waits 30 s before the next, doubling up to
   15 min; one that gets through resets it, and a pull goes every 5 min
   while no wake says sooner. What it shows is the phone's sentence
-  (`notice`, `loquax/src/home/board.rs:355`): "Your mailbox is not
+  (`notice`, `loquax/src/home/board.rs:367`): "Your mailbox is not
   connected" for no path, no link, no answer or a refusal.
-- **The batch** (`Batch`, `loquax/src/home/board.rs:51`): the page is
+- **The batch** (`Batch`, `loquax/src/home/board.rs:52`): the page is
   the LoRa page while the board's session census keeps `SESSION_PEAK`,
   a smaller one in proportion when it does not (`census::batch`,
-  `loquax-m9/src/census.rs:332`); the board runs the census at boot and
+  `loquax-m9/src/census.rs:334`); the board runs the census at boot and
   picks its batch from what it measured. An answer longer than the
   board takes asks the same page smaller on the same link
   (`Ask::refit`, `loquax/src/home/ask.rs:434`) down to 64 B; a single
@@ -1406,6 +1406,123 @@ node held=... box=... links=8 max_answer=262144`, `[NODE] state=up
 iface=serial hw_mtu=564 serial_mux=1`, `[CENSUS] session=pull ...`, and
 `[HOME] client=none page=<n>` on a board that is no device of a home yet.
 What the board's census measures with the node up is the rig's to read.
+
+### The M9 joins its home (1415)
+
+The second half of "the M9 as Lew's second device": the code reaches
+the board, the board joins, pulls, draws and sends. Built and tested on
+the host; the board half is the reviewer's walk below, nothing was
+flashed in the pass.
+
+**The code, two ways.** Typed: a board without a client record opens on
+the pairing screen (`pair::screen`, `loquax-m9/src/pair.rs:94`), the
+code in fives as it is typed on the keys with the verdict under it;
+Enter on a whole code that checks takes it, Back leaves for the
+fixture. Written: `lnflash --home <code> --port <tty>`
+(`lnflash/src/home.rs:36`) sends it as one control frame,
+`TYPE_HOME_CODE` (0x19, `leviculum-core/src/envelope.rs:416`), the code
+as text with or without its rendezvous list. The M9 has no transport
+CDC, so the session opens the port it is named, which resets the board,
+and asks for the capability report until the boot is through (60 s at
+most). Both end in `Handheld::take_code` (`leviculum-esp/src/handheld.rs:189`):
+a new device identity, the pending record in flash before the ack, the
+client that joins with it. A text that is no code is refused
+`REFUSE_VALUE`, a record flash did not take `REFUSE_PERSIST`.
+
+**The join, the pull, the screen.** The client of 1414 now hands every
+pulled page to the board's loop, which folds it into the model the
+screen draws (`board::fold`, `loquax/src/home/board.rs:521`; the
+board's `take_in` without an engine: a message the home took in, one of
+the home's devices sent, a mark, a name). A board that is a device of a
+home draws that model from boot: its chats list and its chats come from
+the archive, and a line typed in a chat is the home's `/send`, queued
+ahead of the next pull. The board checks no signature (it holds no
+sender's identity), so received messages show unverified. The top bar
+says the home at its right end (`board::Word`,
+`loquax/src/home/board.rs:409`): "Joining your mailbox", "Fetched N of
+M", "Mailbox unreachable", "You. Your mailbox is connected.", and for a
+refused code "The mailbox did not take this code. Make a new one on the
+computer." M is the home's: a paged `/sync` answer now carries how many
+entries wait after it (`Page::left`, `loquax/src/home/wire.rs:155`), a
+fifth element only a client that asked a page bound gets, so every
+client from before reads the four it read. The home cuts the page
+counting with the longest such number, so the count never pushes an
+answer past the LoRa page.
+
+**A stale link carries no answer.** The cell for a line cut mid-pull
+was red first: the core says `LinkStale` about ten seconds after the
+line went, but the request's timeout is the whole ask's budget, so the
+pull waited out its 120 s with 4 of 24 entries. The executor now takes
+a stale link with a request in flight as a lost answer and asks again
+on a fresh link from the cursor (`loquax/src/home/board.rs:171`); the
+cell went green, 24 of 24, none twice, 13.9 s. On LoRa a link goes
+stale much later than on the host's line, so the recovery there takes
+that much longer.
+
+**Not kept across a reset.** The board has no message store in flash
+yet. The cursor is saved once per pull (1414), so after a reset the
+board shows only what arrives after it; the store is the next step.
+
+**The cells** (`loquax-android/tests/m9_join_cells.rs`), each the client
+the board runs on the line the M9 writes, through a transport node to
+the real mailbox daemon, each with one `[CELL]` line it asserts on; the
+numbers are one run of all five, 25 s:
+
+| cell | measure line, as measured |
+|---|---|
+| `m9_cell_join_and_pull` | `joined=true join_ms=1140 taken=24 of=Some(24) pages=12 answer_bytes=3912 dup=0 pull_ms=714 word="Fetched 24 of 24"` |
+| `m9_cell_wrong_and_expired_code` | `m9_wrong_code result=Refused(BadToken) ms=413`; `m9_expired_code result=Refused(BadToken) ms=85`; both `word="The mailbox did not take this code. ..."` |
+| `m9_cell_home_unreachable_at_join` | `result=NoPath ms=25008 word="Mailbox unreachable" next_ask_ms=30000` |
+| `m9_cell_link_breaks_mid_pull` | `cuts=1 taken=24 of=Some(24) pages=12 dup=0 pull_ms=13880` |
+| `m9_cell_second_device_joins_mid_pull` | `archive=40 first=40 first_dup=0 second=40 second_dup=0 second_joined=Joined` |
+
+Board-only, and so the walk's: the keys, the panel, the flash record,
+lnflash's frame on the real UART.
+
+**The walk, for the reviewer's window.** Lew's home is the mailbox the
+phone pulls from; the bench line is lnsd on schneckenschreck, the
+rendezvous, the home behind it.
+
+1. Build and flash: `just build-m9`, then `just flash-m9
+   /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0` (it carries the
+   partition table). First boot, expected: `[FLASH] identity=<offset>
+   client=<offset>`, `[IDENTITY] ... source=generated stored=yes`,
+   `[CENSUS] session=pull held=0 peak=<about 392> stack=<n> verdict=ok
+   pages=30 entries=30` (the host measures `peak=392`), `[HOME]
+   client=none page=412`, and the pairing screen on the panel.
+2. On the home: `loquax mailbox admit --name M9` prints the code (on a
+   phone that holds the mailbox, its "Link a device" screen shows it).
+3. The written way: stop lnsd on the port, `lnflash --home '<code>'
+   --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`, expect
+   "the board took the code and joins its home now" and on the line
+   `[HOME] code=taken saved=yes`, `[HOME] client=yes admitted=no
+   cursor=0 page=412 max_answer=262144`. Start lnsd again; then
+   `[HOME] joined=yes reach=connected saved=yes`, the home logs `HOME
+   admitted device=... name="M9"`, and the panel's top bar says
+   "Joining your mailbox" until then.
+4. The pull: `[HOME] page entries=<k> last=<seq> bytes=<b> more=<m>
+   taken=<n> of=<M>` per page, the top bar "Fetched n of M", the home
+   `HOME sync device=... left=<M-n>`, then `[HOME] pulled entries=M
+   pages=<p> cursor=<c> saved=yes reach=connected
+   next_in_ms=300000`. With a page of 412 B a 150-byte message is two
+   to a page, so p is about M/2 for short texts.
+5. The phone and the board show the same conversations: the chats list
+   on the panel against the phone's, by name and last line.
+6. A line from the board: open a chat, `i`, type, Enter; `[HOME] sent
+   id=<8 hex> waiting=0`, the line on the phone, and after the next pull
+   the bubble on the board named by the pulled sent entry, one bubble.
+   The reverse: a line from the phone arrives on the board at its next
+   pull (every 5 min, sooner after a send).
+7. Once by keys, for the record: `loquax mailbox admit` again, then on
+   a board whose client record was erased (`espflash erase-region
+   0x811000 0x1000`, the `loquax_client` partition of
+   `leviculum-esp/partitions-m9.csv`), type the 140 characters; `[HOME] code=typed`, then as in 3.
+8. Unhappy, by hand: a code typed with one character changed is
+   refused on the screen ("the home code has a typo"), Enter does
+   nothing; `lnflash --home hello` is refused `REFUSE_VALUE`; with the
+   home's daemon stopped the top bar says "Mailbox unreachable" and the
+   line `[HOME] failed ... reach=unreachable failures=<n>
+   next_in_ms=<30000, 60000, ...>`.
 
 ### Tracks on the M9 (1385, not built)
 
@@ -1460,8 +1577,10 @@ slice seven (1375, the map measured and drawn in pixels, its pins and
 keys). The
 client's record in flash and the board's executor over `leviculum-core`
 are built and in the image since 1414 ("The board's node and the
-client's board half"); the board has not run them yet, and typing the
-admission code on it is 1415. Of the 2026-10-21 list that stood
+client's board half"); the code typed or written, the join, the pull
+drawn and the send are in it since 1415 ("The M9 joins its home"). The
+board has not run any of them yet, and its message store in flash is
+not built. Of the 2026-10-21 list that stood
 here, the rest has landed since: the core builds `no_std`
 (`just loquax-core-no-std`), the desktop window ships beside the
 terminal, Android went through the JNI facade rather than the C
