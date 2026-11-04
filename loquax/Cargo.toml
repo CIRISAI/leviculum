@@ -443,29 +443,20 @@ required-features = ["tui"]
 name = "term_map_samples"
 required-features = ["picture"]
 
-# The host draw time per map profile (1099), for the reviewer and the
-# commit messages; the gates count instead. Never in a package.
+# The map's frame budget (1422): one MAP_BENCH line a scene, size and
+# zoom, the ground, names, tracks, compose, cold, pan and zoom, run by
+# `just map-bench` on the host and under the weak CPU emulation. It took
+# the rows of map_bench (1099), window_fps (1144) and names_cost (1225).
+# For the reviewer and the commit messages; never a gate, never packaged.
 [[example]]
-name = "map_bench"
-required-features = ["picture"]
+name = "map_eye_bench"
+required-features = ["screenmap"]
 
 # The cost of the outline under a frame no cached tile covers (1143), for
 # the reviewer and the commit message. Never in a package.
 [[example]]
 name = "outline_cost"
 required-features = ["picture"]
-
-# The window's frame time before and after it took the phone's frames
-# (1144), for the reviewer and the commit message. Never in a package.
-[[example]]
-name = "window_fps"
-required-features = ["screenmap"]
-
-# What placing the names costs beside drawing the ground, at z10, z13 and
-# z16 (1225), for the reviewer and the commit message. Never in a package.
-[[example]]
-name = "names_cost"
-required-features = ["screenmap"]
 
 # What a photo costs (1220): each size's bytes and the time to prepare,
 # decode and thumbnail a camera picture, for the reviewer.

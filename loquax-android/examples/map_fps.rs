@@ -29,7 +29,7 @@
 //! ```
 //!
 //! `HOME` holds `maps/` with the region, Frankfurt with its names (LMR2,
-//! cut as `loquax/examples/map_bench.rs` says), and a `config` with
+//! cut as `loquax/examples/map_eye_bench.rs` names), and a `config` with
 //! `map_autoload = off`. The median of the frames after one warm-up. A
 //! measuring tool for the reviewer and the commit message, not a gate.
 //!

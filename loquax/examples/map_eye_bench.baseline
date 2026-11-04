@@ -1,0 +1,9 @@
+MAP_BENCH scene=ffm size=480x320 zoom=13 cold_ms=15.77 cold_nw_ms=5.77 compose_ms=0.18 frame_ms=1.33 ground_ms=5.10 heap_peak_kib=12560 labels_ms=0.20 pan_ms=0.19 tracks_ms=0.25 zoom_ms=1.07
+MAP_BENCH scene=ffm size=480x320 zoom=15 cold_ms=9.58 cold_nw_ms=4.76 compose_ms=0.17 frame_ms=1.69 ground_ms=1.58 heap_peak_kib=11808 labels_ms=0.84 pan_ms=0.17 tracks_ms=0.33 zoom_ms=0.93
+MAP_BENCH scene=ffm size=480x320 zoom=17 cold_ms=9.71 cold_nw_ms=2.90 compose_ms=0.23 frame_ms=1.28 ground_ms=0.67 heap_peak_kib=12296 labels_ms=0.27 pan_ms=0.23 tracks_ms=0.54 zoom_ms=0.67
+MAP_BENCH scene=ffm-phone size=1080x2400 zoom=13 cold_ms=150.75 cold_nw_ms=58.28 compose_ms=3.98 frame_ms=18.30 ground_ms=50.55 heap_peak_kib=79500 labels_ms=8.83 pan_ms=11.07 tracks_ms=1.03 zoom_ms=22.32
+MAP_BENCH scene=ffm-phone size=1080x2400 zoom=15 cold_ms=102.76 cold_nw_ms=79.74 compose_ms=3.96 frame_ms=24.93 ground_ms=21.51 heap_peak_kib=78212 labels_ms=17.08 pan_ms=10.90 tracks_ms=3.74 zoom_ms=19.18
+MAP_BENCH scene=ffm-phone size=1080x2400 zoom=17 cold_ms=87.13 cold_nw_ms=61.22 compose_ms=4.35 frame_ms=23.94 ground_ms=9.27 heap_peak_kib=82940 labels_ms=8.60 pan_ms=4.52 tracks_ms=1.05 zoom_ms=18.18
+MAP_BENCH scene=ffm-m9 size=320x240 zoom=13 cold_ms=8.88 cold_nw_ms=7.82 compose_ms=0.15 frame_ms=0.92 ground_ms=2.26 heap_peak_kib=9176 labels_ms=0.18 pan_ms=0.15 tracks_ms=0.26 zoom_ms=0.89
+MAP_BENCH scene=ffm-m9 size=320x240 zoom=15 cold_ms=5.34 cold_nw_ms=5.83 compose_ms=0.26 frame_ms=1.25 ground_ms=0.74 heap_peak_kib=8792 labels_ms=0.74 pan_ms=0.25 tracks_ms=0.89 zoom_ms=0.73
+MAP_BENCH scene=ffm-m9 size=320x240 zoom=17 cold_ms=2.50 cold_nw_ms=4.10 compose_ms=0.18 frame_ms=0.58 ground_ms=0.26 heap_peak_kib=10428 labels_ms=0.19 pan_ms=0.27 tracks_ms=0.57 zoom_ms=0.43

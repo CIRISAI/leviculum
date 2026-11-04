@@ -336,7 +336,7 @@ The frontends:
   it.
 
   The cost, measured 2026-10-31 on the coder host (10 vCPUs, eight
-  workers) with `loquax/examples/names_cost.rs` over Berlin Mitte (cut
+  workers) with `names_cost` (folded into `map_eye_bench` by 1422) over Berlin Mitte (cut
   from the Protomaps build of that day, `--bbox
   13.33,52.49,13.45,52.55`, and a z12 cut of the country around it),
   the median of ten frames of a pinch out by 0.05 a frame, in ms (the

@@ -2699,3 +2699,65 @@ flash-m9 port:
     espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
         --non-interactive --flash-size 16mb \
         --partition-table leviculum-esp/partitions-m9.csv "$elf"
+
+# 1422, #474: the map's frame budget measured (the eye candy study of
+# 2026-11-04, section 4). `REGION` is the Frankfurt region the study cut
+# (LMR3 with names and buildings, sha256 5022565b...a2b7c7a). One MAP_BENCH
+# line a scene, size and zoom on the host, as an A/B in the same run: the
+# bench of `BASE` (default: the commit that last wrote the baseline,
+# loquax/examples/map_eye_bench.baseline) built in a worktree under target/,
+# and this tree's, in turn, five rounds, one worker thread, the medians compared; a held
+# column more than 5 % and 0.1 ms slower fails. A run against the file alone
+# measured a phone frame's compose 3.2 and 4.8 ms with one binary, which no
+# 5 % rule survives. Then this tree's bench under the weak CPU emulation
+# (12.5 % of one core in 1 ms periods, about ten times slower than the host
+# core; the 100 ms default period lets short frames through and measures
+# bimodal), reported only. The tables land in target/map-bench/. A
+# measuring tool, never in `guards`: a build of BASE, about 1 min host,
+# 1 min emulated.
+[doc('Measure the map frame budget, A/B on the host and on a weak CPU (#474)')]
+map-bench REGION BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=target/map-bench
+    mkdir -p "$out"
+    exe() { python3 -c 'import json,sys
+    for l in sys.stdin:
+        m = json.loads(l)
+        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "map_eye_bench":
+            print(m["executable"])'; }
+    base="{{BASE}}"
+    [ -n "$base" ] || base="$(git log -1 --format=%H -- loquax/examples/map_eye_bench.baseline)"
+    src="$out/base-src"
+    git worktree remove --force "$src" 2>/dev/null || rm -rf "$src"
+    git worktree add -q --detach "$src" "$base"
+    target="$(realpath target)"
+    built="$(cd "$src" && CARGO_TARGET_DIR="$target" cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | exe)"
+    cp "$built" "$out/base-bench"
+    git worktree remove --force "$src"
+    bench="$(cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | exe)"
+    rm -rf "$out/maps" && mkdir -p "$out/maps"
+    ln -s "$(realpath "{{REGION}}")" "$out/maps/$(basename "{{REGION}}")"
+    status=0
+    "$bench" "$out/maps" --label host --against "$out/base-bench" --write "$out/host.txt" > "$out/host.md" || status=$?
+    cat "$out/host.md"
+    systemd-run --user --scope -q -p CPUQuota=12.5% -p CPUQuotaPeriodSec=1ms taskset -c 0 "$bench" "$out/maps" --label weak --write "$out/weak.txt" > "$out/weak.md"
+    cat "$out/weak.md"
+    exit "$status"
+
+# 1422: rewrite the baseline `map-bench` measures against, after a change
+# whose cost was measured and accepted in its commit message; the commit
+# that writes it is the next runs' BASE.
+[doc('Rewrite the map-bench baseline from a host run (#474)')]
+map-bench-baseline REGION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bench="$(cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | python3 -c 'import json,sys
+    for l in sys.stdin:
+        m = json.loads(l)
+        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "map_eye_bench":
+            print(m["executable"])')"
+    out=target/map-bench
+    rm -rf "$out/maps" && mkdir -p "$out/maps"
+    ln -s "$(realpath "{{REGION}}")" "$out/maps/$(basename "{{REGION}}")"
+    "$bench" "$out/maps" --label host --write loquax/examples/map_eye_bench.baseline
