@@ -9,14 +9,19 @@
 //! interface a packet took.
 //!
 //! The client is `loquax::home::board`: a pending record joins, an
-//! admitted one pulls from its cursor whenever the session says an ask is
-//! due, and every page and every end is said on the debug line as a
-//! `[HOME]` line. The board has no message store yet, so a page's entries
-//! are counted and dropped, and the cursor moves past them: the store is
-//! the step that keeps them.
+//! admitted one sends what the board's model typed and pulls from its
+//! cursor whenever the session says an ask is due, and every page and
+//! every end is said on the debug line as a `[HOME]` line. A code typed on
+//! the keys or written over the control link (`TYPE_HOME_CODE`, 1415)
+//! makes the record ([`Handheld::take_code`]). A page's entries are handed
+//! to the board's loop ([`Handheld::drain`]), which folds them into the
+//! model the screen draws (`loquax_m9::home`); the board has no message
+//! store in flash yet, so after a reset the model is empty and the cursor
+//! has moved past what it showed: the store is the step that keeps them.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use esp_hal::rng::Trng;
@@ -25,9 +30,11 @@ use leviculum_core::node::{NodeCore, NodeCoreBuilder};
 use leviculum_core::traits::Interface;
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::{EmbeddedStorage, Identity, InterfaceMode, TickOutput};
-use loquax::home::ask::{HomeError, Outcome};
-use loquax::home::board::{Batch, Executor, Reach, Report, Session};
+use loquax::home::ask::{Ask, HomeError, Outcome, Verb};
+use loquax::home::board::{self, Batch, Executor, Progress, Reach, Report, Session, Word};
 use loquax::home::record::{Admission, ClientRecord};
+use loquax::home::wire::{Entry, Submission};
+use rand_core::CryptoRngCore;
 
 use crate::flash::Stores;
 use crate::serial_iface::{SerialIface, SERIAL_HW_MTU, SERIAL_IFACE, SERIAL_NAME};
@@ -49,6 +56,31 @@ pub const MAX_ANSWER: usize = 256 * 1024;
 pub const JOIN_BUDGET_MS: u64 = 120_000;
 /// How long one pull may take, every page included.
 pub const PULL_BUDGET_MS: u64 = 300_000;
+/// How long one send may take: the ladder's first rungs and a link.
+pub const SEND_BUDGET_MS: u64 = 120_000;
+
+/// The name the board joins its home under: what the phone's device list
+/// shows (`loquax_m9::pair::DEVICE_NAME`).
+pub const DEVICE_NAME: &str = "M9";
+
+/// Why a code was not taken, as the control envelope refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeRefusal {
+    /// Not a home code.
+    Value,
+    /// The record did not reach flash.
+    Persist,
+}
+
+/// What the client has for the board's loop since it last asked.
+#[derive(Debug, Default)]
+pub struct Drained {
+    /// Pulled entries, oldest first, for the model.
+    pub entries: Vec<Entry>,
+    /// Sends that ended, oldest first: the message id the home gave, or
+    /// why it refused.
+    pub sent: Vec<Result<[u8; 32], String>>,
+}
 
 /// The node, its serial interface and its client.
 pub struct Handheld {
@@ -63,13 +95,22 @@ pub struct Handheld {
 struct Client {
     record: ClientRecord,
     device: Identity,
+    /// The home's LXMF address, which the board's model shows as its own.
+    address: [u8; 16],
     batch: Batch,
     session: Session,
     exec: Option<Executor>,
+    /// The ask in flight is the oldest send.
+    sending: bool,
     /// Entries taken in the pull in flight.
     pulled: usize,
+    /// How far the latest pull came, for the screen's word.
+    progress: Option<Progress>,
     /// The cursor as flash has it; the record's moves with every page.
     saved_cursor: u64,
+    /// Sends the model asked for, oldest first.
+    outgoing: VecDeque<Submission>,
+    drained: Drained,
 }
 
 /// The node's identity: the one in flash, or a new one saved there.
@@ -141,11 +182,41 @@ impl Handheld {
         handheld
     }
 
+    /// Take `text` as a home's admission code (1415): a new device
+    /// identity from `rng`, the pending record written to flash, and the
+    /// client that joins with it, replacing any it had. Typed on the keys
+    /// or written by `lnflash --home`; the same record either way.
+    pub fn take_code(
+        &mut self,
+        text: &str,
+        rng: &mut impl CryptoRngCore,
+        stores: &mut Stores<'_>,
+        batch: Batch,
+        log: &mut UartLog<'_>,
+    ) -> Result<(), CodeRefusal> {
+        let device = Identity::generate(rng);
+        let record = match board::admit(text, &device, DEVICE_NAME) {
+            Ok(record) => record,
+            Err(error) => {
+                log.line("[HOME] ", format_args!("code=refused error={error:?}"));
+                return Err(CodeRefusal::Value);
+            }
+        };
+        if let Err(error) = stores.save_client(&record) {
+            log.line("[HOME] ", format_args!("code=unsaved error={error}"));
+            return Err(CodeRefusal::Persist);
+        }
+        log.line("[HOME] ", format_args!("code=taken saved=yes"));
+        self.client(record, batch, log);
+        Ok(())
+    }
+
     /// Become a device of the home `record` names, pulling in `batch`;
     /// says why not when the record's identity does not read.
     pub fn client(&mut self, record: ClientRecord, batch: Batch, log: &mut UartLog<'_>) {
-        match record.device_identity() {
-            Ok(device) => {
+        let address = loquax::home::lxmf_address(&record.home);
+        match (record.device_identity(), address) {
+            (Ok(device), Ok(address)) => {
                 log.line(
                     "[HOME] ",
                     format_args!(
@@ -160,14 +231,53 @@ impl Handheld {
                     saved_cursor: record.cursor,
                     record,
                     device,
+                    address,
                     batch,
                     session: Session::new(),
                     exec: None,
+                    sending: false,
                     pulled: 0,
+                    progress: None,
+                    outgoing: VecDeque::new(),
+                    drained: Drained::default(),
                 });
             }
-            Err(error) => log.line("[HOME] ", format_args!("client=unread error={error:?}")),
+            (Err(error), _) => log.line("[HOME] ", format_args!("client=unread error={error:?}")),
+            (_, Err(error)) => log.line("[HOME] ", format_args!("client=unread error={error}")),
         }
+    }
+
+    /// The home's LXMF address, the board's own in its model; `None` on a
+    /// board that is no device of a home.
+    pub fn address(&self) -> Option<[u8; 16]> {
+        self.client.as_ref().map(|client| client.address)
+    }
+
+    /// What the screen's top bar says of the home.
+    pub fn word(&self) -> Option<Word> {
+        self.client.as_ref().map(|client| {
+            let admitted = client.record.admitted();
+            Word::of(&client.session, admitted, client.progress)
+        })
+    }
+
+    /// Sends the model asked for: queued, and asked of the home at once.
+    pub fn send(&mut self, submissions: Vec<Submission>, now_ms: u64) {
+        if submissions.is_empty() {
+            return;
+        }
+        if let Some(client) = self.client.as_mut() {
+            client.outgoing.extend(submissions);
+            client.session.hurry(now_ms);
+        }
+    }
+
+    /// What the client has for the loop since the last call.
+    pub fn drain(&mut self) -> Drained {
+        self.client
+            .as_mut()
+            .map(|client| core::mem::take(&mut client.drained))
+            .unwrap_or_default()
     }
 
     /// Whether the home answers, for the screen; `None` on a board that
@@ -266,19 +376,27 @@ impl Handheld {
             Report::Idle => {}
             Report::Page(page) => {
                 client.pulled += page.entries.len();
+                client
+                    .progress
+                    .get_or_insert_with(Progress::default)
+                    .page(&page);
                 let last = page.entries.last().map_or(0, |entry| entry.seq);
                 // Taken, so a pull that breaks after this page asks again
                 // from here, in this ask or the next one.
                 client.record.cursor = client.record.cursor.max(last);
                 let bytes: usize = page.entries.iter().map(|entry| entry.packed.len()).sum();
+                let progress = client.progress.unwrap_or_default();
                 log.line(
                     "[HOME] ",
                     format_args!(
-                        "page entries={} last={last} bytes={bytes} more={}",
+                        "page entries={} last={last} bytes={bytes} more={} taken={} of={}",
                         page.entries.len(),
-                        page.more
+                        page.more,
+                        progress.taken,
+                        progress.of.map_or(-1, |of| of as i64)
                     ),
                 );
+                client.drained.entries.extend(page.entries);
             }
             Report::Done(result) => {
                 client.exec = None;
@@ -290,18 +408,29 @@ impl Handheld {
 }
 
 impl Client {
-    /// Begin the ask the record owes: its join while pending, a pull once
-    /// admitted.
+    /// Begin the ask the record owes: its join while pending; once
+    /// admitted the oldest send, else a pull.
     fn start(&mut self, now_ms: u64, log: &mut UartLog<'_>) {
-        let ask = match self.record.admission {
-            Admission::Pending { .. } => self.record.join(now_ms, JOIN_BUDGET_MS),
-            Admission::Admitted => self
-                .record
-                .pull(self.batch.page_bytes, now_ms, PULL_BUDGET_MS),
+        self.sending = false;
+        let ask = match (&self.record.admission, self.outgoing.front()) {
+            (Admission::Pending { .. }, _) => self.record.join(now_ms, JOIN_BUDGET_MS),
+            (Admission::Admitted, Some(submission)) => {
+                self.sending = true;
+                let verb = Verb::Send(submission.clone());
+                Some(Ask::new(&self.record.home, verb, now_ms, SEND_BUDGET_MS))
+            }
+            (Admission::Admitted, None) => {
+                self.record
+                    .pull(self.batch.page_bytes, now_ms, PULL_BUDGET_MS)
+            }
         };
         match ask {
             Some(Ok(ask)) => {
                 self.pulled = 0;
+                if !self.sending {
+                    self.progress = matches!(self.record.admission, Admission::Admitted)
+                        .then(Progress::default);
+                }
                 self.exec = Some(Executor::new(ask, self.batch.max_answer));
             }
             Some(Err(error)) => {
@@ -354,7 +483,40 @@ impl Client {
                     ),
                 );
             }
+            Ok(Outcome::Sent(id)) => {
+                self.outgoing.pop_front();
+                self.drained.sent.push(Ok(*id));
+                // The home archived it: the next pull brings its entry,
+                // which names the bubble on every device.
+                self.session.hurry(now_ms);
+                log.line(
+                    "[HOME] ",
+                    format_args!(
+                        "sent id={:02x}{:02x}{:02x}{:02x} waiting={} reach={reach}",
+                        id[0],
+                        id[1],
+                        id[2],
+                        id[3],
+                        self.outgoing.len()
+                    ),
+                );
+            }
             Ok(other) => log.line("[HOME] ", format_args!("done={other:?} reach={reach}")),
+            Err(error) if self.sending => {
+                // A refusal stays one; anything else is asked again when
+                // the session says, the send kept at the front.
+                if matches!(error, HomeError::Refused(_)) {
+                    self.outgoing.pop_front();
+                    self.drained.sent.push(Err(alloc::format!("{error}")));
+                }
+                log.line(
+                    "[HOME] ",
+                    format_args!(
+                        "send=failed error=\"{error}\" waiting={} reach={reach} next_in_ms={next_in}",
+                        self.outgoing.len()
+                    ),
+                );
+            }
             Err(error) => {
                 let saved = self.save_cursor(stores);
                 log.line(

@@ -1267,6 +1267,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-log-line",
  "leviculum-serial-mux",
+ "leviculum-ui",
  "loquax",
  "loquax-m9",
  "rand_core 0.6.4",

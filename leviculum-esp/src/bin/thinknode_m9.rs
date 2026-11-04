@@ -22,6 +22,15 @@
 //! report stating `serial_mux=1` so lnsd does its half. A frame that is not
 //! the envelope is a packet for the node.
 //!
+//! Since 1415 the board becomes that device: a board without a client
+//! record opens on the pairing screen, where the home's admission code is
+//! typed on the keys (Back leaves it for the fixture), or the code comes
+//! over the line as a `TYPE_HOME_CODE` frame (`lnflash --home <code>
+//! --port <tty>`). Either way the record is written, the board joins, and
+//! from then on it draws its home's chats from what it pulls, says the
+//! home in the top bar (joining, fetched N of M, unreachable) and sends a
+//! line typed in a chat through the home.
+//!
 //! **Nothing goes on the air.** The LR1110's chip select is parked high so
 //! it ignores the panel's traffic on the shared bus; no opcode reaches it.
 //! The radio is the node's second interface and the next step.
@@ -47,7 +56,9 @@
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
-//! [HOME] page ... / pulled ... / joined=yes ... / failed ...   (as the client asks)
+//! [HOME] page ... taken=<n> of=<m> / pulled ... / joined=yes ... / failed ...   (as the client asks)
+//! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
+//! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
 //! KBRAW <ms> <hex>          one per poll, every 10 ms
 //! KB <ms> <14 hex>          one per poll, the scan the table made of it
@@ -88,8 +99,10 @@ use esp_hal::{
 use leviculum_core::envelope::{self, EnvelopeError};
 use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
 use leviculum_esp::flash::Stores;
-use leviculum_esp::handheld::{self, Handheld};
+use leviculum_esp::handheld::{self, CodeRefusal, Handheld};
 use leviculum_esp::{boards::thinknode_m9 as m9, uptime_ms, UartLog};
+use leviculum_ui::input::{KeyCode, KeyEvent, KeyEventKind};
+use loquax::home::board::Word;
 use loquax::ui::UiModel;
 use loquax_m9::census::{self, Probe, Step};
 use loquax_m9::field::Field;
@@ -98,8 +111,9 @@ use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
 use loquax_m9::kbraw::{self, Protocol, MAX_ANSWER};
 use loquax_m9::keyboard::{Keyboard, POLL_MS};
 use loquax_m9::map::{self, Map};
+use loquax_m9::pair::{self, Pairing};
 use loquax_m9::render::Renderer;
-use loquax_m9::{dump, group, screen};
+use loquax_m9::{dump, group, home, screen};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -276,22 +290,38 @@ fn halt_with_banner(log: &mut UartLog<'_>, heap: usize) -> ! {
     }
 }
 
+/// What the screen shows besides the model: the pairing while a code is
+/// typed, and the home's word in the top bar (1415).
+#[derive(Default)]
+struct Shown {
+    pairing: Option<Pairing>,
+    word: Option<Word>,
+}
+
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
-/// the map in pixels when it is open, and send the rows that changed to
-/// the panel.
+/// the map in pixels when it is open, or the pairing over all of it, and
+/// send the rows that changed to the panel.
 fn redraw(
     renderer: &mut Renderer<'_, Frame>,
     map: &mut Map<'_>,
     panel: &mut Panel<'_>,
     model: &UiModel<Field>,
     row: usize,
+    shown: &Shown,
     log: &mut UartLog<'_>,
 ) {
     let look = screen::Look {
         row,
+        home: shown.word,
         ..screen::Look::of(model)
     };
-    if renderer.show(model, &look, map).is_err() {
+    let drawn = match &shown.pairing {
+        Some(pairing) => {
+            renderer.text(|cols, rows| pair::screen(pairing, shown.word, &look, cols, rows))
+        }
+        None => renderer.show(model, &look, map),
+    };
+    if drawn.is_err() {
         log.line("[DISP] ", format_args!("draw=failed"));
         return;
     }
@@ -590,10 +620,28 @@ fn main() -> ! {
         Err(error) => log.line("[HOME] ", format_args!("client=unread error={error}")),
     }
 
-    let mut model = fixture::model();
+    // A device of a home draws its home's chats, from the first pull on;
+    // a board that is none opens on the pairing, and Back from there shows
+    // the fixture as before (1415).
+    let mut model = match node.address() {
+        Some(address) => home::model(address),
+        None => fixture::model(),
+    };
+    let mut shown = Shown {
+        pairing: node.address().is_none().then(Pairing::new),
+        word: node.word(),
+    };
     // The M9's own cursor over a group's sheet or picker (slice six).
     let mut row = 0;
-    redraw(&mut renderer, &mut map, &mut panel, &model, row, &mut log);
+    redraw(
+        &mut renderer,
+        &mut map,
+        &mut panel,
+        &model,
+        row,
+        &shown,
+        &mut log,
+    );
 
     let mut deframer = Deframer::new();
     let mut answer = [0u8; MAX_ANSWER];
@@ -625,6 +673,48 @@ fn main() -> ! {
                 node.packet(&data, uptime_ms(), &mut stores, &mut log);
                 continue;
             }
+            if let Ok(frame) = envelope::decode_frame(&data) {
+                if frame.frame_type == envelope::TYPE_HOME_CODE {
+                    // The code written over the control link (1415): the
+                    // record before the ack, then the same join as typed.
+                    let answer = match envelope::decode_home_code_payload(frame.payload) {
+                        None => envelope::encode_refusal(
+                            envelope::TYPE_HOME_CODE,
+                            envelope::REFUSE_MALFORMED,
+                        ),
+                        Some(text) => {
+                            match node.take_code(text, &mut rng, &mut stores, batch, &mut log) {
+                                Ok(()) => envelope::encode_ack(envelope::TYPE_HOME_CODE),
+                                Err(CodeRefusal::Value) => envelope::encode_refusal(
+                                    envelope::TYPE_HOME_CODE,
+                                    envelope::REFUSE_VALUE,
+                                ),
+                                Err(CodeRefusal::Persist) => envelope::encode_refusal(
+                                    envelope::TYPE_HOME_CODE,
+                                    envelope::REFUSE_PERSIST,
+                                ),
+                            }
+                        }
+                    };
+                    log.frame(&answer);
+                    if let Some(address) = node.address() {
+                        model = home::model(address);
+                        row = 0;
+                        shown.pairing = None;
+                        shown.word = node.word();
+                        redraw(
+                            &mut renderer,
+                            &mut map,
+                            &mut panel,
+                            &model,
+                            row,
+                            &shown,
+                            &mut log,
+                        );
+                    }
+                    continue;
+                }
+            }
             control(
                 &data,
                 &mut model,
@@ -637,6 +727,37 @@ fn main() -> ! {
         }
 
         node.turn(uptime_ms(), &mut stores, &mut log);
+
+        // What the client brought: pulled entries into the model, ended
+        // sends to their bubbles, and the top bar's word when it moved.
+        let drained = node.drain();
+        let mut dirty = false;
+        if let Some(address) = node.address() {
+            if !drained.entries.is_empty() {
+                home::take(&mut model, &drained.entries, &address);
+                dirty = true;
+            }
+            for result in drained.sent {
+                home::sent(&mut model, result);
+                dirty = true;
+            }
+        }
+        let word = node.word();
+        if word != shown.word {
+            shown.word = word;
+            dirty = true;
+        }
+        if dirty {
+            redraw(
+                &mut renderer,
+                &mut map,
+                &mut panel,
+                &model,
+                row,
+                &shown,
+                &mut log,
+            );
+        }
 
         if now < next_poll {
             continue;
@@ -663,9 +784,49 @@ fn main() -> ! {
                 keyboard.poll(ms, scan, &mut |event| events.push(event));
                 if !events.is_empty() {
                     for event in events {
-                        group::press(&mut model, &mut row, &event);
+                        if let Some(pairing) = shown.pairing.as_mut() {
+                            let before = node.address();
+                            pairing_key(
+                                pairing,
+                                &event,
+                                &mut node,
+                                &mut rng,
+                                &mut stores,
+                                batch,
+                                &mut log,
+                            );
+                            if event.code == KeyCode::Esc && event.kind != KeyEventKind::Release {
+                                shown.pairing = None;
+                            }
+                            if let (None, Some(address)) = (before, node.address()) {
+                                // The code was taken: the home's chats from
+                                // here, the join in the top bar.
+                                model = home::model(address);
+                                row = 0;
+                                shown.pairing = None;
+                            }
+                            shown.word = node.word();
+                            continue;
+                        }
+                        let effects = group::press(&mut model, &mut row, &event);
+                        if node.address().is_some() {
+                            let mut ids = || {
+                                let mut id = [0u8; 16];
+                                rand_core::RngCore::fill_bytes(&mut rng, &mut id);
+                                id
+                            };
+                            node.send(home::sends(effects, &mut ids), uptime_ms());
+                        }
                     }
-                    redraw(&mut renderer, &mut map, &mut panel, &model, row, &mut log);
+                    redraw(
+                        &mut renderer,
+                        &mut map,
+                        &mut panel,
+                        &model,
+                        row,
+                        &shown,
+                        &mut log,
+                    );
                 }
             }
             Err(e) => {
@@ -676,6 +837,25 @@ fn main() -> ! {
                 }
             }
         }
+    }
+}
+
+/// One key on the pairing screen: the code edited, and on Enter with a
+/// whole code that checks, the code taken as `lnflash --home` would give
+/// it.
+fn pairing_key(
+    pairing: &mut Pairing,
+    event: &KeyEvent,
+    node: &mut Handheld,
+    rng: &mut Trng,
+    stores: &mut Stores<'_>,
+    batch: loquax::home::board::Batch,
+    log: &mut UartLog<'_>,
+) {
+    if let Some(code) = pairing.key(event) {
+        log.line("[HOME] ", format_args!("code=typed"));
+        // Refused only when flash would not take it: the typed code checked.
+        let _ = node.take_code(&code.encode(), rng, stores, batch, log);
     }
 }
 
@@ -707,7 +887,11 @@ fn control(
             // `serial_mux=1`: the one UART carries text and frames, so lnsd
             // escapes its flow bytes and strips the line's (1414).
             log.frame(&envelope::encode_capability_report_with_facts(
-                &[envelope::TYPE_CAPABILITIES, envelope::TYPE_FRAME_DUMP],
+                &[
+                    envelope::TYPE_CAPABILITIES,
+                    envelope::TYPE_FRAME_DUMP,
+                    envelope::TYPE_HOME_CODE,
+                ],
                 &[envelope::FACT_SERIAL_MUX],
             ));
         }
@@ -724,11 +908,11 @@ fn control(
                 log.frame(&envelope::encode_ack(envelope::TYPE_FRAME_DUMP));
                 if let Some(shown) = screen.and_then(Screen::of) {
                     (*model, *row) = shown.walk();
-                    redraw(renderer, map, panel, model, *row, log);
+                    redraw(renderer, map, panel, model, *row, &Shown::default(), log);
                     log.line("[DUMP] ", format_args!("screen={}", shown.name()));
                 }
-                let shown = renderer.panel();
-                dump::encode(WIDTH, HEIGHT, |x, y| shown.pixel(x, y), &mut |line| {
+                let frame = renderer.panel();
+                dump::encode(WIDTH, HEIGHT, |x, y| frame.pixel(x, y), &mut |line| {
                     log.raw(line)
                 });
             }
