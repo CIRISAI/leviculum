@@ -280,15 +280,13 @@ fn the_phone_draws_the_buildings_as_the_window_does() {
             let info = reader.next_frame(&mut want).expect("frame");
             want.truncate(info.buffer_size());
             let rgb: Vec<u8> = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
-            let differ = want
-                .chunks(3)
-                .zip(rgb.chunks(3))
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(
-                differ, 0,
-                "z{zoom} {t}: the phone is not the window's picture"
-            );
+            if want != rgb {
+                let name = format!("phone-buildings-{t}-z{zoom}.png");
+                panic!(
+                    "z{zoom} {t}: the phone is not the window's picture; {}",
+                    tell_the_difference(&name, &want, &rgb, W, H)
+                );
+            }
         }
     }
 }
@@ -728,6 +726,46 @@ fn same_as(name: &str, rgba: &[u8], w: u32, h: u32) {
             keep().display()
         );
     }
+}
+
+/// What differs between the RGB picture `want` and `got`, `w` x `h`: the
+/// count, the box around it and the count per band of 32 rows, with `got`
+/// kept under the target's temp dir as `name`, so a run on another host
+/// (the forge, whose container goes with its picture) shows which pixels.
+fn tell_the_difference(name: &str, want: &[u8], got: &[u8], w: u32, h: u32) -> String {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("loquax-android-golden");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let kept = dir.join(name);
+    let mut out = Vec::new();
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgb);
+    e.set_depth(png::BitDepth::Eight);
+    let mut writer = e.write_header().expect("header");
+    writer.write_image_data(got).expect("data");
+    writer.finish().expect("finish");
+    std::fs::write(&kept, out).expect("write");
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    let mut bands = vec![0usize; h.div_ceil(32) as usize];
+    let mut differ = 0;
+    for (i, (a, b)) in want.chunks(3).zip(got.chunks(3)).enumerate() {
+        if a != b {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            bands[(y / 32) as usize] += 1;
+            differ += 1;
+        }
+    }
+    let bands: Vec<String> = bands
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .map(|(i, n)| format!("rows {}..{}: {n}", i * 32, i * 32 + 32))
+        .collect();
+    format!(
+        "{differ} pixels differ in x {x0}..={x1}, y {y0}..={y1} ({}); this run's is {}",
+        bands.join(", "),
+        kept.display()
+    )
 }
 
 /// The smallest shift by which every pixel column of `rgba`, `w` wide,
