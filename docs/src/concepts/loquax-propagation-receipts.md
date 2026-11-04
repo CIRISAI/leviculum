@@ -6,8 +6,9 @@ for Lew over the study, order 1393, Refs #232, #450). The codec is built
 Loquax behaviour yet**: no client sets bit 2, sends `0x07` or reads it.
 That is order 1395. The study behind this page is the reviewer's
 `2026-11-04-empfangsbestaetigung-propagation` (German, every claim
-cited); the second half of its recommendation, a status query to lnpnd,
-is order 1394 and not on this page.
+cited). The second half of its recommendation, asking lnpnd what became
+of a message, is section B below: built in lnpnd by order 1394, asked
+by nobody yet (1395).
 
 ## The problem
 
@@ -142,7 +143,148 @@ The screen reader says the words.
   message stays at one tick, which is true.
 - **A stock propagation node** (Python `lxmd`): does nothing. It cannot
   read the field; the receipt is an ordinary message to it.
-- **lnpnd**: nothing either; the receipt is end to end.
+- **lnpnd**: nothing for the receipt, which is end to end. It answers
+  the status query of section B.
+
+## B. Asking the node: `/lev/status`
+
+The receipt needs a recipient that sends one. A stock recipient never
+does, so for it the sender's only witness is the node it uploaded to:
+the node saw the recipient's client collect the message. lnpnd answers a
+query for that; a stock node cannot.
+
+**Pull, never push.** A node that told the sender would have to know the
+sender, and it does not: the upload comes over a link that never
+identifies (`reference/LXMF/LXMF/LXMRouter.py:2889`). Learning it would
+tie sender and recipient at the node, the leak upstream keeps the feature
+out for (#192 above). So the sender asks, by the message's `transient_id`,
+which only the sender and the nodes that hold the message know
+(`reference/LXMF/LXMF/LXMessage.py:433-434`).
+
+### What lnpnd keeps
+
+Every id that leaves the store, with when and why, for 30 days after it
+left (`PropagationNode::departures`, `leviculum-lxmf/src/propagation_node.rs`),
+persisted across restarts in the data directory's `departures` file:
+
+| Reason | When | Answer |
+|---|---|---|
+| `collected` | the recipient's client listed it in its `haves` and the node deleted it (`LXMRouter.py:1508-1519`) | `collected` |
+| `evicted` | displaced to make room (`get_weight`, `LXMRouter.py:1056-1067`) | `evicted` |
+| `expired` | older than the 30-day expiry, never collected here | `expired` |
+| `delivered` | addressed to the node's own mailbox, delivered to it | `delivered` |
+
+A message still in the store is `held`; an id the node never had, or
+that left more than 30 days ago, is `unknown`.
+
+- **File format `LNPNDDP2`** (`lnpnd/src/departures.rs`): the 8-byte
+  magic, then 41 bytes an id: the 32-byte `transient_id`, the departure
+  time as little-endian u64 seconds, one reason byte (1 collected,
+  2 evicted, 3 expired, 4 delivered). The older `LNPNDDP1` (40 bytes, no
+  reason) still loads; its ids stay duplicates and answer `unknown`,
+  because that file did not say whether an id was collected or
+  displaced. The next save writes `LNPNDDP2`.
+- **An expired id is no duplicate.** It is kept to answer, but a restart
+  does not seed the duplicate cache with it: past the window a peer
+  re-offers what it received after us, a new copy here too.
+- **The log line** per departure, whichever path removed it (a `/get`
+  confirmation, an own-mailbox delivery, an eviction during an upload or
+  a peer's sync, an expiry):
+
+  ```
+  PN_DEPART id=<transient_id, 64 hex> reason=collected|evicted|expired|delivered t=<ms>
+  ```
+
+  and one `PN_STATUS ids=<n> result=answered|refused|throttled` per query.
+
+### The wire
+
+```
+request path  "/lev/status"       on lxmf.propagation, path hash 46b17db4be0eb4b3e31ab655f95a87a4
+request data  [ bin32 transient_id, ... ]          at most 64 ids
+answer        { bin32 transient_id: str word, ... } every asked id, in the order asked
+              word = "held" | "collected" | "evicted" | "expired" | "delivered" | "unknown"
+refusal       uint error code                     0xf4 malformed or over 64 ids, 0xf6 throttled
+```
+
+- **One id, collected** (`a_request_round_trips_and_its_bytes_are_an_array_of_bins`,
+  `an_answer_round_trips_and_a_refusal_is_its_code` in
+  `leviculum-lxmf/src/lev_status.rs`):
+
+  ```
+  request  91 c4 20 <32-byte transient id>                                  35 bytes
+  answer   81 c4 20 <32-byte transient id> a9 63 6f 6c 6c 65 63 74 65 64    45 bytes
+  ```
+
+  Seven ids are a 239-byte request and an answer under 320 bytes, so a
+  home's usual question fits one packet each way on a link.
+- A word a reader does not know reads as `unknown`, so a later node can
+  add one.
+- **Open to any link, never identified.** The node never asks who is on
+  the link. A home asks over a link of its own that it does not identify,
+  not over its sync link, which identifies before `/get`
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:569`), or the node
+  could tie its identity to the ids and through them to the recipients.
+- **Spaced per link**: a second request within one second on the same
+  link is answered `0xf6`. A home asks once per sync round.
+
+### The announce
+
+The capability rides the propagation node's announce, so a client never
+asks a stock node, which would leave the request unanswered
+(`reference/Reticulum/RNS/Link.py:859-905`, no branch for a missing
+handler). Metadata key `PN_META_CUSTOM` 0xFF
+(`reference/LXMF/LXMF/LXMF.py:138`):
+
+```
+field 6 = { ..., 0xFF: { "lev": { "status": 1 } } }
+            cc ff 81 a3 6c 65 76 81 a6 73 74 61 74 75 73 01     16 bytes
+```
+
+`1` is the version of this wire. The reference checks only that field 6
+is a dict (`LXMF.py:244`), so a stock client keeps taking the announce
+and ignores the key (`lev_status_reference` feeds our exact announce to
+that function). A board announces none: it keeps no departures and does
+not serve the path. Readers look up `{"lev": {"status": _}}` and skip any
+other key in either map (`lev_status::announced_version`).
+
+### What the answers mean, and what they cannot
+
+- **`collected`** means the recipient's LXMF router took it from this
+  node. With Sideband or Columba the router is on the phone, so it
+  reached the device. It does not mean read.
+- **`expired` means "not collected here", never "lost".** With peering
+  every peer gets a copy (`LXMRouter.py:2519`), so the recipient may
+  have collected it at another node, which deletes only its own copy;
+  ours expires uncollected. The words must say so (the table in section C of the
+  study: "not collected at this node; perhaps delivered via another").
+- **`evicted`** the same: gone from here, perhaps delivered elsewhere.
+- **`unknown`** after a node's departures file was lost or never
+  written: no claim at all.
+
+### Privacy of the query
+
+- The node saw the collection anyway. New is only that it tells whoever
+  holds the `transient_id`: the sender, and every node that holds the
+  message by peering. A foreign peer node can thus learn when the
+  recipient collected at ours. Small, but it is there.
+- The query reveals only that someone holding the ids asks. Over an
+  unidentified link the node cannot tie the asker to anything.
+- **The home's rule (1395):** ask at most once per sync round, only for
+  ids still open, and for at most 30 days after the upload; an id that
+  reached `collected`, `delivered` or a receipt is never asked again.
+
+### For a later cell against lxmd (lane 2)
+
+A periculum cell with a stock `lxmd` beside lnpnd must assert: lxmd
+keeps validating lnpnd's announce (it keeps lnpnd as a known propagation
+node and peers it, `pn_announce_data_is_valid` true on the wire); lxmd's
+own announce carries no `0xFF` key, so a reader finds no capability; and
+a `/lev/status` request sent to lxmd gets no answer (the request times
+out), while the same request to lnpnd for an id lxmd's peer sync carried
+over answers `held`, then `collected` after the recipient's stock client
+fetched from lnpnd, and stays `held`, never `collected`, when it fetched
+from lxmd instead.
 
 ## Privacy
 
@@ -157,6 +299,10 @@ message, as for any reply. Nothing identifies the sender to the node.
   `KEY_PROPAGATION_RECEIPT`, `PropagationReceipt` with its batches, the
   hand-built vector and the older-reader test, in
   `leviculum-lxmf/src/lev.rs`.
+- Built (1394): section B in lnpnd. The departure reasons and their
+  `LNPNDDP2` file, `PN_DEPART` and `PN_STATUS`, the `/lev/status` handler
+  with its spacing, the `0xFF` announce entry, the codec in
+  `leviculum-lxmf/src/lev_status.rs`.
 - Not built: setting bit 2, sending `0x07` on a propagated arrival, taking
-  it, the words on the ladder (1395); a status query to lnpnd by
-  transient id (1394).
+  it, the words on the ladder, and the home asking `/lev/status` (1395);
+  the cell against lxmd (lane 2).
