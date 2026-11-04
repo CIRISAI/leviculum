@@ -344,12 +344,13 @@ pub enum OutboxEvent {
         detail: String,
         path: Option<PropagationPathAttempts>,
     },
-    /// A propagated [`Command::SendPacked`] waits for the key of its
-    /// `destination`: without it the message can be neither encrypted nor
-    /// stamped for the propagation node, and the router asks the path
-    /// until an announce brings the key. Said when it starts to wait and
-    /// again every [`crate::engine::KEY_WAIT_SAY_MS`] while it waits (1305).
-    KeyWanted {
+    /// A propagated [`Command::SendPacked`] the router did not take since
+    /// this node does not hold the key of its `destination`: the copy on
+    /// the node is encrypted for the recipient. The recipient's path was
+    /// asked, and the announce that answers it brings the key (1406: the
+    /// router held such a leg without a word until the home's stall bound
+    /// gave it up). No queue entry, so nothing else is said of it.
+    KeyMissing {
         message_id: [u8; 32],
         destination: [u8; 16],
     },

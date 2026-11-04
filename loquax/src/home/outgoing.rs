@@ -120,6 +120,10 @@ pub enum Outcome {
     Sent,
     /// It did not go.
     Failed,
+    /// A propagated leg that did not go since the recipient's key is not
+    /// held (1406): the node's copy is encrypted for the recipient. The
+    /// recipient's path was asked, and the answer brings the key.
+    NoKey,
 }
 
 /// A state change of an outbox message: each one is a row update and an
@@ -175,8 +179,10 @@ pub enum Act {
     GiveUp { id: [u8; 32], leg: Leg },
     /// Call off the direct leg of `id` in the router: the recipient did not
     /// answer within [`Policy::answer_secs`]. A direct failure, recorded as
-    /// none.
-    Unanswered { id: [u8; 32] },
+    /// none. `offer` says whether the propagation node is offered the copy
+    /// next: not when a node took it already (1406: the line said it was
+    /// for every message, 22 of 27 on the field mailbox were on the node).
+    Unanswered { id: [u8; 32], offer: bool },
 }
 
 /// How the recipient was heard, as the router said it.
@@ -232,6 +238,10 @@ struct Item {
     /// A direct leg was given up and the propagation node is owed the
     /// copy a failure would have sent it.
     propagation_owed: bool,
+    /// The last propagated leg did not go for want of the recipient's key
+    /// ([`Outcome::NoKey`]): the recipient's path response, which brings
+    /// the key, offers the node the copy.
+    key_wanted: bool,
     next_direct_at: i64,
 }
 
@@ -241,9 +251,11 @@ impl Item {
         self.heard_at = now;
         self.started_at = now;
         self.answered = false;
-        if leg == Leg::Direct {
-            // A direct failure propagates by itself.
-            self.propagation_owed = false;
+        // A direct failure propagates by itself; a propagated leg pays
+        // what was owed, whatever started it.
+        self.propagation_owed = false;
+        if leg == Leg::Propagated {
+            self.key_wanted = false;
         }
         Act::Send { id: self.id, leg }
     }
@@ -287,6 +299,7 @@ impl Outgoing {
             started_at: i64::MIN,
             answered: false,
             propagation_owed: false,
+            key_wanted: false,
             next_direct_at: i64::MIN,
         });
     }
@@ -294,6 +307,11 @@ impl Outgoing {
     /// The packed message, while it is retried.
     pub fn packed(&self, id: &[u8; 32]) -> Option<&[u8]> {
         self.item(id).map(|item| item.packed.as_slice())
+    }
+
+    /// Whether a propagation node took a copy of `id`.
+    pub fn propagated(&self, id: &[u8; 32]) -> bool {
+        self.item(id).is_some_and(|item| item.propagated)
     }
 
     /// The leg `id` is on now.
@@ -357,7 +375,10 @@ impl Outgoing {
             {
                 item.in_flight = None;
                 item.propagation_owed |= !item.propagated;
-                acts.push(Act::Unanswered { id: item.id });
+                acts.push(Act::Unanswered {
+                    id: item.id,
+                    offer: !item.propagated,
+                });
                 // The next leg waits for the next tick, as after a stall.
                 return true;
             }
@@ -401,16 +422,29 @@ impl Outgoing {
     /// `destination` announced: it is there now, so every message for it
     /// that is not on a leg goes direct at once.
     ///
-    /// A path response starts nothing (1330): every direct leg given up or
-    /// failed ends in a path request of the router's own, which a transport
-    /// node answers from its cache within a minute, and taking that answer
-    /// for the recipient tried an offline member direct every 100 s after
-    /// its copy was handed on, where the announce and the hour were meant.
+    /// A path response starts no direct leg (1330): every direct leg given
+    /// up or failed ends in a path request of the router's own, which a
+    /// transport node answers from its cache within a minute, and taking
+    /// that answer for the recipient tried an offline member direct every
+    /// 100 s after its copy was handed on, where the announce and the hour
+    /// were meant. It does bring the recipient's key, so a message whose
+    /// propagated leg wanted it is offered to the node again, once per
+    /// [`Outcome::NoKey`] (1406).
     pub fn announced(&mut self, destination: [u8; 16], heard: Heard, now: i64) -> Vec<Act> {
-        if heard == Heard::PathResponse {
-            return Vec::new();
-        }
         let horizon = self.policy.horizon_secs;
+        if heard == Heard::PathResponse {
+            return self
+                .items
+                .iter_mut()
+                .filter(|item| {
+                    item.destination == destination
+                        && item.key_wanted
+                        && item.in_flight.is_none()
+                        && now.saturating_sub(item.created_at) < horizon
+                })
+                .map(|item| item.start(Leg::Propagated, now))
+                .collect();
+        }
         let retry = self.policy.retry_secs;
         let mut acts = Vec::new();
         for item in &mut self.items {
@@ -460,6 +494,11 @@ impl Outgoing {
             }
             // No node took it; the next direct failure tries again.
             (Leg::Propagated, Outcome::Failed) => Vec::new(),
+            // The same, and the recipient's path response tries again too.
+            (Leg::Propagated, Outcome::NoKey) => {
+                item.key_wanted = true;
+                Vec::new()
+            }
         }
     }
 }
@@ -484,6 +523,10 @@ mod tests {
 
     fn record(change: Change) -> Act {
         Act::Record { id: ID, change }
+    }
+
+    fn unanswered(offer: bool) -> Act {
+        Act::Unanswered { id: ID, offer }
     }
 
     #[test]
@@ -717,7 +760,7 @@ mod tests {
         outgoing.heard(&ID, 1030);
         assert!(outgoing.unanswered(&ID));
         assert!(outgoing.tick(1044).is_empty());
-        assert_eq!(outgoing.tick(1045), [Act::Unanswered { id: ID }]);
+        assert_eq!(outgoing.tick(1045), [unanswered(true)]);
         assert_eq!(outgoing.in_flight(&ID), None);
         assert!(outgoing.left(&ID, Outcome::Failed, 1045).is_empty());
         // Neither the path response the router's request drew nor an
@@ -737,7 +780,7 @@ mod tests {
             outgoing.announced(PEER, Heard::Announce, 1100),
             [send(Leg::Direct)]
         );
-        assert_eq!(outgoing.tick(1145), [Act::Unanswered { id: ID }]);
+        assert_eq!(outgoing.tick(1145), [unanswered(false)]);
         assert!(outgoing.tick(1146).is_empty());
         // Control: answered, the leg is not cut at the bound.
         assert_eq!(
@@ -784,7 +827,7 @@ mod tests {
         let mut acts = outgoing.tick(1000);
         assert!(outgoing.unanswered(&ID));
         acts.extend(outgoing.tick(1000 + answer));
-        assert_eq!(acts.last(), Some(&Act::Unanswered { id: ID }));
+        assert_eq!(acts.last(), Some(&unanswered(true)));
         acts.extend(outgoing.left(&ID, Outcome::Failed, 1000 + answer));
         for now in 1000 + answer + 1..1000 + 2 * router_secs as i64 {
             acts.extend(outgoing.tick(now));
@@ -802,7 +845,10 @@ mod tests {
         for now in 1000 + answer..1000 + 2 * router_secs as i64 {
             acts.extend(outgoing.tick(now));
         }
-        assert!(!acts.contains(&Act::Unanswered { id: ID }), "{acts:?}");
+        assert!(
+            !acts.iter().any(|act| matches!(act, Act::Unanswered { .. })),
+            "{acts:?}"
+        );
         assert_eq!(offers(&acts), 1, "{acts:?}");
         assert_eq!(outgoing.in_flight(&ID), Some(Leg::Propagated));
     }
@@ -817,7 +863,7 @@ mod tests {
     fn a_path_response_does_not_try_direct_again() {
         let mut outgoing = outbox();
         assert_eq!(outgoing.tick(1000), [send(Leg::Direct)]);
-        assert_eq!(outgoing.tick(1045), [Act::Unanswered { id: ID }]);
+        assert_eq!(outgoing.tick(1045), [unanswered(true)]);
         assert_eq!(outgoing.tick(1046), [send(Leg::Propagated)]);
         assert_eq!(
             outgoing.left(&ID, Outcome::Sent, 1065),
@@ -834,13 +880,80 @@ mod tests {
             outgoing.announced(PEER, Heard::Announce, 1200),
             [send(Leg::Direct)]
         );
-        assert_eq!(outgoing.tick(1245), [Act::Unanswered { id: ID }]);
+        assert_eq!(outgoing.tick(1245), [unanswered(false)]);
         assert!(outgoing
             .announced(PEER, Heard::PathResponse, 1300)
             .is_empty());
         // And the hour, counted from the announce's leg.
         assert!(outgoing.tick(1200 + 3599).is_empty());
         assert_eq!(outgoing.tick(1200 + 3600), [send(Leg::Direct)]);
+    }
+
+    /// 1406, the field mailbox: a message the node took long ago, its
+    /// direct leg unanswered every hour, offers the node nothing, and the
+    /// act says so, so the daemon's line does not claim an offer. Control:
+    /// one never handed on offers the copy.
+    #[test]
+    fn an_unanswered_leg_of_a_message_on_the_node_offers_nothing() {
+        let mut outgoing = Outgoing::new(Policy::default());
+        outgoing.add(ID, PEER, Vec::new(), 1000, true);
+        assert!(outgoing.propagated(&ID));
+        assert_eq!(outgoing.tick(1000), [send(Leg::Direct)]);
+        assert_eq!(outgoing.tick(1045), [unanswered(false)]);
+        assert!(outgoing.tick(1046).is_empty(), "no copy offered");
+        let mut control = outbox();
+        assert!(!control.propagated(&ID));
+        assert_eq!(control.tick(1000), [send(Leg::Direct)]);
+        assert_eq!(control.tick(1045), [unanswered(true)]);
+        assert_eq!(control.tick(1046), [send(Leg::Propagated)]);
+    }
+
+    /// 1406: a propagated leg the engine could not start (the recipient's
+    /// key is not held, said at once) ends: nothing more until the
+    /// recipient is heard or the hour comes round, and the hour's direct
+    /// leg asks the path again. The recipient's path response, which brings
+    /// the key, offers the node the copy, once; its announce tries direct.
+    /// Control: after a propagated leg that failed otherwise, a path
+    /// response starts nothing (1330).
+    #[test]
+    fn a_propagated_leg_without_a_key_waits_for_the_key_or_the_hour() {
+        let mut outgoing = outbox();
+        assert_eq!(outgoing.tick(1000), [send(Leg::Direct)]);
+        assert_eq!(outgoing.tick(1045), [unanswered(true)]);
+        assert_eq!(outgoing.tick(1046), [send(Leg::Propagated)]);
+        assert!(outgoing.left(&ID, Outcome::NoKey, 1046).is_empty());
+        assert_eq!(outgoing.in_flight(&ID), None);
+        for now in 1047..1000 + 3600 {
+            assert!(outgoing.tick(now).is_empty(), "at {now}");
+        }
+        assert_eq!(outgoing.tick(1000 + 3600), [send(Leg::Direct)]);
+        assert_eq!(outgoing.tick(1000 + 3645), [unanswered(true)]);
+        assert_eq!(outgoing.tick(1000 + 3646), [send(Leg::Propagated)]);
+        assert!(outgoing.left(&ID, Outcome::NoKey, 1000 + 3646).is_empty());
+        // The path response brings the key: the node is offered the copy,
+        // once.
+        assert_eq!(
+            outgoing.announced(PEER, Heard::PathResponse, 1000 + 3650),
+            [send(Leg::Propagated)]
+        );
+        assert!(outgoing.left(&ID, Outcome::Failed, 1000 + 3651).is_empty());
+        assert!(outgoing
+            .announced(PEER, Heard::PathResponse, 1000 + 3660)
+            .is_empty());
+        // The recipient's own announce tries direct.
+        assert_eq!(
+            outgoing.announced(PEER, Heard::Announce, 1000 + 3700),
+            [send(Leg::Direct)]
+        );
+        // A path response for another recipient offers nothing.
+        let mut other = outbox();
+        other.tick(1000);
+        other.tick(1045);
+        other.tick(1046);
+        other.left(&ID, Outcome::NoKey, 1046);
+        assert!(other
+            .announced([7; 16], Heard::PathResponse, 1050)
+            .is_empty());
     }
 
     /// A restart finds a message that was on a leg in a process that no

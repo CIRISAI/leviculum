@@ -1316,15 +1316,19 @@ async fn a_watching_client_hears_new_mail_within_two_seconds_and_the_old_way_sti
 }
 
 /// The home node's propagated leg end to end (#232, slice 2): the client
-/// sends to a recipient that is offline and was never heard, so the direct
-/// leg fails and the home node hands the same packed message to a stock
-/// Python propagation node. That leg waits for the recipient's key (the
-/// copy on the node is encrypted for it), which a short run of the
-/// recipient's announces before it leaves again; the client then sees
+/// sends to a recipient that is offline, heard once before by a short run of
+/// its announces, so the direct leg fails and the home node hands the same
+/// packed message to a stock Python propagation node; the client then sees
 /// `propagated`. The recipient comes up, collects from the node and
 /// announces; the home node's direct retry gets its proof, which the
 /// recipient answers for a message it already holds. The recipient keeps
 /// one message, and the client sees `delivered`.
+///
+/// Heard before the send since 1406: a recipient never heard fails the
+/// propagated leg at once for want of its key
+/// (`a_message_to_a_recipient_never_heard_fails_its_propagated_leg_at_once`),
+/// and its first announce after that tries direct, which a recipient that
+/// is up at that moment answers.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once() {
     let node_peer = PythonPeer::start();
@@ -1347,38 +1351,6 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     let recipient = leviculum_std::generate_identity();
     let recipient_address =
         hex::encode(loquax::engine::delivery_address(&recipient).expect("address"));
-    let body = "ueber den Briefkasten";
-    let sent = mesh
-        .run(
-            "send",
-            client.path().to_path_buf(),
-            vec![
-                recipient_address.clone(),
-                "--timeout".to_string(),
-                "40".to_string(),
-            ],
-            body.as_bytes().to_vec(),
-        )
-        .await;
-    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
-    let message_id = sent.enqueued_id();
-
-    // Nobody answers the direct leg within its bound (1328), or the router
-    // gives up on it first, and the propagated leg starts.
-    node.wait_for_direct_end(&message_id, 90).await;
-    node.wait_for(&format!("HOME outbox propagated message={message_id}"), 5)
-        .await;
-    // The home has never heard the recipient: the propagated leg cannot be
-    // encrypted for the node, and says that it waits (1305).
-    node.wait_for(
-        &format!(
-            "HOME outbox propagated waiting message={message_id} reason=no key for {}, \
-             path requested",
-            &recipient_address[..8]
-        ),
-        10,
-    )
-    .await;
     // The recipient is heard once: a loquax run on its identity announces
     // on attach and leaves, failing on a node that does not exist rather
     // than collecting from the real one.
@@ -1402,6 +1374,34 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
         )
         .await;
     assert_eq!(heard.code, Some(1), "{heard}");
+
+    let body = "ueber den Briefkasten";
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![
+                recipient_address.clone(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            body.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let message_id = sent.enqueued_id();
+
+    // Nobody answers the direct leg within its bound (1328), or the router
+    // gives up on it first, and the propagated leg starts.
+    node.wait_for_direct_end(&message_id, 90).await;
+    node.wait_for(
+        &format!(
+            "HOME outbox propagated message={message_id} pn={}",
+            &pn_hash[..8]
+        ),
+        10,
+    )
+    .await;
     node.wait_for(
         &format!("HOME outbox propagated message={message_id} seq="),
         120,
@@ -1481,6 +1481,98 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     );
 
     drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// 1406, the field mailbox on 2026-11-04: five messages to recipients the
+/// home never heard ran a propagated leg every hour that logged
+/// `propagated pn=`, mined no stamp, uploaded nothing and ended only at the
+/// 779 s stall bound, for seven days. The leg cannot be encrypted for the
+/// node without the recipient's key. Now it fails at once, naming the key
+/// and the path request, and no line claims an upload; the recipient's
+/// first announce brings the key and tries direct at once, which the
+/// recipient, up at that moment, answers with its proof.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_a_recipient_never_heard_fails_its_propagated_leg_at_once() {
+    let mut mesh = Mesh::start_many(&[]).await;
+    let pn = lnpnd_node::PropagationNode::start(&mesh.instance, 0).await;
+    let pn_hash = pn.hex();
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "laptop");
+    let node = HomeNode::start_with(&home, &mesh.instance, &["--pn", &pn_hash]).await;
+    let client = joined(&mesh, &node, &code).await;
+
+    let recipient = leviculum_std::generate_identity();
+    let recipient_address =
+        hex::encode(loquax::engine::delivery_address(&recipient).expect("address"));
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![
+                recipient_address.clone(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            b"an niemanden, den das Zuhause kennt".to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let message_id = sent.enqueued_id();
+
+    node.wait_for_direct_end(&message_id, 90).await;
+    node.wait_for(
+        &format!(
+            "HOME outbox propagated failed message={message_id} pn={} reason=no key for {}, \
+             path requested",
+            &pn_hash[..8],
+            &recipient_address[..8]
+        ),
+        10,
+    )
+    .await;
+    let log = node.log();
+    assert!(
+        !log.contains(&format!("HOME outbox propagated message={message_id} pn=")),
+        "a leg the router never took was logged as one:\n{log}"
+    );
+    assert!(
+        !log.contains(&format!(
+            "HOME outbox propagated stalled message={message_id}"
+        )),
+        "{log}"
+    );
+
+    // The recipient is heard: a loquax run on its identity announces on
+    // attach, and the home tries direct at once while it is up.
+    let once = tempfile::tempdir().expect("the recipient's home");
+    std::fs::write(
+        once.path().join("identity"),
+        leviculum_core::identity_store::encode_identity(&recipient).expect("storable"),
+    )
+    .expect("the recipient's identity");
+    let heard = mesh
+        .run(
+            "fetch",
+            once.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+                "--timeout".to_string(),
+                "10".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(heard.code, Some(1), "{heard}");
+    node.wait_for(
+        &format!("HOME outbox delivered message={message_id} seq="),
+        10,
+    )
+    .await;
+
+    drop(node);
+    drop(pn);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 

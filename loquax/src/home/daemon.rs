@@ -435,12 +435,16 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         // A screen that went away borrows nothing.
         let _ = to.send(attached.lend_to(*lender));
     }
+    // The groups' open copies are counted beside the home's own outbox:
+    // they go out on the groups' engines, which start below, and the line
+    // said `outbox=9` where 27 went out within two seconds (1406).
     tracing::warn!(
-        "HOME up address={} home={} archive_cap={}B outbox={}",
+        "HOME up address={} home={} archive_cap={}B outbox={} group_copies={}",
         crate::address::to_hex(&address),
         crate::address::to_hex(&home_destination),
         archive_cap_bytes,
-        outgoing.len()
+        outgoing.len(),
+        store.group_copies_open_count().map_err(|e| e.to_string())?
     );
     // The name the owner goes by in the groups it makes (1307): its
     // announced name, else the start of its address.
@@ -732,6 +736,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             let (outcome, reason) = left_outcome(last, failure);
                             sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, reason.as_deref(), selected_pn, selected_pn);
                         }
+                        OutboxEvent::Queued { message_id } => {
+                            sender.queued(&outgoing, &message_id);
+                        }
                         OutboxEvent::State { message_id, state } => {
                             // A sign of the leg: the stall bound counts from now.
                             leg_sign(&mut outgoing, &message_id, state);
@@ -739,11 +746,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::Unsent { message_id, detail } => {
                             sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, Outcome::Failed, Some(&format!("unsent: {detail}")), selected_pn, selected_pn);
                         }
+                        OutboxEvent::KeyMissing { message_id, destination } => {
+                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, Outcome::NoKey, Some(&no_key_reason(&destination)), selected_pn, selected_pn);
+                        }
                         OutboxEvent::Refused { detail } => {
                             tracing::info!("HOME outbox refused: {detail}");
-                        }
-                        OutboxEvent::KeyWanted { message_id, destination } => {
-                            tracing::info!("{}", key_wanted_line(&message_id, &destination));
                         }
                         OutboxEvent::NodeAnnounced { destination }
                             if Some(destination) == selected_pn =>
@@ -1032,6 +1039,9 @@ fn pump_group<O: Outbox>(
                     group.selected_pn,
                 );
             }
+            OutboxEvent::Queued { message_id } => {
+                sender.queued(&group.outgoing, &message_id);
+            }
             OutboxEvent::State { message_id, state } => {
                 leg_sign(&mut group.outgoing, &message_id, state);
             }
@@ -1043,6 +1053,21 @@ fn pump_group<O: Outbox>(
                     &message_id,
                     Outcome::Failed,
                     Some(&format!("unsent: {detail}")),
+                    selected_pn,
+                    group.selected_pn,
+                );
+            }
+            OutboxEvent::KeyMissing {
+                message_id,
+                destination,
+            } => {
+                sender.left(
+                    &mut group.engine,
+                    store,
+                    &mut group.outgoing,
+                    &message_id,
+                    Outcome::NoKey,
+                    Some(&no_key_reason(&destination)),
                     selected_pn,
                     group.selected_pn,
                 );
@@ -1603,7 +1628,14 @@ impl Sender {
             };
             tracing::info!(
                 "{}",
-                left_line(leg, outcome, outgoing.unanswered(id), id, node, reason)
+                left_line(
+                    leg,
+                    outcome,
+                    outgoing.unanswered(id).then_some(!outgoing.propagated(id)),
+                    id,
+                    node,
+                    reason
+                )
             );
         }
         let acts = outgoing.left(id, outcome, unix_now());
@@ -1628,13 +1660,8 @@ impl Sender {
         while let Some(act) = acts.pop_front() {
             match act {
                 Act::Record { id, change } => self.record(store, &id, change),
-                Act::Unanswered { id } => {
-                    tracing::info!(
-                        "HOME outbox direct unanswered message={}: no link after {} s, \
-                         offering the propagation node",
-                        crate::address::to_hex(&id),
-                        super::outgoing::ANSWER_SECS
-                    );
+                Act::Unanswered { id, offer } => {
+                    tracing::info!("{}", unanswered_line(&id, offer));
                     // As a stall's call-off: the router's end comes back as
                     // a Left the outbox ignores.
                     let _ = engine.submit(Command::Cancel { message_id: id });
@@ -1713,21 +1740,28 @@ impl Sender {
                         },
                     };
                     if started {
+                        // The leg's line waits for the router to take it
+                        // ([`Sender::queued`]): an engine that refuses the
+                        // leg says unsent, and the line said a leg that
+                        // never was (1406: `propagated pn=` every hour for a
+                        // recipient whose key the home never held).
                         match node_used {
                             Some(node) => self.nodes.insert(id, node),
                             None => self.nodes.remove(&id),
                         };
-                        tracing::info!(
-                            "HOME outbox {} message={}{}",
-                            leg_word(leg),
-                            crate::address::to_hex(&id),
-                            node_field(node_used)
-                        );
                     } else {
                         acts.extend(outgoing.left(&id, Outcome::Failed, unix_now()));
                     }
                 }
             }
+        }
+    }
+
+    /// The router took `id`: the line of the leg it is on, with the node a
+    /// propagated leg went to. A message on no leg is not the outbox's.
+    fn queued(&self, outgoing: &Outgoing, id: &[u8; 32]) {
+        if let Some(leg) = outgoing.in_flight(id) {
+            tracing::info!("{}", leg_line(leg, id, self.nodes.get(id).copied()));
         }
     }
 
@@ -1769,14 +1803,44 @@ impl Sender {
     }
 }
 
-/// The line a propagated leg that waits for its recipient's key leaves,
-/// once and again every [`crate::engine::KEY_WAIT_SAY_MS`] (1305): without
-/// the key it can be neither encrypted nor stamped, and the router asks the
-/// recipient's path until an announce brings it.
-fn key_wanted_line(id: &[u8; 32], destination: &[u8; 16]) -> String {
+/// The line a leg the router took leaves: `HOME outbox direct message=…`,
+/// or `propagated` with the node.
+fn leg_line(leg: Leg, id: &[u8; 32], node: Option<[u8; 16]>) -> String {
     format!(
-        "HOME outbox propagated waiting message={} reason=no key for {}, path requested",
+        "HOME outbox {} message={}{}",
+        leg_word(leg),
         crate::address::to_hex(id),
+        node_field(node)
+    )
+}
+
+/// The line a direct leg the outbox's answer bound called off leaves. It
+/// offers the propagation node the copy only when `offer`: a message a node
+/// took already is tried direct again on the announce and the hour, and
+/// the line said otherwise for every one (1406).
+fn unanswered_line(id: &[u8; 32], offer: bool) -> String {
+    format!(
+        "HOME outbox direct unanswered message={}: no link after {} s, {}",
+        crate::address::to_hex(id),
+        super::outgoing::ANSWER_SECS,
+        unanswered_next(offer)
+    )
+}
+
+/// What follows an unanswered direct leg, as its lines say it.
+fn unanswered_next(offer: bool) -> &'static str {
+    match offer {
+        true => "offering the propagation node",
+        false => "the propagation node holds a copy",
+    }
+}
+
+/// Why a propagated leg to `destination` did not go, as its `failed` line
+/// says it (1406): the home holds no key for the recipient, so the copy
+/// cannot be encrypted for the node, and the recipient's path was asked.
+fn no_key_reason(destination: &[u8; 16]) -> String {
+    format!(
+        "no key for {}, path requested",
         crate::address::to_hex(&destination[..4])
     )
 }
@@ -1805,20 +1869,22 @@ fn pn_pull_line(n: usize, pn: Option<[u8; 16]>, schedule: &Schedule, now_ms: u64
 /// before the recipient answered is told as the outbox's own answer bound
 /// tells it, `unanswered`, with the router's reason (1331): the two are one
 /// fact, and which of them ends the leg first is no matter for the log.
+/// `unanswered` is `Some(offer)` for such a leg, `offer` as in
+/// [`unanswered_line`].
 fn left_line(
     leg: Leg,
     outcome: Outcome,
-    unanswered: bool,
+    unanswered: Option<bool>,
     id: &[u8; 32],
     node: Option<[u8; 16]>,
     reason: Option<&str>,
 ) -> String {
     let id = crate::address::to_hex(id);
-    if leg == Leg::Direct && outcome == Outcome::Failed && unanswered {
+    if let (Leg::Direct, Outcome::Failed, Some(offer)) = (leg, outcome, unanswered) {
         return format!(
-            "HOME outbox direct unanswered message={id}: reason=router: {}, \
-             offering the propagation node",
-            reason.unwrap_or("failed")
+            "HOME outbox direct unanswered message={id}: reason=router: {}, {}",
+            reason.unwrap_or("failed"),
+            unanswered_next(offer)
         );
     }
     format!(
@@ -1827,7 +1893,7 @@ fn left_line(
         match outcome {
             Outcome::Delivered => "delivered",
             Outcome::Sent => "handed-on",
-            Outcome::Failed => "failed",
+            Outcome::Failed | Outcome::NoKey => "failed",
         },
         node_field(node),
         reason.map_or_else(String::new, |reason| format!(" reason={reason}"))
@@ -2018,7 +2084,7 @@ mod tests {
             left_line(
                 Leg::Direct,
                 Outcome::Failed,
-                true,
+                Some(true),
                 &id,
                 None,
                 Some("failed")
@@ -2032,7 +2098,21 @@ mod tests {
             left_line(
                 Leg::Direct,
                 Outcome::Failed,
-                false,
+                Some(false),
+                &id,
+                None,
+                Some("failed")
+            ),
+            format!(
+                "HOME outbox direct unanswered message={hex}: reason=router: failed, \
+                 the propagation node holds a copy"
+            )
+        );
+        assert_eq!(
+            left_line(
+                Leg::Direct,
+                Outcome::Failed,
+                None,
                 &id,
                 None,
                 Some("failed")
@@ -2040,14 +2120,14 @@ mod tests {
             format!("HOME outbox direct failed message={hex} reason=failed")
         );
         assert_eq!(
-            left_line(Leg::Direct, Outcome::Delivered, true, &id, None, None),
+            left_line(Leg::Direct, Outcome::Delivered, Some(true), &id, None, None),
             format!("HOME outbox direct delivered message={hex}")
         );
         assert_eq!(
             left_line(
                 Leg::Propagated,
                 Outcome::Failed,
-                true,
+                Some(true),
                 &id,
                 Some([0x63, 0x52, 0x98, 0xc8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
                 Some("rejected")
@@ -2056,20 +2136,50 @@ mod tests {
         );
     }
 
-    /// 1305: a propagated leg that waits for its recipient's key says why,
-    /// in the words miauhaus lacked on 2026-11-02.
+    /// 1406: a propagated leg refused for a missing key names the recipient
+    /// and the path request in its `failed` line, in place of the
+    /// `propagated pn=` line that promised an upload and the 779 s of
+    /// silence after it on the field mailbox.
     #[test]
-    fn a_leg_waiting_for_a_key_names_the_recipient() {
+    fn a_leg_without_a_key_names_the_recipient() {
         let id = [0xab; 32];
+        let hex = crate::address::to_hex(&id);
+        let destination = [0x63, 0x52, 0x98, 0xc8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         assert_eq!(
-            key_wanted_line(
+            left_line(
+                Leg::Propagated,
+                Outcome::NoKey,
+                None,
                 &id,
-                &[0x63, 0x52, 0x98, 0xc8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+                Some([0xca, 0xfa, 0x58, 0x3f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                Some(&no_key_reason(&destination))
             ),
             format!(
-                "HOME outbox propagated waiting message={} reason=no key for 635298c8, \
-                 path requested",
-                crate::address::to_hex(&id)
+                "HOME outbox propagated failed message={hex} pn=cafa583f reason=no key for \
+                 635298c8, path requested"
+            )
+        );
+    }
+
+    /// 1406, the field mailbox at the 13:56 restart: 22 of 27
+    /// `unanswered` lines offered the node a copy it had held for days. A
+    /// leg of a message on the node says so; one never handed on offers.
+    #[test]
+    fn an_unanswered_line_offers_the_node_only_what_it_lacks() {
+        let id = [0xab; 32];
+        let hex = crate::address::to_hex(&id);
+        assert_eq!(
+            unanswered_line(&id, true),
+            format!(
+                "HOME outbox direct unanswered message={hex}: no link after 45 s, \
+                 offering the propagation node"
+            )
+        );
+        assert_eq!(
+            unanswered_line(&id, false),
+            format!(
+                "HOME outbox direct unanswered message={hex}: no link after 45 s, \
+                 the propagation node holds a copy"
             )
         );
     }
@@ -2667,6 +2777,128 @@ mod tests {
             ),
             "Bob's announce: {commands:?}"
         );
+    }
+
+    /// 1406, the field mailbox: a copy's propagated leg to a member whose
+    /// key the engine does not hold is refused at once (`KeyMissing`), and
+    /// the message is on no leg: nothing more is sent until the member is
+    /// heard. Its path response, which brings the key, offers the node the
+    /// copy once; a second one sends nothing (1330).
+    #[test]
+    fn a_copy_without_the_members_key_is_offered_again_when_its_key_comes() {
+        use crate::outbox::fake::FakeOutbox;
+        const PN: [u8; 16] = [0x5a; 16];
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna, bob) = (person(), person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[(anna.1, "Anna".into()), (bob.1, "Bob".into())],
+            100,
+        )
+        .expect("create");
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
+        let original = leviculum_lxmf::Message::create(
+            hosted.group.address,
+            anna.1,
+            &anna.0,
+            1_800_000_000.0,
+            Vec::new(),
+            b"Bin gleich da".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(vec![OutboxEvent::Packed {
+                message_id: original.message_id,
+                packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
+            }]),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: Some(PN),
+            ended: false,
+        };
+        let mut sender = Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: true,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
+        };
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let _ = engine.engine.commands.take();
+        let bobs = store
+            .group_copy_for(&hosted.group.address, &original.message_id, &bob.1)
+            .expect("row")
+            .expect("copy")
+            .copy;
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: bobs,
+            last: Some(MessageState::Failed),
+            failure: None,
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let propagated = |commands: &[Command]| {
+            matches!(
+                commands,
+                [Command::SendPacked {
+                    via: Via::Propagated,
+                    ..
+                }]
+            )
+        };
+        let commands = engine.engine.commands.take();
+        assert!(propagated(&commands), "{commands:?}");
+        engine.engine.events.push_back(OutboxEvent::KeyMissing {
+            message_id: bobs,
+            destination: bob.1,
+        });
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        assert_eq!(engine.outgoing.in_flight(&bobs), None, "on no leg");
+        assert!(engine.engine.commands.take().is_empty());
+        let acts = engine.outgoing.tick(unix_now());
+        assert!(acts.is_empty(), "nothing until Bob is heard: {acts:?}");
+
+        let path_response = OutboxEvent::Announced {
+            destination: bob.1,
+            name: None,
+            path_response: true,
+        };
+        engine.engine.events.push_back(path_response.clone());
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        let commands = engine.engine.commands.take();
+        assert!(propagated(&commands), "the key came: {commands:?}");
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: bobs,
+            last: Some(MessageState::Sent),
+            failure: None,
+        });
+        engine.engine.events.push_back(path_response);
+        pump_group(&mut store, &mut sender, &mut engine, Some(PN));
+        assert!(
+            engine.engine.commands.take().is_empty(),
+            "handed on, a path response sends nothing"
+        );
+        let row = store.group_copy(&bobs).expect("row").expect("copy");
+        assert!(row.propagated, "the node took it");
     }
 
     /// 1307 G2, item 1: the daemon dies between the fan-out and the

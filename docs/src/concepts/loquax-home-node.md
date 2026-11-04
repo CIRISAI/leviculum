@@ -349,7 +349,10 @@ then and may sleep.
   single link establishment waits 6 s per hop plus the first hop's time)
   is called off in the router, logged as `HOME outbox direct unanswered`,
   and counts as a direct failure: the propagation node is offered the copy
-  on the next tick, before any announce restarts the direct leg. The
+  on the next tick, before any announce restarts the direct leg. A message
+  the node holds already is not offered again, and its line says so
+  (`… the propagation node holds a copy`, 1406: the line offered the node
+  every message, 22 of 27 at one restart of the field mailbox). The
   announce and hourly retries go on as before. The bound sits under the
   router's own end of such a leg: a recipient whose key the home never
   held fails there after five attempts 12 s apart, 60 s, never under
@@ -400,11 +403,21 @@ then and may sleep.
   table and may wait for announce replays, and the outbox's path must not
   wait. It logs once per message that only direct retries remain and why.
   With `--pn` it selects that node before the first upload.
-- **A propagated copy needs the recipient's key.** The copy on the node is
-  encrypted for the recipient, so a recipient never heard (no announce ever
-  reached the home node) cannot be propagated to: the leg waits for its
-  path, and goes out as soon as the recipient announces once. A sender
-  writing to a known contact has its key.
+- **A propagated copy needs the recipient's key** (1406). The copy on the
+  node is encrypted for the recipient, so a recipient never heard (no
+  announce ever reached the home node) cannot be propagated to. The leg
+  fails at once, `HOME outbox propagated failed … reason=no key for
+  <recipient>, path requested`, and the engine asks the recipient's path.
+  The answer brings the key: a path response offers the node the copy
+  once more, the recipient's own announce tries direct, and without
+  either the hour's direct leg asks the path again. Before, the router
+  held such a leg without a word (`propagation_runtime.rs`, the
+  `Err(RouterError::Node(_))` arm after `ensure_prepared_upload`, which
+  asks the path and charges no attempt), the line `HOME outbox propagated
+  … pn=` promised an upload that never came, and the leg ended only at
+  the stall bound, every hour for seven days. A leg's line is written when
+  the router took it, so a leg the engine refuses leaves only its
+  `failed` line. A sender writing to a known contact has its key.
 - **DELIVERED when a direct proof arrives**, even after the propagation node
   took a copy. Both legs carry the same bytes, so the same hash, and the
   recipient keeps one message per hash

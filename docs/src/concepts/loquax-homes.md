@@ -106,7 +106,7 @@ falsifies it:
 Measured on 2026-11-02: nothing lost and every message proven, but no
 home holds what reached another. In the own-ratchets arm each mailbox
 restart is followed within 50 ms by one `LXMF_RX_UNDECRYPTABLE` at the
-home that just announced (the event, `loquax/src/engine.rs:1483`): the
+home that just announced (the event, `loquax/src/engine.rs:1476`): the
 sender sealed to the other home's ratchet before the new announce reached
 it. The stock router's retry heals a single packet; a propagated message
 has no such retry, which is where the loss lives. E4 (hardware, LoRa or
