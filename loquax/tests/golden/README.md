@@ -126,3 +126,13 @@ terminal's braille cells, 72 x 22, the tracks and the pins as the text
 frame draws them, drawn by
 `ui::tracks::scenes::tests::the_track_scenes_in_cells_are_the_goldens`;
 `LOQUAX_WRITE_GOLDEN=1` writes them anew.
+
+`gui-tracks-radar.png`, `gui-tracks-way-back.png`, `gui-tracks-late.png`,
+`gui-tracks-battery.png`, `gui-tracks-fit-all.png`, and
+`tracks-radar.txt` and the four like it: 1386's five scenes
+(`loquax::ui::tracks::scenes::marks`) in the window's pixels over the
+Florence fixture, drawn by `gui::map::tests::the_marks_scenes_are_the_goldens`,
+and in cells, drawn by
+`ui::tracks::scenes::tests::the_marks_scenes_in_cells_are_the_goldens`.
+The radar scene lies on the Seceda ridge, where no region is, so its
+ground is the radar's blank one with its rings.

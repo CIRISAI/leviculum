@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:693`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:694`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -316,8 +316,8 @@ stays the separate renderer it is.
 ### The input model
 
 One table. The M9's keyboard feeds the same resolver the terminal uses:
-a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:991`)
-through the shared rows (`ROWS`, `loquax/src/keys.rs:218`, over
+a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:1002`)
+through the shared rows (`ROWS`, `loquax/src/keys.rs:221`, over
 `leviculum_ui::keymap`'s scroll rows), and the action becomes a scene
 intent (`Intent::from_action`, `loquax/src/ui/intent.rs:492`). Nothing
 M9-specific enters the model; what the platform layer owns is the I2C
@@ -896,8 +896,8 @@ host half. Nothing was flashed: the board half is the rig's.
 verbs, the yes/no question, "New group" with its friends, ticks and
 name, the invitation card with its Join. A phone taps a node and runs
 its `Action`. The terminal reaches these verbs through its palette only:
-the rows from `new group` (`loquax/src/keys.rs:862`) to `start again`
-(`loquax/src/keys.rs:894`) have no chord. The M9 has no palette. So its
+the rows from `new group` (`loquax/src/keys.rs:873`) to `start again`
+(`loquax/src/keys.rs:905`) have no chord. The M9 has no palette. So its
 group keys run the node's `Action` the way a tap does (`hit`,
 `loquax-m9/src/group.rs:136`), and nothing new enters the model. The
 cursor over the sheet's and the picker's rows is the M9's own, as a
@@ -1147,7 +1147,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4316`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4353`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1156,7 +1156,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:820`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:824`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1288,7 +1288,7 @@ the tab), so a `ROOMS_ROWS` table beside `LIST_ROWS` and `CHAT_ROWS` in
 erase and the character keys onto those events through `keys::event`,
 with a test that resolves each row as the list's and the chat's tests do,
 and one row in the list pane for the terminal's `R`
-(`loquax/src/keys.rs:600`) to bring the tab. Two things beyond the
+(`loquax/src/keys.rs:603`) to bring the tab. Two things beyond the
 screen decide whether it is worth building there: the hub link is `std`
 on tokio (`loquax/src/rooms_link.rs`, behind `std`), so the board drives
 `leviculum_rrc::Session` (`no_std` already) over a link of its own once
@@ -1314,6 +1314,16 @@ does not need is the store: the board holds the fixes it hears in the
 model's per-peer list, 32 bytes a fix, so the census has to set how many
 it keeps (a day at a 5 min cadence is 288 fixes, 9 KB a peer). The time
 window maps onto the key table as `w` does in the terminal.
+
+The M9 is where the **radar** (1386) matters most: a board in a pocket
+off-grid will rarely hold a region. `loquax::ui::radar` is `no_std` and
+gives the rings, the step and each pin's "1.3 km NE" from the pins
+alone; the panel draws the rings as 1 px circles in the muted grey and
+the note on the status line. The **way back** costs the board its own
+fixes at a minute's cadence, 1 440 a day, 45 KB at 32 bytes, so the
+census decides how many days it keeps. **Late** segments dash at 1 px
+(3 on, 2 off); the **battery** mark is a 7 by 4 px outline; **fit all**
+is a key of the map's table beside `w`.
 
 ## Open
 

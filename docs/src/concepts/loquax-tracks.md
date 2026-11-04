@@ -144,8 +144,14 @@ Every position a peer's message carried, and since schema 14 every
 position the mesh announced (`lev.position`, 1302): the store keeps one
 row a peer and fix time, `positions.source` 0 for a message's and 1 for
 an announced one; a fix a message carried takes the row of the same fix
-announced, so the row names its message. Our own receiver's fixes join
-our own track while Loquax runs; they are not stored.
+announced, so the row names its message. Our own receiver's fixes (the
+phone's GNSS, the board's, the desktop's mesh position) join our own
+track as they come and, since 1386, are stored too, a row a minute at
+most (`OWN_TRACK_EVERY_SECS`), whatever the receiver's cadence: the grey
+own track is **the way back** to the car after a restart, without a
+network. A day outdoors with the receiver on costs at most **1 440 rows**,
+about **200 KB** at 142 bytes a row; the phone's 5 s watch alone would
+have been 17 280.
 
 **What it costs.** A day at a 5 min cadence is **288 rows**. A year of
 one peer at that cadence (105 120 rows) measured **15.1 MB** of SQLite
@@ -168,6 +174,63 @@ whichever technique draws the picture; a dwell `•`, a place `○`, a dot
 `·`, the wedge an arrow; in ASCII `.`, `o`, `O`, `,` and `^ / > \ v < `.
 A cell holds one track; where two cross the later wins.
 
+## Radar without a map
+
+Where the view is deeper than the world outline (z10) and no installed
+region touches it, the map has nothing to draw but coasts that are not
+there. It draws a **radar** instead (`loquax::ui::radar`, 1386): the
+ground blank in the map's paper colour, north up, rings of distance about
+the own position, and each pin says where it is from there, "anna · 1.3
+km NE, 22 min ago". Without an own position the radar centres on the
+newest peer and its note says so ("radar on anna, no own position").
+The tracks are drawn over it by the rules above, unchanged; only the
+ground differs. The terminal draws the rings as faint `·` (`.` in
+ASCII), the centre `+`, the note on the credit's row; the pixel screens
+draw them as thin grey circles with their distance on the north
+crossing, an "N" arrow at the top right and the note at the top left.
+On the phone the avatars carry the same words under them.
+
+**The ring step by zoom** is the largest of 1, 2 and 5 times a power of
+ten at most half the view's shorter half: two or three rings around the
+centre at any zoom, out to the screen's diagonal. On a 480 by 320 window
+at 46° N that is
+
+| zoom | step |
+|---|---|
+| 11 | 2 km |
+| 13 | 1 km |
+| 15 | 200 m |
+| 17 | 50 m |
+
+and a terminal's 2 by 4 pixel cells give about a quarter of the window's
+step on the same cells.
+
+**Zooms.** The outline ends at z10, and a fit to a pin no region holds
+used to stop there, 70 km across. Where no region holds the centre a
+fit now goes to z15, and the reader may zoom on to z17 (`radar::DEEPEST`); the phone lifts
+its zooms only while it has a pin, since without one there is no radar.
+
+## The small marks (1386)
+
+- **Late arrival.** A fix whose receive time is more than 30 min after
+  its fix time (`LATE_AFTER_SECS`) arrived late: the segment it ends is
+  dashed (6 on, 4 off, running on across a late stretch), the terminal
+  draws it `┄` (`:` in ASCII) where no on-time line crosses the cell,
+  and the message's detail says "arrived 2 h late". The reader sees
+  where the peer was out of reach. The flag rides in the fix's padding,
+  so a fix stays 32 bytes in memory.
+- **Battery.** When the fix's Telemeter carried a battery sensor below
+  20 %, the pin gets a small battery, a fifth of it red, centred above
+  the marker (top right of the avatar on the phone, `▯` after the name
+  in the terminal, `!` in ASCII). The detail view lists the reading as
+  before.
+- **Fit all.** `f` in the terminal and the window, a button at the end
+  of the window's time strip, a chip at the end of the phone's: the view
+  fits every peer whose newest fix is inside the tracks' time window; for
+  the current episode that is the last 24 h, since a peer silent longer
+  ended its episode by the silence. With none inside, every pin. `0`
+  still fits every pin.
+
 ## The pictures
 
 Six synthetic scenes around Florence (`loquax::ui::tracks::scenes`) are
@@ -180,7 +243,18 @@ peer with a week-old trip and a fresh walk; a walk with a 360 km/h spike
 and a vague fix; and a year of a handbag tracker, which collapses into
 three places (home 149 d, work 86 d, a café 3 d) and today's commute.
 
+Five more for 1386 (`scenes::marks`): **radar**, a walk on the Seceda
+ridge in the Dolomites where no region is, ours grey with Anna ahead
+and Bert behind; **way-back**, our own walk from the car park; **late**,
+a walk whose middle twenty minutes arrived late; **battery**, Kai at
+12 % beside Lia at 64 %; and **fit-all**, two walking in town and Ugo
+five days old and 12 km away, whom the fit leaves out.
+
 ## Not yet
+
+- **The meeting point** (1386, item 5): the manual position sent to a
+  group or a peer drawn as a flag, and every pin's distance to it while
+  one is set in the conversation shown. Not built in this pass.
 
 - **The privacy sentence** (rule 9) in the share flow: a line on the
   position sheet of every target.

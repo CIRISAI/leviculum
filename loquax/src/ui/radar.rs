@@ -314,6 +314,21 @@ mod tests {
         assert_eq!(ring_step(12_000.0), 10_000);
     }
 
+    /// The concept page's table: the step on a 480 x 320 window at the
+    /// Seceda's latitude, by zoom.
+    #[test]
+    fn the_ring_step_by_zoom_is_the_pages_table() {
+        let us = pin(1, 46.6006, 11.7254, true, 0);
+        let step = |z: u8| {
+            let unit = libm::exp2(24.0 - f64::from(z));
+            radar(core::slice::from_ref(&us), unit, (480, 320)).map(|r| r.step_m)
+        };
+        assert_eq!(
+            [step(11), step(13), step(15), step(17)],
+            [Some(2_000), Some(1_000), Some(200), Some(50)]
+        );
+    }
+
     #[test]
     fn distances_read_as_people_say_them() {
         assert_eq!(distance(3.0), "0 m");
