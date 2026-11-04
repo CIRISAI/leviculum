@@ -56,8 +56,8 @@ Invariants (the study's 2.7):
 What exists today for one home and carries over:
 
 - The move to a new device, with each archive entry's kind, id and time:
-  `archive_moving` (`loquax/src/store.rs:1958`) and `archive_moved_in`
-  (`loquax/src/store.rs:2009`), which adds nothing on a second take-in.
+  `archive_moving` (`loquax/src/store.rs:1985`) and `archive_moved_in`
+  (`loquax/src/store.rs:2036`), which adds nothing on a second take-in.
   The sync generalises it to both directions and to paging from a cursor.
 - The rule that authority lives with the key, not with an admission:
   `may_move` (`loquax/src/home/server.rs:933`). Two homes recognise each
@@ -166,7 +166,7 @@ lost phone is no longer a lost identity, since another home still holds
 the key and a new phone takes a copy by code.
 
 What exists: revoking an admitted client device, `revoke`
-(`loquax/src/store.rs:2402`), checked again on every request. What is
+(`loquax/src/store.rs:2429`), checked again on every request. What is
 new: revoking a device that was itself a home, from any other device, and
 the re-seed of (b). The honest limit stays: Reticulum has no revocation
 of an identity key, the key is the address. The finder can no longer read
