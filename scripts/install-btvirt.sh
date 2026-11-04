@@ -787,8 +787,9 @@ self_test() {
     else
         bad "sidecar comment does not name $(basename "$FREE_PATCH_FILE")"
     fi
-    if echo "$origin" | grep -qE \
-        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \+ local $LOCAL_PATCH_TAG, $MAX_PATCH_TAG, $FREE_PATCH_TAG; built 2026-09-27, md5 [0-9a-f]{32}$"
+    if grep -qE \
+        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \+ local $LOCAL_PATCH_TAG, $MAX_PATCH_TAG, $FREE_PATCH_TAG; built 2026-09-27, md5 [0-9a-f]{32}$" \
+        <<<"$origin"
     then
         ok "origin line has the shape periculum reads"
     else

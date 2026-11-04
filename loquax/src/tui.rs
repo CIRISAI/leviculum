@@ -45,7 +45,7 @@ use leviculum_ui::tokens::Tokens;
 use leviculum_ui_ratatui::background::detect_background;
 use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
 use leviculum_ui_ratatui::geometry::to_ratatui;
-use leviculum_ui_ratatui::images::{Between, Picker};
+use leviculum_ui_ratatui::images::{self, Between, Picker};
 use leviculum_ui_ratatui::style::downgrade_buffer;
 use leviculum_ui_ratatui::terminal::{
     draw_synced, install_panic_hook, set_mouse_capture, TerminalOps,
@@ -283,8 +283,11 @@ async fn run_terminal(
     let mut memory = map::Memory::new(context, held, chosen.graphics);
     // The map is drawn on its own thread: a key is read while the last
     // one's view is painted and encoded (1075).
-    let mut painter =
-        map::MapPainter::new(shell.maps.clone(), chosen.graphics, picker.clone()).threaded();
+    // Read once: the painter is handed it rather than reading it itself.
+    let tmux = images::in_tmux();
+    let mut painter = map::MapPainter::new(shell.maps.clone(), chosen.graphics, picker.clone())
+        .behind_tmux(tmux)
+        .threaded();
     log_graphics(&painter, &chosen, &facts);
     shell.apply(UiEvent::MapSetup(map::setup_of(&painter, &facts)));
     let mut map_open = false;
@@ -314,8 +317,9 @@ async fn run_terminal(
             if let Output::MapDrawing(n) = output {
                 // Another way of drawing the map, at once (1093).
                 if let Some(&next) = map::Graphics::ORDER.get(n) {
-                    painter =
-                        map::MapPainter::new(shell.maps.clone(), next, picker.clone()).threaded();
+                    painter = map::MapPainter::new(shell.maps.clone(), next, picker.clone())
+                        .behind_tmux(tmux)
+                        .threaded();
                     memory.chose(next);
                     tracing::info!("GRAPHICS backend={} reason=chosen", next.name());
                     shell.apply(UiEvent::MapSetup(map::setup_of(&painter, &facts)));

@@ -25,6 +25,7 @@
 //! it is implemented. The reference pin is 795fdaa (LXMF 1.1.0).
 
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use leviculum_core::constants::RESOURCE_HASHMAP_LEN;
 use leviculum_core::resource::{ResourceSource, SourceError, RESOURCE_RANDOM_HASH_SIZE};
@@ -32,6 +33,7 @@ use leviculum_core::{Destination, Identity};
 
 use crate::{
     constants::{DESTINATION_LENGTH, STAMP_SIZE},
+    lev_status::{self, DepartureReason, MessageStatus},
     msgpack,
     node::APP_NAME,
     propagation::{
@@ -49,6 +51,15 @@ use crate::{
 /// (`PN_META_NAME`, `reference/LXMF/LXMF/LXMF.py:133`).
 pub const PN_META_NAME: u64 = 0x01;
 
+/// The stamp value a stock peer demands of every message we offer it:
+/// its `PROPAGATION_COST` 16 minus its `PROPAGATION_COST_FLEX` 3
+/// (`reference/LXMF/LXMF/LXMRouter.py:53-54`), applied by the offering
+/// side (`min_accepted_cost`, `reference/LXMF/LXMF/LXMPeer.py:331`, the
+/// drop at `:340-353`). A message stored below it never leaves this node
+/// toward such a peer; [`PropagationNode::accepts_below_stock_peers`]
+/// says when a configuration admits one.
+pub const STOCK_PEER_MIN_STAMP_VALUE: u8 = 13;
+
 /// Messages expire after 30 days
 /// (`MESSAGE_EXPIRY`, `reference/LXMF/LXMF/LXMRouter.py:38`).
 pub const MESSAGE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
@@ -58,12 +69,40 @@ pub const MESSAGE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 /// (`clean_transient_id_caches`, `reference/LXMF/LXMF/LXMRouter.py:1011`).
 pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
 
+/// How long past [`PROCESSED_ID_EXPIRY_SECS`] a processed ID may stay: the
+/// width of the cache's buckets, a week, which are dropped whole instead of
+/// walked ([`crate::processed_ids`]). The cache holds every ID accepted in
+/// up to 180 days, about 56 000 a day on the field node (leviculum#478); a
+/// week longer only widens the duplicate window by a week.
+pub const PROCESSED_ID_PRUNE_SLACK_SECS: u64 = crate::processed_ids::PROCESSED_BUCKET_SECS;
+
+/// How long one eviction walk's candidates serve later full appends: the
+/// reference weighs its store once per store job, `JOB_STORE_INTERVAL` 120
+/// times `PROCESSING_INTERVAL` 4 s (`reference/LXMF/LXMF/LXMRouter.py:31,876,899`),
+/// so a choice this old is no staler than the reference's own.
+pub const EVICTION_CANDIDATES_SECS: u64 = 480;
+
+/// One eviction walk chooses candidates worth this fraction of the
+/// capacity beyond what the append needs: 2 MB, about 6 000 messages, on a
+/// 2 GB store, so a full store walks once per that many accepts instead of
+/// on every one (order 1370: 789 ms an upload at 6 M messages on the coder
+/// host, 15 of 20 uploads walking).
+pub const EVICTION_CANDIDATE_FRACTION: u64 = 1024;
+
+/// How many expired messages [`PropagationNode::tick_at_most`]'s caller in
+/// a host hook takes per call: purging one and logging it costs a few
+/// microseconds, so a backlog of tens of thousands (a node back from a long
+/// stop) would hold the core lock for a whole sweep, 113 ms for 74 645 on
+/// the coder host (order 1295's bench). A caller that gets this many back
+/// comes again soon.
+pub const MAX_EXPIRED_PER_TICK: usize = 128;
+
 /// Bytes the request/response envelope adds to a response body on its way
 /// to the wire: msgpack `fixarray(2)` (one byte) plus the 16-byte request
 /// id as msgpack `bin8` (two header bytes plus its payload). Both the
 /// single-packet path and the Resource path pack exactly this frame, and
 /// since #384 both compute its length before building it rather than
-/// after (`bin_len`, `leviculum-core/src/node/mod.rs:1807`).
+/// after (`bin_len`, `leviculum-core/src/node/mod.rs:1810`).
 pub const RESPONSE_FRAME_BYTES: usize = 1 + 2 + 16;
 
 /// Bookkeeping heap each part of an outgoing Resource costs beyond its
@@ -338,7 +377,17 @@ pub struct PropagationNodeConfig {
     pub stamp_cost: u8,
     /// Announce field 5\[1\]: how far below our cost a stamp may fall and
     /// still be accepted (`PROPAGATION_COST_FLEX`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:53`, default 3).
+    /// `reference/LXMF/LXMF/LXMRouter.py:53`).
+    ///
+    /// Default 0, where the reference's is 3: the reference pairs its 3
+    /// with cost 16 (`PROPAGATION_COST`, `:54`), so it accepts 13 and
+    /// up, and 13 is what every stock peer demands of what we offer it
+    /// (`min_accepted_cost = max(0, cost - flexibility)`,
+    /// `reference/LXMF/LXMF/LXMPeer.py:331`, filtered at `:340-353`).
+    /// At our cost 13 a flexibility of 3 accepted 10 to 12, which no stock
+    /// peer takes, so such a message stayed on this node for 30 days and
+    /// reached nobody beyond it (leviculum#478, order 1294). Our clients
+    /// mine to the announced cost, so 0 refuses none of theirs.
     pub stamp_cost_flexibility: u8,
     /// Announce field 5\[2\]: the peering cost another node mines to `/offer`
     /// us batches. Default 1 (Lead, 2026-09-12), not 0: 0 is wire-legal,
@@ -405,6 +454,13 @@ pub struct PropagationNodeConfig {
     /// ([`PropagationNode::set_compute_stamp_value`]), saving the
     /// workblock expansion per message.
     pub always_compute_stamp_value: bool,
+    /// Destinations whose messages the cull keeps longest: their weight is
+    /// a tenth of another message's of the same age and size
+    /// (`priority_weight = 0.1`, `get_weight`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1064`), lxmd's
+    /// `prioritise_destinations` (`reference/LXMF/LXMF/Utilities/lxmd.py:214-217`,
+    /// applied at `:446-450`). Empty by default and on a board.
+    pub prioritised_destinations: Vec<[u8; DESTINATION_LENGTH]>,
 }
 
 impl Default for PropagationNodeConfig {
@@ -419,7 +475,9 @@ impl Default for PropagationNodeConfig {
             // cost (`reference/LXMF/LXMF/LXMPeer.py:228`), so it would
             // never sync toward us.
             stamp_cost: leviculum_core::pn_config_store::DEFAULT_STAMP_COST,
-            stamp_cost_flexibility: 3,
+            // Cost 13 minus 0 accepts exactly what a stock peer will take
+            // from us (`STOCK_PEER_MIN_STAMP_VALUE`).
+            stamp_cost_flexibility: 0,
             peering_cost: leviculum_core::pn_config_store::DEFAULT_PEERING_COST,
             name: None,
             message_expiry_secs: MESSAGE_EXPIRY_SECS,
@@ -427,8 +485,28 @@ impl Default for PropagationNodeConfig {
             serve_limit_bytes: None,
             from_static_only: false,
             always_compute_stamp_value: true,
+            prioritised_destinations: Vec::new(),
         }
     }
+}
+
+/// When and why one message left the store ([`PropagationNode::departures`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Departure {
+    pub at_secs: u64,
+    pub reason: DepartureReason,
+}
+
+/// The departures a host asked the role to keep
+/// ([`PropagationNode::track_departures`]).
+struct Departures {
+    left: alloc::collections::BTreeMap<TransientId, Departure>,
+    /// Departures since the host last took them
+    /// ([`PropagationNode::take_fresh_departures`]), for its log line.
+    fresh: Vec<(TransientId, DepartureReason)>,
+    /// The host answers `/lev/status`, so the announce says so
+    /// ([`PropagationNode::serve_lev_status`]).
+    serves_status: bool,
 }
 
 /// One message removed by expiry or displacement, for the host's `PN_EVICT`
@@ -895,17 +973,36 @@ pub struct PropagationNode<S> {
     /// `locally_processed_transient_ids`,
     /// `reference/LXMF/LXMF/LXMRouter.py:2496,2499`).
     ///
-    /// **Deviation:** the reference persists this set across restarts; ours
-    /// is RAM-only and starts empty. Wire format is untouched; semantically
-    /// a client that re-uploads an already-drained message after our restart
-    /// sees it accepted again, which its own `has_message` filter already
-    /// tolerates (`message_list_response`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:1581`). What it buys is Priority 1
-    /// on the board: no per-message state outside the log — a rewritten
+    /// **Deviation:** the reference persists this whole set across
+    /// restarts; ours is RAM-only and starts empty. A host persists the part
+    /// a restart cannot rebuild from the store's own index, the ids that
+    /// left the store early ([`Self::track_departures`]); a message still
+    /// in the store is a duplicate by [`PropagationStore::contains`] alone.
+    /// The board keeps no per-message state outside the log — a rewritten
     /// metadata page is the 18.6-day endurance failure the concept paper's
-    /// §2 forbids — and the host keeps the same shape so both run one code
-    /// path.
-    processed: alloc::collections::BTreeMap<TransientId, u64>,
+    /// §2 forbids — and needs none: a purged record stays on flash until
+    /// its page is reclaimed, and the store answers from it
+    /// ([`PropagationStore::departed`]). Past that reclaim a re-upload of
+    /// an already-drained message is accepted again, which the client's
+    /// own `has_message` filter tolerates (`message_list_response`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1581`).
+    ///
+    /// Week buckets of 16-byte id prefixes, exact for at least the
+    /// reference's window ([`crate::processed_ids`]).
+    processed: crate::processed_ids::ProcessedIds,
+    /// Messages expired or displaced since the role was built, for a host's
+    /// status line ([`Self::evicted_total`]).
+    evicted_total: u64,
+    /// The heaviest messages the last eviction walk found, heaviest first,
+    /// and when it ran: what the next full append evicts from without a
+    /// walk, for [`EVICTION_CANDIDATES_SECS`] ([`Self::make_room`]).
+    eviction_candidates: Vec<Eviction>,
+    eviction_walked_at: u64,
+    /// Ids that left the store (a confirmed collection, an own-mailbox
+    /// delivery, a displacement, an expiry), with when and why, for a host
+    /// to persist and to answer `/lev/status` from: `None` unless
+    /// [`Self::track_departures`] asked for it, so a board pays nothing.
+    departed: Option<Departures>,
     /// Compute true stamp values even when our own accepted cost is 0.
     /// Set by the engine while any known peer requires a stamp value above
     /// 0 of the messages it takes (`docs/src/concepts/
@@ -928,15 +1025,26 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// processed-id duplicate cache and the announced name. The store
     /// adapter accounts for its own queued writes.
     pub fn heap_bytes(&self) -> usize {
-        leviculum_core::heap_census::btree_map_bytes(&self.processed)
+        self.processed.heap_bytes()
+            + self.departed.as_ref().map_or(0, |departed| {
+                leviculum_core::heap_census::btree_map_bytes(&departed.left)
+                    + departed.fresh.capacity()
+                        * core::mem::size_of::<(TransientId, DepartureReason)>()
+            })
             + self.config.name.as_ref().map_or(0, |name| name.capacity())
+            + self.eviction_candidates.capacity() * core::mem::size_of::<Eviction>()
     }
 
-    pub fn new(store: S, config: PropagationNodeConfig) -> Self {
+    pub fn new(mut store: S, config: PropagationNodeConfig) -> Self {
+        store.count_sizes_up_to(Self::largest_offered_size_under(&config));
         Self {
             store,
             config,
-            processed: alloc::collections::BTreeMap::new(),
+            processed: crate::processed_ids::ProcessedIds::new(),
+            evicted_total: 0,
+            eviction_candidates: Vec::new(),
+            eviction_walked_at: 0,
+            departed: None,
             compute_stamp_value: false,
             calendar_jump_floor: 0,
         }
@@ -970,6 +1078,13 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// host always, on a board while a peer demands them.
     pub fn compute_stamp_value(&self) -> bool {
         self.config.always_compute_stamp_value || self.compute_stamp_value
+    }
+
+    /// Messages this role removed from its store by expiry or
+    /// displacement since it was built; a collected or delivered message is
+    /// not counted.
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total
     }
 
     pub fn store(&self) -> &S {
@@ -1008,6 +1123,14 @@ impl<S: PropagationStore> PropagationNode<S> {
             .saturating_sub(self.config.stamp_cost_flexibility)
     }
 
+    /// Whether this configuration accepts stamps that a stock peer then
+    /// refuses to take from us ([`STOCK_PEER_MIN_STAMP_VALUE`]): such a
+    /// message stays here until it expires. A host warns at start; the
+    /// configuration is honoured, a cost below 13 is the operator's call.
+    pub fn accepts_below_stock_peers(&self) -> bool {
+        self.min_accepted_cost() < STOCK_PEER_MIN_STAMP_VALUE
+    }
+
     /// The seven-field announce app-data, exactly as the reference builds it
     /// (`get_propagation_node_app_data`,
     /// `reference/LXMF/LXMF/LXMRouter.py:324-336`): field 0 legacy `False`,
@@ -1022,6 +1145,9 @@ impl<S: PropagationStore> PropagationNode<S> {
             let mut raw = Vec::with_capacity(name.len() + 2);
             msgpack::bin(&mut raw, name);
             metadata.push((PN_META_NAME, raw));
+        }
+        if self.departed.as_ref().is_some_and(|d| d.serves_status) {
+            metadata.push(lev_status::capability_metadata());
         }
         let announce = PropagationNodeAnnounce {
             legacy_support: false,
@@ -1052,6 +1178,72 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// to, in bytes: what a refusal names as the cap it failed.
     pub fn resource_limit_bytes(&self) -> u64 {
         self.config.sync_limit_kb.saturating_mul(1000)
+    }
+
+    /// The announced per-message transfer limit in bytes, the cap above
+    /// which a stored message is local only ([`Self::is_local_only`]).
+    pub fn transfer_limit_bytes(&self) -> u64 {
+        self.config.transfer_limit_kb.saturating_mul(1000)
+    }
+
+    /// Whether a message whose stored body (`lxmf_data ‖ stamp`) is
+    /// `body_len` bytes may leave this node toward a peer: the offering
+    /// side skips, for good, a message whose size plus
+    /// [`crate::peering::OFFER_PER_MESSAGE_OVERHEAD`] exceeds the peer's
+    /// transfer limit (`reference/LXMF/LXMF/LXMPeer.py:370-373`; ours at
+    /// `build_offer`), and our own announced limit is the one we hold it
+    /// to. A message that fails it is *local only* ([`Self::is_local_only`]).
+    pub fn upload_fits_transfer_limit(&self, body_len: usize) -> bool {
+        (body_len as u64).saturating_add(crate::peering::OFFER_PER_MESSAGE_OVERHEAD)
+            <= self.transfer_limit_bytes()
+    }
+
+    /// The largest stored size a peer may be offered: a message above it
+    /// is local only ([`Self::is_local_only`]).
+    pub fn largest_offered_size(&self) -> u64 {
+        Self::largest_offered_size_under(&self.config)
+    }
+
+    fn largest_offered_size_under(config: &PropagationNodeConfig) -> u64 {
+        config
+            .transfer_limit_kb
+            .saturating_mul(1000)
+            .saturating_sub(crate::peering::OFFER_PER_MESSAGE_OVERHEAD)
+    }
+
+    /// Each cursor's count of stored messages above it that may be offered
+    /// to a peer, local-only ones left out: the per-peer unhandled count
+    /// ([`PropagationStore::count_above_cursors`]).
+    pub fn unhandled_above(&self, cursors: &[u64]) -> Result<Vec<u64>, StorageError> {
+        self.store
+            .count_above_cursors(cursors, self.largest_offered_size())
+    }
+
+    /// Whether a stored message of `size` bytes is local only: above our
+    /// own transfer limit, so it is never offered to a peer and never
+    /// counted as owed to one, and only its recipient collecting from this
+    /// node takes it away. Only a client upload can be one: a stock peer
+    /// offers us nothing above the limit we announce
+    /// (`reference/LXMF/LXMF/LXMPeer.py:370`, our announced limit is its
+    /// `propagation_transfer_limit`).
+    ///
+    /// The reference stores such an upload too (it checks only the sync
+    /// limit at upload, `reference/LXMF/LXMF/LXMRouter.py:2220-2224`) and
+    /// lets each peer's own limit decide; we decide by ours, so a message
+    /// the sender was told is stored here stays here for its recipient
+    /// (order 1294 refused it at upload; reversed by the reviewer on
+    /// 2026-11-03, order 1295).
+    pub fn is_local_only(&self, size: u32) -> bool {
+        !self.upload_fits_transfer_limit(size as usize)
+    }
+
+    /// The stored size (`lxmf_data ‖ stamp`) of the message in one upload
+    /// envelope, `None` when it does not decode (the accept path classifies
+    /// that). A host asks before [`Self::handle_upload`], to refuse above
+    /// its delivery limit and to log a local-only accept.
+    pub fn upload_body_len(&self, envelope: &[u8]) -> Option<u64> {
+        let upload = PropagationUpload::decode(envelope).ok()?;
+        Some((upload.unstamped_lxmf().len() + STAMP_SIZE) as u64)
     }
 
     /// Accept one client upload envelope (`[timestamp, [lxmf_data ‖ stamp]]`,
@@ -1152,8 +1344,15 @@ impl<S: PropagationStore> PropagationNode<S> {
         body.extend_from_slice(stamp);
         let size = body.len() as u32;
 
-        let duplicate = self.processed.contains_key(&transient_id)
-            || self.store.contains(&transient_id).unwrap_or(false);
+        // A store that remembers its own departures answers for them past a
+        // restart; an expired message is not one (`track_departures`).
+        let received_since = now_secs.saturating_sub(self.config.message_expiry_secs);
+        let duplicate = self.processed.contains(&transient_id)
+            || self.store.contains(&transient_id).unwrap_or(false)
+            || self
+                .store
+                .departed(&transient_id, received_since)
+                .unwrap_or(false);
         if duplicate {
             return UploadOutcome::Accepted {
                 transient_id,
@@ -1174,16 +1373,21 @@ impl<S: PropagationStore> PropagationNode<S> {
             // this body, not its raw length: a block-backed store charges
             // whole blocks plus its framing, and its free_space frees
             // blocks, so a raw-byte target would never be reached.
+            //
+            // A body the empty store could not hold either evicts nothing:
+            // culling would empty the store and the append would still fail.
             let needed = self.store.space_required(body.len());
-            evicted = self.make_room(needed, now_secs);
-            result = self
-                .store
-                .append(&transient_id, now_secs, stamp_value, &body);
+            if needed <= self.store.capacity() {
+                evicted = self.make_room(needed, now_secs);
+                result = self
+                    .store
+                    .append(&transient_id, now_secs, stamp_value, &body);
+            }
         }
         if let Err(error) = result {
             return UploadOutcome::StoreFailed(error);
         }
-        self.processed.insert(transient_id, now_secs);
+        self.remember_processed(transient_id, now_secs);
 
         UploadOutcome::Accepted {
             transient_id,
@@ -1463,7 +1667,127 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// Remember an explicit client confirmation only after its exact deletion
     /// has committed, including an independently verified uncertain receipt.
     pub fn note_confirmed_deletion(&mut self, transient_id: &TransientId, now_secs: u64) {
-        self.processed.insert(*transient_id, now_secs);
+        self.remember_processed(*transient_id, now_secs);
+        self.note_departure(transient_id, now_secs, DepartureReason::Collected);
+    }
+
+    /// Remember a message the host delivered to its own mailbox and then
+    /// purged: a duplicate from now on, and `delivered` to `/lev/status`.
+    pub fn note_delivered_locally(&mut self, transient_id: &TransientId, now_secs: u64) {
+        self.remember_processed(*transient_id, now_secs);
+        self.note_departure(transient_id, now_secs, DepartureReason::Delivered);
+    }
+
+    fn remember_processed(&mut self, transient_id: TransientId, at_secs: u64) {
+        self.processed.insert(&transient_id, at_secs);
+    }
+
+    fn note_departure(
+        &mut self,
+        transient_id: &TransientId,
+        now_secs: u64,
+        reason: DepartureReason,
+    ) {
+        if let Some(departed) = self.departed.as_mut() {
+            departed.left.insert(
+                *transient_id,
+                Departure {
+                    at_secs: now_secs,
+                    reason,
+                },
+            );
+            departed.fresh.push((*transient_id, reason));
+        }
+    }
+
+    /// Keep the ids that leave the store, with why, so a host can persist
+    /// them ([`Self::departures`]) and a restart does not turn a
+    /// re-offered, already-collected message into a revenant: the
+    /// reference persists its whole duplicate set
+    /// (`locally_processed_transient_ids`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2496`, saved at `:1018-1024`).
+    /// Expired ones are kept for `/lev/status` but are no duplicates
+    /// ([`DepartureReason::blocks_reoffer`]).
+    pub fn track_departures(&mut self) {
+        self.departed.get_or_insert_with(|| Departures {
+            left: alloc::collections::BTreeMap::new(),
+            fresh: Vec::new(),
+            serves_status: false,
+        });
+    }
+
+    /// Track departures and say in the announce that this node answers
+    /// `/lev/status` ([`crate::lev_status`]); the host serves the path.
+    pub fn serve_lev_status(&mut self) {
+        self.track_departures();
+        if let Some(departed) = self.departed.as_mut() {
+            departed.serves_status = true;
+        }
+    }
+
+    /// The departed ids, when and why they left, held to the expiry window
+    /// by [`Self::tick`]; empty unless [`Self::track_departures`] was
+    /// called.
+    pub fn departures(&self) -> impl Iterator<Item = (&TransientId, &Departure)> {
+        self.departed
+            .iter()
+            .flat_map(|departed| departed.left.iter())
+    }
+
+    /// The departures since the last call, in the order they happened, for
+    /// the host's `PN_DEPART` line; restored ones are not among them.
+    pub fn take_fresh_departures(&mut self) -> Vec<(TransientId, DepartureReason)> {
+        self.departed
+            .as_mut()
+            .map(|departed| core::mem::take(&mut departed.fresh))
+            .unwrap_or_default()
+    }
+
+    /// What `/lev/status` answers for `transient_id`: held while the store
+    /// has it, else why it left, else unknown.
+    pub fn status_of(&self, transient_id: &TransientId) -> MessageStatus {
+        if self.store.contains(transient_id).unwrap_or(false) {
+            return MessageStatus::Held;
+        }
+        self.departed
+            .as_ref()
+            .and_then(|departed| departed.left.get(transient_id))
+            .map_or(MessageStatus::Unknown, |departure| {
+                MessageStatus::of_departure(departure.reason)
+            })
+    }
+
+    /// The `/lev/status` answer for `ids`, decoded by the host
+    /// ([`lev_status::decode_request`]), which also owns the refusals.
+    pub fn answer_lev_status(&self, ids: &[TransientId]) -> Vec<u8> {
+        let entries: Vec<_> = ids.iter().map(|id| (*id, self.status_of(id))).collect();
+        lev_status::encode_answer(&entries)
+    }
+
+    /// Re-seed the duplicate cache with persisted departures, skipping
+    /// any older than the expiry window. Tracking is switched on, so what
+    /// was restored is persisted again.
+    pub fn restore_departures(
+        &mut self,
+        entries: impl IntoIterator<Item = (TransientId, Departure)>,
+        now_secs: u64,
+    ) -> usize {
+        self.track_departures();
+        let window = self.config.message_expiry_secs;
+        let mut restored = 0;
+        for (transient_id, departure) in entries {
+            if now_secs.saturating_sub(departure.at_secs) > window {
+                continue;
+            }
+            if departure.reason.blocks_reoffer() {
+                self.remember_processed(transient_id, departure.at_secs);
+            }
+            if let Some(departed) = self.departed.as_mut() {
+                departed.left.insert(transient_id, departure);
+            }
+            restored += 1;
+        }
+        restored
     }
 
     fn complete_get(&mut self, prepared: PreparedFetch) -> GetOutcome {
@@ -1509,34 +1833,66 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// birth anchor is the build timestamp, which no value test can tell
     /// apart from real time.
     pub fn tick(&mut self, now_secs: u64) -> Vec<Eviction> {
+        self.tick_at_most(now_secs, usize::MAX)
+    }
+
+    /// [`Self::tick`], expiring at most `max_expired` messages, oldest
+    /// first over a store indexed by receive time: a host calls it under
+    /// the core lock, and comes again soon when it got `max_expired` back
+    /// ([`MAX_EXPIRED_PER_TICK`]).
+    ///
+    /// Neither half walks what did not expire. The store hands over only
+    /// the entries received before `now - expiry`
+    /// ([`PropagationStore::for_each_received_before`]); the processed-ID
+    /// cache drops whole week buckets ([`crate::processed_ids`]). Both walked
+    /// every entry on every tick before, 24.6 ms on the field node's Odroid
+    /// at 300 000 messages (leviculum#478).
+    pub fn tick_at_most(&mut self, now_secs: u64, max_expired: usize) -> Vec<Eviction> {
         let expiry = self.config.message_expiry_secs;
         let floor = self.calendar_jump_floor;
         let mut expired = Vec::new();
-        let _ = self.store.for_each(&mut |meta: &StoredMessage| {
-            if floor > 0 && meta.received_at <= floor && now_secs > floor {
-                return;
-            }
-            if now_secs.saturating_sub(meta.received_at) > expiry {
-                expired.push(Eviction {
-                    transient_id: meta.transient_id,
-                    size: meta.size,
-                    age_secs: now_secs.saturating_sub(meta.received_at),
-                    reason: EvictionReason::Expired,
-                });
-            }
-        });
+        // `now - received_at > expiry` is `received_at < now - expiry`.
+        let before = now_secs.saturating_sub(expiry);
+        let _ = self
+            .store
+            .for_each_received_before(before, &mut |meta: &StoredMessage| {
+                if expired.len() >= max_expired {
+                    return ControlFlow::Break(());
+                }
+                if floor > 0 && meta.received_at <= floor && now_secs > floor {
+                    return ControlFlow::Continue(());
+                }
+                if now_secs.saturating_sub(meta.received_at) > expiry {
+                    expired.push(Eviction {
+                        transient_id: meta.transient_id,
+                        size: meta.size,
+                        age_secs: now_secs.saturating_sub(meta.received_at),
+                        reason: EvictionReason::Expired,
+                    });
+                }
+                ControlFlow::Continue(())
+            });
         expired.retain(|eviction| self.store.purge(&eviction.transient_id).unwrap_or(false));
+        self.evicted_total += expired.len() as u64;
+        for eviction in &expired {
+            self.note_departure(&eviction.transient_id, now_secs, DepartureReason::Expired);
+        }
 
-        self.processed
-            .retain(|_, received| now_secs.saturating_sub(*received) <= PROCESSED_ID_EXPIRY_SECS);
+        self.processed.prune(now_secs, PROCESSED_ID_EXPIRY_SECS);
+        if let Some(departed) = self.departed.as_mut() {
+            departed
+                .left
+                .retain(|_, left| now_secs.saturating_sub(left.at_secs) <= expiry);
+        }
         expired
     }
 
     /// Cull by the reference's weight until at least `needed` bytes are
-    /// free: `age_weight × size` with
-    /// `age_weight = max(1, age / 4 days)` (`get_weight`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:1056-1067`; the prioritised-list
-    /// factor is omitted — this node has no prioritised list). The trigger
+    /// free: `priority × age_weight × size` with
+    /// `age_weight = max(1, age / 4 days)` and `priority` 0.1 for a
+    /// destination in [`PropagationNodeConfig::prioritised_destinations`],
+    /// 1 otherwise (`get_weight`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1056-1067`). The trigger
     /// differs from the reference by necessity: it culls when a *configured*
     /// limit is exceeded on a periodic job (`:1183-1218`), our store has a
     /// hard capacity and culls when an append reports [`StorageError::Full`].
@@ -1545,38 +1901,145 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// loop compares like with like: `free_space` and it are the store's own
     /// accounting unit. The *weight* is still the raw `age × size` the
     /// reference computes over body bytes.
+    ///
+    /// **One walk serves many appends** (order 1370). The reference sorts
+    /// its whole store by weight once per store job; this sorted the whole
+    /// store on every full append, 789 ms an upload on the coder host at
+    /// 6 M messages (a full 2 GB store), and a full store finds itself full
+    /// again on most appends. A walk now keeps only the heaviest messages
+    /// worth `needed` plus [`EVICTION_CANDIDATE_FRACTION`] of the capacity
+    /// (a bounded heap, `O(n log k)`, `k` entries of memory, no copy of the
+    /// store) and evicts from that list, heaviest first, exactly what the
+    /// append needs. The rest serve the next full appends for
+    /// [`EVICTION_CANDIDATES_SECS`], the reference's own store-job cadence;
+    /// a candidate gone meanwhile is skipped, and messages that arrived
+    /// since the walk wait for the next one, as they wait for the
+    /// reference's next job. The receive-time index cannot replace the walk:
+    /// the weight multiplies age by size, so no order by age alone is the
+    /// reference's order.
     fn make_room(&mut self, needed: u64, now_secs: u64) -> Vec<Eviction> {
-        let mut weighted: Vec<(f64, Eviction)> = Vec::new();
+        let mut evicted = Vec::new();
+        let stale = now_secs < self.eviction_walked_at
+            || now_secs - self.eviction_walked_at >= EVICTION_CANDIDATES_SECS;
+        if stale {
+            self.eviction_candidates.clear();
+        }
+        let mut walked = false;
+        while self.store.free_space() < needed {
+            if self.eviction_candidates.is_empty() {
+                if walked {
+                    break;
+                }
+                let want = needed
+                    .saturating_sub(self.store.free_space())
+                    .saturating_add(self.store.capacity() / EVICTION_CANDIDATE_FRACTION);
+                self.eviction_candidates = self.heaviest(want, now_secs);
+                self.eviction_walked_at = now_secs;
+                walked = true;
+                if self.eviction_candidates.is_empty() {
+                    break;
+                }
+            }
+            // Heaviest last, so taking it is a pop.
+            let Some(candidate) = self.eviction_candidates.pop() else {
+                break;
+            };
+            if self.store.purge(&candidate.transient_id).unwrap_or(false) {
+                self.note_departure(&candidate.transient_id, now_secs, DepartureReason::Evicted);
+                evicted.push(Eviction {
+                    age_secs: now_secs.saturating_sub(self.eviction_walked_at) + candidate.age_secs,
+                    ..candidate
+                });
+            }
+        }
+        self.evicted_total += evicted.len() as u64;
+        evicted
+    }
+
+    /// The heaviest stored messages whose sizes add up to at least `bytes`
+    /// (all of them when the store holds less), lightest first: one walk,
+    /// a min-heap of the best seen so far that drops its lightest while the
+    /// rest still add up. Equal weights go to the message the walk met
+    /// first, as the stable sort this replaced left them.
+    fn heaviest(&self, bytes: u64, now_secs: u64) -> Vec<Eviction> {
+        use alloc::collections::BinaryHeap;
+        use core::cmp::{Ordering, Reverse};
+
+        struct Weighed {
+            weight: f64,
+            walked: u64,
+            eviction: Eviction,
+        }
+        impl Ord for Weighed {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.weight
+                    .total_cmp(&other.weight)
+                    .then(other.walked.cmp(&self.walked))
+            }
+        }
+        impl PartialOrd for Weighed {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl PartialEq for Weighed {
+            fn eq(&self, other: &Self) -> bool {
+                self.cmp(other) == Ordering::Equal
+            }
+        }
+        impl Eq for Weighed {}
+
+        let prioritised = &self.config.prioritised_destinations;
+        let mut best: BinaryHeap<Reverse<Weighed>> = BinaryHeap::new();
+        let mut held = 0u64;
+        let mut walked = 0u64;
         let _ = self.store.for_each(&mut |meta: &StoredMessage| {
             let age_secs = now_secs.saturating_sub(meta.received_at);
             let age_weight = (age_secs as f64 / (4.0 * 24.0 * 60.0 * 60.0)).max(1.0);
-            weighted.push((
-                age_weight * meta.size as f64,
-                Eviction {
+            let priority = if prioritised.contains(&meta.destination_hash) {
+                0.1
+            } else {
+                1.0
+            };
+            let weight = priority * age_weight * meta.size as f64;
+            walked += 1;
+            // Already enough, and lighter than the lightest kept: it would
+            // be pushed and popped again.
+            if held >= bytes
+                && best
+                    .peek()
+                    .is_some_and(|Reverse(lightest)| weight <= lightest.weight)
+            {
+                return;
+            }
+            best.push(Reverse(Weighed {
+                weight,
+                walked,
+                eviction: Eviction {
                     transient_id: meta.transient_id,
                     size: meta.size,
                     age_secs,
                     reason: EvictionReason::Displaced,
                 },
-            ));
-        });
-        weighted.sort_by(|left, right| {
-            right
-                .0
-                .partial_cmp(&left.0)
-                .unwrap_or(core::cmp::Ordering::Equal)
-        });
-
-        let mut evicted = Vec::new();
-        for (_, eviction) in weighted {
-            if self.store.free_space() >= needed {
-                break;
+            }));
+            held += u64::from(meta.size);
+            while let Some(Reverse(lightest)) = best.peek() {
+                let size = u64::from(lightest.eviction.size);
+                if held - size < bytes {
+                    break;
+                }
+                held -= size;
+                best.pop();
             }
-            if self.store.purge(&eviction.transient_id).unwrap_or(false) {
-                evicted.push(eviction);
-            }
-        }
-        evicted
+        });
+        // Ascending by `Reverse` is heaviest first; reversed for `pop`.
+        let mut lightest_first: Vec<Eviction> = best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|Reverse(weighed)| weighed.eviction)
+            .collect();
+        lightest_first.reverse();
+        lightest_first
     }
 }
 

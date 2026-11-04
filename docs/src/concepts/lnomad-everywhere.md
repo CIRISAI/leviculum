@@ -41,7 +41,7 @@ which is what the M9 needs, is less: `fetch.rs`, `browser.rs`,
 network IO and are the platform layer; the other 5,840 lines need only
 `alloc` after the mechanical changes of slice 4a, but for the file halves
 of `bookmarks.rs` and the decoder in `image.rs`. The line is held by `just
-lnomad-core-no-tui` (`Justfile:644`) and stated in the module doc of
+lnomad-core-no-tui` (`Justfile:645`) and stated in the module doc of
 `lnomad/src/app/mod.rs:1`. Two qualifications, both measured:
 
 - **The core speaks cells.** Events arrive as raw keys and cell-addressed
@@ -244,10 +244,10 @@ The reasons for the tab:
 
 What the network seam needs on the phone (slice 3): the mailbox's node is
 built with transport off and without the application event stream
-(`loquax/src/engine/shell.rs:891`, `loquax/src/engine/shell.rs:930`): it
+(`loquax/src/engine/shell.rs:892`, `loquax/src/engine/shell.rs:931`): it
 is "a destination on the network, not a transport node"
-(`loquax/src/engine/shell.rs:917`), so a leaf on its screens' listener
-(`loquax/src/engine/shell.rs:920`) has no route through it to a NomadNet
+(`loquax/src/engine/shell.rs:918`), so a leaf on its screens' listener
+(`loquax/src/engine/shell.rs:921`) has no route through it to a NomadNet
 node. So the browser on the phone
 fetches through the mailbox's node itself: `fetch::Session` (`Session`,
 `lnomad/src/fetch.rs:221`) gains a constructor over a node the host hands
@@ -605,7 +605,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   picture's fitted size, not its cell box, in which iced centred it.
 
 **Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
-`just lnomad-core-no-std` (`Justfile:2551`) holds it.
+`just lnomad-core-no-std` (`Justfile:2566`) holds it.
 
 - **`leviculum-micron` is `no_std` always** (`leviculum-micron/src/lib.rs:25`):
   a parser has no use for a file or a clock, and its `std` paths were
@@ -667,7 +667,7 @@ terminal and window get no tab (the second question, answered no for now).
   lnomad-core-no-std` still build both for the firmware triples. The tab
   is `Browse` (`loquax/src/ui/browse.rs:38`): whether the host has the tab
   (`enabled`, set by the phone's session at
-  `loquax-android/src/session.rs:1796`), whether it is in front, and
+  `loquax-android/src/session.rs:1800`), whether it is in front, and
   lnomad's `Model`, marked `hosted`. `TabId::Browse`
   (`loquax/src/ui/scene.rs:82`) joins Chats and Map where enabled, and the
   scene carries lnomad's scene as `browse` (`loquax/src/ui/scene.rs:987`;
@@ -754,19 +754,19 @@ two).** Slice 3's network seam: one node, lent, not a second one.
 - **The phone's turn.** `loquax-android/src/browse_fetch.rs` is the task
   the terminal's loop is on a desktop: one fetch in flight, a newer one or
   a cancel superseding it, lnomad's discovery drain beside it. The
-  session's pump (`browse`, `loquax-android/src/session.rs:1886`) hands it
+  session's pump (`browse`, `loquax-android/src/session.rs:1890`) hands it
   the owed effects and folds back what it says: `BrowseEvent::FailedText`,
   `Identifying`, `Downloaded` and `DownloadFailed` are new
   (`loquax/src/ui/browse.rs:104`). A download is kept under the app's
   files as a bubble's file is, `files/browse/` (`keep_download`,
-  `loquax-android/src/session.rs:1948`), and the clipboard text and the
+  `loquax-android/src/session.rs:1952`), and the clipboard text and the
   file go to Java once with the next screen; `BrowsePane` writes the
   clipboard and opens the file, or the share sheet takes it. Announces
   reach the list from the session's start, the tab shown or not.
 - **The phone's start page** is one sentence over the places list, no
   key named (`lnomad/src/app/event.rs:385`, English and German).
 - **Held back.** The tab shows only where the config's `browse_tab` is on
-  (`loquax-android/src/session.rs:1796`), off in the APK, until the fetch
+  (`loquax-android/src/session.rs:1800`), off in the APK, until the fetch
   has been seen on a device; Java hides the tab's button then.
 - **Measured.** From the tap on a node's row to the first screen that
   shows the page, the Reticulum README (23,490 bytes, a response
@@ -783,7 +783,7 @@ two).** Slice 3's network seam: one node, lent, not a second one.
 - **Tests.** `a_lent_node_fetches_as_its_own_does_and_stays_its_hosts`
   (`lnomad/tests/fetch_integ.rs:302`, the control a node let go of);
   `a_lent_fetch_hears_its_own_links_and_its_answers_alone`
-  (`loquax/src/engine/shell.rs:1007`, the controls a link a peer opened
+  (`loquax/src/engine/shell.rs:1008`, the controls a link a peer opened
   and an event no fetch reads); `the_fetchs_words_reach_the_browser`
   (`loquax/src/ui/browse.rs:539`) and
   `the_tab_opens_on_the_phones_start_page`
@@ -824,8 +824,8 @@ as the phone, off by default until Lew flips it.
   (`loquax/src/keys.rs:595`, `browse::open`, `loquax/src/ui/browse.rs:231`);
   with the tab off they say how to switch it on.
 - **The terminal** draws the tab with lnomad's terminal view over the
-  whole screen (`draw_screen`, `loquax/src/tui.rs:1378`), in the
-  messenger's theme and colour depth (`loquax/src/tui.rs:1508`). It asks
+  whole screen (`draw_screen`, `loquax/src/tui.rs:1382`), in the
+  messenger's theme and colour depth (`loquax/src/tui.rs:1512`). It asks
   for no pictures (`no_images`): the map owns the terminal's picture
   protocol, and two pickers on one terminal is a later question.
 - **The window** draws it with lnomad's window view beside the rail

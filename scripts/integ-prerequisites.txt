@@ -45,14 +45,20 @@ reference/Reticulum/RNS/__init__.py leviculum-std/rnsd_interop
 # reference as well. Excluding the whole mvr target would take ~90 other tests
 # with them, so these go by exact name. Measured on a clone without
 # submodules whose submodule URLs point nowhere, 2026-10-04: these seven, and
-# only these, fail in the whole selection there. The two `a_third_announce_*`
-# lines came after (1317), and spawn the same Python peer.
+# only these, fail in the whole selection there. The `a_third_announce_*`
+# lines came after (1317, 1320), and spawn the same Python peer, as do the
+# `local_clients_announces_*` lines (1358).
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::a_third_announce_on_a_fresh_interface_waits_at_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::control_two_announces_on_a_fresh_interface_both_arrive
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::five_destinations_on_a_fresh_interface_all_arrive_at_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr client_wait_for_path_request_fallback::wait_for_path_installs_via_request_when_never_announced
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_restart
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_daemon_starts_and_responds
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr harness::tests::test_register_destination
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::control_one_local_client_announce_reaches_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::five_destinations_from_two_local_clients_all_arrive_at_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::three_local_clients_announces_all_reach_python
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr local_clients_announces_on_a_fresh_interface_reach_python::two_local_clients_announces_both_reach_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_from_python::rust_client_installs_path_from_python_announce
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_via_relay::rust_client_installs_path_via_relay_hops2
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_with_own_echo::rust_client_installs_peer_path_while_own_echoes
@@ -60,6 +66,12 @@ reference/Reticulum/RNS/__init__.py leviculum-std/mvr rust_client_path_install_w
 # leviculum-lxmf reference_lock pins hashes of the vendored Python LXMF and
 # panics naming the submodule when it is not checked out.
 reference/LXMF/LXMF/__init__.py leviculum-lxmf/reference_lock
+
+# leviculum-lxmf lev_status_reference feeds the announce of a node that
+# serves /lev/status to the reference's pn_announce_data_is_valid, which
+# imports RNS and LXMF out of reference/ (order 1394).
+reference/Reticulum/RNS/__init__.py leviculum-lxmf/lev_status_reference
+reference/LXMF/LXMF/__init__.py leviculum-lxmf/lev_status_reference
 
 # loquax python_interop drives scripts/test_daemon.py, which imports RNS and
 # LXMF out of reference/ and tells the caller to init the submodule.
@@ -80,13 +92,16 @@ reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reache
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
 # The voice round trip (1222) starts the same Python peer, and makes and
 # judges its sounds with the reference codecs: opus-tools and codec2 from
-# apt (scripts/install-ci.sh).
+# apt (scripts/install-ci.sh). Looked up on PATH, not at /usr/bin: a host
+# with them elsewhere runs the test (1353). scripts/check-python-test-
+# prerequisites.py refuses a test that spawns one of these four without its
+# `command:` line.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/opusenc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/opusdec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/c2enc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
-/usr/bin/c2dec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:opusenc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:opusdec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:c2enc loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
+command:c2dec loquax-android/facade a_voice_message_travels_both_ways_with_python_lxmf
 # The photo (1220) and file (1221) round trips start the same Python peer;
 # the home node merge brought them beside 1282's guard, which found them.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size

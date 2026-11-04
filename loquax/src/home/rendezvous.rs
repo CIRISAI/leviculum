@@ -428,23 +428,32 @@ mod driver {
         Peer,
     }
 
-    /// The platform's last word about the network, numbered, with the
-    /// number of the last word that said the network changed. A watch
-    /// holds only the newest value: a burst said faster than a rotation
-    /// reads it ("lost", "available", "capabilities" within a millisecond)
-    /// reaches it as its last word, which says no change, and the change
-    /// before it is kept here instead (1346).
+    /// The platform's newest word about the network, and how many of all
+    /// its words said "another network". A watch keeps only the newest
+    /// value, so a burst said before a rotation looks (lost, available,
+    /// capabilities, inside a millisecond) reaches it as its last word
+    /// alone; the count is what tells it that an earlier one of the burst
+    /// changed the network (1334).
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     struct Note {
-        seq: u64,
         kind: NetworkKind,
-        changed_seq: u64,
+        changes: u64,
     }
 
-    impl Note {
-        /// The kind now, and whether a word after `seen` said a change.
-        fn since(&self, seen: u64) -> (NetworkKind, bool) {
-            (self.kind, self.changed_seq > seen)
+    /// A rotation's ear on [`Network`]: what it heard last of the count.
+    struct Heard {
+        notes: tokio::sync::watch::Receiver<Note>,
+        changes: u64,
+    }
+
+    impl Heard {
+        /// The newest kind, and whether any word since the last take said
+        /// "another network".
+        fn take(&mut self) -> (NetworkKind, bool) {
+            let note = *self.notes.borrow_and_update();
+            let changed = note.changes != self.changes;
+            self.changes = note.changes;
+            (note.kind, changed)
         }
     }
 
@@ -452,13 +461,16 @@ mod driver {
     /// rotation of the process: the phone's leaf and its own mailbox hear
     /// the same change. It also counts the rotations that re-dial for a
     /// change and are not up again yet, which is what the app's line says
-    /// ("Reconnecting…" while there is one), and the re-dials it started,
-    /// so a re-dial that was up again before anyone looked is still said.
+    /// ("Reconnecting…" while there is one), and the re-dials begun, so a
+    /// re-dial that is up again before the line was looked at still reads
+    /// as one; each start and end of one wakes whoever waits in
+    /// [`Network::turned`] (1334).
     #[derive(Debug, Clone)]
     pub struct Network {
         notes: Arc<tokio::sync::watch::Sender<Note>>,
         owed: Arc<AtomicUsize>,
         redials: Arc<AtomicUsize>,
+        turned: Arc<tokio::sync::Notify>,
     }
 
     impl Default for Network {
@@ -467,6 +479,7 @@ mod driver {
                 notes: Arc::new(tokio::sync::watch::Sender::new(Note::default())),
                 owed: Arc::new(AtomicUsize::new(0)),
                 redials: Arc::new(AtomicUsize::new(0)),
+                turned: Arc::new(tokio::sync::Notify::new()),
             }
         }
     }
@@ -482,10 +495,9 @@ mod driver {
         /// from none). Every rotation evaluates it once the burst settled.
         pub fn say(&self, kind: NetworkKind, changed: bool) {
             self.notes.send_modify(|note| {
-                note.seq += 1;
                 note.kind = kind;
                 if changed {
-                    note.changed_seq = note.seq;
+                    note.changes = note.changes.wrapping_add(1);
                 }
             });
         }
@@ -495,20 +507,35 @@ mod driver {
             self.owed.load(Ordering::Relaxed) > 0
         }
 
-        /// How many times a rotation dropped its connection for a change.
-        /// Counted before the connection goes, with [`Self::reconnecting`]
-        /// set, so whoever the interface's going wakes sees both; a re-dial
-        /// on the loopback address is up again within milliseconds, before
-        /// a pump that sleeps 100 ms looks at [`Self::reconnecting`] (1346).
+        /// How many re-dials for a change have begun, wrapping: a count
+        /// that moved since the last look is a re-dial even when it is up
+        /// again already (a loopback entry is up within a millisecond).
         pub fn redials(&self) -> usize {
             self.redials.load(Ordering::Relaxed)
         }
 
-        fn subscribe(&self) -> tokio::sync::watch::Receiver<Note> {
+        /// Until a re-dial for a change begins or ends. One that happened
+        /// while nobody waited is not lost: the next wait returns at once.
+        pub async fn turned(&self) {
+            self.turned.notified().await;
+        }
+
+        /// A rotation's share of the count, none owed yet. Not the notes:
+        /// the rotation holding a sender would keep its own channel open.
+        fn owed(&self) -> Owed {
+            Owed {
+                count: Arc::clone(&self.owed),
+                redials: Arc::clone(&self.redials),
+                turned: Arc::clone(&self.turned),
+                owed: false,
+            }
+        }
+
+        fn subscribe(&self) -> Heard {
             let mut notes = self.notes.subscribe();
             // What was said before the rotation started is no change to it.
-            notes.mark_unchanged();
-            notes
+            let changes = notes.borrow_and_update().changes;
+            Heard { notes, changes }
         }
     }
 
@@ -516,17 +543,27 @@ mod driver {
     /// it is up again or its task ends.
     struct Owed {
         count: Arc<AtomicUsize>,
+        redials: Arc<AtomicUsize>,
+        turned: Arc<tokio::sync::Notify>,
         owed: bool,
     }
 
     impl Owed {
+        /// `true` is said once per re-dial for a change, and each one
+        /// counts, also one that comes while the last is not up yet (no
+        /// network, then WLAN back); the share is taken only once.
         fn set(&mut self, owed: bool) {
             match (self.owed, owed) {
-                (false, true) => {
-                    self.count.fetch_add(1, Ordering::Relaxed);
+                (_, true) => {
+                    self.redials.fetch_add(1, Ordering::Relaxed);
+                    if !self.owed {
+                        self.count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.turned.notify_one();
                 }
                 (true, false) => {
                     self.count.fetch_sub(1, Ordering::Relaxed);
+                    self.turned.notify_one();
                 }
                 _ => {}
             }
@@ -699,13 +736,9 @@ mod driver {
         let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut tap = dial.node.subscribe_events();
         let mut notes = dial.network.subscribe();
-        let mut seen = notes.borrow().seq;
         let mut notes_open = true;
         let mut settle = Settle::default();
-        let mut owed = Owed {
-            count: Arc::clone(&dial.network.owed),
-            owed: false,
-        };
+        let mut owed = dial.network.owed();
         let mut rotation = Rotation::new(dial.entries.len(), dial.timing);
         let mut ids = spawn(&dial.node, &dial, rotation.active());
         tell(rotation.active(), false);
@@ -739,11 +772,9 @@ mod driver {
                     Some(_) => continue,
                     None => return,
                 },
-                said = notes.changed(), if notes_open => match said {
+                said = notes.notes.changed(), if notes_open => match said {
                     Ok(()) => {
-                        let note = *notes.borrow_and_update();
-                        let (kind, changed) = note.since(seen);
-                        seen = note.seq;
+                        let (kind, changed) = notes.take();
                         settle.note(now_ms(), kind, changed);
                         continue;
                     }
@@ -776,7 +807,6 @@ mod driver {
                             said(host, *port, "down", index);
                         }
                         owed.set(true);
-                        dial.network.redials.fetch_add(1, Ordering::Relaxed);
                         drop_all(&dial.node, &mut ids);
                         rotation.restart();
                         up = false;
@@ -866,28 +896,59 @@ mod driver {
     mod tests {
         use super::*;
 
-        /// 1346: a burst the platform says faster than a rotation reads
-        /// reaches it as one value, the last word; the change an earlier
-        /// word said is not lost with it. The facade's network test went
-        /// red one run in two on this: "lost, available, capabilities" in
-        /// a millisecond read as "mobile, no change", and the rotation
-        /// asked instead of re-dialling.
+        /// The platform says lost, available and its capabilities inside a
+        /// millisecond; the rotation's task, busy or not yet scheduled,
+        /// looks only after the third (1334). The burst said "another
+        /// network" twice: the rotation must hear that, not just the last
+        /// word's "the same one".
         #[test]
-        fn a_burst_read_at_once_keeps_its_change() {
+        fn a_burst_said_before_the_rotation_looks_keeps_its_change() {
             let network = Network::new();
             let mut notes = network.subscribe();
-            let mut seen = notes.borrow().seq;
             network.say(NetworkKind::None, true);
             network.say(NetworkKind::Mobile, true);
             network.say(NetworkKind::Mobile, false);
-            assert!(notes.has_changed().expect("the sender lives"));
-            let note = *notes.borrow_and_update();
-            assert_eq!(note.since(seen), (NetworkKind::Mobile, true));
-            seen = note.seq;
-            // The same network said again, read alone: no change.
+            assert_eq!(notes.take(), (NetworkKind::Mobile, true));
+            // Heard once: the same network said again is no change.
             network.say(NetworkKind::Mobile, false);
-            let note = *notes.borrow_and_update();
-            assert_eq!(note.since(seen), (NetworkKind::Mobile, false));
+            assert_eq!(notes.take(), (NetworkKind::Mobile, false));
+        }
+
+        /// A re-dial that begins and ends before anyone looks still counts
+        /// and still wakes the waiter (1334): the session's pump, asleep
+        /// for the keepalive's ceiling, otherwise saw "not reconnecting"
+        /// before and after and never said the line.
+        #[tokio::test]
+        async fn a_redial_up_again_before_the_look_still_counts_and_wakes() {
+            let network = Network::new();
+            let before = network.redials();
+            let mut owed = network.owed();
+            owed.set(true);
+            assert!(network.reconnecting());
+            owed.set(false);
+            assert!(!network.reconnecting());
+            assert_ne!(network.redials(), before);
+            tokio::time::timeout(Duration::from_secs(1), network.turned())
+                .await
+                .expect("the re-dial woke the waiter");
+            // Up again without a re-dial: no count, and dropped not owed,
+            // no share given back twice.
+            let counted = network.redials();
+            owed.set(false);
+            drop(owed);
+            assert_eq!(network.redials(), counted);
+            assert!(!network.reconnecting());
+        }
+
+        /// A change said before the rotation subscribed is not one to it.
+        #[test]
+        fn a_change_said_before_the_rotation_started_is_none_to_it() {
+            let network = Network::new();
+            network.say(NetworkKind::Wifi, true);
+            let mut notes = network.subscribe();
+            assert!(!notes.notes.has_changed().unwrap_or(true));
+            network.say(NetworkKind::Wifi, false);
+            assert_eq!(notes.take(), (NetworkKind::Wifi, false));
         }
     }
 }

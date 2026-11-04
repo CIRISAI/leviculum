@@ -123,6 +123,14 @@ reference packs the fields, unpacks the message with
 same bytes. `leviculum-lxmf/tests/lev_vectors.rs` holds both directions;
 the codec is `leviculum-lxmf/src/lev.rs`.
 
+### The propagation receipt
+
+Capability bit 2 and key `0x07` acknowledge a message that arrived
+through the propagation network, which has no proof the sender ever sees.
+The recipient sends it, not switchable, only for messages that arrived by
+propagation from a sender that set bit 2:
+[receipts for propagated post](loquax-propagation-receipts.md).
+
 ### The group keys
 
 Group chats (`docs/drafts/group-chats-study-2026-11.md`, built from 1307)
@@ -267,7 +275,10 @@ encodes with. When a board sends it, and to whom it is sealed, is
 The message that is read carries its sender's mark. When B reads a marked
 message of A's, B knows in that moment that A understands receipts and
 wants them; an unmarked message (a foreign client, or Loquax with receipts
-off) never causes one. No detection in advance.
+off) never causes one, and is never named in one: a stock client's plain
+reply beside a marked message stays unnamed though the marked one makes
+the peer take receipts (`owes_receipt`, `loquax/src/ui/receipts.rs`, 1322).
+No detection in advance.
 
 The latest message from a peer decides (`Flags::receipts`,
 `loquax/src/ui/history.rs`): a peer that turns receipts off stops being

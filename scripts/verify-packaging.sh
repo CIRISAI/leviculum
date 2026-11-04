@@ -95,8 +95,8 @@ readelf -d "$stage/consumer" | grep -q "NEEDED.*libleviculum.so.0" \
 echo "==> run the dynamic consumer"
 out="$(run_consumer "$stage/consumer")"
 echo "$out" | sed 's/^/    /'
-echo "$out" | grep -q "^leviculum $want_ver " || fail "consumer did not report version $want_ver"
-echo "$out" | grep -q "builder create/free: ok" || fail "consumer could not use the library"
+grep -q "^leviculum $want_ver " <<<"$out" || fail "consumer did not report version $want_ver"
+grep -q "builder create/free: ok" <<<"$out" || fail "consumer could not use the library"
 
 echo "==> static link against the archive (glibc stays dynamic) via pkg-config"
 # pkg-config --static surfaces Libs.private (the archive's system deps); drop
@@ -111,7 +111,7 @@ if readelf -d "$stage/consumer_static" | grep -q "libleviculum"; then
     fail "static consumer still carries a dynamic libleviculum dependency"
 fi
 out_static="$(run_consumer "$stage/consumer_static")"
-echo "$out_static" | grep -q "builder create/free: ok" || fail "static consumer did not run"
+grep -q "builder create/free: ok" <<<"$out_static" || fail "static consumer did not run"
 echo "    static consumer ran with no libleviculum.so dependency"
 
 echo "PASS ($target): libleviculum installs and links as a standard Unix C library"

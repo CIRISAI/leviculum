@@ -119,10 +119,10 @@
 //!   walks a work queue of `TickOutput`s, routing every event through
 //!   `LxmfRouter::handle_event` and pushing the output that produces back onto
 //!   the queue.
-//! * `absorb` (leviculum-lxmf-node/src/processor.rs:534) is the same loop
+//! * `absorb` (leviculum-lxmf-node/src/processor.rs:544) is the same loop
 //!   inside a real hook: it re-feeds each event to the router *and* forwards
 //!   it on the returned `TickOutput`, under a round cap —
-//!   `MAX_ABSORB_ROUNDS` (leviculum-lxmf-node/src/processor.rs:93).
+//!   `MAX_ABSORB_ROUNDS` (leviculum-lxmf-node/src/processor.rs:94).
 //!
 //! # Registration happens before the channel exists
 //!
@@ -253,7 +253,7 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 ///
 /// # The one call on `core` that must not be made
 ///
-/// `NodeCore::send_resource` (`leviculum-core/src/node/mod.rs:1858`) is `pub`
+/// `NodeCore::send_resource` (`leviculum-core/src/node/mod.rs:1861`) is `pub`
 /// and reachable on the handle. It is the composed single call that
 /// `docs/src/concepts/core-lock-budget.md` was written about: 141 ms under the
 /// lock for a 1 MiB payload, a 32 % inbound-throughput stall (Codeberg #152).

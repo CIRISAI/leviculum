@@ -344,6 +344,15 @@ pub enum OutboxEvent {
         detail: String,
         path: Option<PropagationPathAttempts>,
     },
+    /// A propagated [`Command::SendPacked`] waits for the key of its
+    /// `destination`: without it the message can be neither encrypted nor
+    /// stamped for the propagation node, and the router asks the path
+    /// until an announce brings the key. Said when it starts to wait and
+    /// again every [`crate::engine::KEY_WAIT_SAY_MS`] while it waits (1305).
+    KeyWanted {
+        message_id: [u8; 32],
+        destination: [u8; 16],
+    },
     /// A [`Command::SendPacked`] the router did not take: no queue entry, so
     /// nothing else will be said of it.
     Unsent {
@@ -360,7 +369,46 @@ pub enum OutboxEvent {
     Packed {
         message_id: [u8; 32],
         packed: Vec<u8>,
+        arrived: Arrived,
     },
+}
+
+/// How a received message reached us, as the router read it: the `via` of a
+/// home's `HOME_ACCEPT` (1305).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrived {
+    /// Over a delivery link.
+    Direct,
+    /// As one single packet, encrypted to the delivery destination.
+    Opportunistic,
+    /// Collected from a propagation node.
+    Propagated,
+    /// From an `lxm://` paper message.
+    Paper,
+}
+
+impl Arrived {
+    /// The word the event log uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Opportunistic => "opportunistic",
+            Self::Propagated => "propagated",
+            Self::Paper => "paper",
+        }
+    }
+}
+
+impl From<leviculum_lxmf::DeliveryMethod> for Arrived {
+    fn from(method: leviculum_lxmf::DeliveryMethod) -> Self {
+        use leviculum_lxmf::DeliveryMethod;
+        match method {
+            DeliveryMethod::Direct => Self::Direct,
+            DeliveryMethod::Opportunistic => Self::Opportunistic,
+            DeliveryMethod::Propagated => Self::Propagated,
+            DeliveryMethod::Paper => Self::Paper,
+        }
+    }
 }
 
 /// The engine went away — in this slice, the driver detached a panicking

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Every test that spawns Python is declared in scripts/integ-prerequisites.txt.
+"""Every test that spawns Python or a reference codec is declared in
+scripts/integ-prerequisites.txt.
 
 A test that starts a Python process needs something a clone does not carry by
 itself: the vendored reference stacks under reference/ for the Python peers,
@@ -32,7 +33,19 @@ lines, `reference/Reticulum` -> the RNS line, otherwise `command:python3`.
 Check the suggestion against what the test really needs; the file's header
 says how to measure it.
 
-Exit 0 = every Python-spawning test is declared.
+THE REFERENCE CODECS. The same holds for the four codec tools the voice
+round trip makes and judges its sounds with (CODEC_TOOLS: opus-tools' opusenc
+and opusdec, codec2's c2enc and c2dec), with one difference: each tool needs
+its own `command:<tool>` line, on the test or its whole target, because a line
+for the Python reference says nothing about whether codec2 is installed. The
+tool's name is passed to a helper as a string (`codec_tool("c2enc", ...)` in
+loquax-android/tests/facade.rs) rather than written into `Command::new`, so a
+function whose body holds the literal `"c2enc"` counts as spawning c2enc, and
+so does every function that calls it. The lander's push on 2026-11-03 ran the
+voice test on hamster, which has no codec2, and it panicked with
+"c2enc: No such file or directory" (1353).
+
+Exit 0 = every Python- and codec-spawning test is declared.
 Exit 1 = one is not (file:line, test, the line to add), or the selftest failed.
 
 Usage:
@@ -53,6 +66,9 @@ RNS = "reference/Reticulum/RNS/__init__.py"
 LXMF = "reference/LXMF/LXMF/__init__.py"
 
 SPAWN = re.compile(r'Command\s*::\s*new\s*\(\s*"python')
+PYTHON = "python"
+CODEC_TOOLS = ("opusenc", "opusdec", "c2enc", "c2dec")
+CODEC = re.compile(r'"(' + "|".join(CODEC_TOOLS) + r')"')
 TEST_ATTR = re.compile(r"#\[\s*(?:tokio\s*::\s*)?test\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 INLINE_MOD = re.compile(r"\bmod\s+(\w+)\s*$")
@@ -182,8 +198,9 @@ class Fn:
         self.path, self.line, self.body = path, line, body
         self.start, self.end = start, end
         self.method = bool(re.search(r"\(\s*&?\s*(?:'\w+\s+)?(?:mut\s+)?self\b", body))
-        self.spawns = False
-        self.via = None
+        # {kind: where}, a kind being PYTHON or one of CODEC_TOOLS, and
+        # where the spawn site (file:line) or the callee that reaches it.
+        self.spawns = {}
 
 
 def scan(path, modpath, child_dir, seen, fns):
@@ -196,7 +213,8 @@ def scan(path, modpath, child_dir, seen, fns):
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     masked = mask(text)
-    spawns = [m.start() for m in SPAWN.finditer(text)]
+    spawns = [(m.start(), PYTHON) for m in SPAWN.finditer(text)]
+    spawns += [(m.start(), m.group(1)) for m in CODEC.finditer(text)]
     line_of = lambda off: text.count("\n", 0, off) + 1  # noqa: E731
 
     # Every brace pair, classified by the header in front of it.
@@ -247,12 +265,14 @@ def scan(path, modpath, child_dir, seen, fns):
         fns.append(fn)
     # A spawn belongs to the innermost function around it.
     mine = [f for f in fns if f.path == path]
-    for off in spawns:
+    for off, kind in spawns:
+        # A literal in a comment is blanked whole by mask(), quote included.
+        if kind != PYTHON and masked[off] != '"':
+            continue
         inner = [f for f in mine if f.start < off < f.end]
         if inner:
             f = min(inner, key=lambda f: f.end - f.start)
-            f.spawns = True
-            f.via = f"{os.path.relpath(path, REPO_ROOT[0])}:{line_of(off)}"
+            f.spawns.setdefault(kind, f"{os.path.relpath(path, REPO_ROOT[0])}:{line_of(off)}")
 
     for m in MOD_DECL.finditer(masked):
         chain = enclosing(m.start())
@@ -315,22 +335,21 @@ def reaching(fns):
     while changed:
         changed = False
         for f in fns:
-            if f.spawns:
-                continue
             for g in calls[id(f)]:
-                if g.spawns:
-                    f.spawns, f.via = True, f"{g.qual} ({g.via})"
-                    changed = True
-                    break
+                for kind, where in g.spawns.items():
+                    if kind not in f.spawns:
+                        f.spawns[kind] = f"{g.qual} ({where})"
+                        changed = True
 
 
 def spawn_sites(f, fns):
-    """The files of the spawn sites `f` reaches, through its `via` chain."""
+    """The files of the Python spawn sites `f` reaches, through its chain."""
     files = set()
+    via = f.spawns.get(PYTHON, "")
     for g in fns:
-        if g.spawns and g.via and re.match(r"[^ ]+:\d+$", g.via):
-            if g.via in (f.via or "") or g is f:
-                files.add(g.path)
+        site = g.spawns.get(PYTHON, "")
+        if re.match(r"[^ ]+:\d+$", site) and (site in via or g is f):
+            files.add(g.path)
     return files
 
 
@@ -348,18 +367,28 @@ def suggestion(files):
 
 
 def declared(path):
-    """({whole targets}, {(target, test)}) of the prerequisite file."""
-    whole, named = set(), set()
+    """({whole target: {paths}}, {(target, test): {paths}}) of the
+    prerequisite file."""
+    whole, named = {}, {}
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             fields = line.split()
             if not fields or fields[0].startswith("#") or len(fields) < 2:
                 continue
             if len(fields) == 2:
-                whole.add(fields[1])
+                whole.setdefault(fields[1], set()).add(fields[0])
             else:
-                named.add((fields[1], fields[2]))
+                named.setdefault((fields[1], fields[2]), set()).add(fields[0])
     return whole, named
+
+
+def missing(kind, lines):
+    """Whether `lines`, the prerequisite paths a test is declared with, leave
+    a spawn of `kind` undeclared: any line but a codec tool's covers Python
+    (the suggestion says which), a codec tool needs its own `command:` line."""
+    if kind == PYTHON:
+        return not lines - {f"command:{tool}" for tool in CODEC_TOOLS}
+    return f"command:{kind}" not in lines
 
 
 def findings(root, prerequisites=None):
@@ -370,7 +399,7 @@ def findings(root, prerequisites=None):
     # A line names its target as `<dir>/<target>`. A bare name covers no
     # target here, and when two packages share it, it does not say which one
     # it means (1306: lnomad and loquax both have `scene_golden`).
-    for bare in sorted({t for t in whole | {t for t, _ in named} if "/" not in t}):
+    for bare in sorted({t for t in set(whole) | {t for t, _ in named} if "/" not in t}):
         same = sorted(t for t in tree if t.rsplit("/", 1)[-1] == bare)
         if len(same) > 1:
             out.append(
@@ -379,8 +408,6 @@ def findings(root, prerequisites=None):
                 f"<dir>/{bare} (1306)."
             )
     for target, path in sorted(tree.items()):
-        if target in whole:
-            continue
         fns = []
         child_dir = os.path.dirname(path)
         scan(path, [], child_dir, set(), fns)
@@ -388,17 +415,23 @@ def findings(root, prerequisites=None):
             continue
         reaching(fns)
         for f in fns:
-            if not (f.test and f.spawns) or (target, f.qual) in named:
+            if not f.test:
                 continue
-            lines = "\n".join(
-                f"    {p} {target} {f.qual}" for p in suggestion(spawn_sites(f, fns))
-            )
-            out.append(
-                f"{os.path.relpath(f.path, root)}:{f.line}: test {f.qual} of "
-                f"{target} spawns Python (via {f.via}), and {PREREQUISITES} "
-                f"has no line for it, so a runner without the prerequisite "
-                f"runs it and it fails there (1282). Add, with its reason:\n{lines}"
-            )
+            lines = whole.get(target, set()) | named.get((target, f.qual), set())
+            for kind, via in sorted(f.spawns.items()):
+                if not missing(kind, lines):
+                    continue
+                if kind == PYTHON:
+                    what, wanted, why = "Python", suggestion(spawn_sites(f, fns)), "1282"
+                else:
+                    what, wanted, why = kind, [f"command:{kind}"], "1353"
+                add = "\n".join(f"    {p} {target} {f.qual}" for p in wanted)
+                out.append(
+                    f"{os.path.relpath(f.path, root)}:{f.line}: test {f.qual} of "
+                    f"{target} spawns {what} (via {via}), and {PREREQUISITES} "
+                    f"has no line for it, so a runner without the prerequisite "
+                    f"runs it and it fails there ({why}). Add, with its reason:\n{add}"
+                )
     return out
 
 
@@ -462,6 +495,34 @@ fn b_spawns() {
     let _ = std::process::Command::new("python3").status();
 }
 """
+# The voice test's shape (1353): the tool is named by a literal at the call
+# of a helper that spawns whatever it is given, beside a Python peer.
+FIXTURE_CODEC = """\
+fn codec_tool(tool: &str) {
+    let _ = std::process::Command::new(tool).status();
+}
+
+fn python() {
+    let _ = std::process::Command::new("python3").status();
+}
+
+fn round_trip() {
+    codec_tool("c2enc");
+}
+
+#[test]
+fn voice() {
+    python();
+    round_trip();
+    codec_tool("opusdec");
+}
+
+#[test]
+fn says_opusenc_only_in_a_comment() {
+    // codec_tool("opusenc");
+    let _ = "opusenc is a word in a string";
+}
+"""
 FIXTURE_PREREQ_FULL = f"""\
 # fixture
 {RNS} a/interop direct
@@ -470,6 +531,9 @@ FIXTURE_PREREQ_FULL = f"""\
 command:python3 a/script
 command:python3 a/mvr inner::tests::spawns
 command:python3 b/script b_spawns
+{RNS} a/voice voice
+command:c2enc a/voice voice
+command:opusdec a/voice voice
 """
 
 
@@ -484,6 +548,7 @@ def selftest():
             "a/tests/mvr/main.rs": FIXTURE_MVR,
             "a/tests/mvr/inner.rs": FIXTURE_MVR_INNER,
             "b/tests/script.rs": FIXTURE_SAME_NAME,
+            "a/tests/voice.rs": FIXTURE_CODEC,
             PREREQUISITES: FIXTURE_PREREQ_FULL,
         }
         for rel, body in files.items():
@@ -511,14 +576,35 @@ def selftest():
             ("command:python3 a/mvr inner::tests::spawns", ["test inner::tests::spawns of a/mvr"]),
             # a/script's line does not cover b/script, whose name it shares.
             ("command:python3 b/script b_spawns", ["test b_spawns of b/script"]),
+            # Each codec tool needs its own line, through a helper or direct;
+            # the Python line beside it does not cover them (1353).
+            (
+                "command:c2enc a/voice voice",
+                ["a/tests/voice.rs:14: test voice of a/voice spawns c2enc (via round_trip (a/tests/voice.rs:10))",
+                 "command:c2enc a/voice voice"],
+            ),
+            ("command:opusdec a/voice voice", ["test voice of a/voice spawns opusdec (via a/tests/voice.rs:17)"]),
+            # The codec lines do not cover the Python peer either.
+            (f"{RNS} a/voice voice", ["test voice of a/voice spawns Python", "command:python3 a/voice voice"]),
         ]:
             with open(os.path.join(tmp, PREREQUISITES), "w", encoding="utf-8") as handle:
                 handle.write(FIXTURE_PREREQ_FULL.replace(line + "\n", ""))
             expect(f"without `{line}`", want)
         # A whole-target line covers every test of the target.
         with open(os.path.join(tmp, PREREQUISITES), "w", encoding="utf-8") as handle:
-            handle.write(f"{RNS} a/interop\ncommand:python3 a/script\ncommand:python3 a/mvr\ncommand:python3 b/script\n")
+            handle.write(
+                f"{RNS} a/interop\ncommand:python3 a/script\ncommand:python3 a/mvr\n"
+                f"command:python3 b/script\n{RNS} a/voice\ncommand:c2enc a/voice\n"
+                f"command:opusdec a/voice\n"
+            )
         expect("whole targets", [], 0)
+        # A whole-target line for the reference alone leaves both tools out.
+        with open(os.path.join(tmp, PREREQUISITES), "w", encoding="utf-8") as handle:
+            handle.write(
+                f"{RNS} a/interop\ncommand:python3 a/script\ncommand:python3 a/mvr\n"
+                f"command:python3 b/script\n{RNS} a/voice\n"
+            )
+        expect("a whole target declared for Python only", ["spawns c2enc", "spawns opusdec"], 2)
         # A bare name both packages have is refused by name, and covers
         # neither: b's test is reported as well.
         with open(os.path.join(tmp, PREREQUISITES), "w", encoding="utf-8") as handle:
@@ -555,12 +641,12 @@ def main():
         print(f"check-python-test-prerequisites: {finding}", file=sys.stderr)
     if out:
         print(
-            f"check-python-test-prerequisites: FAILED, {len(out)} test(s) spawn "
-            f"Python without a line in {PREREQUISITES}.",
+            f"check-python-test-prerequisites: FAILED, {len(out)} spawn(s) of "
+            f"Python or a codec tool without a line in {PREREQUISITES}.",
             file=sys.stderr,
         )
         return 1
-    print("check-python-test-prerequisites: every Python-spawning test is declared")
+    print("check-python-test-prerequisites: every Python- and codec-spawning test is declared")
     return 0
 
 

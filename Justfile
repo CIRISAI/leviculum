@@ -349,7 +349,7 @@ nrf-shellcheck:
         scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
-        scripts/nrf-elf.sh \
+        scripts/nrf-elf.sh scripts/nrf-rustflags.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/check-nrf-stack-frames.sh \
@@ -380,7 +380,8 @@ nrf-shellcheck:
         scripts/run-fuzz.sh scripts/test-run-fuzz.sh \
         scripts/check-tree-clean.sh scripts/test-tree-clean.sh \
         scripts/test-just-sweep.sh \
-        scripts/check-firmware-images.sh scripts/check-embassy-pins.sh scripts/test-log-diff-mask.sh scripts/check-firmware-no-hal.sh scripts/check-firmware-no-chip.sh
+        scripts/check-firmware-images.sh scripts/check-embassy-pins.sh scripts/test-log-diff-mask.sh scripts/check-firmware-no-hal.sh scripts/check-firmware-no-chip.sh \
+        scripts/check-no-printf-grep-pipes.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -1141,6 +1142,18 @@ test-retry-guard:
     @python3 scripts/check-test-retries.py --selftest
     @python3 scripts/check-test-retries.py
 
+# Order 1340 (#843): bash's printf writes a pipe one line per write(2), so
+# under `pipefail` `printf "$list" | grep -q X` is exit 141 whenever grep
+# matches and exits before printf is done (1314: 14 of 20 000 under load).
+# Three sites went red that way before the tree was converted to here-strings;
+# this refuses the construct, printf or echo into `grep -q`, in every tracked
+# shell file that sets pipefail or is only ever sourced. Text scan, 0.3 s. The
+# selftest plants five pipes and five clean shapes first.
+[doc('Refuse printf/echo piped into grep -q under pipefail')]
+no-printf-grep-pipes:
+    @bash scripts/check-no-printf-grep-pipes.sh --selftest
+    @bash scripts/check-no-printf-grep-pipes.sh
+
 # Codeberg #191c's census, moved forward to the push gate. `just standard`
 # already counts the #[ignore]d tests, but from the BUILT test binaries --
 # `--ignored --list` on every one of them -- so it cannot run here: Tier 0
@@ -1422,6 +1435,8 @@ tree-clean-selftest:
 # `lnomad-core-no-std` (#475) is in on (a) to (c) too: two foreign triples and
 # a temp copy's check for its control, 7.4 s standing alone after `touch
 # leviculum-core/src/lib.rs`, 4.0 s warm (2026-11-02, with the esp fork).
+# `no-printf-grep-pipes` (1340, #843) is a text scan over the tracked shell
+# files: 0.3 s, no build, no test target (2026-11-02).
 # `m9-render-no-std` (1351, 1363, #232, #473) on the same three grounds: the
 # M9's renderer and client for both firmware triples and one temp copy's checks
 # for their two controls, 7.7 s warm with the esp fork (2026-11-03), most of it those.
@@ -1542,7 +1557,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1574,7 +1589,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2144,7 +2159,7 @@ btvirt-selftest:
 # invoke cargo from its own directory.
 [doc('Flash every attached T114 with the current firmware')]
 flash:
-    cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
+    cd leviculum-nrf && bash ../scripts/nrf-rustflags.sh cargo run --release --bin t114 --features bsp-t114
 
 # Wiring, gdb setup and the probe's own quirks: docs/src/firmware/probe-debugging.md
 [doc('SWD firmware debugging via the RPi Debug Probe')]
@@ -2156,7 +2171,7 @@ probe *args:
 #   just flash-one /dev/leviculum-transport
 [doc('Flash a single T114 by port path or udev symlink')]
 flash-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} cargo run --release --bin t114 --features bsp-t114
+    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin t114 --features bsp-t114
 
 # What every RAK4631 flash recipe tells the runner about this board: the USB
 # PID our firmware enumerates on, the names it puts in its messages, and the
@@ -2172,13 +2187,13 @@ rak4631_env := 'LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF
 # flashes use the touch path automatically.
 [doc('Flash every attached RAK4631 (WisMesh Pocket V2) with our firmware')]
 flash-rak4631:
-    cd leviculum-nrf && {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631
+    cd leviculum-nrf && {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631
 
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
 [doc('Flash a single RAK4631 by port path or udev symlink')]
 flash-rak4631-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631
+    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631
 
 # Flash with all RAK19026 baseboard peripherals enabled — the WisMesh
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
@@ -2186,7 +2201,7 @@ flash-rak4631-one PORT:
 # bundle ships for this board (docs/src/concepts/board-support-scope.md).
 [doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
-    cd leviculum-nrf && {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+    cd leviculum-nrf && {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 
 # What every SenseCAP Solar Node flash recipe tells the runner about this
 # board. The Board-ID is the XIAO MODULE's, not this product's: a DIY XIAO
@@ -2201,11 +2216,11 @@ solarnode_env := 'LEVICULUM_USB_PID=0003 LEVICULUM_BOARD_NAME=SolarNode LEVICULU
 # touch. Once our firmware is on, this recipe works like the other two.
 [doc('Flash every attached SenseCAP Solar Node P1-Pro with our firmware')]
 flash-solarnode:
-    cd leviculum-nrf && {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
+    cd leviculum-nrf && {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin solarnode --features bsp-solarnode
 
 [doc('Flash a single SenseCAP Solar Node by port path or udev symlink')]
 flash-solarnode-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
+    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin solarnode --features bsp-solarnode
 
 # The SenseCAP T1000-E's bootloader (2886:0057, Board-ID nRF52840-T1000-E-v1)
 # answers serial DFU only on the rig unit, with no UF2 volume, so the UF2
@@ -2216,7 +2231,7 @@ flash-solarnode-one PORT:
 # adafruit-nrfutil comes from `pip install --user adafruit-nrfutil`.
 [doc('Build the SenseCAP T1000-E image as a serial-DFU package')]
 t1000e-dfu-package:
-    cd leviculum-nrf && cargo build --release --bin t1000e --features bsp-t1000e
+    cd leviculum-nrf && bash ../scripts/nrf-rustflags.sh cargo build --release --bin t1000e --features bsp-t1000e
     bash scripts/t1000e-dfu-package.sh
 
 # A measurement instrument for OTA stage 2, not firmware. It ERASES the whole
@@ -2229,7 +2244,7 @@ t1000e-dfu-package:
 # firmware back.
 [doc('Measurement tool: ERASES all SolarNode external flash, tests it')]
 flash-solarnode-qspi-selftest:
-    cd leviculum-nrf && {{solarnode_env}} cargo run --release --bin qspi-selftest --features bsp-solarnode,qspi-selftest
+    cd leviculum-nrf && {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin qspi-selftest --features bsp-solarnode,qspi-selftest
 
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no
@@ -2650,8 +2665,10 @@ loquax-name:
 # and it fails there (land gate on d365c0d2, forge stage, home_reach's Python
 # peer). Next to check-standard-integ in `guards` and `fast`; here at the
 # end so no cited Justfile line moves. Reads the test targets' call graphs
-# from the text; ~0.8 s, no build, its fixtures first.
-[doc('Check that every Python-spawning test declares its prerequisites')]
+# from the text; ~0.8 s, no build, its fixtures first. Since 1353 the same for
+# the four reference codec tools the voice round trip spawns, each by its own
+# `command:` line (hamster has no codec2, and the pre-push run panicked).
+[doc('Check that every Python- or codec-spawning test declares its needs')]
 check-python-test-prerequisites:
     @python3 scripts/check-python-test-prerequisites.py
 

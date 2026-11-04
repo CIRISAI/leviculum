@@ -27,10 +27,7 @@
 # 4 -> 5 -> 4 (2026-10-19): the #848 departure loop in
 # node/mvr_ble_departure_loop.rs was red by design until #852 closed it;
 # the test runs in the suite again.
-# 4 -> 5 (2026-11-02, order 1317): the mvr in
-# node/mvr_announce_committed_before_interface_up.rs is red by design until
-# the fix for the twice-announced destination lands; its control runs.
-5    -p leviculum-core --lib
+4    -p leviculum-core --lib
 3    -p leviculum-core --doc
 
 # measure_send_lock_costs is a timing harness for the lock-budget doc page,
@@ -43,6 +40,14 @@
 # good — the U16 timing harness, and the case marked CANNOT BE ARRANGED (it
 # needs a core-side inbound Resource cancel).
 2    -p leviculum-lxmf --test direct_delivery_attempts
+
+# 0 -> 2 (2026-11-02, 1305): the two N-home losses of the study
+# docs/drafts/mailbox-for-friends-study-2026-11.md, red on today's code by
+# design and kept on record until their fixes land: the ratchet loss
+# (comes off with H1, shared-seed ratchets) and the path flap (comes off with
+# H3, mesh-only announcing for a phone home). Run by hand with
+# `cargo test -p leviculum-lxmf --test two_homes -- --ignored`.
+2    -p leviculum-lxmf --test two_homes
 
 # Four of these need hardware or a live service: two RNode cases wanting a
 # board on /dev/ttyACM0, two i2p cases wanting a running i2pd SAM bridge.
@@ -58,12 +63,18 @@
 # hand with LEVICULUM_APPEND_BENCH_DIR pointed at a real disk, whenever that
 # doc section is re-measured or the store's write/fsync/rename/fsync path
 # changes. Nothing in the release path re-measures it.
-5    -p leviculum-std --lib
+# 5 -> 6 (2026-11-03, order 1376, #478): open_cost_at_field_scale prices the
+# store's open over 320 000 files, the walk against the index file, part by
+# part. Its fixture is 1.3 GB on disk at a block a file and takes five seconds
+# to write, and the figure that matters is the cold one, which needs the page
+# cache dropped as root; no tier should do either per run. What it measured is
+# pinned deterministically by a_reopen_reads_no_file_the_index_file_names and
+# its three siblings, which run in the suite. Run by hand with
+# LEVICULUM_OPEN_BENCH_DIR on a real disk whenever the open or the index file
+# changes.
+6    -p leviculum-std --lib
 1    -p leviculum-std --doc
-# 9 -> 10 (2026-11-02, order 1317): the mvr
-# a_third_announce_on_a_fresh_interface_waits_at_python is red by design
-# until the fix lands; its control runs.
-10   -p leviculum-std --test mvr
+9    -p leviculum-std --test mvr
 
 # 20 in rnsd_interop, of which the status_parity_tests::* are NOT
 # unobserved: `just standard` runs them by name through
@@ -193,4 +204,29 @@
 # a_sync_round_asks_the_store_without_walking_it, which runs in the suite.
 # Run by hand with LNPND_BENCH_DIR (lnpnd/src/peering.rs, the test's docs)
 # whenever the peering path or the file store's indexes change.
-2    -p lnpnd --lib
+# 2 -> 3 (2026-11-03, order 1295, #478): expiry_tick_cost_over_a_field_sized_store
+# prices one maintenance tick over a file store of 300 000 messages spread
+# over 40 days, the whole-store expiry walk against the receive-time index,
+# idle, at the first backlog and in steady state. Same fill cost as the one
+# above. What it measured is pinned deterministically by
+# an_expiry_tick_reads_what_expired_not_the_store, which runs in the suite.
+# Run by hand with LNPND_BENCH_DIR (lnpnd/src/expiry_cost.rs, the test's
+# docs) whenever the expiry sweep or the file store's indexes change.
+# 3 -> 5 (2026-11-03, order 1370, #478): two more of the same kind.
+# processed_and_eviction_cost_at_field_scale prices the processed-id cache at
+# 1 M and 10 M ids (bytes per id, the daily prune, a lookup) and make_room over
+# a full 2 GB store of about 6 M messages; it holds about 1.5 GB of RAM at its
+# peak, which no tier should spend per run (lnpnd/src/walk_cost.rs).
+# unhandled_cost_over_a_field_sized_store prices the per-peer unhandled count
+# and the rotation's count over a file store of 320 000 messages, the same
+# fill as the two above (lnpnd/src/peering.rs). Run both by hand, the
+# commands are in the tests' docs, whenever those paths change.
+5    -p lnpnd --lib
+# 0 -> 1 (2026-11-03, order 1376, #478): a_field_size_store_starts_and_answers_within_five_seconds
+# starts the lnpnd binary on the 320 000-file fixture of open_cost_at_field_scale
+# and asks it --status within 5 s. It needs that fixture on a disk, which no
+# tier holds; the restart, the shutdown's write and the damaged file are
+# pinned by the_index_file_survives_a_restart_and_a_damaged_one_costs_one_walk
+# in the same file, which runs in the suite. Run by hand with
+# LNPND_START_BENCH_STORE naming the fixture, after the bench above.
+1    -p lnpnd --test store_index_at_start

@@ -17,10 +17,10 @@ change to the interface seam keeps the way to the full node open.
 | Where messages wait while the phone sleeps | in the mailbox's archive | at a propagation node, as for any LXMF peer |
 
 **The client has no destination of its own.** `Engine::client`
-(`loquax/src/engine.rs:372`) says it "registers nothing, by
+(`loquax/src/engine.rs:387`) says it "registers nothing, by
 construction", and a guard test, `a_client_engine_registers_no_delivery_destination`,
 holds that. The session attaches through `attach_leaf`
-(`loquax-android/src/session.rs:417`) with `Role::Client`. That node runs
+(`loquax-android/src/session.rs:416`) with `Role::Client`. That node runs
 with transport off and has no interface from the config: the rendezvous
 rotation dials one TCP client at a time (`Upstream::Tcp`,
 `loquax/src/engine/shell.rs:828`). The only destination it talks to is the
@@ -28,7 +28,7 @@ mailbox's `loquax.home`, which the client reaches over links that it
 opens itself (`loquax/src/home/client.rs`, `loquax/src/home/watch.rs`).
 Nothing under `loquax/src/home/` registers a destination on the client's
 side. The one `register_destination` sits in the attach path and runs
-only for the home role (`loquax/src/engine/shell.rs:941`).
+only for the home role (`loquax/src/engine/shell.rs:942`).
 
 **The full node needs nothing new above the seam.** The phone already
 runs the messenger engine in one case: the mailbox on the phone
@@ -82,7 +82,7 @@ What already fits the seam:
   case: a host that never sees `/dev/ttyACM*`, Android named. The phone
   supplies `open`. The KISS detection and configuration, the airtime
   bucket and the reconnect loop stay the host RNode interface's own, and
-  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:2664`)
+  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:2668`)
   hot-plugs the radio when the cable goes in.
 - **BLE needs a second carrier binding, not a second interface.** The
   host BLE interface is split into a pure half, `links` (admission,

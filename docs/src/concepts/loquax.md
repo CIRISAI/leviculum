@@ -30,6 +30,9 @@ daemon" has to re-derive the argument from nothing.
 - [Conversation storage](loquax-storage.md) — SQLite, the schema, retention.
 - [The mailbox and who you talk to](loquax-mailbox.md) — propagation-node
   policy, trust, contacts and names.
+- [Read receipts](loquax-read-receipts.md) and
+  [receipts for propagated post](loquax-propagation-receipts.md): the
+  `lev` namespace, what a message's ticks claim and who confirms them.
 - [The map](loquax-map.md): telemetry positions in the conversation and
   on a map, the renderer shared by the terminal, the GUI and the M9, and
   the slices (decided 2026-10-27, Lew).

@@ -1117,3 +1117,26 @@ reference and both ours to route around:
   to sync to it announces at least 1, which is what the conformance
   chain cells do and why. Upstream is not told (standing policy);
   the workaround is a one-bit cost.
+
+## 6. The board keeps lnpnd's rules
+
+Orders 1294 and 1295 gave `lnpnd` the reference's acceptance rules;
+order 1355 brought the board's role to the same ones. Where the board
+cannot hold what `lnpnd` holds, the limit is its own and named here.
+
+| Rule | `lnpnd` | Board |
+|---|---|---|
+| Stamp floor | cost 13, flexibility 0: a stamp worth 12 is refused with `ERROR_INVALID_STAMP`, 13 is stored | the same, from the same role default; announce field 5 reads `[13, 0, 1]` |
+| Transfer limit (field 3) | 256 KB, lxmd's | 4 KB (`BOARD_TRANSFER_LIMIT_KB`, `leviculum-nrf/heap-budget`): two phones' queued uploads are held in the 96 KiB heap |
+| Sync limit (field 4) | 10 MB, lxmd's | derived from what the board can answer (`BOARD_SYNC_LIMIT_KB`, 5 KB today) |
+| Largest client upload | lxmd's 1 MB delivery limit; above it `PN_REJECT reason=too_large` | what one record-log page holds, `MAX_UPLOAD_RESOURCE_BYTES` (4 048 B, `leviculum-nrf/pn-store`); above it `PN_REJECT reason=too_large via=resource bytes= limit=` at the advertisement, with the reference's RCL |
+| Local only | above 256 KB, up to 1 MB: stored, never offered | above 4 KB, up to the 4 042 B a record holds: stored, never offered (`board_offer_builder`), `PN_ACCEPT ... local_only=1` |
+| Departed ids across a restart | written to `<data>/departures`, held 30 days | read off the purged record the departure left on flash, held until the ring reclaims its page: one lap, about eight hours at the field's 22.4 messages an hour |
+| A sync message the store did not keep | `PN_STORE_FULL offered= dropped=`, sweep at the next tick, `/offer` answered `ERROR_THROTTLED` and peer batches refused `store_full` until then | the same; the ring never refuses for room, so on the board it means the flash refused a write |
+| Expiry sweep | reads only the expired range of a receive-time index | skips the region while the oldest receive time it measured is not expired; a walk that runs is one scan (0.4 ms on the host over a full 16-page region, 8 to 33 ms on the board, §2) |
+
+A client learns none of the board's limits before it uploads: only a
+peer reads fields 3 and 4 (`reference/LXMF/LXMF/LXMRouter.py:2367-2375`),
+and no stock client consults a propagation node's limits. An upload
+above them is refused at its advertisement, which the sender sees as a
+rejected resource.

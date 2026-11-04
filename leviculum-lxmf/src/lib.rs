@@ -73,11 +73,13 @@ pub mod constants;
 pub mod control;
 pub mod lev;
 pub mod lev_position;
+pub mod lev_status;
 pub mod message;
 pub mod msgpack;
 pub mod node;
 pub mod paper;
 pub mod peering;
+pub mod processed_ids;
 pub mod propagation;
 pub mod propagation_client;
 pub mod propagation_node;
@@ -98,6 +100,7 @@ pub use control::{
     encode_control_ack, encode_control_error, ControlNodeStats, ControlPeerStats, ControlResponse,
     CONTROL_ASPECTS, HOPS_UNKNOWN, STATS_GET_PATH, SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH,
 };
+pub use lev_status::{DepartureReason, MessageStatus, LEV_STATUS_PATH};
 pub use message::{DeliveryMethod, Field, Message, MessageError, Verification};
 pub use node::{
     DeliveryFailure, DeliveryRepresentation, DirectLinkState, InboundProof, InboundRejection,
@@ -124,9 +127,9 @@ pub use propagation_client::{
     PROPAGATION_ASPECT,
 };
 pub use propagation_node::{
-    Eviction, EvictionReason, FetchPlan, FetchSource, GetError, GetOutcome, PreparedFetch,
-    PreparedGet, PropagationNode, PropagationNodeConfig, UploadOutcome, MESSAGE_EXPIRY_SECS,
-    PN_META_NAME,
+    Departure, Eviction, EvictionReason, FetchPlan, FetchSource, GetError, GetOutcome,
+    PreparedFetch, PreparedGet, PropagationNode, PropagationNodeConfig, UploadOutcome,
+    MAX_EXPIRED_PER_TICK, MESSAGE_EXPIRY_SECS, PN_META_NAME, STOCK_PEER_MIN_STAMP_VALUE,
 };
 pub use propagation_store::{
     ConfirmedPurge, MemoryPropagationStore, PropagationBodyStore, PropagationStore, StoredMessage,

@@ -63,7 +63,7 @@ PY
 refused() {
     local out rc=0
     out="$(check "$1")" || rc=$?
-    [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -qF "$2"
+    [ "$rc" -eq 1 ] && grep -qF "$2" <<<"$out"
 }
 
 selftest() {

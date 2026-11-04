@@ -64,6 +64,7 @@ pub mod resolver;
 pub mod resource_policy;
 pub mod reticulum;
 pub(crate) mod rpc;
+pub(crate) mod sequence_counts;
 pub mod socket_hook;
 pub(crate) mod storage;
 pub(crate) mod sync_ext;

@@ -585,7 +585,7 @@ if [ "$release_assets_json" != "[]" ]; then
     leftover=""
     while read -r asset_id; do
         [ -n "$asset_id" ] || continue
-        if printf '%s\n' "$remaining_ids" | grep -qx "$asset_id"; then
+        if grep -qx "$asset_id" <<<"$remaining_ids"; then
             leftover="$leftover $asset_id"
         fi
     done <<< "$stale_asset_ids"

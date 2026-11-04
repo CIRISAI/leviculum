@@ -433,6 +433,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::Unsent { .. }
                 | OutboxEvent::Fenced { .. }
                 | OutboxEvent::Packed { .. }
+                | OutboxEvent::KeyWanted { .. }
                 | OutboxEvent::HomeSent { .. }
                 | OutboxEvent::HomeMarked { .. }
                 | OutboxEvent::HomeStalled { .. }

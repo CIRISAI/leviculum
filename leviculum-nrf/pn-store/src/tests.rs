@@ -1051,9 +1051,13 @@ fn a_message_accepted_at_cost_0_before_any_demanding_peer_is_offered_to_one() {
     let region = SharedRegion::new(SECTORS);
     let mut log = block_on(fresh(SECTORS));
     sync(&region, &mut log);
+    // The flexibility named: the role's default is 0 since order 1294.
     let mut role = PropagationNode::new(
         PnStore::new(region.clone(), SECTORS),
-        board_role_config(3, 1, b"board".to_vec(), 4_000),
+        leviculum_lxmf::PropagationNodeConfig {
+            stamp_cost_flexibility: 3,
+            ..board_role_config(3, 1, b"board".to_vec(), 4_000)
+        },
     );
     assert_eq!(role.min_accepted_cost(), 0, "cost 3 less flexibility 3");
 
@@ -1925,9 +1929,10 @@ mod oversize_upload {
 /// 867, the 866 shape: a 122 953 B upload advertised to a board's
 /// propagation node is refused at its advertisement with one RCL naming it,
 /// as the reference lxmd refuses it (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`),
-/// and the board now says so: `PN_REJECT reason=oversize via=resource
-/// size=122953 cap=<the store bound>`. The RCL is the positive control: the
-/// refusal on the wire is what it was before the line existed.
+/// and the board now says so: `PN_REJECT reason=too_large via=resource
+/// bytes=122953 limit=<the store bound>`, lnpnd's words and keys since 1355.
+/// The RCL is the positive control: the refusal on the wire is what it was
+/// before the line existed.
 #[test]
 fn an_oversize_upload_is_refused_with_one_rcl_and_says_so() {
     let region = SharedRegion::new(SECTORS);
@@ -1963,12 +1968,13 @@ fn an_oversize_upload_is_refused_with_one_rcl_and_says_so() {
 
     // The role's verdict, as `pn.rs` takes it: a client upload (no peering
     // key validated on the link), so the store bound is the cap.
-    let refusal = board_oversize_refusal(&role, data_size, false).expect("refused for its size");
+    let refusal =
+        board_resource_refusal(&role, data_size, false, false).expect("refused for its size");
     assert!(!board_accepts_resource_of(&role, data_size, false));
     assert_eq!(
         std::format!("PN_REJECT {refusal}"),
         std::format!(
-            "PN_REJECT reason=oversize via=resource size=122953 cap={MAX_UPLOAD_RESOURCE_BYTES}"
+            "PN_REJECT reason=too_large via=resource bytes=122953 limit={MAX_UPLOAD_RESOURCE_BYTES}"
         )
     );
 
@@ -1981,11 +1987,14 @@ fn an_oversize_upload_is_refused_with_one_rcl_and_says_so() {
     );
 }
 
-/// The cap a refusal names is the limit the resource failed: a validated
-/// peer's batch is held to the announced sync limit alone, a client's upload
-/// also to the store bound, and a resource within both is not refused.
+/// The limit a refusal names is the one the resource failed, under lnpnd's
+/// reason word: a validated peer's batch is held to the announced sync limit
+/// alone (`over_sync_limit`), a client's upload to the store bound
+/// (`too_large`, the board's delivery limit), and a resource within both is
+/// not refused. A 300 KB upload, which lnpnd stores local only, is
+/// `too_large` here (order 1355).
 #[test]
-fn the_oversize_refusal_names_the_limit_it_failed() {
+fn the_size_refusal_names_lnpnds_reason_and_the_limit_it_failed() {
     let region = SharedRegion::new(SECTORS);
     let role = PropagationNode::new(
         PnStore::new(region, SECTORS),
@@ -1995,23 +2004,56 @@ fn the_oversize_refusal_names_the_limit_it_failed() {
     assert_eq!(role.resource_limit_bytes(), sync_limit);
     assert!(MAX_UPLOAD_RESOURCE_BYTES < sync_limit);
     assert_eq!(
-        board_oversize_refusal(&role, sync_limit + 1, true),
-        Some(OversizeRefusal {
-            size: sync_limit + 1,
-            cap: sync_limit
+        board_resource_refusal(&role, sync_limit + 1, true, false),
+        Some(ResourceRefusal {
+            reason: "over_sync_limit",
+            bytes: sync_limit + 1,
+            limit: sync_limit
         })
     );
-    assert_eq!(board_oversize_refusal(&role, sync_limit, true), None);
+    assert_eq!(board_resource_refusal(&role, sync_limit, true, false), None);
     assert_eq!(
-        board_oversize_refusal(&role, MAX_UPLOAD_RESOURCE_BYTES + 1, false),
-        Some(OversizeRefusal {
-            size: MAX_UPLOAD_RESOURCE_BYTES + 1,
-            cap: MAX_UPLOAD_RESOURCE_BYTES
+        board_resource_refusal(&role, MAX_UPLOAD_RESOURCE_BYTES + 1, false, false),
+        Some(ResourceRefusal {
+            reason: "too_large",
+            bytes: MAX_UPLOAD_RESOURCE_BYTES + 1,
+            limit: MAX_UPLOAD_RESOURCE_BYTES
         })
     );
     assert_eq!(
-        board_oversize_refusal(&role, MAX_UPLOAD_RESOURCE_BYTES, false),
+        board_resource_refusal(&role, MAX_UPLOAD_RESOURCE_BYTES, false, false),
         None
+    );
+    let refusal = board_resource_refusal(&role, 300_000, false, false).expect("refused");
+    assert_eq!(
+        std::format!("PN_REJECT {refusal}"),
+        std::format!(
+            "PN_REJECT reason=too_large via=resource bytes=300000 limit={MAX_UPLOAD_RESOURCE_BYTES}"
+        )
+    );
+}
+
+/// After a sync message the store did not keep, a peer's batch is refused
+/// `store_full` until the sweep, as on lnpnd; a client's upload is not held
+/// to it, and a batch over the sync limit still names that limit first.
+#[test]
+fn a_store_full_board_refuses_peer_batches_and_not_client_uploads() {
+    let region = SharedRegion::new(SECTORS);
+    let role = PropagationNode::new(
+        PnStore::new(region, SECTORS),
+        board_role_config(0, 0, b"board".to_vec(), 4_000),
+    );
+    let sync_limit = role.resource_limit_bytes();
+    let refusal = board_resource_refusal(&role, 1_000, true, true).expect("refused");
+    assert_eq!(
+        std::format!("PN_REJECT {refusal}"),
+        "PN_REJECT reason=store_full via=resource bytes=1000 limit=0"
+    );
+    assert_eq!(board_resource_refusal(&role, 1_000, false, true), None);
+    assert_eq!(board_resource_refusal(&role, 1_000, true, false), None);
+    assert_eq!(
+        board_resource_refusal(&role, sync_limit + 1, true, true).map(|r| r.reason),
+        Some("over_sync_limit")
     );
 }
 
@@ -2198,4 +2240,378 @@ impl Region for CountingRegion {
         self.reads.set(self.reads.get() + 1);
         self.inner.with_bytes(f)
     }
+}
+
+// ---------------------------------------------------------------------
+// Order 1355: the board keeps lnpnd's rules (1294, 1295)
+// ---------------------------------------------------------------------
+
+/// The board's role at the decided defaults, as `pn.rs` builds it from a
+/// board with no configuration record.
+fn default_board_role(region: &SharedRegion) -> PropagationNode<PnStore<SharedRegion>> {
+    use leviculum_core::pn_config_store::StoredPnConfig;
+    PropagationNode::new(
+        PnStore::new(region.clone(), SECTORS),
+        board_role_config(
+            StoredPnConfig::DEFAULT.stamp_cost,
+            StoredPnConfig::DEFAULT.peering_cost,
+            b"board".to_vec(),
+            4_000,
+        ),
+    )
+}
+
+/// lnpnd's `the_default_floor_refuses_a_stamp_of_12_and_takes_13`, on the
+/// board's role over the board's store: an upload whose stamp is worth 12 is
+/// refused with the reference's `ERROR_INVALID_STAMP` and nothing reaches the
+/// queue, one worth 13 is stored. The validation is the board's own, the
+/// streamed workblock judged at the role's `min_accepted_cost`
+/// (`Engine::validate_step`). And the announce says so: field 5 is
+/// `[13, 0, 1]`, beside the board's own limits in fields 3 and 4.
+#[test]
+fn the_board_default_floor_refuses_a_stamp_of_12_and_takes_13() {
+    use leviculum_lxmf::propagation::PropagationSignal;
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut role = default_board_role(&region);
+    let min_cost = role.min_accepted_cost();
+    assert_eq!(min_cost, leviculum_lxmf::STOCK_PEER_MIN_STAMP_VALUE);
+
+    let mut lxmf = vec![7u8; DESTINATION_LENGTH];
+    lxmf.resize(200, 0x33);
+    let probe = leviculum_lxmf::PropagationUpload::single(1_700_000_000.0, lxmf.clone(), [0; 32]);
+    let transient_id = *leviculum_lxmf::PropagationUpload::decode(&probe.encode())
+        .unwrap()
+        .transient_id();
+    let stream = workblock(&transient_id);
+    let (mut twelve, mut thirteen) = (None, None);
+    for n in 0u64..1 << 20 {
+        let mut stamp = [0u8; 32];
+        stamp[..8].copy_from_slice(&n.to_le_bytes());
+        match stream.value(&stamp) {
+            12 if twelve.is_none() => twelve = Some(stamp),
+            value if value >= 13 && thirteen.is_none() => thirteen = Some(stamp),
+            _ => {}
+        }
+        if twelve.is_some() && thirteen.is_some() {
+            break;
+        }
+    }
+    let (twelve, thirteen) = (twelve.expect("a 12"), thirteen.expect("a 13"));
+
+    let low = leviculum_lxmf::PropagationUpload::single(1_700_000_000.0, lxmf.clone(), twelve);
+    match role.handle_upload(&low.encode(), 1000, |_, stamp| {
+        stream.validated(stamp, min_cost)
+    }) {
+        leviculum_lxmf::UploadOutcome::InvalidStamp { reject } => assert_eq!(
+            PropagationSignal::decode(&reject).expect("a signal"),
+            PropagationSignal::InvalidStamp
+        ),
+        other => panic!("a stamp worth 12 must be refused: {other:?}"),
+    }
+    assert_eq!(role.store().pending_ops(), 0, "nothing queued for flash");
+
+    let good = leviculum_lxmf::PropagationUpload::single(1_700_000_000.0, lxmf, thirteen);
+    match role.handle_upload(&good.encode(), 1000, |_, stamp| {
+        stream.validated(stamp, min_cost)
+    }) {
+        leviculum_lxmf::UploadOutcome::Accepted {
+            stamp_value,
+            duplicate,
+            ..
+        } => {
+            assert!(stamp_value >= 13);
+            assert!(!duplicate);
+        }
+        other => panic!("a stamp worth 13 must be taken: {other:?}"),
+    }
+    flush_messages(role.store_mut(), &region, &mut log);
+    assert!(role.store().contains(&transient_id).unwrap());
+
+    let announce = leviculum_lxmf::PropagationNodeAnnounce::decode(&role.announce_app_data(1000))
+        .expect("the board's announce decodes");
+    assert_eq!(
+        (
+            announce.stamp_cost,
+            announce.stamp_cost_flexibility,
+            announce.peering_cost
+        ),
+        (13, 0, 1),
+        "field 5"
+    );
+    assert_eq!(
+        announce.transfer_limit_kb,
+        leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB
+    );
+    assert_eq!(
+        announce.sync_limit_kb,
+        leviculum_heap_budget::BOARD_SYNC_LIMIT_KB
+    );
+}
+
+/// 1295's rule on the board: a client upload above the board's announced
+/// transfer limit that the store can still hold (a body of 3 985 to 4 042 B)
+/// is stored and proven, local only, and the offer the board builds skips it
+/// for good even toward a stock peer that takes 256 KB, advancing the cursor
+/// past it; the plain builder, the positive control, would have offered it.
+#[test]
+fn an_upload_above_the_transfer_limit_is_stored_local_only_and_never_offered() {
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut role = PropagationNode::new(
+        PnStore::new(region.clone(), SECTORS),
+        board_role_config(0, 0, b"board".to_vec(), 4_000),
+    );
+    let local_body = 4_000;
+    assert!(local_body <= leviculum_record_log::MAX_BODY);
+    let mut ids = Vec::new();
+    for body_len in [local_body, 3_000] {
+        let bytes = upload_with_body(body_len);
+        assert!(board_accepts_resource_of(&role, bytes.len() as u64, false));
+        match role.handle_upload(&bytes, 1000, |_, _| Some(13)) {
+            leviculum_lxmf::UploadOutcome::Accepted {
+                transient_id, size, ..
+            } => {
+                assert_eq!(size as usize, body_len);
+                ids.push(transient_id);
+            }
+            other => panic!("a {body_len} B body must be stored: {other:?}"),
+        }
+        flush_messages(role.store_mut(), &region, &mut log);
+    }
+    assert!(role.is_local_only(local_body as u32));
+    assert!(!role.is_local_only(3_000));
+    let stored = ordered_directory(role.store());
+    assert_eq!(stored.len(), 2, "both stored");
+
+    let table = demanding_peer();
+    let peer = table.get(&[1; 16]).expect("peered");
+    let mut builder = board_offer_builder(&role, peer, OFFER_BYTES_LIMIT);
+    role.store()
+        .for_each_ordered(&mut |meta| builder.push(meta))
+        .unwrap();
+    let plan = builder.finish().expect("a plan");
+    assert_eq!(plan.ids, vec![ids[1]], "only the shared message is offered");
+    assert_eq!(
+        plan.skipped_oversize, 1,
+        "the local one is skipped for good"
+    );
+    assert_eq!(plan.cursor_target, stored[1].sequence);
+
+    let mut control = OfferBuilder::new(peer, OFFER_BYTES_LIMIT);
+    role.store()
+        .for_each_ordered(&mut |meta| control.push(meta))
+        .unwrap();
+    assert_eq!(control.finish().expect("a plan").ids, ids);
+}
+
+/// The duplicate verdict at `now` for one upload envelope.
+fn duplicate_at(role: &mut PropagationNode<PnStore<SharedRegion>>, bytes: &[u8], now: u64) -> bool {
+    match role.handle_upload(bytes, now, |_, _| Some(0)) {
+        leviculum_lxmf::UploadOutcome::Accepted { duplicate, .. } => duplicate,
+        other => panic!("expected acceptance, got {other:?}"),
+    }
+}
+
+/// 1294 item 4 on the board: a message its recipient collected is still a
+/// duplicate after a restart, from the purged record the collection left on
+/// flash, without any record format of its own. It holds until the ring
+/// reclaims the record's page; past that the copy is new again. A message
+/// the expiry sweep took is no departure, and a message never seen is new
+/// (both positive controls: the verdict is not "everything is a duplicate").
+#[test]
+fn a_collected_message_stays_a_duplicate_across_a_restart_until_its_page_is_reclaimed() {
+    const EXPIRY: u64 = leviculum_lxmf::propagation_node::MESSAGE_EXPIRY_SECS;
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut first = role(&region);
+    let collected = upload(21);
+    let expired = upload(22);
+    assert!(!duplicate_at(&mut first, &collected, 1000));
+    assert!(!duplicate_at(&mut first, &expired, 1000));
+    flush_messages(first.store_mut(), &region, &mut log);
+    let collected_id = *leviculum_lxmf::PropagationUpload::decode(&collected)
+        .unwrap()
+        .transient_id();
+    assert_eq!(
+        first.store_mut().purge_confirmed(&collected_id),
+        Ok(ConfirmedPurge::Queued)
+    );
+    flush_messages(first.store_mut(), &region, &mut log);
+
+    // The restart: a fresh role and store over the same flash.
+    let mut rebooted = role(&region);
+    assert!(
+        duplicate_at(&mut rebooted, &collected, 2000),
+        "a collected message is not stored again after a restart"
+    );
+    assert!(!duplicate_at(&mut rebooted, &upload(23), 2000));
+    assert_eq!(rebooted.store().pending_ops(), 1, "the new one is queued");
+    flush_messages(rebooted.store_mut(), &region, &mut log);
+
+    // The sweep takes the expired one; after a restart it is a new copy.
+    let swept = rebooted.tick(1000 + EXPIRY + 1);
+    assert_eq!(swept.len(), 1, "the one 1000 s message still live");
+    flush_messages(rebooted.store_mut(), &region, &mut log);
+    let mut again = role(&region);
+    assert!(!duplicate_at(&mut again, &expired, 1000 + EXPIRY + 2));
+    let _ = again.store_mut().purge(
+        leviculum_lxmf::PropagationUpload::decode(&expired)
+            .unwrap()
+            .transient_id(),
+    );
+
+    // One lap of the ring later the purged record is gone, and so is the
+    // memory of the departure.
+    let filler = (SECTORS * SECTOR_SIZE) as usize / FIELD_BODY + 8;
+    for n in 0..filler as u32 {
+        again
+            .store_mut()
+            .append(&key(1000 + n), 3000, 0, &msg_body(1, FIELD_BODY))
+            .unwrap();
+        flush_messages(again.store_mut(), &region, &mut log);
+    }
+    let mut lapped = role(&region);
+    assert!(!duplicate_at(&mut lapped, &collected, 3000));
+}
+
+fn flush_counted(
+    store: &mut PnStore<CountingRegion>,
+    region: &SharedRegion,
+    log: &mut RecordLog<SimNor>,
+) {
+    block_on(async {
+        while let Some(op) = store.peek_op().cloned() {
+            apply(log, &op).await;
+            store.op_done(true);
+            sync(region, log);
+        }
+    });
+}
+
+/// 1295's sweep on the board: the expiry tick reads the region only when
+/// something in it can have expired. The first tick measures the oldest
+/// receive time; a tick with nothing expired then reads nothing; a tick
+/// that expires walks once, the one after it once more, and then it rests.
+/// An append older than the measured time (a re-priced record, a clock set
+/// back) lowers it, so its expiry is not missed.
+#[test]
+fn the_expiry_sweep_reads_the_region_only_when_something_expired() {
+    const EXPIRY: u64 = leviculum_lxmf::propagation_node::MESSAGE_EXPIRY_SECS;
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let reads = Rc::new(Cell::new(0));
+    let counting = CountingRegion {
+        inner: region.clone(),
+        reads: reads.clone(),
+    };
+    let mut role = PropagationNode::new(
+        PnStore::new(counting, SECTORS),
+        board_role_config(0, 0, b"board".to_vec(), 4_000),
+    );
+    for (n, at) in [(1u32, 1000u32), (2, 2000), (3, 3000)] {
+        role.store_mut()
+            .append(&key(n), at.into(), 0, &msg_body(1, FIELD_BODY))
+            .unwrap();
+    }
+    flush_counted(role.store_mut(), &region, &mut log);
+    let tick = |role: &mut PropagationNode<PnStore<CountingRegion>>,
+                log: &mut RecordLog<SimNor>,
+                now: u64| {
+        let before = reads.get();
+        let evicted = role.tick(now).len();
+        flush_counted(role.store_mut(), &region, log);
+        (evicted, reads.get() - before)
+    };
+
+    assert_eq!(
+        tick(&mut role, &mut log, 999 + EXPIRY),
+        (0, 1),
+        "the first tick measures"
+    );
+    assert_eq!(
+        tick(&mut role, &mut log, 999 + EXPIRY),
+        (0, 0),
+        "nothing expired: no walk"
+    );
+    assert_eq!(
+        tick(&mut role, &mut log, 1000 + EXPIRY),
+        (0, 0),
+        "not yet past the window"
+    );
+    assert_eq!(
+        tick(&mut role, &mut log, 1001 + EXPIRY),
+        (1, 2),
+        "one walk and the purge's own scan"
+    );
+    assert_eq!(
+        tick(&mut role, &mut log, 1001 + EXPIRY),
+        (0, 1),
+        "measured once more"
+    );
+    assert_eq!(
+        tick(&mut role, &mut log, 1001 + EXPIRY),
+        (0, 0),
+        "and at rest"
+    );
+
+    role.store_mut()
+        .append(&key(4), 1500, 0, &msg_body(1, FIELD_BODY))
+        .unwrap();
+    flush_counted(role.store_mut(), &region, &mut log);
+    assert_eq!(
+        tick(&mut role, &mut log, 1600 + EXPIRY).0,
+        1,
+        "an append older than the measured time is not missed"
+    );
+}
+
+/// The expiry tick's cost on a full 16-page region of field-sized records,
+/// measured on the host: the walk every tick paid before 1355 against the
+/// tick at rest. Prints `EXPIRY_TICK` lines for the order's report; the
+/// assertion is the read count, the timing is evidence only.
+#[test]
+fn expiry_tick_cost_on_a_full_board_region() {
+    const PAGES: u32 = 16;
+    const EXPIRY: u64 = leviculum_lxmf::propagation_node::MESSAGE_EXPIRY_SECS;
+    let region = SharedRegion::new(PAGES);
+    let mut log = block_on(fresh(PAGES));
+    sync(&region, &mut log);
+    let reads = Rc::new(Cell::new(0));
+    let mut store = PnStore::new(
+        CountingRegion {
+            inner: region.clone(),
+            reads: reads.clone(),
+        },
+        PAGES,
+    );
+    let records = (PAGES * SECTOR_SIZE) as usize / (FIELD_BODY + 48);
+    for n in 0..records as u32 {
+        store
+            .append(&key(n), 1000 + u64::from(n), 0, &msg_body(1, FIELD_BODY))
+            .unwrap();
+        flush_counted(&mut store, &region, &mut log);
+    }
+    let now = 999 + EXPIRY;
+    let mut visits = 0;
+    let started = std::time::Instant::now();
+    PropagationStore::for_each(&store, &mut |_| visits += 1).unwrap();
+    let walk = started.elapsed();
+    let mut role = PropagationNode::new(store, board_role_config(0, 0, b"b".to_vec(), 4_000));
+    let _ = role.tick(now);
+    let before = reads.get();
+    let started = std::time::Instant::now();
+    let evicted = role.tick(now);
+    let rest = started.elapsed();
+    assert!(evicted.is_empty());
+    assert_eq!(reads.get(), before, "a tick at rest reads nothing");
+    std::eprintln!(
+        "EXPIRY_TICK records={visits} walk_us={} rest_us={}",
+        walk.as_micros(),
+        rest.as_micros()
+    );
 }

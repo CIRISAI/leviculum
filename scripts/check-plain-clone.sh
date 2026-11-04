@@ -117,7 +117,7 @@ EOF
 selftest_failed=0
 bad_hits="$(scan "$SELFTEST_DIR/bad")"
 for fixture in in_src in_tests; do
-    if ! printf '%s' "$bad_hits" | grep -q "$fixture.rs"; then
+    if ! grep -q "$fixture.rs" <<<"$bad_hits"; then
         echo "check-plain-clone: SELF-TEST FAILED — '$fixture' was not caught." >&2
         selftest_failed=1
     fi

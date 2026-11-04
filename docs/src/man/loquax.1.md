@@ -23,6 +23,8 @@ loquax -- LXMF messenger for Reticulum, in a window or the terminal
 **loquax mailbox revoke** *device*
 **loquax mailbox tokens**
 **loquax mailbox revoke-token** *prefix*
+**loquax mailbox archive**
+**loquax mailbox ratchets**
 
 ## DESCRIPTION
 
@@ -128,6 +130,8 @@ Loquax Mailbox is the always-on part: one machine that holds the LXMF identity a
 **mailbox devices**, on the mailbox, lists the admitted devices: hash, name, when admitted.
 
 **mailbox tokens**, on the mailbox, lists the codes not yet used and not yet expired: the token's first eight hex characters, the name, when it expires. **mailbox revoke-token** *prefix* withdraws one, by the start of its hash (four hex characters are enough when they are unique).
+
+**mailbox archive**, on the mailbox, prints the archive oldest first, one entry a line: the message id in hex, the entry's kind (`received`, `sent`, `propagated`, `delivered`, `mark`, `name` and the others the archive keeps) and its time in Unix seconds. Two mailboxes of one identity that print the same lines hold the same history. **mailbox ratchets** prints `ratchets=`*count* `ring=`*hash*, the SHA-256 over the public keys of the delivery address's ratchets, newest first, or `ratchets=0` before it has one; two mailboxes with one ring open the same packets, and the private keys never leave the file.
 
 **mailbox revoke** *device*, on the mailbox, removes a device, named by its name or its hash (four hex characters are enough when they are unique). A name two devices share removes neither and lists both. The mailbox checks every request, so a revoked device is refused at once.
 

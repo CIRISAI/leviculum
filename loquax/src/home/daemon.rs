@@ -679,17 +679,28 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 schedule.on(SyncEvent::Start, now_ms());
                             }
                         }
-                        OutboxEvent::Packed { message_id, packed } => {
+                        OutboxEvent::Packed { message_id, packed, arrived } => {
                             let Ok(new) = archive(&mut store, &message_id, &packed, archive_cap_bytes)
                             else {
                                 // Not archived, so not proven: the sender
                                 // tries again, or propagates.
                                 continue;
                             };
+                            crate::events::home_accept(
+                                &message_id,
+                                &source_of(&packed).unwrap_or([0; 16]),
+                                arrived.as_str(),
+                                &address,
+                            );
                             // Archived, now or before: the sender may be
                             // told so (1239).
                             // An engine that went away is said by the next pump.
-                            let _ = attached.outbox.submit(Command::Prove { message_id });
+                            let proving = attached.outbox.submit(Command::Prove { message_id }).is_ok();
+                            // A propagated message has no proof to release:
+                            // the propagation node took it, not its sender.
+                            if proving && arrived != crate::outbox::Arrived::Propagated {
+                                crate::events::home_prove(&message_id, &address);
+                            }
                             if let Some(seq) = new {
                                 wakes.appended(seq);
                                 if let Some(source) = source_of(&packed) {
@@ -730,6 +741,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::Refused { detail } => {
                             tracing::info!("HOME outbox refused: {detail}");
+                        }
+                        OutboxEvent::KeyWanted { message_id, destination } => {
+                            tracing::info!("{}", key_wanted_line(&message_id, &destination));
                         }
                         OutboxEvent::NodeAnnounced { destination }
                             if Some(destination) == selected_pn =>
@@ -915,7 +929,9 @@ fn pump_group<O: Outbox>(
             }
         };
         match event {
-            OutboxEvent::Packed { message_id, packed } if group.ended => {
+            OutboxEvent::Packed {
+                message_id, packed, ..
+            } if group.ended => {
                 // A deleted group keeps nothing and sends nothing on: the
                 // writer's client stops retrying (as for a stranger).
                 tracing::info!(
@@ -926,7 +942,9 @@ fn pump_group<O: Outbox>(
                 drop(packed);
                 let _ = group.engine.submit(Command::Prove { message_id });
             }
-            OutboxEvent::Packed { message_id, packed } => {
+            OutboxEvent::Packed {
+                message_id, packed, ..
+            } => {
                 let now = unix_now();
                 let new = match store.archive_append(
                     crate::home::KIND_GROUP,
@@ -1584,16 +1602,8 @@ impl Sender {
                 Leg::Direct => None,
             };
             tracing::info!(
-                "HOME outbox {} {} message={}{}{}",
-                leg_word(leg),
-                match outcome {
-                    Outcome::Delivered => "delivered",
-                    Outcome::Sent => "handed-on",
-                    Outcome::Failed => "failed",
-                },
-                crate::address::to_hex(id),
-                node_field(node),
-                reason.map_or_else(String::new, |reason| format!(" reason={reason}"))
+                "{}",
+                left_line(leg, outcome, outgoing.unanswered(id), id, node, reason)
             );
         }
         let acts = outgoing.left(id, outcome, unix_now());
@@ -1759,6 +1769,18 @@ impl Sender {
     }
 }
 
+/// The line a propagated leg that waits for its recipient's key leaves,
+/// once and again every [`crate::engine::KEY_WAIT_SAY_MS`] (1305): without
+/// the key it can be neither encrypted nor stamped, and the router asks the
+/// recipient's path until an announce brings it.
+fn key_wanted_line(id: &[u8; 32], destination: &[u8; 16]) -> String {
+    format!(
+        "HOME outbox propagated waiting message={} reason=no key for {}, path requested",
+        crate::address::to_hex(id),
+        crate::address::to_hex(&destination[..4])
+    )
+}
+
 /// The ` pn=` a propagated leg's lines carry: the node's first four bytes,
 /// as `PN_PULL` names it, so the two read side by side (1330).
 fn node_field(node: Option<[u8; 16]>) -> String {
@@ -1777,6 +1799,39 @@ fn pn_pull_line(n: usize, pn: Option<[u8; 16]>, schedule: &Schedule, now_ms: u64
         |next| (next.saturating_sub(now_ms) / 1000).to_string(),
     );
     format!("PN_PULL n={n} pn={pn} next_in_s={next}")
+}
+
+/// The line a leg the router let go of leaves. A direct leg that failed
+/// before the recipient answered is told as the outbox's own answer bound
+/// tells it, `unanswered`, with the router's reason (1331): the two are one
+/// fact, and which of them ends the leg first is no matter for the log.
+fn left_line(
+    leg: Leg,
+    outcome: Outcome,
+    unanswered: bool,
+    id: &[u8; 32],
+    node: Option<[u8; 16]>,
+    reason: Option<&str>,
+) -> String {
+    let id = crate::address::to_hex(id);
+    if leg == Leg::Direct && outcome == Outcome::Failed && unanswered {
+        return format!(
+            "HOME outbox direct unanswered message={id}: reason=router: {}, \
+             offering the propagation node",
+            reason.unwrap_or("failed")
+        );
+    }
+    format!(
+        "HOME outbox {} {} message={id}{}{}",
+        leg_word(leg),
+        match outcome {
+            Outcome::Delivered => "delivered",
+            Outcome::Sent => "handed-on",
+            Outcome::Failed => "failed",
+        },
+        node_field(node),
+        reason.map_or_else(String::new, |reason| format!(" reason={reason}"))
+    )
 }
 
 /// The router reported `state` for `id`: a sign of its leg, and from
@@ -1949,6 +2004,74 @@ mod tests {
         );
         assert_eq!(announce_period(Some(at), at + 86_400), ANNOUNCE_EVERY);
         assert_eq!(announce_period(Some(at), at - 10), ANNOUNCE_EVERY);
+    }
+
+    /// 1331: the router ending a direct leg nobody answered logs the line
+    /// the outbox's own bound logs, `unanswered`, with the router's reason;
+    /// a direct leg the recipient answered and a propagated leg log as
+    /// they did.
+    #[test]
+    fn a_router_failure_of_an_unanswered_direct_leg_is_told_as_unanswered() {
+        let id = [0xab; 32];
+        let hex = crate::address::to_hex(&id);
+        assert_eq!(
+            left_line(
+                Leg::Direct,
+                Outcome::Failed,
+                true,
+                &id,
+                None,
+                Some("failed")
+            ),
+            format!(
+                "HOME outbox direct unanswered message={hex}: reason=router: failed, \
+                 offering the propagation node"
+            )
+        );
+        assert_eq!(
+            left_line(
+                Leg::Direct,
+                Outcome::Failed,
+                false,
+                &id,
+                None,
+                Some("failed")
+            ),
+            format!("HOME outbox direct failed message={hex} reason=failed")
+        );
+        assert_eq!(
+            left_line(Leg::Direct, Outcome::Delivered, true, &id, None, None),
+            format!("HOME outbox direct delivered message={hex}")
+        );
+        assert_eq!(
+            left_line(
+                Leg::Propagated,
+                Outcome::Failed,
+                true,
+                &id,
+                Some([0x63, 0x52, 0x98, 0xc8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+                Some("rejected")
+            ),
+            format!("HOME outbox propagated failed message={hex} pn=635298c8 reason=rejected")
+        );
+    }
+
+    /// 1305: a propagated leg that waits for its recipient's key says why,
+    /// in the words miauhaus lacked on 2026-11-02.
+    #[test]
+    fn a_leg_waiting_for_a_key_names_the_recipient() {
+        let id = [0xab; 32];
+        assert_eq!(
+            key_wanted_line(
+                &id,
+                &[0x63, 0x52, 0x98, 0xc8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+            ),
+            format!(
+                "HOME outbox propagated waiting message={} reason=no key for 635298c8, \
+                 path requested",
+                crate::address::to_hex(&id)
+            )
+        );
     }
 
     /// 1293: a collection that found nothing says so, with the node and
@@ -2229,6 +2352,7 @@ mod tests {
         let arrived = OutboxEvent::Packed {
             message_id: original.message_id,
             packed: packed.clone(),
+            arrived: crate::outbox::Arrived::Direct,
         };
         let mut engine = GroupEngine {
             hosted: hosted.clone(),
@@ -2349,6 +2473,7 @@ mod tests {
             engine: FakeOutbox::new(vec![OutboxEvent::Packed {
                 message_id: original.message_id,
                 packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
@@ -2474,6 +2599,7 @@ mod tests {
             engine: FakeOutbox::new(vec![OutboxEvent::Packed {
                 message_id: original.message_id,
                 packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: Some(PN),
@@ -2617,6 +2743,7 @@ mod tests {
             engine: FakeOutbox::new(vec![OutboxEvent::Packed {
                 message_id: original.message_id,
                 packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
@@ -2785,6 +2912,7 @@ mod tests {
             engine: FakeOutbox::new(vec![OutboxEvent::Packed {
                 message_id: original.message_id,
                 packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
             }]),
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: Some(PN),

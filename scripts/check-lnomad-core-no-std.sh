@@ -54,7 +54,7 @@ control() {
     cp "$ROOT/leviculum-micron/Cargo.toml" "$tmp/leviculum-micron/Cargo.toml"
     printf '%s\n' "$INJECTED" >> "$tmp/lnomad/src/app/model.rs"
     out="$(check_thumb "$tmp" --offline)" || rc=$?
-    if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qF 'std::fs::metadata'; then
+    if [ "$rc" -eq 0 ] || ! grep -qF 'std::fs::metadata' <<<"$out"; then
         echo "$TAG CONTROL FAIL: a std::fs call injected into the core was not refused (exit $rc)"
         printf '%s\n' "$out" | sed 's/^/  /'
         return 1

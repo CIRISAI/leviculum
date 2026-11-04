@@ -16,7 +16,7 @@ impl Date {
             Some(date) if date.len() == 0 => Ok(None),
             Some(date) if date.len() < 6 => Err("Date input string is too short!"),
             Some(date) => Ok(Some(Date {
-                day: (&date[..2])
+                day: crate::common::field(date, ..2)
                     .parse()
                     .map_err(|_| "Day string is not a number!")
                     .and_then(|d| {
@@ -26,7 +26,7 @@ impl Date {
                             Err("Day is not in range 1-31")
                         }
                     })?,
-                month: (&date[2..4])
+                month: crate::common::field(date, 2..4)
                     .parse()
                     .map_err(|_| "Month string is not a number!")
                     .and_then(|m| {
@@ -36,7 +36,7 @@ impl Date {
                             Err("Months is not in range 1-12")
                         }
                     })?,
-                year: (&date[4..6])
+                year: crate::common::field(date, 4..6)
                     .parse::<u16>()
                     .map(|year| if year > 69 { year + 1900 } else { year + 2000 })
                     .map_err(|_| "Year string is not a number!")?,
@@ -63,7 +63,7 @@ impl Time {
             Some(time) if time.len() == 0 => Ok(None),
             Some(time) if time.len() < 6 => Err("Date input string is too short!"),
             Some(time) => Ok(Some(Time {
-                hours: (&time[..2])
+                hours: crate::common::field(time, ..2)
                     .parse()
                     .map_err(|_| "Hours string is not a number!")
                     .and_then(|h| {
@@ -73,7 +73,7 @@ impl Time {
                             Err("Hours is not in range 0-23")
                         }
                     })?,
-                minutes: (&time[2..4])
+                minutes: crate::common::field(time, 2..4)
                     .parse()
                     .map_err(|_| "Minutes string is not a number!")
                     .and_then(|m| {
@@ -83,7 +83,7 @@ impl Time {
                             Err("Minutes is not in range 0-59")
                         }
                     })?,
-                seconds: crate::fixed::f32_from_str(&time[4..])
+                seconds: crate::fixed::f32_from_str(crate::common::field(time, 4..))
                     .ok_or("Seconds string is not a float")
                     .and_then(|s| {
                         if s < 60f32 {

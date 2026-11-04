@@ -33,8 +33,14 @@
 #   bash scripts/check-nrf-flash-budget.sh <floor>      # another floor, bytes
 #   bash scripts/check-nrf-flash-budget.sh --selftest   # fake images, no build
 #
-# Exit 0 = every image links and keeps the floor free. Exit 1 = one does not,
-# or a selftest case did not behave.
+# The images are built with scripts/nrf-rustflags.sh, which remaps the
+# checkout's, the registry's and the toolchain's paths (order 1368), so the
+# bytes do not depend on where the tree is checked out. The gate holds that
+# too: an image whose .rodata still carries `/home/` is red, a host path that
+# reached the board through a root the remap does not know.
+#
+# Exit 0 = every image links, keeps the floor free and carries no host path.
+# Exit 1 = one does not, or a selftest case did not behave.
 
 set -uo pipefail
 
@@ -97,6 +103,32 @@ verdict() {
     return 0
 }
 
+# host_path_verdict <board> <rodata blob>: red when the blob holds `/home/`.
+# Panic locations are the bulk of what lands there; 1300 counted about 5.6 KB
+# of them per image before the remap, and with them the image size moved with
+# the checkout path (1326).
+host_path_verdict() {
+    local board="$1" blob="$2" n
+    n="$(grep -ac '/home/' "$blob")"
+    if [ "$n" -ne 0 ]; then
+        echo "[flash-budget] FAIL $board: .rodata carries a host path ($n line(s) with /home/), e.g.:"
+        grep -ao '/home/[[:graph:]]*' "$blob" | head -3 | sed 's/^/    /'
+        echo "[flash-budget] Build through scripts/nrf-rustflags.sh, or teach it the missing root."
+        return 1
+    fi
+    return 0
+}
+
+# check_host_paths <board> <elf> <scratch dir>
+check_host_paths() {
+    local board="$1" elf="$2" blob="$3/$1.rodata"
+    "$OBJCOPY" -O binary --only-section=.rodata "$elf" "$blob" || {
+        echo "[flash-budget] FAIL $board: could not extract .rodata from $elf"
+        return 1
+    }
+    host_path_verdict "$board" "$blob"
+}
+
 # measure_elf <board> <elf> <origin> <length> <floor>
 measure_elf() {
     local board="$1" elf="$2" origin="$3" length="$4" floor="$5" end
@@ -129,6 +161,9 @@ run() {
     # shellcheck source=scripts/cargo-target-dir.sh
     source "$ROOT/scripts/cargo-target-dir.sh"
     out="$(cargo_target_dir "$NRF")" || exit 1
+    # shellcheck source=scripts/nrf-rustflags.sh
+    source "$ROOT/scripts/nrf-rustflags.sh"
+    nrf_rustflags_export || exit 1
     logdir="$out/flash-budget"
     mkdir -p "$logdir"
     for entry in "${IMAGES[@]}"; do
@@ -137,6 +172,7 @@ run() {
         log="$logdir/$board.log"
         if (cd "$NRF" && cargo build --release --bin "$board" --features "$features") >"$log" 2>&1; then
             measure_elf "$board" "$out/thumbv7em-none-eabihf/release/$board" "$origin" "$length" "$floor" || rc=1
+            check_host_paths "$board" "$out/thumbv7em-none-eabihf/release/$board" "$logdir" || rc=1
         else
             measure_log "$board" "$log" "$length" "$floor" || rc=1
         fi
@@ -224,6 +260,14 @@ LOG
     expect 1 "[flash-budget] FAIL broken: the build failed for another reason than flash size:" \
         "a compile error is red without a number" measure_log broken "$dir/broken.log" "$length" "$DEFAULT_FLOOR"
 
+    # The host-path guard: a .rodata with a registry path in it is red, one
+    # with only remapped paths is not.
+    printf 'panicked at /home/u/.cargo/registry/src/x/lib' >"$dir/home.rodata"
+    expect 1 "[flash-budget] FAIL home: .rodata carries a host path (1 line(s) with /home/), e.g.:" \
+        "a /home/ path in .rodata is red" host_path_verdict home "$dir/home.rodata"
+    printf 'panicked at /registry/x/lib\0/src/leviculum-core/src' >"$dir/clean.rodata"
+    expect 0 "" "remapped paths pass" host_path_verdict clean "$dir/clean.rodata"
+
     if [ "$fails" -ne 0 ]; then
         echo "[flash-budget] selftest: $fails case(s) failed"
         return 1
@@ -232,6 +276,7 @@ LOG
 }
 
 READELF="$(nrf_elf_tool flash-budget readelf)" || exit 1
+OBJCOPY="$(nrf_elf_tool flash-budget objcopy)" || exit 1
 
 case "${1:-}" in
     --selftest) selftest; exit $? ;;

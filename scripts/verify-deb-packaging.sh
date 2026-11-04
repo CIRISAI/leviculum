@@ -144,7 +144,7 @@ check_package() {
         | grep -oE '\([a-z][a-z0-9_-]*\)' | tr -d '()' | sort -u || true)"
     for claim in $claimed; do
         claims=$((claims + 1))
-        if ! printf '%s\n' "$contents" | grep -qE " \./usr/bin/${claim}\$"; then
+        if ! grep -qE " \./usr/bin/${claim}\$" <<<"$contents"; then
             fail "Description names ${claim}, which the package does not install"
             unshipped=1
         fi
@@ -172,7 +172,7 @@ check_package() {
     # cargo-deb wrote; assert the result, not the intermediate.
     contains "$contents" "/usr/share/doc/${pkg}/changelog.gz" \
         "ships a changelog under its native name"
-    if echo "$contents" | grep -q "/usr/share/doc/${pkg}/changelog.Debian.gz"; then
+    if grep -q "/usr/share/doc/${pkg}/changelog.Debian.gz" <<<"$contents"; then
         fail "changelog still carries the non-native .Debian infix"
     fi
 
@@ -329,7 +329,7 @@ check_package() {
         else
             pass "lintian reports no errors"
         fi
-        if echo "$lint_out" | grep -q '^W:'; then
+        if grep -q '^W:' <<<"$lint_out"; then
             echo "$lint_out" | grep '^W:' | sed 's/^/      note: /'
         fi
     else
@@ -378,7 +378,7 @@ echo
 check_package lnomad lnomad lnomad
 # lnomad is deliberately service-free: it is a terminal browser, and
 # installing it must not add a unit to the system.
-if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
+if grep -q 'systemd' <<<"$CONTENTS"; then
     fail "lnomad ships a systemd unit, which it must not"
 else
     pass "ships no systemd unit"
@@ -500,7 +500,7 @@ elif [ "$ARCH" = amd64 ]; then
         "ships the bundle manifest at /usr/share/lnflash"
     contains "$CONTENTS" "_license-agreement.txt" \
         "ships the SoftDevice licence beside the blob"
-    if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
+    if grep -q 'systemd' <<<"$CONTENTS"; then
         fail "lnflash ships a systemd unit, which it must not"
     else
         pass "ships no systemd unit"
@@ -542,7 +542,7 @@ contains "$LNPND_POSTINST" "deb-systemd-invoke try-restart lnpnd.service" \
 # No conffile on purpose: the package ships no /etc/lnpnd/config — the
 # daemon writes it on first start, exactly as lxmd does in its config
 # directory, and postinst only provisions the (daemon-owned) directory.
-if printf '%s\n' "$CONTENTS" | grep -q ' \./etc/'; then
+if grep -q ' \./etc/' <<<"$CONTENTS"; then
     fail "lnpnd ships files under /etc, which its first-start design says it must not"
 else
     pass "ships nothing under /etc (first-start config, like lxmd)"
@@ -614,7 +614,7 @@ for pair in "packaging/debian/lnsd.service:leviculum" "packaging/lblogd/lblogd.s
     # match, and under `set -o pipefail` the SIGPIPE it delivers to
     # dpkg-deb would fail the pipeline precisely when the match succeeds.
     listing="$(dpkg-deb -c "$deb")"
-    if printf '%s\n' "$listing" | grep -q " \.${exec_path}\$"; then
+    if grep -q " \.${exec_path}\$" <<<"$listing"; then
         pass "$(basename "$unit") starts ${exec_path}, which ${pkg} ships"
     else
         fail "$(basename "$unit") starts ${exec_path}, which ${pkg} does not ship"

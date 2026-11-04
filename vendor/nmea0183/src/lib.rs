@@ -176,7 +176,7 @@ impl TryFrom<&str> for Source {
     type Error = &'static str;
 
     fn try_from(from: &str) -> Result<Self, Self::Error> {
-        match &from[0..2] {
+        match crate::common::field(from, 0..2) {
             "GP" => Ok(Source::GPS),
             "GL" => Ok(Source::GLONASS),
             "GA" => Ok(Source::Gallileo),
@@ -460,8 +460,8 @@ impl Parser {
 
         let sentence = match source {
             #[cfg(feature = "mtk")]
-            Source::MTK => Sentence::try_from(&sentence_field[0..4])?,
-            _ => Sentence::try_from(&sentence_field[2..5])?,
+            Source::MTK => Sentence::try_from(crate::common::field(sentence_field, 0..4))?,
+            _ => Sentence::try_from(crate::common::field(sentence_field, 2..5))?,
         };
 
         if self.sentence_mask.is_masked(sentence) {
@@ -481,7 +481,7 @@ impl Parser {
                 if sentence_field.len() < 7 {
                     return Err("PMTK Sentence field is too small. Must be 7 chars at least!");
                 }
-                match MTKPacketType::try_from(&sentence_field[4..7])? {
+                match MTKPacketType::try_from(crate::common::field(sentence_field, 4..7))? {
                     MTKPacketType::SPF => {
                         Ok(Some(ParseResult::PMTK(PMTKSPF::parse(source, &mut iter)?)))
                     }

@@ -32,6 +32,7 @@
   - [Loquax: the user interface](concepts/loquax-ui.md)
   - [Loquax: keys, mouse and layout](concepts/loquax-keys-and-layout.md)
   - [Loquax: read receipts](concepts/loquax-read-receipts.md)
+  - [Loquax: receipts for propagated post](concepts/loquax-propagation-receipts.md)
   - [Loquax: photos](concepts/loquax-photos.md)
   - [Loquax: files](concepts/loquax-files.md)
   - [Loquax: voice messages](concepts/loquax-voice.md)

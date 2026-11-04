@@ -210,6 +210,12 @@ mod tests {
             handles[0].info.kind,
             leviculum_core::traits::InterfaceKind::Ble
         );
+        // Codeberg #230, order 1380: BLE is a radio and declares the
+        // announce re-hear evidence rule for its direct links.
+        assert_eq!(
+            handles[0].info.path_choice,
+            leviculum_core::transport::PathChoice::HopsAndLoss
+        );
     }
 
     /// Disabling both roles is a config error, not a silent no-op

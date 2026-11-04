@@ -209,6 +209,52 @@ pub trait PropagationStore {
         Ok(())
     }
 
+    /// Visit the entries whose [`StoredMessage::received_at`] is below
+    /// `before`, in no promised order, until `visit` breaks: the walk the
+    /// role's expiry sweep reads
+    /// ([`PropagationNode::tick`](crate::PropagationNode::tick)).
+    ///
+    /// The default is one directory pass, so it costs the whole store
+    /// whatever expired. A store that keeps its entries in receive-time
+    /// order overrides it to cost what the visitor reads: the host node
+    /// walked 300 000 entries for it every maintenance tick, under the core
+    /// lock (leviculum#478).
+    fn for_each_received_before(
+        &self,
+        before: u64,
+        visit: &mut dyn FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        let mut done = false;
+        self.for_each(&mut |meta| {
+            if !done && meta.received_at < before {
+                done = visit(meta).is_break();
+            }
+        })
+    }
+
+    /// For each of `cursors`, how many entries have a
+    /// [`StoredMessage::sequence`] above it and a
+    /// [`StoredMessage::size`] of at most `largest_size`: a peer's
+    /// unhandled count, what its next sync would look at
+    /// ([`PropagationNode::unhandled_above`](crate::PropagationNode::unhandled_above)).
+    ///
+    /// The default collects one directory pass, sorts it and searches each
+    /// cursor, `O(n log n)`. A store that keeps a counting index overrides
+    /// it to `O(log n)` a cursor: the host node walked 320 000 entries per
+    /// peer for every `--status` request (leviculum#478, order 1370).
+    fn count_above_cursors(
+        &self,
+        cursors: &[u64],
+        largest_size: u64,
+    ) -> Result<Vec<u64>, StorageError> {
+        count_above_cursors_by_walk(self, cursors, largest_size)
+    }
+
+    /// The `largest_size` [`Self::count_above_cursors`] will be asked with,
+    /// told by the role when it is built so a counting index can weigh its
+    /// entries by it. The default keeps no index and ignores it.
+    fn count_sizes_up_to(&mut self, _largest_size: u64) {}
+
     /// Remove one message. Returns whether it was present.
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError>;
 
@@ -269,6 +315,23 @@ pub trait PropagationStore {
     /// mount already pays for.
     fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError>;
 
+    /// Whether the store itself still remembers that a message received at
+    /// or after `received_since` left it before it expired, so a restart
+    /// does not turn its re-offer into a new copy (the reference persists
+    /// its whole duplicate set, `reference/LXMF/LXMF/LXMRouter.py:1018-1024`).
+    ///
+    /// Default `false`: a host persists its departures beside the store
+    /// ([`crate::PropagationNode::restore_departures`]). The board's record
+    /// log keeps a purged record on flash until its page is reclaimed, and
+    /// answers from that (`leviculum-nrf/pn-store`).
+    fn departed(
+        &self,
+        _transient_id: &TransientId,
+        _received_since: u64,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
     /// Number of stored messages — one directory pass by default; the record
     /// log's mount already reports the same count
     /// (`leviculum-nrf/record-log/src/lib.rs:420`).
@@ -286,6 +349,30 @@ pub trait PropagationStore {
         self.for_each(&mut |meta| newest = newest.max(meta.sequence))?;
         Ok(newest)
     }
+}
+
+/// [`PropagationStore::count_above_cursors`] over one directory pass, sorted
+/// once and searched per cursor: the trait's default, and the answer a
+/// counting index falls back to when asked for a size it does not weigh.
+pub fn count_above_cursors_by_walk<S: PropagationStore + ?Sized>(
+    store: &S,
+    cursors: &[u64],
+    largest_size: u64,
+) -> Result<Vec<u64>, StorageError> {
+    let mut sequences: Vec<u64> = Vec::new();
+    store.for_each(&mut |meta| {
+        if u64::from(meta.size) <= largest_size {
+            sequences.push(meta.sequence);
+        }
+    })?;
+    sequences.sort_unstable();
+    Ok(cursors
+        .iter()
+        .map(|cursor| {
+            let at_or_below = sequences.partition_point(|sequence| sequence <= cursor);
+            (sequences.len() - at_or_below) as u64
+        })
+        .collect())
 }
 
 /// Reading one stored body, separated from the metadata verbs so a store

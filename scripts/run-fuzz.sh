@@ -265,7 +265,7 @@ for crate_rel in $CRATES; do
     for f in "$FUZZ_DIR"/fuzz_targets/*.rs; do
         [ -e "$f" ] || continue
         name="$(basename "$f" .rs)"
-        if ! printf '%s\n' "$listed" | grep -qx -- "$name"; then
+        if ! grep -qx -- "$name" <<<"$listed"; then
             die "$crate_rel/fuzz_targets/$name.rs is not a [[bin]] in $crate_rel/Cargo.toml,
        so no run reaches it"
         fi

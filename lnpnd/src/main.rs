@@ -59,8 +59,9 @@ const VERSION: &str = env!("LEVICULUM_VERSION");
                   lxmd nodes alike.\n\n\
                   Set LEVICULUM_EVENT_LOG=<path> for one structured line per \
                   accepted upload (PN_ACCEPT), rejected upload (PN_REJECT), \
-                  mailbox request (PN_GET), eviction (PN_EVICT), peering \
-                  change (PN_PEER), offer round (PN_OFFER), sync round \
+                  mailbox request (PN_GET), eviction (PN_EVICT), departure \
+                  with its reason (PN_DEPART), status query (PN_STATUS), \
+                  peering change (PN_PEER), offer round (PN_OFFER), sync round \
                   (PN_SYNC) and own-mailbox delivery (PN_MAILBOX), plus a \
                   PN_STORE line every 8 minutes carrying store size against \
                   the limit -- which is also the log's liveness heartbeat. \
@@ -365,6 +366,16 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
     ExitCode::from(code)
 }
 
+/// The per-message transfer limit an unset key resolves to, lxmd's
+/// `PROPAGATION_LIMIT` (`reference/LXMF/LXMF/LXMRouter.py:55`). It was 4
+/// until 1294, against the example config's 256: a stock peer then sent
+/// us nothing above 4 KB, and an upload above it stayed here for good.
+const DEFAULT_TRANSFER_LIMIT_KB: u64 = 256;
+
+/// The per-sync limit an unset key resolves to, lxmd's `SYNC_LIMIT`,
+/// 40 transfers (`reference/LXMF/LXMF/LXMRouter.py:59`); 32 until 1294.
+const DEFAULT_SYNC_LIMIT_KB: u64 = 256 * 40;
+
 /// Everything the daemon reads from config + flags, resolved.
 struct Effective {
     node_name: Option<String>,
@@ -381,6 +392,7 @@ struct Effective {
     remote_peering_cost_max: u8,
     max_peers: usize,
     static_peers: Vec<[u8; 16]>,
+    prioritised_destinations: Vec<[u8; 16]>,
     from_static_only: bool,
     max_inbound_syncs: usize,
     auth_required: bool,
@@ -456,14 +468,14 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             // (`lxmd.py:165-177`).
             file.get_u64("propagation", "propagation_message_max_accepted_size")?
                 .or(file.get_u64("propagation", "propagation_transfer_max_accepted_size")?)
-                .unwrap_or(4),
+                .unwrap_or(DEFAULT_TRANSFER_LIMIT_KB),
         ),
         sync_limit_kb: args.sync_limit_kb.unwrap_or(
             file.get_u64("propagation", "propagation_sync_max_accepted_size")?
-                .unwrap_or(32),
+                .unwrap_or(DEFAULT_SYNC_LIMIT_KB),
         ),
-        // Unset costs are the role's own defaults, 13 / 3 / 1 (Lead,
-        // 2026-09-12), one source with the board's.
+        // Unset costs are the role's own defaults, 13 / 0 / 1 (Lead,
+        // 2026-09-12; flexibility 0 since 1294), one source with the board's.
         stamp_cost: args.stamp_cost.unwrap_or(
             file.get_u8("propagation", "propagation_stamp_cost_target")?
                 .unwrap_or(leviculum_lxmf::PropagationNodeConfig::default().stamp_cost),
@@ -507,6 +519,12 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             }
             hashes
         },
+        // lxmd reads the list and prioritises each valid hash
+        // (`reference/LXMF/LXMF/Utilities/lxmd.py:214-217`, `:446-450`);
+        // a bad hash is a config error here, as in `static_peers`.
+        prioritised_destinations: file
+            .get_hash_list("propagation", "prioritise_destinations")?
+            .unwrap_or_default(),
         from_static_only: args.from_static_only
             || file
                 .get_bool("propagation", "from_static_only")?
@@ -643,6 +661,16 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         store_free_kb(&store),
         effective.store_limit_kb
     );
+    // What the start cost, and whether the index file spared it the walk
+    // (order 1376: 130 s at 323 597 messages before it did).
+    let opened = store.open_profile();
+    eprintln!(
+        "lnpnd: message store opened in {} ms, index file {}, {} from it, {} file(s) read",
+        opened.total_us / 1000,
+        opened.index_file.as_str(),
+        opened.from_index_file,
+        opened.files_read
+    );
     // From here on the durable writes run on the store's own writer thread,
     // not in the hooks that hold the core lock (order 1081); the re-pricing
     // above ran before, inline, while nothing else was waiting.
@@ -675,8 +703,26 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         stamp_cost_flexibility: effective.stamp_cost_flexibility,
         peering_cost: effective.peering_cost,
         name: effective.node_name.clone().map(String::into_bytes),
+        prioritised_destinations: effective.prioritised_destinations.clone(),
         ..leviculum_lxmf::PropagationNodeConfig::default()
     };
+    // Honoured, but said: a message stamped below what a stock peer takes
+    // from us stays on this node until it expires (order 1294).
+    if leviculum_lxmf::PropagationNode::new(
+        leviculum_lxmf::MemoryPropagationStore::new(0),
+        node_config.clone(),
+    )
+    .accepts_below_stock_peers()
+    {
+        tracing::warn!(
+            "lnpnd: stamp cost {} minus flexibility {} accepts messages a stock \
+             propagation node refuses (it demands {}); they stay here until they \
+             expire",
+            effective.stamp_cost,
+            effective.stamp_cost_flexibility,
+            leviculum_lxmf::STOCK_PEER_MIN_STAMP_VALUE
+        );
+    }
     let peering = peering_config(&effective);
     let peer_store = match leviculum_std::FilePeerStore::open(data_dir.join("peers")) {
         Ok(store) => store,
@@ -704,6 +750,10 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         store_limit_bytes: effective.store_limit_kb * 1000,
         delivery_limit_kb: effective.delivery_limit_kb,
     });
+
+    // The duplicate list's departed ids, beside the message store: a
+    // message collected before a restart stays a duplicate after it.
+    let engine = engine.with_departures_path(data_dir.join("departures"));
 
     // `node_builder` owns the driver configuration, including the reason
     // this daemon has no application event channel (Codeberg #419).
@@ -1069,8 +1119,9 @@ mod tests {
         );
     }
 
-    /// A config that names no cost runs the Lead's decision of 2026-09-12:
-    /// stamp cost 13 with flexibility 3, peering cost 1. Peering cost 0
+    /// A config that names no cost runs the Lead's decision of 2026-09-12,
+    /// stamp cost 13 and peering cost 1, with flexibility 0 since order
+    /// 1294 (13 and up, what a stock peer takes from us). Peering cost 0
     /// would leave every stock lxmd peer unable to sync toward us
     /// (`peering_key_ready` returns false on a falsy cost,
     /// `reference/LXMF/LXMF/LXMPeer.py:228`). The mailbox's own stamp cost
@@ -1086,9 +1137,39 @@ mod tests {
                 effective.stamp_cost_flexibility,
                 effective.peering_cost
             ],
-            [13, 3, 1]
+            [13, 0, 1]
         );
         assert_eq!(effective.mailbox_stamp_cost, 12);
+    }
+
+    /// A config that names no size limit runs lxmd's, 256 KB per message
+    /// and 10 240 KB per sync (`reference/LXMF/LXMF/LXMRouter.py:55`,
+    /// `:59`), the values the example config shows; 4 and 32 until 1294.
+    #[test]
+    fn an_unset_size_limit_resolves_to_the_references() {
+        let file = RawConfig::parse("[propagation]\nenable_node = yes\n").expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(
+            (effective.transfer_limit_kb, effective.sync_limit_kb),
+            (256, 10_240)
+        );
+    }
+
+    /// `prioritise_destinations` reaches the role (order 1294): it was
+    /// parsed, warned about and dropped.
+    #[test]
+    fn prioritise_destinations_is_honoured() {
+        let file = RawConfig::parse(
+            "[propagation]\nprioritise_destinations = \
+             41d20c727598a3fbbdf9106133a3a0ed, d924b81822ca24e68e2effea99bcb8cf\n",
+        )
+        .expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+        assert_eq!(effective.prioritised_destinations.len(), 2);
+        assert_eq!(effective.prioritised_destinations[0][0], 0x41);
+        assert!(file.inert_keys().is_empty());
     }
 
     /// A config that names no autopeer depth peers six hops deep, the depth
@@ -1143,7 +1224,9 @@ mod tests {
         let template = lnpnd::config::EXAMPLE_CONFIG;
         for line in [
             "# propagation_stamp_cost_target = 13",
-            "# propagation_stamp_cost_flexibility = 3",
+            "# propagation_stamp_cost_flexibility = 0",
+            "# propagation_message_max_accepted_size = 256",
+            "# propagation_sync_max_accepted_size = 10240",
             "# peering_cost = 1",
             "\nautopeer_maxdepth = 6\n",
         ] {

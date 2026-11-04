@@ -386,7 +386,7 @@ pub const fn budget_reserve() -> usize {
 /// [`budget_per_link`], the carrier-independent cost of one more link.
 /// With today's numbers (node box [`NODE_BOX_BYTES`], role 21 120 B,
 /// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 696 B) the
-/// division yields 4 with 8 B over — the heap affords exactly the
+/// division yields 4 with 16 B over — the heap affords exactly the
 /// BLE-session count, and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`MAX_LINKS`]: a node box grown past
 /// that line is a budget violation at compile time, not a dead session
@@ -806,7 +806,7 @@ const _: () =
 /// prints it, at 68429da6. The board prints the same figure at runtime as
 /// `size_of_val(&*node)`: the `node_box=` of every `[HEAP_CENSUS]` line,
 /// and the argument the binaries hand `log_budget_and_assert`, whose
-/// `HEAP_BUDGET … total= slack=` follow from it. Of the 31 752 B,
+/// `HEAP_BUDGET … total= slack=` follow from it. Of the 31 744 B,
 /// `EmbeddedStorage`'s inline tables are 29 968 B
 /// (`docs/src/firmware/heap-budget.md` has the table).
 ///
@@ -843,4 +843,11 @@ const _: () =
 /// The 32 B live on the heap only between a failed decrypt and the proof
 /// request behind it. No ratchet state entered the box: the ratchet keys
 /// live in `Destination`, which a board without ratchets never fills.
-pub const NODE_BOX_BYTES: usize = 31_752;
+///
+/// 1380 (Codeberg #230) moved the path-choice evidence map, 12 B inline,
+/// into a box allocated only while some interface prices loss, beside the
+/// per-interface declaration that order added: measured on the bsp-t114
+/// build the node box is 31 744 B, 8 B smaller, and the slack is 16 B, so
+/// it now takes 17 more bytes in `NodeCore` to cost a link. The box is
+/// never allocated on a board, which declares no interface.
+pub const NODE_BOX_BYTES: usize = 31_744;

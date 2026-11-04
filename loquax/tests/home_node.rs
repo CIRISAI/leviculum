@@ -34,6 +34,31 @@ fn local(home: &std::path::Path, args: &[&str]) -> Sent {
     }
 }
 
+/// The lines of the home node's log that carry the event `name`, with the
+/// terminal colours the formatter may put around field names taken out.
+fn events(node: &HomeNode, name: &str) -> Vec<String> {
+    node.log()
+        .lines()
+        .filter(|line| line.contains(name))
+        .map(|line| {
+            let mut plain = String::new();
+            let mut chars = line.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    plain.push(c);
+                }
+            }
+            plain
+        })
+        .collect()
+}
+
 /// `loquax mailbox run` on `home`, killed with its handle. The test of a
 /// second registrar below spawns it as `loquax --daemon`, the old spelling.
 struct HomeNode {
@@ -394,6 +419,46 @@ async fn a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it() {
         node.log().contains("HOME archived message="),
         "{}",
         node.log()
+    );
+    // 1305: the home's own record of it, and the two commands that let the
+    // N-home cells compare homes.
+    let short = &message_hash[..8];
+    assert!(
+        events(&node, "HOME_ACCEPT")
+            .iter()
+            .any(|line| line.contains(&format!("msg={short}")) && line.contains("via=direct")),
+        "{}",
+        node.log()
+    );
+    assert!(
+        events(&node, "HOME_PROVE")
+            .iter()
+            .any(|line| line.contains(&format!("msg={short}"))),
+        "{}",
+        node.log()
+    );
+    assert!(
+        events(&node, "HOME_ANNOUNCE")
+            .iter()
+            .any(|line| line.contains("kind=delivery") && line.contains("iface=all")),
+        "{}",
+        node.log()
+    );
+    let archive = local(&home, &["mailbox", "archive"]);
+    assert_eq!(archive.code, Some(0), "{archive}");
+    assert!(
+        archive
+            .stdout
+            .lines()
+            .any(|line| line.starts_with(&format!("{message_hash} received "))),
+        "{archive}"
+    );
+    let ring = local(&home, &["mailbox", "ratchets"]);
+    assert_eq!(ring.code, Some(0), "{ring}");
+    let ring_line = ring.stdout.trim();
+    assert!(
+        ring_line.starts_with("ratchets=") && ring_line.contains(" ring=") && ring_line.len() > 70,
+        "{ring}"
     );
 
     // Both admitted clients pull it, the second after the first: fetching
@@ -1303,6 +1368,17 @@ async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arri
     node.wait_for_direct_end(&message_id, 90).await;
     node.wait_for(&format!("HOME outbox propagated message={message_id}"), 5)
         .await;
+    // The home has never heard the recipient: the propagated leg cannot be
+    // encrypted for the node, and says that it waits (1305).
+    node.wait_for(
+        &format!(
+            "HOME outbox propagated waiting message={message_id} reason=no key for {}, \
+             path requested",
+            &recipient_address[..8]
+        ),
+        10,
+    )
+    .await;
     // The recipient is heard once: a loquax run on its identity announces
     // on attach and leaves, failing on a node that does not exist rather
     // than collecting from the real one.
@@ -2489,7 +2565,13 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         "Lew invited you to Familie"
     );
 
-    // Anna's phone pulls the invitation and joins through its card.
+    // Anna's phone pulls the invitation and joins through its card. A
+    // scripted terminal keeps no watching link (`shell.rs`, `scripted`), so
+    // it pulls at start and not again for 15 minutes: Anna's home must
+    // hold the invitation before the phone starts, or the start pull can
+    // come first and the card never shows (1322 saw the pull answered
+    // 0.8 ms before the home archived it).
+    anna_node.wait_for("HOME invited to group=", 40).await;
     tui(
         &mesh,
         annas_phone.path(),

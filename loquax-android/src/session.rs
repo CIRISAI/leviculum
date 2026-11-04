@@ -214,12 +214,11 @@ struct Inner {
     /// What the recorder is to do (1276, `UiEffect::Recording`), by peer,
     /// until [`schema::Query::Recording`] hands it out.
     recorder: Vec<([u8; 16], Effect)>,
-    /// The platform's word on the network (1298), and whether the line
-    /// says "Reconnecting…" now.
+    /// The platform's word on the network (1298), whether the line says
+    /// "Reconnecting…" now, and the re-dials it has seen begin.
     network: loquax::home::rendezvous::Network,
     reconnecting: bool,
-    /// The network's re-dials at the last look.
-    redials: usize,
+    redials_seen: usize,
     /// What the device link cost since the last `WAKE_SUMMARY` (1346).
     costs: DeviceCosts,
 }
@@ -525,8 +524,9 @@ impl Session {
             Arc::clone(&wake),
         ));
         let mut inner = inner;
+        inner.redials_seen = network.redials();
         inner.costs.opened = Some(opened_rx);
-        inner.network = network;
+        inner.network = network.clone();
         // The Rooms (1384), where the config names a hub, as on the
         // desktop: identified as the Browse tab identifies, and shown by
         // the mailbox's name when it is here.
@@ -563,6 +563,10 @@ impl Session {
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     () = pump_wake.notified() => {}
+                    // A re-dial for a network change began or ended: the
+                    // line follows it even while the pump sleeps idle
+                    // (1334).
+                    () = network.turned() => {}
                 }
                 let Ok(mut inner) = pumped.lock() else {
                     return;
@@ -1873,7 +1877,7 @@ impl Inner {
             recorder: Vec::new(),
             network: loquax::home::rendezvous::Network::new(),
             reconnecting: false,
-            redials: 0,
+            redials_seen: 0,
             costs: DeviceCosts::default(),
         })
     }
@@ -2135,13 +2139,15 @@ impl Inner {
 
     /// After a network change (1298): the line says "Reconnecting…" while
     /// a rotation that dropped its connection for it is not up again, and
-    /// is gone once every one is.
+    /// is gone once every one is. A re-dial that began and is up again
+    /// since the last look says both, in order (1334): the pump looks on
+    /// each begin and end, but a loopback or fast entry is up before it.
     fn look_at_network(&mut self) {
         // A re-dial that came and went between two looks is said all the
         // same: "reconnecting", then "back" in the same turn (1346).
         let redials = self.network.redials();
-        if redials != self.redials {
-            self.redials = redials;
+        if redials != self.redials_seen {
+            self.redials_seen = redials;
             if !self.reconnecting {
                 self.say_network(true);
             }

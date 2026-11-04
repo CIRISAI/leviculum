@@ -131,6 +131,17 @@ async fn run_script(connected: bool) -> (Helper, Helper) {
             "both messages must arrive: {:?}",
             (&alice.events, &bob.events)
         );
+        // The proof travels back after the message arrived, so arrival
+        // alone does not mean the sender has seen it yet.
+        let proven = pump_until(&mut alice, &mut bob, Duration::from_secs(30), |a, b| {
+            a.seen("lxmf_msg_delivered") && b.seen("lxmf_msg_delivered")
+        })
+        .await;
+        assert!(
+            proven,
+            "both senders must see their delivery proof: {:?}",
+            (&alice.events, &bob.events)
+        );
     }
 
     // lxmf_stop.
@@ -179,6 +190,29 @@ async fn two_helpers_exchange_messages_in_both_directions() {
             "{who} reported an error: {:?}",
             helper.find("lxmf_error")
         );
+    }
+
+    // The delivery proof, the way periculum's `proof_latency_ms` reads it:
+    // the sender's `lxmf_msg_sent` and its `lxmf_msg_delivered` name the
+    // same destination and the same message hash, and the proof is reported
+    // once.
+    for (who, helper, dst) in [("alice", &alice, &bob_hash), ("bob", &bob, &alice_hash)] {
+        let sent = helper.find("lxmf_msg_sent").expect("checked above");
+        let hash = sent
+            .field("hash")
+            .unwrap_or_else(|| panic!("{who}: lxmf_msg_sent must carry hash="));
+        assert_eq!(hash.len(), 64, "{who}: a message hash is 32 bytes of hex");
+        let proofs: Vec<_> = helper
+            .events
+            .iter()
+            .filter(|e| e.name == "lxmf_msg_delivered")
+            .collect();
+        assert_eq!(proofs.len(), 1, "{who}: one message, one proof: {proofs:?}");
+        let proof = proofs[0];
+        assert_eq!(proof.field("dst"), Some(dst.as_str()), "{who}");
+        assert_eq!(proof.field("hash"), Some(hash), "{who}");
+        assert_eq!(proof.field("state"), Some("8"), "{who}: DELIVERED is 0x08");
+        assert!(proof.field("t").is_some(), "{who}: the proof carries t=");
     }
 
     // The received events, checked the way the driver checks them plus the two
@@ -232,6 +266,11 @@ async fn nothing_is_delivered_across_a_partition() {
             !helper.seen("lxmf_msg_received"),
             "{who} received a message with no path to anyone: {:?}",
             helper.find("lxmf_msg_received")
+        );
+        assert!(
+            !helper.seen("lxmf_msg_delivered"),
+            "{who} claimed a delivery proof with no peer to prove anything: {:?}",
+            helper.find("lxmf_msg_delivered")
         );
     }
 }

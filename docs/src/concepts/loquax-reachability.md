@@ -98,9 +98,9 @@ holds no path and has no local clients, re-originates nothing: the
 reference gates the search on the receiving interface's mode
 (`reference/Reticulum/RNS/Transport.py:2918`), and so does lnsd
 (`discovers_paths`, `leviculum-core/src/traits.rs:115`;
-`leviculum-core/src/transport.rs:12501`). lnsd widens the gate only for
+`leviculum-core/src/transport.rs:12735`). lnsd widens the gate only for
 interfaces that report live peers, and today only BLE does
-(`leviculum-std/src/interfaces/ble/mod.rs:1811`). Without an announce of
+(`leviculum-std/src/interfaces/ble/mod.rs:1812`). Without an announce of
 `loquax.home` no relay holds its path either. So A worked only when the
 mailbox's own daemon was node A's direct neighbour, and failed when a
 third relay stood between them. 1196 closes it by announcing
@@ -401,6 +401,10 @@ Then `evaluate` decides what to do:
     showed meanwhile.
 
 ## What this page does not decide
+
+- **Whether a message left at the propagation node reached its
+  recipient.** That is a receipt the recipient sends:
+  [receipts for propagated post](loquax-propagation-receipts.md).
 
 - **The rendezvous list beyond `leviculum.network`**: who else is in the
   shipped list, and whether a mailbox's list is the shipped list, its

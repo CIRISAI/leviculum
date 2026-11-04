@@ -72,6 +72,7 @@ pub struct ReticulumNodeBuilder {
     max_links_explicit: Option<Option<usize>>,
     /// Explicit path expiry in seconds (takes priority over config, #464)
     path_expiry_secs_explicit: Option<u64>,
+    path_choice_explicit: Option<leviculum_core::transport::PathChoice>,
     /// Explicit auto-connect cap override (takes priority over config value).
     /// `0` disables runtime auto-connect; `N > 0` enables it capped at `N`.
     autoconnect_discovered_interfaces_explicit: Option<usize>,
@@ -128,6 +129,7 @@ impl ReticulumNodeBuilder {
             link_establishment_timeout_ms_explicit: None,
             max_links_explicit: None,
             path_expiry_secs_explicit: None,
+            path_choice_explicit: None,
             autoconnect_discovered_interfaces_explicit: None,
             discover_interfaces_explicit: None,
             connect_instance_name: None,
@@ -883,6 +885,17 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Override the route rule on every interface (Codeberg #230).
+    ///
+    /// Unset, each interface runs the rule its medium declares: the
+    /// announce re-hear evidence rule on radio interfaces (RNode, BLE), hop
+    /// count everywhere else. Overrides the config's `[reticulum]
+    /// path_choice`.
+    pub fn path_choice(mut self, choice: leviculum_core::transport::PathChoice) -> Self {
+        self.path_choice_explicit = Some(choice);
+        self
+    }
+
     /// Resolve config: pre-loaded > loaded from path > default
     fn resolve_config(&self) -> Result<Config, Error> {
         if let Some(ref config) = self.loaded_config {
@@ -1010,7 +1023,7 @@ impl ReticulumNodeBuilder {
             let identity = match id_store.load() {
                 Ok(Some(id)) => {
                     tracing::info!("Loaded transport identity: {}", hex_short(id.hash()));
-                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()));
+                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()), identity = %hex_full(id.hash()));
                     id
                 }
                 Ok(None) => {
@@ -1019,7 +1032,7 @@ impl ReticulumNodeBuilder {
                         .save(&id)
                         .map_err(|e| Error::Storage(format!("failed to save identity: {e}")))?;
                     tracing::info!("Generated new transport identity: {}", hex_short(id.hash()));
-                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()));
+                    tracing::info!(event = "IDENTITY", node = %hex_full(id.hash()), identity = %hex_full(id.hash()));
                     id
                 }
                 Err(e) => return Err(Error::Storage(format!("failed to load identity: {e}"))),
@@ -1063,6 +1076,16 @@ impl ReticulumNodeBuilder {
                 })
                 .collect();
 
+        // `[reticulum] path_choice` is an override (Codeberg #230): absent,
+        // each interface runs the rule its medium declares
+        // (`InterfaceInfo::path_choice`), so the builder is told nothing.
+        let path_choice = self
+            .path_choice_explicit
+            .or(config.reticulum.path_choice.map(|choice| choice.to_core()));
+        let core_builder = match path_choice {
+            Some(choice) => core_builder.path_choice(choice),
+            None => core_builder,
+        };
         let core_builder = core_builder
             .enable_transport(enable_transport)
             .link_keepalive(link_keepalive_secs)
@@ -1076,7 +1099,6 @@ impl ReticulumNodeBuilder {
             )
             .path_entries_dump(config.reticulum.path_entries_dump)
             .use_implicit_proof(config.reticulum.use_implicit_proof)
-            .path_choice(config.reticulum.path_choice.to_core())
             .mgmt_announce_interval_ms(
                 config
                     .reticulum

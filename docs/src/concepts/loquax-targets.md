@@ -76,7 +76,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 21 | Buildings on the map | `loquax/src/picture.rs:44` (shared) | `loquax/src/picture.rs:44` | `loquax/src/picture.rs:44` (sixel, kitty) |
 | 22 | Load the map area | `MapPane.java:36` (autoload) | `loquax/src/gui.rs:1417` | `loquax/src/ui.rs:3732` |
 | 23 | Delete all downloaded maps | `SettingsActivity.java:513` | `loquax/src/gui.rs:1028` | `loquax/src/ui.rs:3711` (palette `delete all maps`), `loquax/src/shell.rs:398` (1371) |
-| 24 | Mesh positions (nodes nearby) | `MapPane.java:456` | `loquax/src/gui.rs:1737` | `loquax/src/tui/map.rs:1457` |
+| 24 | Mesh positions (nodes nearby) | `MapPane.java:456` | `loquax/src/gui.rs:1737` | `loquax/src/tui/map.rs:1475` |
 | 25 | Share the position, once or timed | `ChatActivity.java:910`, `ShareService.java:39` | `loquax/src/gui.rs:1117`, `loquax/src/gui.rs:1125`, position by hand `loquax/src/ui/by_hand.rs:27` (1371) | `loquax/src/ui.rs:3702` (palette `position`), `loquax/src/ui.rs:3706` (`share position`, `stop sharing`) (1371) |
 | 26 | Pin | `ConversationsActivity.java:551` | row menu `loquax/src/gui/chat.rs:1136`, `loquax/src/gui.rs:1316` (1371) | `loquax/src/ui.rs:3596` |
 | 27 | Mute | `ContactActivity.java:444` | row menu (1371) | `loquax/src/ui.rs:3692` (palette `mute`) (1371) |
@@ -95,10 +95,10 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 40 | Backup | `BackupActivity.java:117` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:491` | `loquax/src/gui.rs:1139`, `loquax/src/gui.rs:2278` (the shared overlay) (1371) | `loquax/src/ui.rs:3556` |
 | 42 | Settings | `SettingsActivity.java` | `loquax/src/gui.rs:1793` | palette (`loquax/src/ui.rs:3894`, `loquax/src/ui.rs:3650`) |
-| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | `loquax/src/gui.rs:2303`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1378`, behind `browse_tab` (1369) |
-| 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:316`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:413`, bell and `loquax/src/desktop.rs:118` (1341) |
+| 43 | Browse tab | `BrowsePane.java:187` (behind `browse_tab`) | `loquax/src/gui.rs:2303`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1382`, behind `browse_tab` (1369) |
+| 44 | Notifications of new messages | `LoquaxService.java:305` | `loquax/src/gui.rs:316`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:417`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:67` | `loquax/src/gui.rs:407` (1341) | n/a |
-| 46 | Rooms tab (RRC) | `RoomsPane.java:171`, behind `rooms_hub` (1384) | `loquax/src/gui.rs:2317`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1401`, behind `rooms_hub` (1379) |
+| 46 | Rooms tab (RRC) | `RoomsPane.java:171`, behind `rooms_hub` (1384) | `loquax/src/gui.rs:2317`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1405`, behind `rooms_hub` (1379) |
 
 ## Counts
 
@@ -189,7 +189,7 @@ alike over the node each already has; the desktop shell drains the
 browser's effects (`loquax/src/browsing.rs:128`) as the phone's session
 does. The window draws the tab with lnomad's window view
 (`lnomad/src/gui.rs:681`), pictures included, and the terminal with
-lnomad's terminal view (`loquax/src/tui.rs:1378`); neither has a renderer
+lnomad's terminal view (`loquax/src/tui.rs:1382`); neither has a renderer
 of its own. The switch is the phone's, `browse_tab`, off by default on
 all three until Lew flips it. Details in
 `lnomad-everywhere.md`, "The tab on the desktop".

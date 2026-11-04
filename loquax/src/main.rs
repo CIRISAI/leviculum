@@ -235,6 +235,16 @@ enum MailboxCommand {
     /// start of its hash as `mailbox tokens` lists it (four hex characters
     /// are enough when they are unique).
     RevokeToken { prefix: String },
+    /// On the mailbox: print the archive, one entry a line, `id kind at`
+    /// (the message id in hex, the entry's kind, Unix seconds), oldest
+    /// first. Two mailboxes of one identity that hold the same lines hold
+    /// the same history.
+    Archive,
+    /// On the mailbox: print the ratchet ring of the delivery address,
+    /// `ratchets=<count> ring=<sha256 of the public keys>`, or `ratchets=0`
+    /// before it has one. Two mailboxes with one ring open the same
+    /// packets.
+    Ratchets,
 }
 
 /// `loquax mailbox setup`'s answers (`loquax::home::setup`).
@@ -2019,7 +2029,9 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
         | MailboxCommand::Devices
         | MailboxCommand::Revoke { .. }
         | MailboxCommand::Tokens
-        | MailboxCommand::RevokeToken { .. } => {}
+        | MailboxCommand::RevokeToken { .. }
+        | MailboxCommand::Archive
+        | MailboxCommand::Ratchets => {}
     }
     let home = match identity::home_dir() {
         Ok(home) => home,
@@ -2123,6 +2135,36 @@ async fn run_mailbox(command: MailboxCommand) -> ExitCode {
             }
             println!("On a desktop: loquax mailbox join {}", code.encode());
             ExitCode::SUCCESS
+        }),
+        MailboxCommand::Archive => on_home_node(&|store| match store.archive_index() {
+            Ok(entries) => {
+                for (id, kind, at) in entries {
+                    println!(
+                        "{} {} {at}",
+                        address::to_hex(&id),
+                        loquax::home::kind_word(kind)
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => failure(error, "no-store"),
+        }),
+        MailboxCommand::Ratchets => on_home_node(&|_| {
+            let identity = match identity::load_or_create(&home.join("identity")) {
+                Ok(identity) => identity,
+                Err(error) => return failure(error, "no-identity"),
+            };
+            match loquax::import::ratchets::ring_hash(&home, &identity) {
+                Ok(Some((count, hash))) => {
+                    println!("ratchets={count} ring={}", address::to_hex(&hash));
+                    ExitCode::SUCCESS
+                }
+                Ok(None) => {
+                    println!("ratchets=0");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, "failed"),
+            }
         }),
         MailboxCommand::Devices => on_home_node(&|store| match store.devices() {
             Ok(devices) => {

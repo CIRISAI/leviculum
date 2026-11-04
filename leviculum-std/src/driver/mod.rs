@@ -2041,6 +2041,10 @@ impl ReticulumNode {
                     // keeps that default; a config interface's own
                     // `register_interface_config` runs after this loop and
                     // still wins.
+                    // Route rule (Codeberg #230, order 1380): the medium
+                    // declares it, the core applies `[reticulum]
+                    // path_choice` over it when the operator set one.
+                    core.set_interface_path_choice(handle.info.id.0, handle.info.path_choice);
                     if let Some(ingress_on) = handle.info.ingress_control {
                         core.set_interface_ingress_control(handle.info.id.0, ingress_on);
                         if !ingress_on {
@@ -3560,6 +3564,18 @@ impl ReticulumNode {
     /// Get transport statistics (packets sent, received, forwarded, dropped)
     pub fn transport_stats(&self) -> leviculum_core::transport::TransportStats {
         self.inner.lock_recover().transport_stats()
+    }
+
+    /// The route rule interface `id` runs under (Codeberg #230): the
+    /// `path_choice` override when one is set, otherwise what the
+    /// interface's medium declared. Crate-only, for the registration tests.
+    /// Takes the core lock: never from a `CoreProcessor` hook.
+    #[cfg(all(test, feature = "serial"))]
+    pub(crate) fn interface_path_choice(
+        &self,
+        id: InterfaceId,
+    ) -> leviculum_core::transport::PathChoice {
+        self.inner.lock_recover().interface_path_choice(id.0)
     }
 
     /// A read-only snapshot of every interface: its name and online status
@@ -5193,6 +5209,31 @@ async fn run_event_loop(
                 if pending_removals.remove(&handle.info.id) {
                     continue;
                 }
+                // What the core committed before this interface existed goes
+                // out first, to the interfaces that existed then (order 1320).
+                // `select!` picks among ready branches at random, so a
+                // committed announce could wait in Branch 2 while this one
+                // registered the interface: the interface-up re-announce
+                // below sent the destination on it, and the queued broadcast
+                // reached it a second time, the burst a Python peer holds
+                // the third announce of. Draining here keeps the dispatch in
+                // commit order, whichever branch the loop takes first.
+                while let Ok(output) = action_dispatch_rx.try_recv() {
+                    let processor_delay = dispatch_output(
+                        output,
+                        &mut registry,
+                        event_sink.as_mut(),
+                        &inner,
+                        &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs,
+                        remote_mgmt.as_ref(),
+                        discovery_storage.as_deref(),
+                        discovery_network_identity.as_deref(),
+                        &mut discovery_heard_ifac,
+                        &completions,
+                        core_processor.as_mut(),
+                    );
+                    tighten_next_poll(&mut next_poll, processor_delay);
+                }
                 tracing::info!("New connection: {} ({})", handle.info.name, handle.info.id);
                 let is_local = handle.info.is_local_client;
                 let iface_idx = handle.info.id.0;
@@ -5200,6 +5241,7 @@ async fn run_event_loop(
                 let inherited_mode = handle.info.mode;
                 let inherited_kind = handle.info.kind;
                 let inherited_ingress = handle.info.ingress_control;
+                let declared_path_choice = handle.info.path_choice;
                 let announce_cap_bps = handle.info.announce_cap_bitrate;
                 {
                     let mut core = inner.lock_recover();
@@ -5216,6 +5258,10 @@ async fn run_event_loop(
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
                     core.set_interface_kind(iface_idx, inherited_kind);
+                    // Codeberg #230: a runtime-attached radio (a multi-RNode
+                    // vport, a hot-plugged RNode, a BLE peer) prices its
+                    // direct link like a configured one.
+                    core.set_interface_path_choice(iface_idx, declared_path_choice);
                     // Codeberg #404: a runtime-attached radio is capped like a
                     // configured one. `None` for every medium that declares no
                     // announce-cap bitrate, which is every dynamically spawned
@@ -6894,6 +6940,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -7216,6 +7263,7 @@ mod tests {
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Udp,
                     ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -8035,6 +8083,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -8869,6 +8918,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -8926,6 +8976,7 @@ mod tests {
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Unknown,
                     ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
                 },
                 incoming: inc_rx,
                 outgoing: out_tx,
@@ -9000,6 +9051,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: l_inc_rx,
             outgoing: l_out_tx,
@@ -9029,6 +9081,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -9087,6 +9140,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: p_inc_rx,
             outgoing: p_out_tx,
@@ -9166,6 +9220,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: lora_inc_rx,
             outgoing: lora_out_tx,
@@ -9194,6 +9249,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: plain_inc_rx,
             outgoing: plain_out_tx,
@@ -9276,6 +9332,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -9338,6 +9395,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -9400,6 +9458,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -9690,6 +9749,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: inc_rx,
             outgoing: out_tx,
@@ -10397,6 +10457,7 @@ mod tests {
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
                 ingress_control: None,
+                path_choice: leviculum_core::transport::PathChoice::Hops,
             },
             incoming: in_rx,
             outgoing: out_tx,
@@ -11463,6 +11524,109 @@ mod tests {
             None,
         );
         assert!(matches!(poll_completion(&mut fut), Poll::Ready(Ok(_))));
+    }
+
+    /// mvr (orders 1317, 1320): an announce committed before a new
+    /// connection registers reaches that connection once.
+    ///
+    /// The field record is the phone's mailbox in the facade test
+    /// `a_file_travels_both_ways_with_python_lxmf`: its home announce waited
+    /// in the action channel while the loop took the new-interface branch,
+    /// whose interface-up re-announce sent the destination on the new
+    /// connection, and the queued broadcast reached it a second time. With
+    /// the delivery announce that made three inside a millisecond, and the
+    /// Python peer held the third (`leviculum-std/tests/mvr/a_third_announce_on_a_fresh_interface_waits_at_python.rs`).
+    ///
+    /// Both channels hold their message before the loop runs, and `select!`
+    /// picks between the two ready branches at random, so each round is
+    /// either order. Without the drain in Branch 5, a round that took the
+    /// interface first counted two; sixteen rounds miss that order with
+    /// probability 2^-16. With it every round counts one, whatever the order.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_announce_committed_before_a_new_interface_reaches_it_once() {
+        use crate::interfaces::{InterfaceCounters, InterfaceInfo};
+        use leviculum_core::packet::{Packet, PacketType};
+        use leviculum_core::{Destination, DestinationType, Direction, Identity};
+
+        for round in 0..16 {
+            let (core, _td) = shared_test_core();
+            let dest = Destination::new(
+                Some(Identity::generate(&mut rand_core::OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "mvr1320",
+                &["home"],
+            )
+            .expect("destination");
+            let hash = *dest.hash();
+            let committed = {
+                let mut core = core.lock_recover();
+                core.register_destination(dest);
+                core.announce_destination(&hash, None).expect("announce")
+            };
+            let harness = spawn_flush_loop(Arc::clone(&core), 3600);
+
+            let (_in_tx, in_rx) = mpsc::channel(4);
+            let (out_tx, mut out_rx) = mpsc::channel(8);
+            let new_iface = InterfaceHandle {
+                next_tag: None,
+                info: InterfaceInfo {
+                    id: InterfaceId(1),
+                    name: "tcp_client_1".into(),
+                    hw_mtu: None,
+                    is_local_client: false,
+                    bitrate: None,
+                    announce_cap_bitrate: None,
+                    tx_jitter_max_ms: None,
+                    tx_hold_spread_max_ms: None,
+                    acquisition: None,
+                    frame_turnaround_ms: None,
+                    ifac: None,
+                    mode: leviculum_core::traits::InterfaceMode::default(),
+                    kind: leviculum_core::traits::InterfaceKind::Tcp,
+                    ingress_control: None,
+                    path_choice: leviculum_core::transport::PathChoice::Hops,
+                },
+                incoming: in_rx,
+                outgoing: out_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+                credit: None,
+                ready: crate::interfaces::ReadySignal::ready_immediate(),
+                teardown: None,
+            };
+
+            // Committed first, the connection after: the core's order.
+            harness
+                .action_tx
+                .send(committed)
+                .await
+                .expect("loop is live");
+            harness
+                ._new_iface_tx
+                .send(new_iface)
+                .await
+                .expect("loop is live");
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+
+            let mut count = 0;
+            while let Ok(frame) = out_rx.try_recv() {
+                if let Ok(packet) = Packet::unpack(&frame.data) {
+                    if packet.flags.packet_type == PacketType::Announce
+                        && &packet.destination_hash == hash.as_bytes()
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            harness.shutdown_tx.send(true).expect("loop is live");
+            harness.loop_handle.await.expect("loop exits cleanly");
+            assert_eq!(
+                count, 1,
+                "round {round}: the new interface carried the destination's announce {count} times"
+            );
+        }
     }
 }
 

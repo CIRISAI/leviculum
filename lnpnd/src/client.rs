@@ -448,6 +448,10 @@ fn print_status(stats: &ControlNodeStats, show_status: bool, show_peers: bool) {
         println!("          {cprs} propagation messages served to clients");
         println!("          Distribution factor is {df}");
         println!();
+        if let Some(line) = store_flow_line(stats) {
+            println!("{line}");
+            println!();
+        }
     }
 
     if show_peers {
@@ -458,6 +462,25 @@ fn print_status(stats: &ControlNodeStats, show_status: bool, show_peers: bool) {
             print_peer(peer);
         }
     }
+}
+
+/// Where the accepted messages went, in one line: our extension to
+/// `get_status`, printed only when the node reports evictions
+/// (`messagestore.evicted`, lnpnd), so the output against an `lxmd` stays
+/// line for line the reference's. Accepted is the reference's "received in
+/// total" (peers, unpeered nodes and clients), delivered is served to
+/// clients, forwarded is transferred to peers.
+fn store_flow_line(stats: &ControlNodeStats) -> Option<String> {
+    let evicted = stats.messagestore_evicted?;
+    let peered_incoming: u64 = stats.peers.iter().map(|peer| peer.incoming).sum();
+    let forwarded: u64 = stats.peers.iter().map(|peer| peer.outgoing).sum();
+    let accepted = peered_incoming
+        + stats.unpeered_propagation_incoming
+        + stats.client_propagation_messages_received;
+    Some(format!(
+        "Flow    : {accepted} accepted, {} delivered to clients, {forwarded} forwarded to peers, {evicted} evicted",
+        stats.client_propagation_messages_served
+    ))
 }
 
 fn print_peer(peer: &ControlPeerStats) {
@@ -657,6 +680,50 @@ pub fn prettytime(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stats_with(evicted: Option<u64>) -> ControlNodeStats {
+        ControlNodeStats {
+            identity_hash: [1; 16],
+            destination_hash: [2; 16],
+            uptime_secs: 60.0,
+            delivery_limit_kb: Some(1000),
+            propagation_limit_kb: Some(256),
+            sync_limit_kb: Some(10240),
+            target_stamp_cost: 13,
+            stamp_cost_flexibility: 0,
+            peering_cost: 1,
+            max_peering_cost: 26,
+            autopeer_maxdepth: Some(4),
+            from_static_only: false,
+            messagestore_count: 7,
+            messagestore_bytes: 2310,
+            messagestore_limit_bytes: Some(2_048_000_000),
+            messagestore_evicted: evicted,
+            client_propagation_messages_received: 4,
+            client_propagation_messages_served: 28,
+            unpeered_propagation_incoming: 124_932,
+            unpeered_propagation_rx_bytes: 41_300_000,
+            static_peers: 0,
+            discovered_peers: 0,
+            total_peers: 0,
+            max_peers: Some(20),
+            peers: Vec::new(),
+        }
+    }
+
+    /// Order 1295: lnpnd's status says where the accepted messages went,
+    /// and against a node that does not report evictions (an `lxmd`) the
+    /// line is absent, so that output stays the reference's.
+    #[test]
+    fn the_flow_line_counts_accepted_delivered_forwarded_and_evicted() {
+        assert_eq!(
+            store_flow_line(&stats_with(Some(0))).as_deref(),
+            Some(
+                "Flow    : 124936 accepted, 28 delivered to clients, 0 forwarded to peers, 0 evicted"
+            )
+        );
+        assert_eq!(store_flow_line(&stats_with(None)), None);
+    }
 
     /// The formatting helpers must match the reference's Python
     /// implementations on representative values, because the status

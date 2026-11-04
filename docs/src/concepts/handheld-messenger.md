@@ -40,7 +40,7 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:386`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:434`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:253`, `loquax/Cargo.toml:257`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
@@ -65,7 +65,7 @@ map as decided on 2026-10-25, and what is open.
 - **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:38`):
   - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:495`);
   - propagation nodes, both the client and the node
-    (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:889`);
+    (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:967`);
   - stamps (`CooperativeStamper`, `leviculum-lxmf/src/stamp.rs:269`).
 - **Telemetry.** [Telemetry](telemetry.md) settles positions as LXMF
   fields (`FIELD_TELEMETRY`, `FIELD_TELEMETRY_STREAM`) and the
@@ -782,16 +782,16 @@ well as into the renderer, and both must be refused for thumbv7em.
 **The page fits a packet.** A link on LoRa keeps the default MTU, 500
 bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
-resource (`leviculum-core/src/node/mod.rs:1808`), which is an
+resource (`leviculum-core/src/node/mod.rs:1811`), which is an
 advertisement, its parts and a proof. The home's own page bound is
-64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:285`). So
+64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:306`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
 that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 (`loquax/src/home/ask.rs:146`), 412, the longest answer that still fits
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
 says `more` (`fit_page`, `loquax/src/home/wire.rs:298`; the server's
-`sync`, `loquax/src/home/server.rs:1029`). A message larger than a page
+`sync`, `loquax/src/home/server.rs:1032`). A message larger than a page
 still comes alone, as a resource.
 
 **The bytes, measured** (`loquax-android/tests/m9_client.rs`). The
@@ -1147,7 +1147,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4353`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4358`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1262,7 +1262,7 @@ All targets:
   our pin on the map where it is newer than our last share; otherwise
   unchanged.
 - **Android:** the phone's own fix (`Intent::OwnFix`,
-  `loquax-android/src/session.rs:1255`) is our pin the same way;
+  `loquax-android/src/session.rs:1259`) is our pin the same way;
   otherwise unchanged.
 - **The home:** unchanged; it carries no region yet (above).
 

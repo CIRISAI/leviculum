@@ -512,6 +512,22 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- Loss-aware path choice is the default on radio interfaces (Codeberg
+  #230, 1380). With no `path_choice` in `[reticulum]`, an RNode interface
+  (a multi-RNode vport and a hot-plugged one included) and the BLE
+  interface price their direct link by its announce re-hear ratio, so a
+  marginal direct LoRa link no longer beats a clean two-hop route on hop
+  count alone; TCP, UDP, I2P, local IPC, serial, KISS, pipe and
+  AutoInterface keep hop count. `path_choice = hops` or `hops_and_loss`
+  still sets one rule for every interface. Measured on the emulated room
+  with 50 % loss on the direct pair: 8 of 8 probes on the evidence rule
+  against 5 of 8 on hop count (2026-10-06), where the hop-count arms
+  established 8, 2 and 3 of 8 links at 30, 50 and 70 % loss (2026-10-14).
+  Wire-invisible; a Python neighbour may hold a different next hop for
+  the same destination than we do, and both deliver. Boards stay on hop
+  count for now: the evidence table is a heap term their plan does not
+  fund yet.
+
 - The messenger's name is Loquax, with a capital L (#232, 1147): the
   terminal's list title and help, the window title, the messages it prints
   for people, the fallback display name and the docs say Loquax. The

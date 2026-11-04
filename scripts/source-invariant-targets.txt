@@ -127,6 +127,7 @@ skip  leviculum-lxmf  generated_field_pins       # pins generated field values; 
 skip  leviculum-lxmf  inbound_link_promise       # link state machine; subject is the code
 skip  leviculum-lxmf  lev_position_airtime       # airtime arithmetic of the position announce; subject is the code
 skip  leviculum-lxmf  lev_vectors                # vector corpus of the lev namespace; subject is the codec
+skip  leviculum-lxmf  lev_status_reference       # spawns python3 over reference/ on our announce; subject is the encoder
 skip  leviculum-lxmf  message_vectors            # vector corpus; subject is the codec
 skip  leviculum-lxmf  propagation_client         # propagation client logic; subject is the code
 skip  leviculum-lxmf  propagation_node           # propagation node logic; subject is the code
@@ -145,6 +146,7 @@ skip  leviculum-lxmf  telemetry_request          # telemetry request codec; subj
 skip  leviculum-lxmf  telemetry_roundtrip        # telemetry roundtrip; subject is the codec
 skip  leviculum-lxmf  telemetry_vectors          # vector corpus; subject is the codec
 skip  leviculum-lxmf  timebase_jump              # clock-jump behaviour; subject is the code
+skip  leviculum-lxmf  two_homes                  # two-home losses as red mvrs; subject is the code
 skip  leviculum-lxmf  wall_clock_producer        # reads a fixture, but the subject is the producer
 skip  leviculum-lxmf-node control_loopback       # tokio runtime, two nodes, sleeps
 skip  leviculum-lxmf-node deferred_resource_builds # tokio runtime and sleeps
@@ -273,5 +275,6 @@ skip  lnpnd           sigterm_flushes_storage    # spawns the daemon against a s
 skip  lnpnd           sigusr1_census             # spawns the daemon against a shared-instance socket and signals it for its census
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
 skip  lnpnd           status_under_transport_load # tokio runtime, local instance sockets, an announce storm and minute-scale timeouts
+skip  lnpnd           store_index_at_start       # spawns the daemon three times against a shared-instance socket and signals it
 skip  nmea0183        parsing                    # sentence corpus in-process; subject is the parser
 skip  vectors-verify  corpus                     # reads the vector corpus, but the subject is the codecs under it

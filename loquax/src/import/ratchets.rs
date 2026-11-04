@@ -213,6 +213,31 @@ pub fn take_over(
     })
 }
 
+/// The ring the delivery destination of `identity` holds in the loquax
+/// home `home`, as `loquax mailbox ratchets` prints it (1305): how many
+/// ratchets, and the SHA-256 over their public keys newest first. Two homes
+/// with the same hash open the same packets; the private keys never leave
+/// the file. `None` when the destination has no ring yet.
+pub fn ring_hash(home: &Path, identity: &Identity) -> Result<Option<(usize, [u8; 32])>, String> {
+    let address = crate::engine::delivery_address(identity)?;
+    let path = leviculum_std::dest_ratchet_keys_path(&home.join("storage"), &address);
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let ring = read(&data, identity).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some((ring.keys.len(), public_hash(&ring.keys))))
+}
+
+fn public_hash(keys: &[[u8; RATCHET_SIZE]]) -> [u8; 32] {
+    let publics: Vec<u8> = keys
+        .iter()
+        .flat_map(leviculum_core::Destination::ratchet_public_key)
+        .collect();
+    leviculum_core::crypto::sha256(&publics)
+}
+
 /// Read the ratchet file at `file`, check it against `identity` and take it
 /// over into `home`: [`read`] then [`take_over`].
 pub fn import_file(

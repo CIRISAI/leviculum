@@ -340,17 +340,25 @@ then and may sleep.
   recipient is there; the cadence covers an announce the home node missed,
   at one link attempt an hour. The router holds one entry per message id,
   so a message is never on two legs at once.
-- **A direct leg nobody answers is given up within a minute** (1328).
+- **A direct leg nobody answers is given up within 45 s** (1328, 1331).
   The router's stock direct leg against a recipient that does not answer
   runs five link attempts, each retried twice by the core and followed by
   a path request: about six minutes on a 2-hop path, and on miauhaus legs
   ran past the stall bound below. A direct leg whose message has not
-  reached `Sending` after `outgoing::ANSWER_SECS` (60 s; the reference's
+  reached `Sending` after `outgoing::ANSWER_SECS` (45 s; the reference's
   single link establishment waits 6 s per hop plus the first hop's time)
   is called off in the router, logged as `HOME outbox direct unanswered`,
   and counts as a direct failure: the propagation node is offered the copy
   on the next tick, before any announce restarts the direct leg. The
-  announce and hourly retries go on as before.
+  announce and hourly retries go on as before. The bound sits under the
+  router's own end of such a leg: a recipient whose key the home never
+  held fails there after five attempts 12 s apart, 60 s, never under
+  50 s, while the bound, checked on a 1 s tick against a start in whole
+  seconds, fires by 47 s. At 60 s the two met within a second and the
+  daemon's start phase chose the winner (1331). A router that ends an
+  unanswered leg first anyway is the same fact: the line is
+  `HOME outbox direct unanswered … reason=router: …` and the copy goes
+  to the propagation node at once.
 - **A path response is no announce** (1330). Every direct leg called off
   or failed ends in a path request of the router's own, which a transport
   node answers from its cache within a minute. The router reports that

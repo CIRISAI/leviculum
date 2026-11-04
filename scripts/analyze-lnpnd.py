@@ -17,7 +17,11 @@ Phases, in the order an operator asks the questions:
 
   1. Volume and span      -- how much log, over what window, what is in it
   2. Uploads              -- accepted and rejected, rejections by reason
-  3. Store                -- utilisation against the limit, and evictions
+  3. Store                -- utilisation against the limit, evictions, and
+                             where the accepted messages went (accepted,
+                             delivered to clients, forwarded to peers,
+                             evicted; the same four `lnpnd --status` prints),
+                             departures by reason, /lev/status queries
   4. Peers                -- offer and sync rounds per peer, with outcome
   5. Clients              -- mailbox requests served, own mail received
   6. Liveness             -- gaps in the PN_STORE heartbeat
@@ -38,12 +42,15 @@ KNOWN = {
     "PN_ACCEPT",
     "PN_REJECT",
     "PN_EVICT",
+    "PN_DEPART",
+    "PN_STATUS",
     "PN_GET",
     "PN_PEER",
     "PN_OFFER",
     "PN_SYNC",
     "PN_MAILBOX",
     "PN_STORE",
+    "PN_STORE_FULL",
 }
 
 # A heartbeat gap worth naming. PN_STORE fires every STORE_MAINTENANCE_SECS
@@ -77,6 +84,7 @@ class Stats:
         # Phase 2
         self.accepted = 0
         self.accepted_dup = 0
+        self.accepted_local_only = 0
         self.accepted_bytes = 0
         self.accepted_via = defaultdict(int)
         self.rejected_by_reason = defaultdict(int)
@@ -91,6 +99,13 @@ class Stats:
         self.store_used_max = 0
         self.evicted = defaultdict(int)
         self.evicted_bytes = 0
+        # Why messages left, by reason (PN_DEPART), and the /lev/status
+        # queries by result (PN_STATUS); counters, never per-id state.
+        self.departed = defaultdict(int)
+        self.status_queries = defaultdict(int)
+        self.status_ids = 0
+        self.store_full_rounds = 0
+        self.store_full_dropped = 0
 
         # Phase 4: capped at MAX_TRACKED_PEERS, never by traffic.
         self.peer_offers = defaultdict(lambda: defaultdict(int))
@@ -101,6 +116,7 @@ class Stats:
         self.peers_untracked = 0
         self.offered = 0
         self.wanted = 0
+        self.forwarded = 0
 
         # Phase 5
         self.get_forms = defaultdict(int)
@@ -178,6 +194,8 @@ def consume(stats, line):
         else:
             stats.accepted += 1
             stats.accepted_bytes += as_int(values, "bytes")
+            if values.get("local_only") == "true":
+                stats.accepted_local_only += 1
         stats.accepted_via[values.get("via", "?")] += 1
         value = as_int(values, "value", -1)
         if value >= 0:
@@ -190,9 +208,20 @@ def consume(stats, line):
         stats.rejected_by_reason[values.get("reason", "?")] += 1
         stats.rejected_via[values.get("via", "?")] += 1
 
+    elif name == "PN_STORE_FULL":
+        stats.store_full_rounds += 1
+        stats.store_full_dropped += as_int(values, "dropped")
+
     elif name == "PN_EVICT":
         stats.evicted[values.get("reason", "?")] += 1
         stats.evicted_bytes += as_int(values, "bytes")
+
+    elif name == "PN_DEPART":
+        stats.departed[values.get("reason", "?")] += 1
+
+    elif name == "PN_STATUS":
+        stats.status_queries[values.get("result", "?")] += 1
+        stats.status_ids += as_int(values, "ids")
 
     elif name == "PN_STORE":
         stats.store_used = as_int(values, "used")
@@ -217,6 +246,9 @@ def consume(stats, line):
             stats.peer_offers[peer][values.get("dir", "?")] += 1
 
     elif name == "PN_SYNC":
+        # Counted for every peer, as the offer totals are.
+        if values.get("dir") == "out" and values.get("result") == "ok":
+            stats.forwarded += as_int(values, "transferred")
         peer = values.get("peer", "?")
         if stats.track(peer):
             direction = values.get("dir", "?")
@@ -278,6 +310,7 @@ def report(stats):
     out("\n== 2. Uploads ==\n")
     out(f"accepted         {stats.accepted} ({human_bytes(stats.accepted_bytes)})\n")
     out(f"  duplicates     {stats.accepted_dup} (re-proven, not re-stored)\n")
+    out(f"  local only     {stats.accepted_local_only} (above the transfer limit, offered to no peer)\n")
     for via, count in sorted(stats.accepted_via.items()):
         out(f"  via {via:<10} {count}\n")
     if stats.stamp_value_min is not None:
@@ -307,9 +340,29 @@ def report(stats):
     else:
         out("no PN_STORE line in this log -- store utilisation unknown\n")
     evicted = sum(stats.evicted.values())
+    out(
+        f"flow             {stats.accepted} accepted, {stats.get_served} delivered to clients, "
+        f"{stats.forwarded} forwarded to peers, {evicted} evicted\n"
+    )
     out(f"evicted          {evicted} ({human_bytes(stats.evicted_bytes)})\n")
     for reason, count in sorted(stats.evicted.items(), key=lambda kv: -kv[1]):
         out(f"  {reason:<14} {count}\n")
+    if stats.departed:
+        out(f"departed         {sum(stats.departed.values())}\n")
+        for reason, count in sorted(stats.departed.items(), key=lambda kv: -kv[1]):
+            out(f"  {reason:<14} {count}\n")
+    if stats.status_queries:
+        out(
+            f"status queries   {sum(stats.status_queries.values())} "
+            f"({stats.status_ids} id(s) answered)\n"
+        )
+        for result, count in sorted(stats.status_queries.items(), key=lambda kv: -kv[1]):
+            out(f"  {result:<14} {count}\n")
+    if stats.store_full_rounds:
+        out(
+            f"store full       {stats.store_full_rounds} sync round(s) lost "
+            f"{stats.store_full_dropped} message(s) the store could not hold\n"
+        )
     if stats.evicted.get("displaced"):
         out("  note: 'displaced' means the store was full and made room -- if this\n")
         out("        is not near zero the limit is too small for the offered load\n")

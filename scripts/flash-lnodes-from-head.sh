@@ -261,7 +261,7 @@ for id in "${flashed_ids[@]}"; do
         1209:0002) board=rak4631 ;;
         *)         continue ;;
     esac
-    if printf '%s\n' "${flash_failed_ids[@]:-}" | grep -qxF "$id"; then
+    if grep -qxF "$id" <<<"$(printf '%s\n' "${flash_failed_ids[@]:-}")"; then
         log "[CI_HW] WARN: $board ($id) hard flash failure — firmware UNVERIFIED; run will be RED"
         echo "FW_UNVERIFIED $id"
         continue

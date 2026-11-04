@@ -871,9 +871,10 @@ async fn attach_through<N: Effects + Send + 'static>(
     let engine = match role {
         Role::Messenger => Engine::new(config.identity, config.display_name),
         Role::Client { address } => Engine::client(address),
-        Role::Home { .. } | Role::Group => {
-            Engine::new(config.identity, config.display_name).handing_out_packed()
-        }
+        Role::Home { .. } => Engine::new(config.identity, config.display_name)
+            .handing_out_packed()
+            .saying_home(),
+        Role::Group => Engine::new(config.identity, config.display_name).handing_out_packed(),
     };
     let lend = Tap::default();
     let processor = Processor {

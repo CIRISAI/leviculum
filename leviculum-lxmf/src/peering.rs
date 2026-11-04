@@ -1675,6 +1675,15 @@ impl OfferBuilder {
         }
     }
 
+    /// Hold the offer to our own transfer limit as well as the peer's: a
+    /// message above it is local only
+    /// ([`PropagationNode::is_local_only`](crate::PropagationNode::is_local_only))
+    /// and is skipped as oversize, for good, whatever the peer would take.
+    pub fn with_own_transfer_limit(mut self, transfer_limit_bytes: u64) -> Self {
+        self.transfer_limit_bytes = self.transfer_limit_bytes.min(transfer_limit_bytes);
+        self
+    }
+
     pub fn push(&mut self, entry: &StoredMessage) -> ControlFlow<()> {
         if self.stopped {
             return ControlFlow::Break(());

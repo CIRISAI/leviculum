@@ -20,9 +20,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1545`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1570`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1261-1272`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1286-1297`).
 
 ### When to sync
 
@@ -171,7 +171,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1294-1338`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1319-1568`) with no trust
 input at all, because it has no notion of trust.
 
 Your propagation node sees the *envelope* of every message sent to you: who sent it
@@ -229,7 +229,7 @@ The replay is lnsd answering from its cache: a path request from a local
 client for a destination the path table holds is answered with the cached
 announce, sent to the requesting interface alone, and the handler returns
 without forwarding the request (`handle_path_request`,
-`leviculum-core/src/transport.rs:12079`, the local-client arm at
+`leviculum-core/src/transport.rs:12313`, the local-client arm at
 `:12157-12202`, the send at `:12195`; pinned by
 `test_path_request_from_local_client_returns_cached_announce`, `:30745`,
 which asserts no send to the network interface and no
@@ -289,7 +289,7 @@ default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
 consequence spelled out, not a config-file default nobody reads. Loquax
 does not expose it yet: it enables the client with
-`PropagationClientConfig::default()` (`loquax/src/engine.rs:1738`).
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1817`).
 
 Set to `true`, our client keeps every message on the node. That is a
 deviation from the reference client, whose flag only keeps messages it
@@ -300,7 +300,7 @@ acknowledges every download unconditionally (`LXMRouter.py:1623-1638`,
 acknowledgement (`LXMRouter.py:1508-1519`). So with the reference client
 the flag does not keep a fresh download on the node, and a second client
 would never see it. Ours withholds the acknowledgement as well
-(`leviculum-lxmf/src/router/propagation_runtime.rs:677`). Wire-neutral:
+(`leviculum-lxmf/src/router/propagation_runtime.rs:702`). Wire-neutral:
 the node holds an unacknowledged message until expiry, exactly as for a
 client that drops before acknowledging. The same client does not fetch it
 again, since the message is in its router's store and the next list's
@@ -317,7 +317,7 @@ list until older ones expire.
   neither is in the router snapshot (`snapshot`,
   `leviculum-lxmf/src/router.rs:2323-2340`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1497`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1522`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.
@@ -403,7 +403,7 @@ disappears.**
    `Conversations.py`, lines 2186-2204). The library will tell you: our own
    helper checks `core.storage().get_identity(&peer)` before composing and
    reports which call was skipped rather than timing out later
-   (`leviculum-lxmf-node/src/processor.rs:1241-1250`).
+   (`leviculum-lxmf-node/src/processor.rs:1294-1303`).
 6. **Contact status as persisted state**, columba's `ACTIVE` /
    `PENDING_IDENTITY` / `UNRESOLVED`, rather than a live lookup, so the
    list can be rendered without touching the network.

@@ -233,6 +233,27 @@ pub const KIND_STALLED: u8 = 11;
 /// message, so a client skips this kind.
 pub const KIND_GROUP: u8 = 12;
 
+/// The word `loquax mailbox archive` prints for an entry kind (1305); a
+/// kind this program does not know is its number.
+pub fn kind_word(kind: u8) -> alloc::borrow::Cow<'static, str> {
+    alloc::borrow::Cow::Borrowed(match kind {
+        KIND_RECEIVED => "received",
+        KIND_SENT => "sent",
+        KIND_PROPAGATED => "propagated",
+        KIND_DELIVERED => "delivered",
+        KIND_FAILED => "failed",
+        KIND_RETRIES_ENDED => "retries-ended",
+        KIND_MARK => "mark",
+        KIND_NAME => "name",
+        KIND_PETNAME => "petname",
+        KIND_IMPORTED => "imported",
+        KIND_PEERSTATE => "peerstate",
+        KIND_STALLED => "stalled",
+        KIND_GROUP => "group",
+        other => return alloc::borrow::Cow::Owned(alloc::format!("{other}")),
+    })
+}
+
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that
 /// changes nothing on screen (direct retries that ended while a propagated

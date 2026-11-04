@@ -503,7 +503,7 @@ impl AnnounceGate {
 }
 
 /// A double press of the user button got past its debouncer and its rate
-/// limit (`leviculum_firmware::button`): both announces, booked in the one cadence.
+/// limit (`leviculum_firmware::button`): every announce, booked in the one cadence.
 ///
 /// The cadence decides first ([`AnnounceCadence::manual`]) so that the
 /// press is paid for in the carrier's duty budget like every other
@@ -513,6 +513,13 @@ impl AnnounceGate {
 /// at once with `reason=button` and `reason=pn-button`. When it does not,
 /// nothing goes out here and both slots fire on their own tick as early as
 /// the band allows, which this writes as `[ANNOUNCE] deferred`.
+///
+/// A board that shares its position and has a fix announces it on the
+/// same press (order 1316), after the other two and with
+/// `reason=position-button`, when the position slot's own spacing allows
+/// it; otherwise the slot is brought forward and its tick answers.
+/// Without a fix nothing new is written: the existing `[POSITION] withheld
+/// reason=no-fix` line, once per change, is the answer.
 #[cfg(feature = "softdevice")]
 pub fn on_button_press<R, C, S>(
     node: &mut NodeCore<R, C, S>,
@@ -527,7 +534,9 @@ where
 {
     use leviculum_announce_policy::ManualAnnounce;
     let now_ms = node.now_ms();
-    match with_cadence(|cadence| cadence.manual(now_ms)) {
+    let position = crate::position::for_button(node);
+    let share_position = position.is_some();
+    match with_cadence(|cadence| cadence.manual(now_ms, share_position)) {
         ManualAnnounce::Deferred { wait_ms } => {
             crate::log::log_fmt_critical(
                 "[INFO!] ",
@@ -537,10 +546,13 @@ where
             );
             Vec::new()
         }
-        ManualAnnounce::Now => {
+        ManualAnnounce::Now { position: booked } => {
             let mut actions = gate.announce_now(node, delivery_hash, "button");
             if let Some(pn) = pn {
                 actions.extend(pn.announce_now(node, "pn-button").actions);
+            }
+            if let (true, Some(ready)) = (booked, position) {
+                actions.extend(crate::position::send(node, ready, "position-button"));
             }
             actions
         }

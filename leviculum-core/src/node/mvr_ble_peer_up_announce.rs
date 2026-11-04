@@ -223,7 +223,10 @@ fn mvr_the_daemon_announces_its_own_destinations_to_the_new_peer() {
         .expect("registered");
     assert_eq!(announces(&seed), std::vec![(None, None)]);
 
-    let (sent, out) = node.announce_local_destinations_to_peer(InterfaceId(ble), PHONE);
+    let (sent, mut out) = node.announce_local_destinations_to_peer(InterfaceId(ble), PHONE);
+    // The seed took the fresh interface's turn a moment ago, so the peer's
+    // copy leaves a spacing later (order 1320), on the same link.
+    out.actions.extend(node.release_paced_announces());
 
     assert_eq!(sent, 1, "one destination is held and has announced before");
     assert_eq!(

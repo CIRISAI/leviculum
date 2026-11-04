@@ -123,7 +123,7 @@ selftest() {
     printf 'use ratatui::layout::Rect;\n' >> "$tmp/lnomad/src/app/model.rs"
     rc2=0
     out="$(check_source "$tmp")" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "use ratatui::layout::Rect"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "use ratatui::layout::Rect" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: an injected ratatui import was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
@@ -138,7 +138,7 @@ selftest() {
     fi
     rc2=0
     out="$(check_graph "$tmp" --offline)" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "carries ratatui"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "carries ratatui" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: tui-input with default features was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
@@ -167,7 +167,7 @@ selftest_ui() {
     printf 'use ratatui::layout::Rect;\n' >> "$tmp/leviculum-ui/src/lib.rs"
     rc2=0
     out="$(check_source "$tmp" leviculum-ui/src)" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "use ratatui::layout::Rect"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "use ratatui::layout::Rect" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: an injected ratatui import in leviculum-ui was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1
@@ -182,7 +182,7 @@ selftest_ui() {
     fi
     rc2=0
     out="$(check_graph "$tmp" --offline leviculum-ui --all-features)" || rc2=$?
-    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "carries ratatui"; then
+    if [ "$rc2" -ne 1 ] || ! grep -qF "carries ratatui" <<<"$out"; then
         echo "$TAG SELFTEST FAIL: tui-input with default features in leviculum-ui was not refused (exit $rc2)"
         printf '%s\n' "$out"
         rc=1

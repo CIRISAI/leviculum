@@ -143,9 +143,11 @@
 //! What a refusal no longer shows as is a missing proof, so every
 //! refusing arm now logs `PN_REJECT reason=<word> via=<carrier>` — the
 //! same fixed-word line `lnpnd` keeps — and the accepted arm still
-//! reports its flush as `PN_ACCEPT ... durable=`. The advertisement
-//! refused for its size adds `size=<bytes> cap=<bytes>`, the limit it
-//! failed (867: until then that arm was the one without a line). A verdict
+//! reports its flush as `PN_ACCEPT ... durable= local_only=`. The
+//! advertisement refused adds `bytes=<bytes> limit=<bytes>`, the limit it
+//! failed, with lnpnd's reason words `too_large`, `over_sync_limit` and
+//! `store_full` (867: until then that arm was the one without a line; 1355
+//! gave it lnpnd's words and keys). A verdict
 //! the node itself then refuses, the late `incoming_full` above all, logs
 //! `PN_REJECT reason=<error> link=<16 hex> accept=<0|1>` (878).
 //!
@@ -255,9 +257,9 @@ use leviculum_lxmf::constants::{
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
     answer_offer, offer_budget_for_mdu, offer_reply, peering_key_material, plan_sync_batch,
-    DeclineReason, DropReason, InboundGate, OfferBuilder, OfferPlan, OfferReply, OfferResponse,
-    PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, SyncPhase,
-    SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
+    DeclineReason, DropReason, InboundGate, OfferPlan, OfferReply, OfferResponse, PeerChange,
+    PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, SyncPhase, SyncSource,
+    WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
@@ -798,6 +800,11 @@ pub struct Engine {
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
     next_maintenance_at_ms: u64,
+    /// A sync message the store did not keep since the last maintenance
+    /// sweep: `/offer`s answer `ERROR_THROTTLED` and peer batches are
+    /// refused at their advertisement until the sweep, booked for the next
+    /// settle pass, has run (`PN_STORE_FULL`, lnpnd's rule, order 1355).
+    store_full: bool,
     next_stats_at_ms: u64,
     announce_withheld_logged: bool,
     active: Option<ActiveDelivery>,
@@ -1005,6 +1012,7 @@ impl Engine {
             last_synced: None,
             next_sync_at_ms: 0,
             next_maintenance_at_ms: 0,
+            store_full: false,
             next_stats_at_ms: 0,
             announce_withheld_logged: false,
             active: None,
@@ -1300,13 +1308,23 @@ impl Engine {
                 // also held to what the record log can store (D11), since
                 // past this point the resource is proven before the role
                 // ever sees it.
+                //
+                // The reasons and keys are lnpnd's (order 1355): a client's
+                // upload above what the store keeps is `too_large`, a peer's
+                // batch above the sync limit `over_sync_limit`, and a peer's
+                // batch after a sync message the store did not keep, until
+                // the sweep, `store_full`.
                 let from_peer = self.validated_links.contains_key(link_id);
-                let oversize =
-                    leviculum_pn_store::board_oversize_refusal(&self.role, *data_size, from_peer);
-                if let Some(refusal) = &oversize {
+                let refusal = leviculum_pn_store::board_resource_refusal(
+                    &self.role,
+                    *data_size,
+                    from_peer,
+                    self.store_full,
+                );
+                if let Some(refusal) = &refusal {
                     crate::log::log_fmt("PN_REJECT ", format_args!("{refusal}"));
                 }
-                let within_limit = oversize.is_none();
+                let within_limit = refusal.is_none();
                 let in_flight: usize = node
                     .links()
                     .map(|(_, link)| link.incoming_resource_count())
@@ -1747,7 +1765,8 @@ impl Engine {
         let Some(peer) = self.peers.get(&peer_hash) else {
             return;
         };
-        let mut offer_builder = OfferBuilder::new(peer, offer_budget_for_mdu(mdu));
+        let mut offer_builder =
+            leviculum_pn_store::board_offer_builder(&self.role, peer, offer_budget_for_mdu(mdu));
         if self
             .role
             .store()
@@ -2328,6 +2347,17 @@ impl Engine {
             self.abandon_grind("batch_concluded");
         }
         if let Some(batch) = self.sync_batch.take() {
+            if let Some((offered, dropped)) = batch.drain.store_full() {
+                crate::log::log_fmt(
+                    "PN_STORE_FULL ",
+                    format_args!(
+                        "peer={} offered={} dropped={}",
+                        Hex(&batch.remote),
+                        offered,
+                        dropped
+                    ),
+                );
+            }
             crate::log::log_fmt(
                 "PN_SYNC ",
                 format_args!(
@@ -2748,6 +2778,12 @@ impl Engine {
         let now = node.emission_secs();
         let evicted = self.role.tick(now);
         self.log_evictions(&evicted);
+        // The sweep a store failure booked has run: offers are answered
+        // again. On this store it frees nothing a failure was short of (the
+        // ring reclaims its oldest page by itself, so a record that did not
+        // land was refused by the flash, not for room); it is the point the
+        // board tries again, as lnpnd's is.
+        self.store_full = false;
         for dropped in self.peers.cull(now) {
             let _ = self.peer_store.remove(&dropped);
             self.log_peer("drop", &dropped, "unreachable");
@@ -2993,7 +3029,8 @@ impl Engine {
             return;
         }
 
-        let mut offer_builder = OfferBuilder::new(peer, OFFER_PROBE_BUDGET);
+        let mut offer_builder =
+            leviculum_pn_store::board_offer_builder(&self.role, peer, OFFER_PROBE_BUDGET);
         if self
             .role
             .store()
@@ -3295,17 +3332,21 @@ impl Engine {
                         // a storage statement, and holding it for the flush
                         // put it behind the whole stamp workblock.
                         let durable = self.flush(node).await;
+                        // `local_only=1`: above our own transfer limit, so
+                        // never offered to a peer; its recipient collects it
+                        // here (1295's rule, `board_offer_builder`).
                         crate::log::log_fmt(
                             "PN_ACCEPT ",
                             format_args!(
-                                "tid={} dst={} bytes={} value={} dup={} via={} durable={}",
+                                "tid={} dst={} bytes={} value={} dup={} via={} durable={} local_only={}",
                                 Hex(&transient_id[..8]),
                                 Hex(&destination_hash),
                                 size,
                                 stamp_value,
                                 duplicate as u8,
                                 via,
-                                durable as u8
+                                durable as u8,
+                                self.role.is_local_only(size) as u8
                             ),
                         );
                         notify_if_for_us(&destination_hash, duplicate);
@@ -3458,6 +3499,16 @@ impl Engine {
             return OfferResponse::Error(PeerError::Throttled).encode();
         }
 
+        // A store that did not keep a sync message since the last sweep
+        // declines with the reference's postponement, as lnpnd does: the
+        // peer keeps its messages and comes back after `PN_STAMP_THROTTLE`
+        // (`reference/LXMF/LXMF/LXMPeer.py:421-425`), where "want none"
+        // would tell it we hold them all.
+        if self.store_full {
+            Self::log_reject("store_full", "offer");
+            return OfferResponse::Error(PeerError::Throttled).encode();
+        }
+
         if let Err(error) = self.gate.admit(
             self.peers.config(),
             &remote_hash,
@@ -3589,11 +3640,26 @@ impl Engine {
                     ),
                 );
                 notify_if_for_us(&destination_hash, duplicate);
-                if !duplicate && durable {
+                if !duplicate {
                     if let Some(batch) = self.sync_batch.as_mut() {
-                        batch.drain.accept(size as u64);
+                        if durable {
+                            batch.drain.accept(size as u64);
+                        } else {
+                            // The write did not reach flash: the role forgot
+                            // the id (`settle_message_op`), and the sender's
+                            // cursor is already past it.
+                            batch.drain.store_failure();
+                            self.store_full = true;
+                        }
                     }
                 }
+            }
+            UploadOutcome::StoreFailed(_) => {
+                Self::log_reject(reason, "sync");
+                if let Some(batch) = self.sync_batch.as_mut() {
+                    batch.drain.store_failure();
+                }
+                self.store_full = true;
             }
             refused => {
                 Self::log_reject(reason, "sync");
@@ -3603,6 +3669,11 @@ impl Engine {
                     }
                 }
             }
+        }
+        if self.store_full {
+            // The sweep runs on the next settle pass, before the next sync
+            // is taken; until then offers and peer batches are declined.
+            self.next_maintenance_at_ms = 0;
         }
         let drained = self.sync_batch.as_ref().map(|batch| {
             (

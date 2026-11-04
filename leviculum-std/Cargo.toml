@@ -151,9 +151,8 @@ tempfile = "3"
 # lnomad is the NomadNet browser backend; its shared-instance fetch path is
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.
-# The fetch path is lnomad's `std` platform layer since its core went
-# no_std; `std` takes leviculum-std with default features off, so neither
-# family comes back with it.
+# `std` is asked for by name: since slice 4a the fetch module sits behind it,
+# and it adds neither interface family, so the minimal cut is unchanged.
 lnomad = { path = "../lnomad", default-features = false, features = ["std"] }
 # The `lncp` transfer logic, driven directly by the interop suite so the test
 # exercises the tool's own push loop rather than a copy of it. Dev-only cycle,

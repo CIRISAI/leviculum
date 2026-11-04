@@ -23,7 +23,15 @@
 //! nothing — there is no same-emission competitor, so the cost rule is
 //! never consulted and the path stays installed under both knob settings.
 //!
-//! Sans-I/O: 1 node, 1 mock interface, deterministic (loss is the
+//! Since order 1380 the evidence rule is the DEFAULT on radio interfaces:
+//! the media-aware driver declares it per interface and the config's
+//! `path_choice` overrides either way. The tests below the original three pin that
+//! default against a TCP control on the same copy sequence (through
+//! `run_room_by_medium`), and a mixed
+//! radio-plus-TCP node pins that the penalty follows the medium of the
+//! direct candidate.
+//!
+//! Sans-I/O: 1 node, 1-2 mock interfaces, deterministic (loss is the
 //! alternating epochs, not a draw), sub-second.
 
 extern crate std;
@@ -237,4 +245,170 @@ fn norelay_keeps_the_only_path_under_both_rules() {
             );
         }
     }
+}
+
+/// Order 1380: no override in the config, so each interface runs the rule
+/// its medium declared. `declared` is what the media-aware driver hands the
+/// core at registration (`Some(HopsAndLoss)` for a radio interface, nothing
+/// for TCP and the other wired media).
+fn run_room_by_medium(
+    declared: Option<PathChoice>,
+    charlie: &mut Charlie,
+) -> (Box<TransportNode>, usize) {
+    let mut node: Box<TransportNode> = NodeCoreBuilder::new().enable_transport(true).build_boxed(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        MemoryStorage::with_defaults(),
+    );
+    let iface = add_iface(&mut node, "medium_under_test");
+    if let Some(choice) = declared {
+        node.set_interface_path_choice(iface, choice);
+    }
+    for epoch in 0..=EPOCHS {
+        node.transport.clock().advance(10_000);
+        let now = node.transport.clock().now_ms();
+        let (direct, relayed) = charlie.emit(now);
+        if epoch % 2 == 0 {
+            let _ = node.handle_packet(InterfaceId(iface), &direct);
+        }
+        let _ = node.handle_packet(InterfaceId(iface), &relayed);
+    }
+    (node, iface)
+}
+
+/// The default on a radio interface (Codeberg #230, order 1380): with no
+/// `path_choice` in the config, an interface that declared
+/// `HopsAndLoss` routes around the half-deaf direct link exactly as the
+/// explicit knob does — and an interface that declared nothing (the TCP
+/// control) keeps the hop rule on the identical copy sequence.
+#[test]
+fn radio_interface_defaults_to_the_evidence_rule_and_tcp_keeps_hops() {
+    let mut charlie = Charlie::new();
+    let (radio, iface) = run_room_by_medium(Some(PathChoice::HopsAndLoss), &mut charlie);
+    assert_eq!(radio.interface_path_choice(iface), PathChoice::HopsAndLoss);
+    let path = radio
+        .transport
+        .get_path_clone(charlie.dest_hash.as_bytes())
+        .expect("path installed");
+    assert_eq!(
+        (path.hops, path.next_hop),
+        (2, Some(BRAVO)),
+        "a radio interface with no override must price its marginal direct \
+         link (re-hear ~0.5, ETX ~4) above the clean two-hop route"
+    );
+
+    let mut charlie = Charlie::new();
+    let (wired, iface) = run_room_by_medium(None, &mut charlie);
+    assert_eq!(wired.interface_path_choice(iface), PathChoice::Hops);
+    let path = wired
+        .transport
+        .get_path_clone(charlie.dest_hash.as_bytes())
+        .expect("path installed");
+    assert_eq!(
+        (path.hops, path.next_hop),
+        (1, None),
+        "an interface that declared nothing (TCP, local) keeps hop count: the \
+         decoded direct copy wins as it always did"
+    );
+}
+
+/// The override wins either way: `path_choice = hops` holds a radio
+/// interface on hop count, `path_choice = hops_and_loss` prices an
+/// interface that declared nothing.
+#[test]
+fn config_override_wins_over_the_medium_default() {
+    let mut charlie = Charlie::new();
+    let mut node = make_node(PathChoice::Hops);
+    let iface = add_iface(&mut node, "lora_sx1262");
+    node.set_interface_path_choice(iface, PathChoice::HopsAndLoss);
+    assert_eq!(node.interface_path_choice(iface), PathChoice::Hops);
+    for epoch in 0..=EPOCHS {
+        node.transport.clock().advance(10_000);
+        let now = node.transport.clock().now_ms();
+        let (direct, relayed) = charlie.emit(now);
+        if epoch % 2 == 0 {
+            let _ = node.handle_packet(InterfaceId(iface), &direct);
+        }
+        let _ = node.handle_packet(InterfaceId(iface), &relayed);
+    }
+    let path = node
+        .transport
+        .get_path_clone(charlie.dest_hash.as_bytes())
+        .expect("path installed");
+    assert_eq!(
+        (path.hops, path.next_hop),
+        (1, None),
+        "path_choice = hops overrides the radio default"
+    );
+
+    let node = make_node(PathChoice::HopsAndLoss);
+    assert_eq!(node.interface_path_choice(7), PathChoice::HopsAndLoss);
+}
+
+/// Teardown takes the declaration with it: the index no longer prices
+/// loss, and with no declaring interface left and no override the evidence
+/// table is emptied, so a re-registered wired interface under the same
+/// index starts on the hop rule with nothing inherited.
+#[test]
+fn teardown_forgets_the_declared_rule_and_its_evidence() {
+    let mut charlie = Charlie::new();
+    let (mut node, iface) = run_room_by_medium(Some(PathChoice::HopsAndLoss), &mut charlie);
+    assert!(!node.transport.direct_link_evidence_is_empty());
+    node.transport.remove_interface_path_choice(iface);
+    assert_eq!(node.interface_path_choice(iface), PathChoice::Hops);
+    assert!(node.transport.direct_link_evidence_is_empty());
+}
+
+/// A daemon with a radio and a TCP backbone (the shape `lnsd` runs on a
+/// gateway): the penalty follows the medium of the DIRECT candidate. A
+/// marginal direct link on the radio loses to the clean route that
+/// arrives over TCP; a direct neighbour on TCP keeps its plain hop cost
+/// even when the race involves the radio interface.
+#[test]
+fn the_penalty_follows_the_medium_of_the_direct_candidate() {
+    let run = |direct_on_radio: bool| {
+        let mut charlie = Charlie::new();
+        let mut node: Box<TransportNode> =
+            NodeCoreBuilder::new().enable_transport(true).build_boxed(
+                OsRng,
+                MockClock::new(TEST_TIME_MS),
+                MemoryStorage::with_defaults(),
+            );
+        let radio = add_iface(&mut node, "lora_sx1262");
+        let tcp = add_iface(&mut node, "tcp_backbone");
+        node.set_interface_path_choice(radio, PathChoice::HopsAndLoss);
+        let (direct_iface, relayed_iface) = if direct_on_radio {
+            (radio, tcp)
+        } else {
+            (tcp, radio)
+        };
+        for epoch in 0..=EPOCHS {
+            node.transport.clock().advance(10_000);
+            let now = node.transport.clock().now_ms();
+            let (direct, relayed) = charlie.emit(now);
+            if epoch % 2 == 0 {
+                let _ = node.handle_packet(InterfaceId(direct_iface), &direct);
+            }
+            let _ = node.handle_packet(InterfaceId(relayed_iface), &relayed);
+        }
+        let path = node
+            .transport
+            .get_path_clone(charlie.dest_hash.as_bytes())
+            .expect("path installed");
+        (path.hops, path.next_hop, path.interface_index)
+    };
+    let (h, n, iface) = run(true);
+    assert_eq!(
+        (h, n),
+        (2, Some(BRAVO)),
+        "a half-deaf direct radio link loses to the clean route over TCP"
+    );
+    assert_eq!(iface, 1, "the held route is the TCP one");
+    let (h, n, _) = run(false);
+    assert_eq!(
+        (h, n),
+        (1, None),
+        "a direct TCP neighbour is not priced by announce re-hear: TCP does \
+         not declare loss pricing, so its direct copy keeps its hop cost"
+    );
 }

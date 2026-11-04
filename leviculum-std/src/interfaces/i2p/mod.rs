@@ -219,6 +219,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
             // spawned interface takes `self.ingress_control` from the one
             // parent interface (I2PInterface.py:951).
             ingress_control: Some(config.ingress_control),
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,
@@ -549,6 +550,7 @@ fn spawn_i2p_accepted(
             // Codeberg #189, I2PInterface.py:951: inherited from the endpoint
             // that accepted this connection.
             ingress_control: Some(ingress_control),
+            path_choice: leviculum_core::transport::PathChoice::Hops,
         },
         incoming: incoming_rx,
         outgoing: outgoing_tx,

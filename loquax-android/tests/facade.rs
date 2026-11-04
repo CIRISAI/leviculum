@@ -30,6 +30,18 @@ use support::java::{java_map, Java};
 /// lock, which the async test holds across its awaits.
 static FACADE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The facade's turn, with no session left in the slot: a test that failed
+/// before its `stop` leaves its session there, and the next `start` would
+/// answer for that one (its server, its link) and fail a second test for
+/// the first one's fault (1334).
+async fn facade_turn() -> tokio::sync::MutexGuard<'static, ()> {
+    let turn = FACADE.lock().await;
+    tokio::task::spawn_blocking(loquax_android::stop)
+        .await
+        .expect("stop a session left over");
+    turn
+}
+
 fn started(bytes: &[u8]) -> Started {
     rmp_serde::from_slice(bytes).expect("a Started")
 }
@@ -44,6 +56,8 @@ fn start_bytes(start: &Start) -> Vec<u8> {
 #[test]
 fn a_first_start_says_what_it_needs() {
     let _facade = FACADE.blocking_lock();
+    // As `facade_turn`: no session left over from a failed test.
+    loquax_android::stop();
     let dir = tempfile::tempdir().expect("app dir");
     let base = Start {
         dir: dir.path().display().to_string(),
@@ -1903,7 +1917,7 @@ fn send_through_facade(peer: &str, body: &str, secs: u64) {
 /// nor server, builds a fresh one, and a send goes through that.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
-    let _facade = FACADE.lock().await;
+    let _facade = facade_turn().await;
     let instance = instance();
     let rns = tempfile::tempdir().expect("transport config dir");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
@@ -2007,7 +2021,7 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
 /// three words is one reconnect; the same network with the link up is none.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_network_change_reconnects_the_phone_without_a_restart() {
-    let _facade = FACADE.lock().await;
+    let _facade = facade_turn().await;
     let instance = instance();
     let rns = tempfile::tempdir().expect("transport config dir");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
@@ -2053,7 +2067,18 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
         facade_event(10, "reconnecting", state("reconnecting"));
         facade_event(20, "back", state("back"));
         let took = began.elapsed();
-        link_event(true, 10);
+        // The interface is up again: its level, not a `link` event. The
+        // session reads the level once a second, and a re-dial on loopback
+        // is up within a millisecond, so it may never read it down and has
+        // no edge to say (1334).
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !started(&loquax_android::start(&schema::encode(&first))).link {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the interface not up again in 10 s"
+            );
+            let _ = loquax_android::next_event(Duration::from_millis(200));
+        }
         facade_home_link(true, 60);
         send_through_facade(&peer, "nach dem Netzwechsel", 60);
         // One reconnect for the burst: no second line within the settle.

@@ -53,9 +53,10 @@ pub const ENCODED_SIZE_ALIGNED: usize = ENCODED_SIZE.div_ceil(4) * 4;
 /// satisfies its own cost minus flexibility, filtered on the offering
 /// side (`reference/LXMF/LXMF/LXMPeer.py:331`, `:340`), and 13 is the
 /// reference's own announce floor (`PROPAGATION_COST_MIN`,
-/// `reference/LXMF/LXMF/LXMRouter.py:52`), so a store accepted at this
-/// cost clears every default peer's filter with the full flexibility
-/// margin.
+/// `reference/LXMF/LXMF/LXMRouter.py:52`), and a stock peer filters at
+/// its own 16 minus 3, so a store that accepts exactly this cost
+/// (flexibility 0, `leviculum_lxmf::PropagationNodeConfig`) clears every
+/// default peer's filter.
 pub const DEFAULT_STAMP_COST: u8 = 13;
 
 /// Default announced peering cost: 1 (Lead, 2026-09-12, compatibility).

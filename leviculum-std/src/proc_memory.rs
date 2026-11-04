@@ -30,6 +30,14 @@
 //! the daemon owns changed (#478, order 1253: lnpnd 10.0 to 1.9 MB resident
 //! with 0.56 MB swapped, then back up through the canary's window).
 //!
+//! The shared pages (`RssShmem`) come off for the same reason. A file on
+//! tmpfs is booked there, not under `RssFile`: a binary started from a
+//! tmpfs tree (a `/tmp` deploy, likely the forge's workspace) or a store on tmpfs
+//! that is mapped. When those pages leave the resident set, the swap they
+//! may go to is the tmpfs's, which `VmSwap` does not count, so they leave
+//! RSS plus swap exactly as file pages do (order 1372, pipelines 602/603).
+//! The daemons map no anonymous shared memory of their own.
+//!
 //! Every parser here takes text, not a path, so the tests feed fixtures and
 //! the daemon feeds `/proc/self/*`.
 
@@ -44,6 +52,8 @@ pub struct StatusFields {
     pub swap_bytes: Option<u64>,
     /// `RssFile:` in bytes: resident pages mapped from files.
     pub rss_file_bytes: Option<u64>,
+    /// `RssShmem:` in bytes: resident shared pages, tmpfs files included.
+    pub rss_shmem_bytes: Option<u64>,
 }
 
 /// Parse the fields the census needs out of `/proc/self/status` text.
@@ -58,6 +68,7 @@ pub fn parse_status(text: &str) -> StatusFields {
             "Threads" => out.threads = value,
             "VmSwap" => out.swap_bytes = value.map(|kb: u64| kb * 1024),
             "RssFile" => out.rss_file_bytes = value.map(|kb: u64| kb * 1024),
+            "RssShmem" => out.rss_shmem_bytes = value.map(|kb: u64| kb * 1024),
             _ => {}
         }
     }
@@ -261,7 +272,9 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
 /// as `n/a` and subtracts nothing.
 ///
 /// `file` is the resident file pages (`RssFile`), taken off first: reclaim
-/// drops them without swapping (module docs).
+/// drops them without swapping (module docs). `shmem` is the resident
+/// shared pages (`RssShmem`), taken off next: a file on tmpfs is booked
+/// there and leaves the line the same way (module docs).
 ///
 /// `live` is the counting shim's balance ([`crate::heap_accounting`]), known
 /// only in a `heap-accounting` build. When it is known it is subtracted
@@ -273,6 +286,7 @@ pub fn render_gap_line(
     rss: u64,
     swap: Option<u64>,
     file: Option<u64>,
+    shmem: Option<u64>,
     tracked: Option<u64>,
     live: Option<u64>,
     view: Option<AllocatorView>,
@@ -295,6 +309,7 @@ pub fn render_gap_line(
         swap.map_or_else(|| "n/a".to_string(), |s| s.to_string())
     );
     step(&mut out, &mut left, "file", file);
+    step(&mut out, &mut left, "shmem", shmem);
     match (live, tracked) {
         (Some(_), Some(t)) => {
             let _ = write!(out, "; tracked {t} (model, not subtracted)");
@@ -331,6 +346,7 @@ pub fn census_sections(rss: u64, tracked: Option<u64>) -> String {
         rss,
         status.swap_bytes,
         status.rss_file_bytes,
+        status.rss_shmem_bytes,
         tracked,
         measured_live(),
         view,
@@ -361,6 +377,7 @@ mod tests {
         VmRSS:\t  907776 kB\n\
         VmData:\t 1841124 kB\n\
         RssFile:\t    9216 kB\n\
+        RssShmem:\t     512 kB\n\
         VmSwap:\t  893516 kB\n\
         Threads:\t13\n\
         SigQ:\t0/7000\n";
@@ -387,6 +404,7 @@ mod tests {
         assert_eq!(s.threads, Some(13));
         assert_eq!(s.swap_bytes, Some(893_516 * 1024));
         assert_eq!(s.rss_file_bytes, Some(9_216 * 1024));
+        assert_eq!(s.rss_shmem_bytes, Some(512 * 1024));
         assert_eq!(parse_status("Name:\tx\n"), StatusFields::default());
     }
 
@@ -450,14 +468,23 @@ mod tests {
             ..AllocatorView::default()
         };
         assert_eq!(
-            render_gap_line(1000, Some(500), Some(100), Some(400), None, Some(view)),
-            "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; - tracked 400 = 1000; \
-             - live n/a; - allocator free 120 = 880; - mmapped 300 = 580; unaccounted 580\n"
+            render_gap_line(
+                1000,
+                Some(500),
+                Some(100),
+                Some(50),
+                Some(400),
+                None,
+                Some(view)
+            ),
+            "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; - shmem 50 = 1350; \
+             - tracked 400 = 950; - live n/a; - allocator free 120 = 830; - mmapped 300 = 530; \
+             unaccounted 530\n"
         );
         assert_eq!(
-            render_gap_line(1000, None, None, Some(400), None, None),
-            "gap: rss 1000 + swap n/a = 1000; - file n/a; - tracked 400 = 600; - live n/a; \
-             - allocator free n/a; - mmapped n/a; unaccounted 600\n"
+            render_gap_line(1000, None, None, None, Some(400), None, None),
+            "gap: rss 1000 + swap n/a = 1000; - file n/a; - shmem n/a; - tracked 400 = 600; \
+             - live n/a; - allocator free n/a; - mmapped n/a; unaccounted 600\n"
         );
     }
 
@@ -467,15 +494,23 @@ mod tests {
     #[test]
     fn gap_line_subtracts_live_instead_of_tracked_when_measured() {
         assert_eq!(
-            render_gap_line(1000, Some(500), Some(100), Some(400), Some(250), None),
-            "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; \
+            render_gap_line(
+                1000,
+                Some(500),
+                Some(100),
+                Some(0),
+                Some(400),
+                Some(250),
+                None
+            ),
+            "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; - shmem 0 = 1400; \
              tracked 400 (model, not subtracted); - live 250 = 1150; \
              - allocator free n/a; - mmapped n/a; unaccounted 1150\n"
         );
         assert_eq!(
-            render_gap_line(1000, None, None, None, Some(250), None),
-            "gap: rss 1000 + swap n/a = 1000; - file n/a; tracked n/a; - live 250 = 750; \
-             - allocator free n/a; - mmapped n/a; unaccounted 750\n"
+            render_gap_line(1000, None, None, None, None, Some(250), None),
+            "gap: rss 1000 + swap n/a = 1000; - file n/a; - shmem n/a; tracked n/a; \
+             - live 250 = 750; - allocator free n/a; - mmapped n/a; unaccounted 750\n"
         );
     }
 
@@ -530,6 +565,13 @@ mod tests {
     /// resident set what reclaim does to file pages, so the test maps a
     /// file on disk (this test binary), faults it in, drops it, and holds
     /// the unaccounted figure to anonymous memory: it must not follow.
+    ///
+    /// Order 1372: on the forge (pipelines 602/603) the unaccounted figure
+    /// followed the drop. The same binary copied to `/dev/shm` failed here
+    /// the same way, its pages booked as `RssShmem`, which the census did
+    /// not subtract then. The test now proves first that the kernel booked
+    /// the drop under a term the census reads, and prints every figure when
+    /// red.
     #[cfg(target_os = "linux")]
     #[test]
     fn unaccounted_does_not_follow_file_pages_out_of_the_resident_set() {
@@ -561,27 +603,77 @@ mod tests {
         }
         std::hint::black_box(sum);
 
+        let status_in = std::fs::read_to_string("/proc/self/status").expect("status");
         let rss_in = statm_rss();
-        let in_set = unaccounted_of(&census_sections(rss_in, None));
+        let sections_in = census_sections(rss_in, None);
         // SAFETY: the range is exactly the mapping made above.
         let rc = unsafe { libc::madvise(base, len, libc::MADV_DONTNEED) };
         assert_eq!(rc, 0, "madvise");
+        let status_out = std::fs::read_to_string("/proc/self/status").expect("status");
         let rss_out = statm_rss();
-        let out_of_set = unaccounted_of(&census_sections(rss_out, None));
+        let sections_out = census_sections(rss_out, None);
         // SAFETY: unmapping the mapping made above, once.
         unsafe { libc::munmap(base, len) };
 
         let len = len as u64;
-        // The positive control: the resident set did lose the file pages.
+        // Everything a reader of a red run needs: both gap lines and every
+        // resident-set field the kernel gave, before and after the drop.
+        let rss_lines = |status: &str| {
+            status
+                .lines()
+                .filter(|l| {
+                    l.starts_with("Rss") || l.starts_with("VmRSS") || l.starts_with("VmSwap")
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let gap_line = |sections: &str| {
+            sections
+                .lines()
+                .find(|l| l.starts_with("gap: "))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let diag = format!(
+            "mapped {len} bytes of {}\n  in:  statm {rss_in}; {}\n       {}\n  out: statm {rss_out}; {}\n       {}",
+            exe.display(),
+            rss_lines(&status_in),
+            gap_line(&sections_in),
+            rss_lines(&status_out),
+            gap_line(&sections_out),
+        );
+        // The positive control, part one: the resident set did lose the pages.
         assert!(
             rss_in.saturating_sub(rss_out) >= len * 3 / 4,
-            "the drop did not leave the resident set: {rss_in} -> {rss_out}, mapped {len}"
+            "the drop did not leave the resident set\n{diag}"
         );
+        // Part two: the kernel booked them where the census looks, under
+        // RssFile for a file on disk or RssShmem for one on tmpfs. A kernel
+        // that books them under neither (or prints neither line) gives the
+        // census nothing to subtract, which is a statement about the kernel,
+        // not about the subtraction this test holds.
+        let (st_in, st_out) = (parse_status(&status_in), parse_status(&status_out));
+        let moved = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (Some(a), Some(b)) => a.saturating_sub(b),
+            _ => 0,
+        };
+        let booked = moved(st_in.rss_file_bytes, st_out.rss_file_bytes)
+            + moved(st_in.rss_shmem_bytes, st_out.rss_shmem_bytes);
+        if booked < len * 3 / 4 {
+            eprintln!(
+                "skip: the kernel booked the dropped file pages under neither RssFile nor \
+                 RssShmem ({booked} of {len} bytes moved), so the census has no term to \
+                 subtract them by\n{diag}"
+            );
+            return;
+        }
+        let in_set = unaccounted_of(&sections_in);
+        let out_of_set = unaccounted_of(&sections_out);
         // Other tests allocate beside this one; a quarter of the mapping is
         // far above that and far below the pages that left.
         assert!(
             in_set.abs_diff(out_of_set) < len / 4,
-            "unaccounted followed {len} bytes of file pages: {in_set} -> {out_of_set}"
+            "unaccounted followed {len} bytes of file pages: {in_set} -> {out_of_set}\n{diag}"
         );
     }
 

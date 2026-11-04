@@ -379,6 +379,18 @@ fn dials(seen: &Seen, name: &str) -> usize {
     self::seen(seen).iter().filter(|s| **s == plus).count()
 }
 
+/// How many connections of fake `name` ended.
+///
+/// Counted, never read off the log's order: the fake writes `+` from its
+/// accept loop and `-` from the connection's own task when it reads the
+/// end (`Fake::up`), two tasks on a multi-thread runtime, so a drop and the
+/// redial right behind it can land in either order. Red once in a full
+/// package run as `["A+", "A-", "A+", "A+", "A-"]` (order 1294).
+fn drops(seen: &Seen, name: &str) -> usize {
+    let minus = format!("{name}-");
+    self::seen(seen).iter().filter(|s| **s == minus).count()
+}
+
 /// A leaf over `servers` that hears `network`.
 async fn leaf(
     servers: Vec<String>,
@@ -476,7 +488,12 @@ async fn network_changes_redial_the_first_entry_once_each() {
     wait_until("mobile data dials A", 5, || dials(&log, "A") == 3).await;
     wait_until("up on A", 5, || up_on(&entry_a)).await;
     quiet_for(&log, 1_500, "the burst was one dial").await;
-    assert_eq!(seen(&log), ["A+", "A-", "A+", "A-", "A+"]);
+    assert_eq!(
+        (dials(&log, "A"), drops(&log, "A")),
+        (3, 2),
+        "{:?}",
+        seen(&log)
+    );
     assert_eq!(network.redials(), 3, "one re-dial for the burst");
 
     // 3. Flight mode for "two minutes" (two seconds here): nothing is
@@ -493,10 +510,11 @@ async fn network_changes_redial_the_first_entry_once_each() {
     network.say(loquax::home::NetworkKind::Wifi, true);
     wait_until("the new WLAN dials A", 5, || dials(&log, "A") == 5).await;
     wait_until("up on A", 5, || up_on(&entry_a)).await;
-    assert_eq!(
-        seen(&log),
-        ["A+", "A-", "A+", "A-", "A+", "A-", "A+", "A-", "A+"]
-    );
+    wait_until("the old WLAN's connection ended", 5, || {
+        drops(&log, "A") == 4
+    })
+    .await;
+    assert_eq!(seen(&log).len(), 9, "{:?}", seen(&log));
 
     // 5. Asleep, and the same network back: with the connection up it is
     //    kept (no dial, no drop), however often it is said.
@@ -516,8 +534,9 @@ async fn network_changes_redial_the_first_entry_once_each() {
     let before = seen(&log).len();
     network.say(loquax::home::NetworkKind::Wifi, true);
     wait_until("the change dials A first", 5, || up_on(&entry_a)).await;
+    wait_until("B is dropped", 5, || drops(&log, "B") == 1).await;
     let after: Vec<String> = seen(&log)[before..].to_vec();
-    assert_eq!(after.first().map(String::as_str), Some("B-"), "{after:?}");
+    assert!(after.contains(&"B-".to_string()), "{after:?}");
     assert!(after.contains(&"A+".to_string()), "{after:?}");
     assert!(!after.contains(&"B+".to_string()), "{after:?}");
 

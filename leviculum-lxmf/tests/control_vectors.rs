@@ -39,6 +39,7 @@ fn reference_stats() -> ControlNodeStats {
         messagestore_count: 2,
         messagestore_bytes: 4096,
         messagestore_limit_bytes: Some(500_000_000),
+        messagestore_evicted: None,
         client_propagation_messages_received: 5,
         client_propagation_messages_served: 3,
         unpeered_propagation_incoming: 1,

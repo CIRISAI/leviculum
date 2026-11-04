@@ -193,7 +193,7 @@ Note that `LxmfRouter`, `RouterEvent`, `RouterOutput`, `RouterConfig` and
 `MessageState` are *not* re-exported at the crate root — the crate root
 exports only `BuiltResource`, `DeliveryStampRequest`, `InboundStampRequest`,
 `PendingResourceBuild` and `PropagationStampRequest` from that module
-(`leviculum-lxmf/src/lib.rs:134-137`) — so they are reachable as
+(`leviculum-lxmf/src/lib.rs:137-140`) — so they are reachable as
 `leviculum_lxmf::router::*` only.
 
 ### Events are return values, not a channel
@@ -210,9 +210,9 @@ Every router method that can produce work returns this. There is no
 callback and no channel. The library never drops an event, but it never
 retains one either: if the application drops a `RouterOutput`, those events
 are gone. `#[must_use]` on both `RouterOutput` and `TickOutput`
-(`leviculum-core/src/transport.rs:588`) is the only safety net, and
+(`leviculum-core/src/transport.rs:615`) is the only safety net, and
 `TickOutput`'s own doc says dropping it "silently loses outbound packets
-and application events" (`leviculum-core/src/transport.rs:557-559`).
+and application events" (`leviculum-core/src/transport.rs:584-586`).
 
 There is a re-entrancy obligation that is easy to miss and fatal to get
 wrong: `RouterOutput.core.events` contains `NodeEvent`s that must be fed
@@ -220,7 +220,7 @@ wrong: `RouterOutput.core.events` contains `NodeEvent`s that must be fed
 drains. This is exactly Codeberg #204's subject. `leviculum-lxmf-node`
 implements it with a bounded worklist and says why the bound is the
 consumer's choice (`MAX_ABSORB_ROUNDS`,
-`leviculum-lxmf-node/src/processor.rs:83-93`, `absorb` at `:534-540`). A
+`leviculum-lxmf-node/src/processor.rs:84-94`, `absorb` at `:534-540`). A
 client that forgets this will silently never see incoming messages.
 
 ### `RouterEvent`
@@ -298,7 +298,7 @@ Discriminants are the Python `LXMessage` constants. Four traps:
 4. **`Rejected` is ambiguous.** It means either "the receiver cancelled the
    Resource transfer" (`leviculum-lxmf/src/router.rs:1436-1502`) or "the
    propagation node refused the upload for an insufficient stamp"
-   (`leviculum-lxmf/src/router/propagation_runtime.rs:483-495`), and the
+   (`leviculum-lxmf/src/router/propagation_runtime.rs:508-520`), and the
    event alone cannot distinguish them.
 
 And one omission that shapes the whole UI: **there is no "propagated but
@@ -309,7 +309,7 @@ that vanished.
 Terminal states remove the entry from the outbound map
 (`remove_outbound`, `leviculum-lxmf/src/router.rs:1016-1019`; call sites at
 `:888`, `:1334`, `:1369` and five in the propagation runtime, among them
-`leviculum-lxmf/src/router/propagation_runtime.rs:1010`). If the client does
+`leviculum-lxmf/src/router/propagation_runtime.rs:1035`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
 message afterwards, and it cannot offer a retry button.
 `MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:48`).
@@ -351,29 +351,29 @@ node the caller named is never swapped: it is waited for, and its attempts
 run out against it, as the reference keeps the node its caller set (1332: a
 group's fresh engine, without a path yet to the home's node, had moved its
 copies to another announced node without a word)
-(`leviculum-lxmf/src/router/propagation_runtime.rs:924-987`).
+(`leviculum-lxmf/src/router/propagation_runtime.rs:949-1012`).
 
 What the router will not do:
 
 - **It never schedules a sync.** `request_messages_from_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1545`) must be called
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1570`) must be called
   by the application every time. `PropagationClientConfig` has three fields
   and none of them is an interval
   (`leviculum-lxmf/src/router/propagation_runtime.rs:56-68`), and
   `next_deadline()` returns `None` in every state except `PathRequested`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1261-1272`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1286-1297`).
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
   router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2323-2340`).
   The client must persist and replay them via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1497`). The selected
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1522`). The selected
   node is not snapshotted either.
 - **It does not clamp the transfer limit against the node's advertised
   one.** The download request carries the local
   `delivery_transfer_limit_kb` (default 1000) regardless of what the node
-  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:598-603`).
+  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:623-628`).
 
 Default `retain_synced_on_node` is `false`
 (`leviculum-lxmf/src/router/propagation_runtime.rs:77`), meaning the client
@@ -381,7 +381,7 @@ tells the node to purge what it has collected. That is a user-visible
 policy decision disguised as a config default, and
 [the mailbox page](loquax-mailbox.md) argues it should be surfaced. Set to
 `true`, our client also withholds the acknowledgement after a download
-(`leviculum-lxmf/src/router/propagation_runtime.rs:677`), which the
+(`leviculum-lxmf/src/router/propagation_runtime.rs:702`), which the
 reference client sends regardless of the flag
 (`reference/LXMF/LXMF/LXMRouter.py:1623-1638`); only then does a second
 client on the same identity still find the message.
@@ -511,12 +511,12 @@ carries hard obligations:
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`
-  (`leviculum-core/src/node/mod.rs:1858`) must not be called from a hook:
+  (`leviculum-core/src/node/mod.rs:1861`) must not be called from a hook:
   141 ms under the lock for 1 MiB.
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`
   uses 200 ms (`POLL_INTERVAL_MS`,
-  `leviculum-lxmf-node/src/processor.rs:81`).
+  `leviculum-lxmf-node/src/processor.rs:82`).
 
 This is a strong constraint and a gift at the same time: it means the
 "model" that talks to the network is a synchronous state machine with a
@@ -882,7 +882,7 @@ why the exit code is what the tests assert. The ID does not become
 unobtainable, because `loquax status <id>` needs it: `LNMSG_ENQUEUED … id=…`
 carries it into the structured event log, which `LEVICULUM_EVENT_LOG=<path>`
 turns on and which is written by an unfiltered layer, so the line arrives even
-at the `warn` default (`leviculum-std/src/event_log.rs:812-819`). No
+at the `warn` default (`leviculum-std/src/event_log.rs:830-837`). No
 `--print-id` flag was added: nothing consumes the ID today, and an option
 added against a hypothetical user is an option nobody tests.
 

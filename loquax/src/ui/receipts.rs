@@ -32,8 +32,9 @@
 //!   open chat. The core decides the rest.
 //! - A received message is seen when its bubble stayed on screen in the
 //!   open chat, in front, for [`SEEN_MS`] without a break. It must be the
-//!   peer's, not a reaction nor a position report, carry an id, and its
-//!   peer must take receipts ([`super::history::Flags::receipts`]), not be
+//!   peer's, not a reaction nor a position report, carry an id and the
+//!   mark itself (1322: a plain message is never named, whatever the
+//!   messages around it carried), and its peer must take receipts ([`super::history::Flags::receipts`]), not be
 //!   blocked, and the switch ([`Reading::on`]) be on. Seen is kept in the
 //!   message's ledger ([`SEEN`]), so a restart sends no receipt twice.
 //! - What is seen gathers into one receipt a peer, with the reader's clock
@@ -511,10 +512,16 @@ impl<B> UiModel<B> {
 }
 
 /// Whether a received message is one a receipt names once seen: the
-/// peer's, a bubble of its own, with an id, not seen before.
+/// peer's, a bubble of its own, with an id, not seen before, and itself
+/// carrying the mark. The conversation's flag says whether the peer takes
+/// receipts now; only the message's own mark says it asked for one, so a
+/// stock client's plain reply beside a marked message is never named
+/// (1322), as the home node names none either (`home/server.rs`, its
+/// `seen`).
 fn owes_receipt(message: &super::Message) -> bool {
     !message.outbound
         && message.id.is_some()
+        && Lev::from_fields(&message.fields).is_some_and(|lev| lev.supports_receipts())
         && !message.is_report()
         && !message.is_aside()
         && !message.ledger.iter().any(|entry| entry.what == SEEN)

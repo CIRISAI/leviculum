@@ -393,8 +393,16 @@ async fn take_over(
         .unwrap_or(loquax::home::DEFAULT_ARCHIVE_CAP_MB)
         .saturating_mul(1 << 20);
     let mut cursor = 0;
+    // The old home, by its `loquax.home` destination.
+    let peer_home = loquax::home::destination_hash(&code.public_key).unwrap_or([0; 16]);
+    let ratchets = match taken.ratchets.is_empty() {
+        true => "differ",
+        false => "same",
+    };
     let mut keep = |entries: &[loquax::home::wire::Moving], cursor: &mut u64| {
         *cursor = entries.last().map_or(*cursor, |entry| entry.seq);
+        // The old home's ring is written below as this one's (1305).
+        loquax::events::home_sync(&peer_home, entries.len(), 0, ratchets);
         store
             .archive_moved_in(entries, cap)
             .map(|_| ())

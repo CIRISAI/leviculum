@@ -72,6 +72,7 @@ fn the_analysis_reads_what_the_writer_writes() {
             value = 13u64,
             dup = false,
             via = "resource",
+            local_only = index == 2,
         );
     }
     tracing::debug!(
@@ -156,6 +157,10 @@ fn the_analysis_reads_what_the_writer_writes() {
     // Phase 2: accepted and rejected, rejections split by reason.
     assert!(field(&report, "accepted ").contains('3'), "{report}");
     assert!(field(&report, "duplicates").contains('1'), "{report}");
+    assert!(
+        field(&report, "local only").starts_with("local only     1 "),
+        "{report}"
+    );
     assert!(field(&report, "rejected ").contains('3'), "{report}");
     assert!(field(&report, "invalid_stamp").contains('2'), "{report}");
     assert!(field(&report, "store_failed").contains('1'), "{report}");
@@ -164,6 +169,13 @@ fn the_analysis_reads_what_the_writer_writes() {
     let store = field(&report, "last reported");
     assert!(store.contains("20.0 %"), "store utilisation: {store}");
     assert!(field(&report, "evicted ").contains('1'), "{report}");
+    // Order 1295: where the accepted messages went, as `--status` says it.
+    // Only the round that ended ok forwarded anything.
+    assert_eq!(
+        field(&report, "flow "),
+        "flow             3 accepted, 2 delivered to clients, 2 forwarded to peers, 1 evicted",
+        "{report}"
+    );
 
     // Phase 4: per-peer rounds, and a round that ended other than ok.
     assert!(report.contains(&peer_a[..16]), "peer A missing:\n{report}");

@@ -259,10 +259,17 @@ compiled and tested on the pure function.
 
 ## 6. The measured same-emission arm: `path_choice = hops_and_loss`
 
-Since 2026-10-05 (Codeberg #230) the same-emission clause has a second,
-opt-in rule beside the default hop ranking (§5): `path_choice =
-hops_and_loss` (the `[reticulum]` key; `TransportConfig::path_choice`,
-`PathChoice` in `transport.rs`). Where §5's 1.5.2 `gravity` re-ranks
+Since 2026-10-05 (Codeberg #230) the same-emission clause has a second
+rule beside the hop ranking (§5): `path_choice = hops_and_loss` (the
+`[reticulum]` key; `TransportConfig::path_choice`, `PathChoice` in
+`transport.rs`). Since order 1380 it is the default on radio interfaces:
+the media-aware driver declares it per interface
+(`Transport::set_interface_path_choice`, from `InterfaceInfo::path_choice`
+in leviculum-std), RNode and BLE declare `hops_and_loss`, every other
+medium `hops`, and the `[reticulum]` key, when set, overrides every
+interface. A same-emission race is decided by the cost rule when either
+the installed path's interface or the copy's prices loss, and the penalty
+prices only a direct candidate on such an interface. Where §5's 1.5.2 `gravity` re-ranks
 equal-emission copies by an operator-CONFIGURED preference, this rule
 re-ranks them by a MEASURED one: the direct link is priced at its
 bidirectional ETX, estimated for free from the announce re-hear ratio —
@@ -281,9 +288,9 @@ losing more than ~29 % of announces. Three properties bound it:
   absence of a direct copy of it proves nothing.
 * **Degradation.** Below `DIRECT_EVIDENCE_MIN_KNOWN` known emissions —
   a fresh destination, or a mesh whose announce cadence is too sparse
-  to score — the rule decides exactly like `hops`. The default IS
-  `hops`; the knob is a deliberate opt-in and rnsd ignores the key in
-  a shared config.
+  to score — the rule decides exactly like `hops`. The default is
+  `hops` on every non-radio interface; rnsd ignores the key in a shared
+  config.
 * **Evidence.** The pinned replay `mvr_pathchoice_rule_table`
   (leviculum-core, node/) drives both knob settings through the real
   acceptance gate over the `pathchoice_loss*` room shape at five loss

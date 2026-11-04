@@ -4030,6 +4030,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let now = model.now;
             if let Some(&(c, m)) = model.sending.front() {
                 if let Some(message) = model.message_mut(c, m) {
+                    // Named already by its pulled sent entry (`home_sent`),
+                    // which is further along than queued.
+                    if message.id == Some(message_id) {
+                        return Vec::new();
+                    }
                     message.id = Some(message_id);
                     message.delivery = Some(DeliveryState::Queued);
                     let id = to_hex(&message_id[..4]);
@@ -4764,6 +4769,28 @@ fn home_sent<B>(
     }
     if found {
         return;
+    }
+    // The running send's own entry, pulled before the runner named it: the
+    // home node answered the send on one link and the pull read its log on
+    // another, so the pull can win (1335). Its bubble takes the id here and
+    // the late `Queued` finds it named.
+    if let Some(&(c, m)) = model.sending.front() {
+        let running = model
+            .conversations
+            .get(c)
+            .filter(|conversation| conversation.peer == destination)
+            .and_then(|conversation| conversation.messages.get(m))
+            .is_some_and(|message| {
+                message.outbound && message.id.is_none() && message.body.as_bytes() == body
+            });
+        if running {
+            if let Some(message) = model.message_mut(c, m) {
+                message.id = Some(message_id);
+                message.delivery = Some(DeliveryState::Sent);
+                message.note(now, "taken by the mailbox");
+            }
+            return;
+        }
     }
     let index = model.conversation(destination);
     let activity = model.bump();
@@ -6339,6 +6366,55 @@ pub(crate) mod tests {
         );
     }
 
+    /// 1322: messages from `PEER`, ids `0x40 + i`, each with the mark or
+    /// without it as `marks` says, the chat open and in front, all of
+    /// them on screen; the ids every receipt sent named, the chat left at
+    /// the end.
+    fn named_by_receipts(marks: &[bool]) -> Vec<[u8; 32]> {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        for (i, &mark) in (0u8..).zip(marks) {
+            let id = [0x40 + i; 32];
+            let event = match mark {
+                true => with_lev(PEER, id, "loquax", &leviculum_lxmf::lev::Lev::mark()),
+                false => received_from(PEER, id, "stock"),
+            };
+            engine(&mut model, event);
+        }
+        update(&mut model, UiEvent::Open { peer: PEER });
+        update(&mut model, UiEvent::Front(true));
+        let keys = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.activity)
+            .collect();
+        update(&mut model, UiEvent::Viewport { peer: PEER, keys });
+        let mut named = Vec::new();
+        for ms in (0..=12_000).step_by(500) {
+            named.extend(receipts_in(&ms_at(&mut model, ms)));
+        }
+        named.extend(receipts_in(&update(&mut model, UiEvent::Close)));
+        named.into_iter().flat_map(|(_, _, ids)| ids).collect()
+    }
+
+    /// 1322: a receipt names only the messages that asked for one. A stock
+    /// client's plain reply before a marked message stays unnamed though
+    /// the marked one made the peer take receipts (periculum 1235 saw
+    /// both named, `plain_named=yes`). The positive control, both marked,
+    /// names both. The mirror, a marked message and a plain one after it,
+    /// names none: the latest says the peer takes no receipts. A marked
+    /// one after that names the two marked and still not the plain.
+    #[test]
+    fn a_receipt_names_only_the_messages_that_carried_the_mark() {
+        assert_eq!(named_by_receipts(&[false, true]), [[0x41; 32]]);
+        assert_eq!(named_by_receipts(&[true, true]), [[0x40; 32], [0x41; 32]]);
+        assert_eq!(named_by_receipts(&[true, false]), Vec::<[u8; 32]>::new());
+        assert_eq!(
+            named_by_receipts(&[true, false, true]),
+            [[0x40; 32], [0x42; 32]]
+        );
+    }
+
     /// 1233: the switch round trip. The palette's command turns it off
     /// and on, each change asks the config to keep it, setting it to what
     /// it is asks nothing; a message written while off carries no mark,
@@ -7322,6 +7398,46 @@ pub(crate) mod tests {
         engine(&mut model, home_sent(ID2, PEER));
         assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
         assert_eq!(model.conversations[0].messages.len(), 1);
+    }
+
+    /// 1335: on a client the pull can bring the sent entry of the running
+    /// send before the runner names it (the home's answer and the pull race
+    /// on two links): the running bubble takes the id, no second bubble
+    /// appears, and the late name does not take it back to queued.
+    #[test]
+    fn a_sent_entry_pulled_before_the_runner_names_it_is_the_running_bubble() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        sent(&mut model, "und die Antwort");
+        let home_sent = |body: &[u8]| OutboxEvent::HomeSent {
+            message_id: ID,
+            destination: PEER,
+            sent_at: 0,
+            body: body.to_vec(),
+            fields: Vec::new(),
+        };
+        // Another device's message to the same peer: not the running one.
+        engine(&mut model, home_sent(b"from the laptop"));
+        assert_eq!(model.conversations[0].messages.len(), 2);
+        assert_eq!(model.conversations[0].messages[0].id, None);
+        let id = [0x49; 32];
+        engine(
+            &mut model,
+            OutboxEvent::HomeSent {
+                message_id: id,
+                destination: PEER,
+                sent_at: 0,
+                body: b"und die Antwort".to_vec(),
+                fields: Vec::new(),
+            },
+        );
+        engine(&mut model, OutboxEvent::Queued { message_id: id });
+        let messages = &model.conversations[0].messages;
+        assert_eq!(messages.len(), 2, "one bubble for the running send");
+        assert_eq!(messages[0].id, Some(id));
+        assert_eq!(messages[0].delivery, Some(DeliveryState::Sent));
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert!(model.sending.is_empty());
     }
 
     /// A finished send on a client pulls at once; one finishing while a

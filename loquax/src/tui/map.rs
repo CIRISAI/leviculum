@@ -645,7 +645,7 @@ enum Picture {
     /// Kitty, or a sixel through ratatui-image's quantiser: under tmux, or
     /// past 256 colours.
     Sliced(SlicedProtocol),
-    /// A sixel of the frame's own colours ([`images::sixel_indexed`]).
+    /// A sixel of the frame's own colours ([`images::sixel_indexed_direct`]).
     Whole(images::Protocol),
 }
 
@@ -686,6 +686,12 @@ struct Canvas {
     painter: Painter,
     graphics: Graphics,
     pictures: Pictures,
+    /// tmux sits between ([`images::in_tmux`]): its passthrough wrapping
+    /// is `ratatui-image`'s, so a sixel goes that way. Read once at the
+    /// start and handed in, never from the environment here: a test run
+    /// from a tmux pane drew a different picture than the same test
+    /// anywhere else (1347).
+    tmux: bool,
     /// The glyph sets the text techniques fit, built once.
     sets: Sets,
 }
@@ -806,9 +812,9 @@ impl Canvas {
     /// its palette and no quantiser; anything else goes through
     /// ratatui-image.
     fn encode(&self, fb: &mut [u16], w: u32, h: u32, cells: (u16, u16)) -> Option<Picture> {
-        if self.graphics == Graphics::Sixel {
+        if self.graphics == Graphics::Sixel && !self.tmux {
             if let Some((palette, indices)) = indexed(fb) {
-                if let Some(sixel) = images::sixel_indexed(&palette, &indices, w, h, cells) {
+                if let Some(sixel) = images::sixel_indexed_direct(&palette, &indices, w, h, cells) {
                     return Some(Picture::Whole(sixel));
                 }
             }
@@ -1053,6 +1059,7 @@ impl MapPainter {
                 painter,
                 graphics,
                 pictures: Pictures::new(picker, backend),
+                tmux: false,
                 sets: Sets::default(),
             })),
             painted: None,
@@ -1086,6 +1093,17 @@ impl MapPainter {
             _ => MapStyle::M9,
         };
         finish.in_theme(self.theme)
+    }
+
+    /// The same painter, drawing for a terminal behind tmux when `tmux`
+    /// ([`images::in_tmux`], read by the caller). A painter is made for a
+    /// terminal reached directly, so a test's picture is the same wherever
+    /// it runs.
+    pub fn behind_tmux(mut self, tmux: bool) -> Self {
+        if let Engine::Inline(canvas) = &mut self.engine {
+            canvas.tmux = tmux;
+        }
+        self
     }
 
     /// The same painter drawing on its own thread: a frame shows the
@@ -2490,6 +2508,7 @@ mod tests {
             painter: Painter::new(Maps::new(Some(dir.path().to_path_buf()))),
             graphics: Graphics::Octant,
             pictures: Pictures::new(None, Backend::Text),
+            tmux: false,
             sets: Sets::default(),
         };
         let view = Viewport::new(
@@ -2580,7 +2599,16 @@ mod tests {
                     c.set_symbol("▒");
                 }
             };
-            if symbol.contains("\u{1b}P") {
+            // Kitty's placeholders first: behind tmux its transmission is
+            // wrapped in a passthrough DCS, which is no sixel. ratatui-image
+            // reads tmux from the environment for every picker, so a test
+            // run from a tmux pane gets the wrapped form (1347).
+            if symbol.contains('\u{10EEEE}') {
+                let width = symbol.chars().filter(|&c| c == '\u{10EEEE}').count() as u16;
+                for dx in 0..width {
+                    picture(x + dx, y);
+                }
+            } else if symbol.contains("\u{1b}P") {
                 let width: u16 = symbol
                     .split_once("\u{1b}[")
                     .and_then(|(_, rest)| rest.split_once('X'))
@@ -2591,11 +2619,6 @@ mod tests {
                     for dx in 0..width {
                         picture(x + dx, y + dy);
                     }
-                }
-            } else if symbol.contains('\u{10EEEE}') {
-                let width = symbol.chars().filter(|&c| c == '\u{10EEEE}').count() as u16;
-                for dx in 0..width {
-                    picture(x + dx, y);
                 }
             } else if let Some(c) = self.shown.cell_mut((x, y)) {
                 *c = cell.clone();
@@ -2763,6 +2786,7 @@ mod tests {
             painter: Painter::new(open()),
             graphics: Graphics::Sixel,
             pictures: Pictures::new(Some(picker()), Backend::Graphics(ProtocolType::Sixel)),
+            tmux: false,
             sets: Sets::default(),
         };
         let mut read = Vec::new();
@@ -2806,8 +2830,8 @@ mod tests {
                 let t4 = Instant::now();
                 let (palette, indices) = indexed(&fb).expect("at most 256 colours");
                 let t5 = Instant::now();
-                let new =
-                    images::sixel_indexed(&palette, &indices, w, h, (cols, rows)).expect("sixel");
+                let new = images::sixel_indexed_direct(&palette, &indices, w, h, (cols, rows))
+                    .expect("sixel");
                 let t6 = Instant::now();
                 before = bytes_of(&|f| images::render(f, area, &old, 0, 0));
                 after = bytes_of(&|f| images::render_whole(f, area, &new));

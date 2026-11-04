@@ -848,7 +848,7 @@ if [ -n "$FLASHED_PORTS" ]; then
         fi
         if [ -z "$fp_serial" ]; then
             # No serial recorded — fall back to path comparison.
-            if echo "$CURRENT_PORTS" | grep -qx "$fp"; then
+            if grep -qx "$fp" <<<"$CURRENT_PORTS"; then
                 BOOTED_PORTS="$BOOTED_PORTS"$'\n'"$fp"
             else
                 NOT_BOOTED_PORTS="$NOT_BOOTED_PORTS"$'\n'"$fp"

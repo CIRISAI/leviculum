@@ -327,9 +327,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "EMB_INSERT_FAIL",
         required_keys: &["cap", "len_after_evict", "map"],
     },
+    // The transport identity. Its site also writes `node=` for periculum's
+    // fmt-log readers; the event log skips a site's `node`, so the hash
+    // rides here as `identity` (1294).
     EventSchema {
         name: "IDENTITY",
-        required_keys: &["node"],
+        required_keys: &["identity"],
     },
     EventSchema {
         name: "PATH_LOOKUP",
@@ -458,6 +461,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "ANN_QUEUE_STALE",
         required_keys: &["dst", "hops", "iface", "age_ms"],
+    },
+    // An own announce held back on a fresh interface so a Python peer's
+    // ingress control learns every destination (order 1320). `release_ms`
+    // is the core clock at which the interface takes its next one.
+    EventSchema {
+        name: "ANN_PACED",
+        required_keys: &["dst", "iface", "release_ms"],
     },
     // A received announce that found a targeted path response still in its
     // grace (1262): the response stays, carrying this newer emission, and
@@ -843,13 +853,34 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "HOME_NETWORK",
         required_keys: &["kind", "changed", "action", "entry"],
     },
+    // The home's own record (1305, H6 of the N-home study,
+    // `docs/drafts/mailbox-for-friends-study-2026-11.md` section 6): a
+    // message archived, its proof released, an archive exchange with another
+    // home of the identity, an announce of the identity. Emitters in
+    // `loquax/src/events.rs`.
+    EventSchema {
+        name: "HOME_ACCEPT",
+        required_keys: &["msg", "from", "via", "home"],
+    },
+    EventSchema {
+        name: "HOME_PROVE",
+        required_keys: &["msg", "home"],
+    },
+    EventSchema {
+        name: "HOME_SYNC",
+        required_keys: &["peer_home", "pulled", "pushed", "ratchets"],
+    },
+    EventSchema {
+        name: "HOME_ANNOUNCE",
+        required_keys: &["home", "iface", "kind"],
+    },
     EventSchema {
         name: "LNMSG_VIA",
         required_keys: &["method", "reason"],
     },
     EventSchema {
         name: "LNMSG_PN",
-        required_keys: &["node", "source", "cost"],
+        required_keys: &["pn", "source", "cost"],
     },
     EventSchema {
         name: "LNMSG_FETCHED",
@@ -887,6 +918,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PN_EVICT",
         required_keys: &["tid", "bytes", "age_s", "reason"],
     },
+    // Why a message left the store, per id, with the full transient id a
+    // sender's `/lev/status` query names it by (order 1394): `reason` is
+    // collected, evicted, expired or delivered.
+    EventSchema {
+        name: "PN_DEPART",
+        required_keys: &["id", "reason"],
+    },
+    // One `/lev/status` request: `result` is answered, refused or
+    // throttled; `ids` how many it asked for when answered.
+    EventSchema {
+        name: "PN_STATUS",
+        required_keys: &["ids", "result"],
+    },
     // Peering events (Codeberg #384 part 2): one line per peer-table
     // change, per `/offer` round (either direction), per concluded or
     // failed sync round. `peer` is the remote propagation destination
@@ -910,6 +954,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PN_REJECT",
         required_keys: &["reason", "via"],
+    },
+    // lnpnd: an inbound sync batch had messages the store could not hold
+    // even after eviction; `offered` is the batch, `dropped` what was lost.
+    // The node declines offers until its next maintenance sweep (1294).
+    EventSchema {
+        name: "PN_STORE_FULL",
+        required_keys: &["peer", "offered", "dropped"],
     },
     EventSchema {
         name: "PN_MAILBOX",
@@ -1177,16 +1228,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESOURCE_PART_DROP",
         required_keys: &["reason", "link", "state"],
     },
-    // The receive window's per-round sample. NOTE: this site emits its own
-    // `t` field, and the layer appends the relative timestamp as `t=` too,
-    // so the line carries two. A line's own stamp is its LAST `t=` (the rule
-    // `merge_event_logs` already applies), so the parsers agree -- but the
-    // round's elapsed milliseconds are shadowed and only the second `t` is
-    // readable. Declared as emitted; renaming the field is a wire change for
-    // whoever greps these lines.
+    // The receive window's per-round sample; `took_ms` is the round's
+    // elapsed milliseconds. It was `t` until 1294, beside the layer's own
+    // `t=` stamp, so a first-match parser read the round time as the
+    // line's timestamp (miauhaus, `round=1 t=161 ... t=314207`). No site
+    // may write `t` again (`no_event_site_writes_a_layer_key`).
     EventSchema {
         name: "RESOURCE_RW",
-        required_keys: &["rh", "round", "window", "wmax", "rate", "outst", "t"],
+        required_keys: &["rh", "round", "window", "wmax", "rate", "outst", "took_ms"],
     },
     // `leviculum-std` driver. ANNOUNCE_TX/ANNOUNCE_WITHHELD are the
     // peer-up announce burst (distinct from the transport's ANN_TX, which
@@ -1709,7 +1758,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4902`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4918`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

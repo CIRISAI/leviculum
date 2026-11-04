@@ -80,4 +80,23 @@ apt-get install -y --no-install-recommends openjdk-17-jdk-headless
 rustup component add rustfmt clippy
 cargo install --locked just
 
+# Where the gate runs, printed before it runs. A test that reads the kernel's
+# own books (proc_memory's file-page census) went red on the forge and green
+# in the same image here (order 1372, pipelines 602/603): the runner's
+# kernel, core count and the filesystem under the workspace and the target
+# dir are what differ, and tmpfs books file pages as RssShmem, not RssFile.
+# The target dir may not exist yet, so its nearest existing parent is named.
+fs_of() {
+    local p="$1"
+    while [ ! -e "$p" ]; do p="$(dirname "$p")"; done
+    printf '%s (%s)' "$(stat -f -c %T "$p" 2>/dev/null || echo unknown)" "$p"
+}
+echo "=== ci-gate environment ==="
+uname -a
+echo "nproc: $(nproc)"
+echo "workspace fs: $(fs_of "$REPO_DIR")"
+echo "target fs: $(fs_of "${CARGO_TARGET_DIR:-$REPO_DIR/target}")"
+grep -E '^(Rss|VmRSS|VmSwap)' /proc/self/status || echo "no Rss/VmRSS/VmSwap lines in /proc/self/status"
+echo "=== end ci-gate environment ==="
+
 just ci-gate
