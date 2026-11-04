@@ -499,6 +499,9 @@ pub struct Bubble {
     /// Ours only, when [`Mark::Read`]: the reader's time, unix seconds
     /// (1230).
     pub read_at: Option<u32>,
+    /// Ours only, when [`Mark::Delivered`] came from the propagation
+    /// network and not a proof (1395): the words differ, the ticks do not.
+    pub witness: Option<super::arrival::Witness>,
     pub at: Option<WallTime>,
     pub chips: Vec<Chip>,
     /// The position the message carries, which the bubble's line opens the
@@ -641,6 +644,12 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                     .then(|| Mark::of(shown(message.delivery, model))),
                 read_at: match shown(message.delivery, model) {
                     Some(DeliveryState::Read { at }) if message.outbound => Some(at),
+                    _ => None,
+                },
+                witness: match shown(message.delivery, model) {
+                    Some(DeliveryState::Delivered) => {
+                        super::arrival::witness(message).map(|(witness, _)| witness)
+                    }
                     _ => None,
                 },
                 at: message.at,
@@ -1092,6 +1101,7 @@ mod tests {
             body: String::new(),
             mark,
             read_at: None,
+            witness: None,
             at: at.map(|unix_secs| WallTime {
                 unix_secs,
                 offset_secs: 3600,

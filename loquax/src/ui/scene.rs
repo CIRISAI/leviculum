@@ -543,12 +543,26 @@ pub struct VoiceNode {
 
 /// The screen reader's words for `mark`; `read_at` is the reader's time
 /// for [`chat::Mark::Read`], shown in the zone `now` is in.
-pub fn mark_words(mark: chat::Mark, read_at: Option<u32>, now: Option<WallTime>) -> Text {
+///
+/// `witness` says who confirmed [`chat::Mark::Delivered`] when it was not
+/// a proof (1395): the same two ticks, the words of the propagation
+/// network.
+pub fn mark_words(
+    mark: chat::Mark,
+    read_at: Option<u32>,
+    witness: Option<super::arrival::Witness>,
+    now: Option<WallTime>,
+) -> Text {
+    use super::arrival::Witness;
     match mark {
         chat::Mark::Sending => Text::key(StrId::StateSending),
         chat::Mark::Unconfirmed => Text::key(StrId::StateUnconfirmed),
         chat::Mark::Mailbox => Text::key(StrId::StateMailbox),
-        chat::Mark::Delivered => Text::key(StrId::StateDelivered),
+        chat::Mark::Delivered => match witness {
+            Some(Witness::Receipt) => Text::key(StrId::StateDeliveredViaPn),
+            Some(Witness::Collected) => Text::key(StrId::StateCollected),
+            _ => Text::key(StrId::StateDelivered),
+        },
         chat::Mark::Read => {
             let at = WallTime {
                 unix_secs: i64::from(read_at.unwrap_or(0)),
@@ -1837,7 +1851,7 @@ fn bubble_node(
     };
     let mark = bubble.mark.map(|mark| MarkNode {
         mark,
-        words: mark_words(mark, bubble.read_at, now),
+        words: mark_words(mark, bubble.read_at, bubble.witness, now),
         activate: (mark == chat::Mark::Failed).then(|| {
             Action::of(Intent::SendAgain {
                 peer,

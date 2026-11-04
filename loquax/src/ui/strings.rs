@@ -133,6 +133,10 @@ leviculum_ui::catalogue! {
     StateMailbox = "state_mailbox", "Waiting in the mailbox", "Wartet im Postfach";
     StateDelivered = "state_delivered", "Delivered", "Zugestellt";
     StateRead = "state_read", "Read at %1$s", "Gelesen um %1$s";
+    // The delivered rung's words when the propagation network, not a
+    // proof, witnessed it (1395, loquax-propagation-receipts.md).
+    StateDeliveredViaPn = "state_delivered_via_pn", "Delivered via the propagation network", "Über das Propagation-Netz zugestellt";
+    StateCollected = "state_collected", "Collected from the propagation network", "Aus dem Propagation-Netz abgeholt";
     StateFailed = "state_failed", "Not sent. Double tap to send again", "Nicht gesendet. Doppeltippen, um es erneut zu senden";
     SendAgain = "scene_send_again", "Send again", "Erneut senden";
     ActionReply = "action_reply", "Reply", "Antworten";
@@ -154,6 +158,9 @@ leviculum_ui::catalogue! {
     InfoSending = "info_sending", "Being sent now", "Wird gerade gesendet";
     InfoMailbox = "info_mailbox", "In the mailbox, delivered once %1$s is online", "Im Postfach, wird zugestellt, sobald %1$s online ist";
     InfoDelivered = "info_delivered", "Arrived on %1$s's device", "Auf dem Gerät von %1$s angekommen";
+    InfoDeliveredViaPn = "info_delivered_via_pn", "Delivered via the propagation network at %1$s", "Über das Propagation-Netz zugestellt um %1$s";
+    InfoCollected = "info_collected", "Collected from the propagation network at %1$s", "Um %1$s aus dem Propagation-Netz abgeholt";
+    InfoNotCollected = "info_not_collected", "Not collected at the propagation node; perhaps delivered via another", "Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt";
     InfoRefused = "info_refused", "Not sent: it was refused. Double tap to send again", "Nicht gesendet: es wurde abgelehnt. Doppeltippen, um es erneut zu senden";
     InfoSender = "info_sender", "Sender", "Absender";
     InfoSignatureOk = "info_signature_ok", "Confirmed by its signature", "Durch die Signatur bestätigt";

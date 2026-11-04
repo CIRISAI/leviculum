@@ -4361,6 +4361,131 @@ fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
     );
 }
 
+/// 1395, against the ugly store: a propagation receipt (0x07) from a peer
+/// turns the message of ours it names into two grey ticks on the phone's
+/// rows, `delivered`, adds no row, and the Info says "delivered via the
+/// propagation network" in the reader's language, not "on the device"; the
+/// words survive the store. Read receipts off do not hide it.
+#[test]
+fn a_propagation_receipt_shows_its_own_words_on_the_phone_and_survives_the_store() {
+    use leviculum_lxmf::lev::{Lev, PropagationReceipt};
+    use leviculum_ui::delivery::DeliveryState;
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent};
+    use loquax::when::WallTime;
+    use loquax_android::session;
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let mut store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    let start = ugly_store::BASE + 3 * 86_400;
+    update(
+        &mut model,
+        UiEvent::Clock(WallTime {
+            unix_secs: start,
+            offset_secs: 0,
+        }),
+    );
+    model.restore(store.restore().expect("restore"));
+    update(&mut model, UiEvent::ReadReceipts(false));
+    let (c, id, key) = model
+        .conversations
+        .iter()
+        .enumerate()
+        .find_map(|(c, conversation)| {
+            conversation.messages.iter().find_map(|m| {
+                (m.outbound
+                    && m.id.is_some()
+                    && !matches!(
+                        m.delivery,
+                        Some(DeliveryState::Delivered | DeliveryState::Read { .. })
+                    ))
+                .then(|| (c, m.id.expect("an id"), m.activity))
+            })
+        })
+        .expect("a message of ours not delivered yet");
+    let peer = model.conversations[c].peer;
+    let rows_before = session::rows(&model, c, Lang::En).len();
+    let receipt = Lev {
+        propagation_receipt: Some(PropagationReceipt {
+            received_at: (start - 60) as u32,
+            ids: vec![id],
+        }),
+        ..Lev::default()
+    };
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            message_id: [0xe7; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: receipt.fields().to_vec(),
+            verified: true,
+        }),
+    );
+    // The words carry when this device learned it, the session's clock.
+    let at = WallTime {
+        unix_secs: start,
+        offset_secs: 0,
+    }
+    .hh_mm();
+    let rows = session::rows(&model, c, Lang::En);
+    assert_eq!(rows.len(), rows_before, "a receipt is no row");
+    let row = rows.iter().find(|r| r.id == hex(&id)).expect("the row");
+    assert_eq!(row.state, "delivered");
+    let state_words = |model: &loquax::ui::UiModel<_>, lang: Lang| {
+        loquax::ui::info::message_info(model, peer, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| row.resolve(lang))
+            .find(|(label, _)| label == "Status")
+            .map(|(_, value)| value)
+            .expect("a status row")
+    };
+    assert_eq!(
+        state_words(&model, Lang::En),
+        format!("Delivered via the propagation network at {at}")
+    );
+    assert_eq!(
+        state_words(&model, Lang::De),
+        format!("Über das Propagation-Netz zugestellt um {at}")
+    );
+    store.write(&model.take_writes()).expect("written");
+    drop(store);
+    let store = loquax::store::Store::open_in(home.path(), me).expect("again");
+    let mut again = session::known(home.path(), &store).expect("a model");
+    update(
+        &mut again,
+        UiEvent::Clock(WallTime {
+            unix_secs: start,
+            offset_secs: 0,
+        }),
+    );
+    again.restore(store.restore().expect("restore"));
+    let key = again
+        .conversations
+        .iter()
+        .flat_map(|c| c.messages.iter())
+        .find(|m| m.id == Some(id))
+        .map(|m| m.activity)
+        .expect("ours, restored");
+    let restored = loquax::ui::info::message_info(&again, peer, key)
+        .expect("its info")
+        .rows
+        .iter()
+        .map(|row| row.resolve(Lang::En))
+        .find(|(label, _)| label == "Status")
+        .map(|(_, value)| value);
+    assert_eq!(
+        restored,
+        Some(format!("Delivered via the propagation network at {at}"))
+    );
+}
+
 /// The photo fixture (1220, `loquax/tests/fixtures/make-photo.py`): 1800 x 2400
 /// as shown, stored turned with EXIF orientation 6, a GPS position and a
 /// camera model in its EXIF, a red block top left as it shows.

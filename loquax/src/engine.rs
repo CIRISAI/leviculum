@@ -558,6 +558,17 @@ impl Engine {
             RouterEvent::PropagationStampPending(request) => {
                 self.dispatch_stamp(StampJob::Propagation(request, Arc::default()));
             }
+            RouterEvent::PropagationUploaded {
+                message_id,
+                transient_id,
+            } => {
+                if self.tracked.contains_key(&message_id) {
+                    self.emit(OutboxEvent::Uploaded {
+                        message_id,
+                        transient_id,
+                    });
+                }
+            }
             RouterEvent::MessageReceived(message) => {
                 let message = *message;
                 let verified = message.verification == Verification::Valid;
@@ -569,6 +580,8 @@ impl Engine {
                 let packed = self
                     .hands_out_packed
                     .then(|| (message.message_id, message.pack(), message.method.into()));
+                let propagated = (message.method == DeliveryMethod::Propagated)
+                    .then_some((message.message_id, message.source_hash));
                 self.emit(OutboxEvent::Received {
                     message_id: message.message_id,
                     source: message.source_hash,
@@ -577,6 +590,9 @@ impl Engine {
                     body: message.content,
                     fields: message.fields,
                 });
+                if let Some((message_id, source)) = propagated {
+                    self.emit(OutboxEvent::Propagated { message_id, source });
+                }
                 if let Some((message_id, source, packed)) = held {
                     self.hold(message_id, source, packed.clone());
                     self.emit(OutboxEvent::Unverified {
@@ -1912,6 +1928,12 @@ impl Engine {
             if is_propagation_node(announce.name_hash()) {
                 self.emit(OutboxEvent::NodeAnnounced {
                     destination: *announce.destination_hash().as_bytes(),
+                    status: leviculum_lxmf::propagation::PropagationNodeAnnounce::decode(
+                        announce.app_data(),
+                    )
+                    .ok()
+                    .as_ref()
+                    .and_then(leviculum_lxmf::lev_status::announced_version),
                 });
             }
         }

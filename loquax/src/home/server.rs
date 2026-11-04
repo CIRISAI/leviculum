@@ -653,6 +653,58 @@ fn seen(
     }
 }
 
+/// The sender a message archived as it came owes a propagation receipt
+/// (1395): one that came by propagation and asks for one
+/// ([`crate::ui::arrival::acknowledges`]), not from the home itself. The
+/// home node is the recipient's endpoint: it collected the message from the
+/// propagation node, so it acknowledges, and its devices acknowledge
+/// nothing.
+pub fn owes_arrival(home: [u8; 16], packed: &[u8], propagated: bool) -> Option<[u8; 16]> {
+    if !propagated {
+        return None;
+    }
+    let message =
+        leviculum_lxmf::Message::unpack(packed, None, None, DeliveryMethod::Direct).ok()?;
+    let lev = leviculum_lxmf::lev::Lev::from_fields(&message.fields);
+    (message.source_hash != home && crate::ui::arrival::acknowledges(true, lev.as_ref()))
+        .then_some(message.source_hash)
+}
+
+/// Sign the propagation receipts `owed`, per sender the ids that arrived
+/// by propagation in one pump, at the home's clock `received_at`, and put
+/// each in the outbox as [`seen`] puts a read receipt: the new outbox
+/// entries, delivered direct first and then by the propagation node.
+pub fn propagation_receipts(
+    store: &mut Store,
+    home: &Home<'_>,
+    owed: alloc::collections::BTreeMap<[u8; 16], Vec<[u8; 32]>>,
+    received_at: u32,
+    now: f64,
+) -> Vec<Outgoing> {
+    let mut accepted = Vec::new();
+    for (peer, ids) in owed {
+        for receipt in leviculum_lxmf::lev::PropagationReceipt::batches(received_at, &ids) {
+            let count = receipt.ids.len();
+            match lev_out(store, home, peer, crate::ui::arrival::alone(receipt), now) {
+                Ok(Some(outgoing)) => {
+                    tracing::info!(
+                        "HOME propagation receipt to={} ids={count} received_at={received_at} message={}",
+                        crate::address::to_hex(&peer),
+                        crate::address::to_hex(&outgoing.id)
+                    );
+                    accepted.push(outgoing);
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    "HOME propagation receipt to {}: {error}",
+                    crate::address::to_hex(&peer)
+                ),
+            }
+        }
+    }
+    accepted
+}
+
 /// Sign one receipt alone to `peer` and put it in the outbox under its own
 /// id: the new outbox entry, `None` when the outbox held it already.
 fn receipt_out(
@@ -662,6 +714,24 @@ fn receipt_out(
     receipt: leviculum_lxmf::lev::Receipt,
     now: f64,
 ) -> Result<Option<Outgoing>, alloc::string::String> {
+    lev_out(
+        store,
+        home,
+        peer,
+        leviculum_lxmf::lev::Lev::mark_with(receipt),
+        now,
+    )
+}
+
+/// Sign a message to `peer` that is nothing but the namespace `lev`, and
+/// put it in the outbox under its own id.
+fn lev_out(
+    store: &mut Store,
+    home: &Home<'_>,
+    peer: [u8; 16],
+    lev: leviculum_lxmf::lev::Lev,
+    now: f64,
+) -> Result<Option<Outgoing>, alloc::string::String> {
     let message = leviculum_lxmf::Message::create(
         peer,
         home.address,
@@ -669,9 +739,7 @@ fn receipt_out(
         now,
         Vec::new(),
         Vec::new(),
-        leviculum_lxmf::lev::Lev::mark_with(receipt)
-            .fields()
-            .to_vec(),
+        lev.fields().to_vec(),
         DeliveryMethod::Direct,
     )
     .map_err(|error| error.to_string())?;
@@ -1687,6 +1755,57 @@ mod tests {
             300.0,
         );
         read_status(&answer.bytes).expect("status")
+    }
+
+    /// 1395: the home node is the recipient's endpoint. A message that
+    /// reached its archive by propagation with bit 2 owes its sender a
+    /// propagation receipt, which the home signs alone and puts in its
+    /// outbox; a direct one, one without bit 2 and the home's own owe none.
+    #[test]
+    fn the_home_acknowledges_propagated_post_that_asks_for_it() {
+        use leviculum_lxmf::lev::{Lev, CAP_GROUPS, CAP_PROPAGATION_RECEIPTS};
+        let (_dir, mut store) = store();
+        let home = home();
+        let sender = Identity::generate(&mut rand_core::OsRng);
+        let from = crate::home::lxmf_address(&sender.public_key_bytes()).expect("address");
+        let packed = |caps: u64| {
+            leviculum_lxmf::Message::create(
+                HOME,
+                from,
+                &sender,
+                100.0,
+                Vec::new(),
+                b"hi".to_vec(),
+                Lev {
+                    capabilities: Some(caps),
+                    ..Lev::default()
+                }
+                .fields()
+                .to_vec(),
+                DeliveryMethod::Direct,
+            )
+            .expect("message")
+        };
+        let asks = packed(CAP_GROUPS | CAP_PROPAGATION_RECEIPTS);
+        let silent = packed(CAP_GROUPS);
+        assert_eq!(owes_arrival(HOME, &asks.pack(), true), Some(from));
+        assert_eq!(owes_arrival(HOME, &asks.pack(), false), None, "direct");
+        assert_eq!(owes_arrival(HOME, &silent.pack(), true), None, "no bit 2");
+        assert_eq!(owes_arrival(from, &asks.pack(), true), None, "its own");
+        let owed = alloc::collections::BTreeMap::from([(from, vec![asks.message_id])]);
+        let out = propagation_receipts(&mut store, &home, owed, 1_800_000_000, 200.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].destination, from);
+        let receipt =
+            leviculum_lxmf::Message::unpack(&out[0].packed, None, None, DeliveryMethod::Direct)
+                .expect("the receipt");
+        let lev = Lev::from_fields(&receipt.fields).expect("lev");
+        assert_eq!(lev.capabilities, None);
+        assert_eq!(
+            lev.propagation_receipt.map(|r| (r.received_at, r.ids)),
+            Some((1_800_000_000, vec![asks.message_id]))
+        );
+        assert!(receipt.content.is_empty());
     }
 
     /// A contact's key (1187) is taken from an admitted device when its

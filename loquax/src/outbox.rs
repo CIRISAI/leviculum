@@ -281,6 +281,16 @@ pub enum OutboxEvent {
         /// Whether the signature verified against a known source identity.
         verified: bool,
     },
+    /// The message just [`OutboxEvent::Received`] came through the
+    /// propagation network: the router handed it on as
+    /// `DeliveryMethod::Propagated` (set where a collected message is
+    /// unpacked, `leviculum-lxmf/src/router/propagation_runtime.rs`). The
+    /// screen owes its sender a propagation receipt when the message asks
+    /// for one (1395, [`crate::ui::arrival`]).
+    Propagated {
+        message_id: [u8; 32],
+        source: [u8; 16],
+    },
     /// The message just [`OutboxEvent::Received`] came from a sender whose
     /// key is not known, so its signature could not be checked. The engine
     /// asks for the sender's path and checks it when the key arrives
@@ -318,7 +328,20 @@ pub enum OutboxEvent {
     /// A propagation node announced its `lxmf.propagation` destination: the
     /// screen's mailbox schedule syncs on its own node's
     /// (`crate::sync::SyncEvent::Announce`).
-    NodeAnnounced { destination: [u8; 16] },
+    /// `status` is the `/lev/status` version its announce says it answers
+    /// (`{"lev": {"status": 1}}` under `PN_META_CUSTOM`, lnpnd); none for a
+    /// stock node, which a sender never asks (1395).
+    NodeAnnounced {
+        destination: [u8; 16],
+        status: Option<u64>,
+    },
+    /// A propagation node proved the upload of the queued message
+    /// `message_id`, which it stores under `transient_id`: what a sender
+    /// asks it by later (`/lev/status`, 1395, [`crate::pn_status`]).
+    Uploaded {
+        message_id: [u8; 32],
+        transient_id: [u8; 32],
+    },
     /// A node announced its position on `lev.position` (1302,
     /// [`crate::mesh_position`]): `identity` is the hash of the identity
     /// the announce proved, `location` what its app data said, timed by

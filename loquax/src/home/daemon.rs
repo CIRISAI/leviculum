@@ -672,6 +672,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     Ok(events) => events,
                     Err(gone) => break Err(gone.to_string()),
                 };
+                // The propagation receipts this pump's arrivals owe (1395),
+                // gathered per sender: one sync round's mail is one pump.
+                let mut arrivals: std::collections::BTreeMap<[u8; 16], Vec<[u8; 32]>> =
+                    Default::default();
                 for event in events {
                     match event {
                         OutboxEvent::Ready { .. } => {
@@ -707,6 +711,12 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                     related(&mut store, &mut relations, source, archive_cap_bytes);
                                 }
                                 learn_invited_key(&node, &packed);
+                                let propagated = arrived == crate::outbox::Arrived::Propagated;
+                                if let Some(sender) =
+                                    super::server::owes_arrival(address, &packed, propagated)
+                                {
+                                    arrivals.entry(sender).or_default().push(message_id);
+                                }
                             }
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
@@ -745,7 +755,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::KeyWanted { message_id, destination } => {
                             tracing::info!("{}", key_wanted_line(&message_id, &destination));
                         }
-                        OutboxEvent::NodeAnnounced { destination }
+                        OutboxEvent::NodeAnnounced { destination, .. }
                             if Some(destination) == selected_pn =>
                         {
                             if let Some(schedule) = &mut schedule {
@@ -757,6 +767,27 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         _ => {}
                     }
+                }
+                if !arrivals.is_empty() {
+                    let now = unix_now();
+                    let received_at = u32::try_from(now.max(0)).unwrap_or(u32::MAX);
+                    for accepted in super::server::propagation_receipts(
+                        &mut store,
+                        &serving,
+                        arrivals,
+                        received_at,
+                        now as f64,
+                    ) {
+                        outgoing.add(
+                            accepted.id,
+                            accepted.destination,
+                            accepted.packed,
+                            accepted.created_at,
+                            false,
+                        );
+                    }
+                    let acts = outgoing.tick(unix_now());
+                    sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn, selected_pn);
                 }
                 for hosted in &mut groups {
                     pump_group(&mut store, &mut sender, hosted, selected_pn);

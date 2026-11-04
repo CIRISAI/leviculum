@@ -47,9 +47,9 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
 use leviculum_lxmf::lev::{
-    DigestLine, GroupStatus, Lev, Member, Members, StandIn, CAP_GROUPS, CAP_READ_RECEIPTS,
-    LEFT_OUT_FILE, LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_ADMIN, MEMBER_JOINED,
-    MEMBER_LEFT,
+    DigestLine, GroupStatus, Lev, Member, Members, StandIn, CAP_GROUPS, CAP_PROPAGATION_RECEIPTS,
+    CAP_READ_RECEIPTS, LEFT_OUT_FILE, LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_ADMIN,
+    MEMBER_JOINED, MEMBER_LEFT,
 };
 use leviculum_lxmf::Field;
 use leviculum_ui::delivery::DeliveryState;
@@ -65,10 +65,11 @@ use super::{Message, Palette, UiEffect, UiModel};
 pub const STATE_SEND: usize = usize::MAX - 1;
 
 /// The capabilities every Loquax client says on every message it sends
-/// (1307): bit 1, it understands groups, always; bit 0, read receipts,
-/// while the reader's switch is on.
+/// (1307): bit 1, it understands groups, always; bit 2, it acknowledges
+/// propagated post and wants its own acknowledged, always (1395, not
+/// switchable); bit 0, read receipts, while the reader's switch is on.
 pub fn client_caps(receipts: bool) -> u64 {
-    CAP_GROUPS | if receipts { CAP_READ_RECEIPTS } else { 0 }
+    CAP_GROUPS | CAP_PROPAGATION_RECEIPTS | if receipts { CAP_READ_RECEIPTS } else { 0 }
 }
 
 /// Why the home did not make a group (1307 pass five): the answer to
@@ -2367,11 +2368,15 @@ mod tests {
         assert_eq!(members.iter().map(|m| m.0).collect::<Vec<_>>(), [ANNA, BOB]);
     }
 
-    /// Every client says bit 1; bit 0 rides with the switch.
+    /// Every client says bit 1 and bit 2 (1395, not switchable); bit 0
+    /// rides with the switch.
     #[test]
     fn every_client_says_it_understands_groups() {
-        assert_eq!(client_caps(true), CAP_GROUPS | CAP_READ_RECEIPTS);
-        assert_eq!(client_caps(false), CAP_GROUPS);
+        assert_eq!(
+            client_caps(true),
+            CAP_GROUPS | CAP_PROPAGATION_RECEIPTS | CAP_READ_RECEIPTS
+        );
+        assert_eq!(client_caps(false), CAP_GROUPS | CAP_PROPAGATION_RECEIPTS);
     }
 
     /// 1307 pass six, Lew's finding: opening a fresh group asked whether

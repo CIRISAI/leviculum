@@ -422,10 +422,12 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::PnUnavailable { .. }
                 | OutboxEvent::Mailbox(_)
                 | OutboxEvent::Received { .. }
+                | OutboxEvent::Propagated { .. }
                 | OutboxEvent::Unverified { .. }
                 | OutboxEvent::Verified { .. }
                 | OutboxEvent::Announced { .. }
                 | OutboxEvent::NodeAnnounced { .. }
+                | OutboxEvent::Uploaded { .. }
                 | OutboxEvent::MeshPosition { .. }
                 | OutboxEvent::SyncLinked
                 | OutboxEvent::SyncDone { .. }

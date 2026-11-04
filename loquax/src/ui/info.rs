@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use leviculum_ui::delivery::DeliveryState;
 
+use super::arrival::{witness, Witness};
 use super::strings::{Arg, Lang, StrId, Text};
 use super::{detail_view, shown_delivery, Signature, UiModel};
 use crate::when::WallTime;
@@ -71,13 +72,30 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     match (message.delivery, message.signature) {
         (Some(state), _) => {
             let state = shown_delivery(state, model.home_client, model.reading.on);
+            // What the propagation network said of it (1395): the words
+            // beside the ticks, which are the proof's.
+            let witness = witness(message);
+            let not_collected = matches!(witness, Some((Witness::NotCollected, _)));
+            let hh_mm =
+                |at: Option<WallTime>| Arg::Str(at.map(|at| at.hh_mm()).unwrap_or_default());
             let value = match state {
                 DeliveryState::Queued => Text::key(StrId::InfoWaiting),
                 DeliveryState::Stamping => Text::key(StrId::InfoPreparing),
                 DeliveryState::InFlight => Text::key(StrId::InfoSending),
+                DeliveryState::Sent | DeliveryState::InMailbox if not_collected => {
+                    Text::key(StrId::InfoNotCollected)
+                }
                 DeliveryState::Sent => Text::key(StrId::StateUnconfirmed),
                 DeliveryState::InMailbox => Text::Key(StrId::InfoMailbox, Vec::from([name()])),
-                DeliveryState::Delivered => Text::Key(StrId::InfoDelivered, Vec::from([name()])),
+                DeliveryState::Delivered => match witness {
+                    Some((Witness::Receipt, at)) => {
+                        Text::Key(StrId::InfoDeliveredViaPn, Vec::from([hh_mm(at)]))
+                    }
+                    Some((Witness::Collected, at)) => {
+                        Text::Key(StrId::InfoCollected, Vec::from([hh_mm(at)]))
+                    }
+                    _ => Text::Key(StrId::InfoDelivered, Vec::from([name()])),
+                },
                 DeliveryState::Read { at } => {
                     let at = WallTime {
                         unix_secs: i64::from(at),

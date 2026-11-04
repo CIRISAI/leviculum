@@ -132,6 +132,7 @@ use leviculum_lxmf::Field;
 
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
+pub mod arrival;
 pub mod browse;
 pub mod by_hand;
 pub mod chat;
@@ -849,6 +850,8 @@ pub struct UiModel<B> {
     drafts_due: BTreeMap<[u8; 16], u64>,
     /// What the reader saw, and the read receipts owed (1231).
     pub reading: receipts::Reading,
+    /// The propagation receipts owed (1395).
+    pub arrivals: arrival::Arrivals,
     /// How far a photo is scaled before it goes (1220, `photo_size` in
     /// the config): the shell scales by it before
     /// [`UiEvent::SendPhoto`].
@@ -980,6 +983,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             compose_cleared: false,
             drafts_due: BTreeMap::new(),
             reading: receipts::Reading::default(),
+            arrivals: arrival::Arrivals::default(),
             photo_size: photos::PhotoSize::default(),
             playing: None,
             bar: compose::Bar::default(),
@@ -1841,8 +1845,12 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // What the reader saw, and the receipts it owes: on this fold's sends,
     // or alone once due (1231).
     model.read_step(&mut effects);
+    // The propagation receipts owed (1395): on this fold's sends, or alone
+    // once due.
+    model.arrival_step(&mut effects);
     // Every message sent says the sender takes read receipts (1230), while
-    // the switch is on, and understands groups (1307), always.
+    // the switch is on, understands groups (1307) and acknowledges
+    // propagated post (1395), always.
     receipts::mark_sends(&mut effects, groups::client_caps(model.reading.on));
     effects
 }
@@ -3575,6 +3583,12 @@ fn detail_words(state: DeliveryState, who: &str, offset_secs: i32) -> String {
     }
 }
 
+/// ` 10:31`, when this device learned something, for the detail view's
+/// words; nothing without a time.
+fn at_words(at: Option<WallTime>) -> String {
+    at.map(|at| format!(" {}", at.hh_mm())).unwrap_or_default()
+}
+
 /// `Enter` on a message: its detail view, with what this device saw
 /// happen to it (loquax-keys-and-layout.md, section 7, slice 2).
 fn details<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
@@ -4014,7 +4028,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             return schedule(model, SyncEvent::Start);
         }
         // Free evidence that the mailbox is reachable now.
-        OutboxEvent::NodeAnnounced { destination } => {
+        OutboxEvent::NodeAnnounced { destination, .. } => {
             if model.mailbox.node == Some(destination) {
                 return schedule(model, SyncEvent::Announce);
             }
@@ -4100,6 +4114,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                     });
                 }
             }
+        }
+        OutboxEvent::Propagated { message_id, source } => {
+            return model.arrived_propagated(source, message_id);
         }
         OutboxEvent::Received {
             message_id,
@@ -5265,7 +5282,21 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
         match (message.delivery, message.signature) {
             (Some(state), _) => {
                 let state = shown_delivery(state, model.home_client, model.reading.on);
-                format!("state  {}", detail_words(state, &who, offset))
+                let words = match (state, arrival::witness(message)) {
+                    (DeliveryState::Delivered, Some((arrival::Witness::Receipt, at))) => {
+                        format!("delivered via the propagation network{}", at_words(at))
+                    }
+                    (DeliveryState::Delivered, Some((arrival::Witness::Collected, at))) => {
+                        format!("collected from the propagation network{}", at_words(at))
+                    }
+                    (
+                        DeliveryState::Sent | DeliveryState::InMailbox,
+                        Some((arrival::Witness::NotCollected, _)),
+                    ) => "not collected at the propagation node; perhaps delivered via another"
+                        .to_string(),
+                    _ => detail_words(state, &who, offset),
+                };
+                format!("state  {words}")
             }
             (None, Signature::Verified) => "signature verified".to_string(),
             (None, Signature::Unverified) => "signature NOT verified".to_string(),
@@ -6039,6 +6070,306 @@ pub(crate) mod tests {
         );
     }
 
+    /// A message from `source` with bit 2 in its mark, that came by
+    /// propagation (1395): the received event and the engine's word after it.
+    fn propagated(model: &mut UiModel<Field>, source: [u8; 16], id: [u8; 32], caps: u64) {
+        engine(model, with_lev(source, id, "via the node", &caps_lev(caps)));
+        engine(
+            model,
+            OutboxEvent::Propagated {
+                message_id: id,
+                source,
+            },
+        );
+    }
+
+    fn caps_lev(capabilities: u64) -> leviculum_lxmf::lev::Lev {
+        caps(capabilities)
+    }
+
+    /// The propagation receipts among `effects`: to whom, and the ids.
+    fn arrival_receipts(effects: &[UiEffect]) -> Vec<([u8; 16], Vec<[u8; 32]>)> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                UiEffect::Send { to, fields, .. } => leviculum_lxmf::lev::Lev::from_fields(fields)
+                    .and_then(|lev| lev.propagation_receipt)
+                    .map(|receipt| (*to, receipt.ids)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1395, the rule: a message that came by propagation and carries bit 2
+    /// is acknowledged with 0x07 after the batch window, alone, with the
+    /// clock of its arrival, whatever the read-receipts switch says; one
+    /// that came direct, or without bit 2, is not; a second copy owes none.
+    #[test]
+    fn a_propagated_message_with_bit_2_is_acknowledged_and_no_other() {
+        use leviculum_lxmf::lev::{CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS};
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        wall(&mut model, RT);
+        // Receipts off: the propagation receipt does not follow the switch.
+        update(&mut model, UiEvent::ReadReceipts(false));
+        let all = CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS;
+        propagated(&mut model, PEER, ID, all);
+        propagated(&mut model, PEER, ID2, all);
+        // Direct: the same mark, no Propagated word, so no receipt.
+        engine(
+            &mut model,
+            with_lev(PEER, [0x33; 32], "direct", &caps_lev(all)),
+        );
+        // Propagated without bit 2: a client that does not ask.
+        propagated(
+            &mut model,
+            OTHER,
+            [0x44; 32],
+            CAP_READ_RECEIPTS | CAP_GROUPS,
+        );
+        assert_eq!(model.arrivals.owed(&PEER), Some(&[ID, ID2][..]));
+        assert_eq!(model.arrivals.owed(&OTHER), None);
+        let early = update(&mut model, UiEvent::Elapsed(receipts::BATCH_MS - 1));
+        assert!(
+            arrival_receipts(&early).is_empty(),
+            "inside the batch window"
+        );
+        let due = update(&mut model, UiEvent::Elapsed(receipts::BATCH_MS));
+        assert_eq!(arrival_receipts(&due), [(PEER, vec![ID, ID2])]);
+        let lev = due
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::Send { fields, body, .. } if body.is_empty() => {
+                    leviculum_lxmf::lev::Lev::from_fields(fields)
+                }
+                _ => None,
+            })
+            .expect("a receipt alone");
+        assert_eq!(lev.capabilities, None, "alone, without the mark");
+        assert_eq!(
+            lev.propagation_receipt.map(|r| r.received_at),
+            Some(RT as u32)
+        );
+        assert_eq!(model.sending.back(), Some(&(receipts::RECEIPT_SEND, 0)));
+        // The same message again by propagation owes nothing more.
+        propagated(&mut model, PEER, ID, all);
+        assert_eq!(model.arrivals.owed(&PEER), None);
+    }
+
+    /// 1395, read wins: a message seen inside the batch window while read
+    /// receipts go to its sender is named by the read receipt only.
+    #[test]
+    fn a_message_read_inside_the_window_gets_the_read_receipt_only() {
+        use leviculum_lxmf::lev::{CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        propagated(
+            &mut model,
+            PEER,
+            ID,
+            CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS,
+        );
+        let key = model.conversations[0].messages[0].activity;
+        update(&mut model, UiEvent::Front(true));
+        update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![key],
+            },
+        );
+        update(&mut model, UiEvent::Elapsed(receipts::SEEN_MS + 10));
+        let mut effects = Vec::new();
+        effects.extend(update(
+            &mut model,
+            UiEvent::Elapsed(receipts::BATCH_MS + 2_000),
+        ));
+        effects.extend(update(&mut model, UiEvent::Front(false)));
+        effects.extend(update(
+            &mut model,
+            UiEvent::Elapsed(receipts::BATCH_MS + 3_000),
+        ));
+        assert!(arrival_receipts(&effects).is_empty(), "{effects:?}");
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Send { fields, .. }
+                if leviculum_lxmf::lev::Lev::from_fields(fields).is_some_and(|l| l.receipt.is_some())
+        )));
+    }
+
+    /// 1395, the mark: a 0x07 for our message is two grey ticks, the
+    /// delivered rung, with the propagation network's words in the Info, the
+    /// terminal's detail and for the screen reader; read receipts off do not
+    /// hide it; a later proof or 0x07 changes nothing; read still wins.
+    #[test]
+    fn a_propagation_receipt_is_two_grey_ticks_with_its_own_words() {
+        use super::arrival::{Witness, VIA_RECEIPT};
+        use super::strings::{Lang, StrId};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        update(&mut model, UiEvent::ReadReceipts(false));
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::AwaitingCollection);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::InMailbox));
+        wall(&mut model, RT + 3_600);
+        let alone = super::arrival::alone(leviculum_lxmf::lev::PropagationReceipt {
+            received_at: (RT + 60) as u32,
+            ids: vec![ID, ID2],
+        });
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(with_lev(PEER, [0x33; 32], "", &alone)),
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(model.conversations[0].messages.len(), 1, "no bubble");
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            UiEffect::Log(line) if line.starts_with("ARRIVAL receipt dropped id=2222")
+        )));
+        let message = &model.conversations[0].messages[0];
+        assert_eq!(
+            super::arrival::witness(message).map(|(w, _)| w),
+            Some(Witness::Receipt)
+        );
+        assert!(message.ledger.iter().any(|e| e.what == VIA_RECEIPT));
+        let key = message.activity;
+        let info = info::message_info(&model, PEER, key).expect("its info");
+        let state_row = |lang| {
+            info.rows
+                .iter()
+                .map(|row| row.resolve(lang))
+                .find(|(label, _)| {
+                    label == &super::strings::Text::key(StrId::InfoState).resolve(lang)
+                })
+                .map(|(_, value)| value)
+        };
+        assert_eq!(
+            state_row(Lang::En).as_deref(),
+            Some("Delivered via the propagation network at 09:00")
+        );
+        assert_eq!(
+            state_row(Lang::De).as_deref(),
+            Some("Über das Propagation-Netz zugestellt um 09:00")
+        );
+        let detail = detail_view(&model, 0, 0).expect("its detail").rows;
+        assert!(
+            detail
+                .iter()
+                .any(|row| row == "state  delivered via the propagation network 09:00"),
+            "{detail:?}"
+        );
+        let bubble = chat::bubbles(&model, 0)
+            .into_iter()
+            .last()
+            .expect("the bubble");
+        assert_eq!(bubble.mark, Some(chat::Mark::Delivered));
+        assert_eq!(bubble.witness, Some(Witness::Receipt));
+        assert_eq!(
+            scene::mark_words(chat::Mark::Delivered, None, bubble.witness, None).resolve(Lang::En),
+            "Delivered via the propagation network"
+        );
+        // A late proof keeps the words; read still moves it on.
+        state(&mut model, ID, MessageState::Delivered);
+        assert_eq!(
+            super::arrival::witness(&model.conversations[0].messages[0]).map(|(w, _)| w),
+            Some(Witness::Receipt)
+        );
+        update(&mut model, UiEvent::ReadReceipts(true));
+        engine(
+            &mut model,
+            with_lev(PEER, [0x34; 32], "", &receipt((RT + 90) as u32, &[ID])),
+        );
+        assert!(matches!(
+            last_delivery(&model),
+            Some(DeliveryState::Read { .. })
+        ));
+    }
+
+    /// 1395, the node's word: collected is two grey ticks with its own
+    /// words; expired and evicted keep the one tick and say "not collected
+    /// here", never lost; held and unknown change nothing; a proof before
+    /// keeps the device's words.
+    #[test]
+    fn what_the_node_answers_moves_the_marks_it_may() {
+        use super::strings::{Lang, StrId};
+        use leviculum_lxmf::lev_status::MessageStatus;
+        let ids = [[0x61; 32], [0x62; 32], [0x63; 32], [0x64; 32], [0x65; 32]];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        for (i, id) in ids.iter().enumerate() {
+            match i {
+                0 => {
+                    sent(&mut model, "m0");
+                }
+                _ => {
+                    typed(&mut model, &format!("m{i}"));
+                    update(&mut model, key(KeyCode::Enter));
+                }
+            }
+            engine(&mut model, OutboxEvent::Queued { message_id: *id });
+            state(&mut model, *id, MessageState::AwaitingCollection);
+            update(&mut model, UiEvent::SendDone(Ok(())));
+        }
+        state(&mut model, ids[4], MessageState::Delivered);
+        model.pn_answered(&[
+            (ids[0], MessageStatus::Collected),
+            (ids[1], MessageStatus::Expired),
+            (ids[2], MessageStatus::Held),
+            (ids[3], MessageStatus::Unknown),
+            (ids[4], MessageStatus::Collected),
+        ]);
+        let states: Vec<Option<DeliveryState>> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.delivery)
+            .collect();
+        assert_eq!(
+            states,
+            [
+                Some(DeliveryState::Delivered),
+                Some(DeliveryState::InMailbox),
+                Some(DeliveryState::InMailbox),
+                Some(DeliveryState::InMailbox),
+                Some(DeliveryState::Delivered),
+            ]
+        );
+        let words = |m: usize, lang| {
+            let key = model.conversations[0].messages[m].activity;
+            info::message_info(&model, PEER, key)
+                .expect("info")
+                .rows
+                .iter()
+                .map(|row| row.resolve(lang))
+                .find(|(label, _)| {
+                    label == &super::strings::Text::key(StrId::InfoState).resolve(lang)
+                })
+                .map(|(_, value)| value)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            words(0, Lang::En),
+            "Collected from the propagation network at 08:00"
+        );
+        assert_eq!(
+            words(1, Lang::En),
+            "Not collected at the propagation node; perhaps delivered via another"
+        );
+        assert!(!words(1, Lang::En).to_lowercase().contains("lost"));
+        assert_eq!(
+            words(1, Lang::De),
+            "Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt"
+        );
+        assert_eq!(
+            words(4, Lang::En),
+            "Arrived on ababababab's device".replace("ababababab", &model.names.label(&PEER))
+        );
+        assert_eq!(
+            model.conversations[0].messages[2].ledger.len(),
+            model.conversations[0].messages[3].ledger.len()
+        );
+    }
+
     /// 1230: a receipt alone reads the message it names, at the reader's
     /// time kept within sent and came, and is no message: no bubble, no
     /// unread, no toast, the list order kept. An id the conversation does
@@ -6360,9 +6691,13 @@ pub(crate) mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
+                fields: caps(
+                    leviculum_lxmf::lev::CAP_GROUPS | leviculum_lxmf::lev::CAP_PROPAGATION_RECEIPTS
+                )
+                .fields()
+                .to_vec(),
             }],
-            "the switch off sends no receipt bit, the groups bit still (1307)"
+            "the switch off sends no receipt bit, the groups bit and bit 2 still (1307, 1395)"
         );
     }
 
@@ -6447,9 +6782,13 @@ pub(crate) mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
+                fields: caps(
+                    leviculum_lxmf::lev::CAP_GROUPS | leviculum_lxmf::lev::CAP_PROPAGATION_RECEIPTS
+                )
+                .fields()
+                .to_vec(),
             }],
-            "off: no receipt bit, the groups bit still (1307)"
+            "off: no receipt bit, the groups bit and bit 2 still (1307, 1395)"
         );
         assert_eq!(
             update(&mut model, UiEvent::ReadReceipts(true)),
@@ -8673,10 +9012,12 @@ pub(crate) mod tests {
         update(&mut model, UiEvent::Elapsed(120_000));
         let other = OutboxEvent::NodeAnnounced {
             destination: [0x42; 16],
+            status: None,
         };
         assert!(engine_says(&mut model, other).is_empty());
         let ours = OutboxEvent::NodeAnnounced {
             destination: [0x9c; 16],
+            status: None,
         };
         assert_eq!(engine_says(&mut model, ours), [UiEffect::Fetch]);
         assert_eq!(model.fetch_reason, Some(Reason::Announce));
