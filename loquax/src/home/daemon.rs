@@ -1129,9 +1129,11 @@ fn send_statuses<O: Outbox>(
 
 /// A group's copies a restart cut off (1307 G2, study 2.4): every copy
 /// sent alone with no proof yet is made again from the archived original,
-/// byte for byte, and handed to the group's outbox with its acceptance
-/// time, so the outbox's retry bound counts from then; a copy that cannot
-/// be made again (its original evicted, its member gone) is ended. Every
+/// byte for byte, or under the text rule this program has when the rule
+/// changed since (1406, [`group::rebuild`]), and handed to the group's
+/// outbox with its acceptance time, so the outbox's retry bound counts from
+/// then; a copy that cannot be made again (its original evicted, its member
+/// gone) is ended. Every
 /// copy that went out in a digest with no proof is held again, and the
 /// next digest carries it.
 fn resume_group<O>(store: &mut Store, group: &mut GroupEngine<O>, now: i64) -> usize {
@@ -1153,6 +1155,13 @@ fn resume_group<O>(store: &mut Store, group: &mut GroupEngine<O>, now: i64) -> u
     for row in open {
         match group::rebuild(store, &group.hosted, &row) {
             Ok(Some(out)) => {
+                if out.id != row.copy {
+                    tracing::warn!(
+                        "GROUP {name} copy {} made again under this program's text rule as {}",
+                        crate::address::to_hex(&row.copy),
+                        crate::address::to_hex(&out.id)
+                    );
+                }
                 // A copy a node took before the restart is not uploaded
                 // again (1307 pass four, the 1330 side finding).
                 group.outgoing.add(
@@ -3084,6 +3093,169 @@ mod tests {
             .group_copies_open(&hosted.group.address)
             .expect("open")
             .is_empty());
+    }
+
+    /// 1406, the field mailbox at the 13:56 restart: a copy booked under
+    /// one text rule could not be made again byte for byte under the next
+    /// (1388 changed a photo's text), and the restart ended it, open and
+    /// unproven. Every later change of the wire text would end whatever is
+    /// open. Bob's copy here stands for one minted under a rule this
+    /// program no longer has: its row names that copy's id. Started again,
+    /// the home makes Bob's copy under the rule it has, books the row under
+    /// the new id, sends it and books its proof. Control: Lew's copy, made
+    /// under the same rule, goes again byte for byte.
+    #[test]
+    fn a_copy_minted_under_an_older_text_rule_survives_a_restart() {
+        use crate::outbox::fake::FakeOutbox;
+        let home = tempfile::tempdir().expect("home");
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = crate::home::lxmf_address(&identity.public_key_bytes()).expect("address");
+            (identity, address)
+        };
+        let (lew, anna, bob) = (person(), person(), person());
+        let mut store = Store::open_in(home.path(), lew.1).expect("store");
+        let hosted = group::create(
+            home.path(),
+            &mut store,
+            "Familie",
+            (lew.1, "Lew"),
+            &[(anna.1, "Anna".into()), (bob.1, "Bob".into())],
+            100,
+        )
+        .expect("create");
+        store
+            .group_flag(
+                &hosted.group.address,
+                &anna.1,
+                crate::store::groups::MEMBER_JOINED,
+            )
+            .expect("joined");
+        let original = leviculum_lxmf::Message::create(
+            hosted.group.address,
+            anna.1,
+            &anna.0,
+            1_800_000_000.0,
+            Vec::new(),
+            b"Bin gleich da".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let sender = || Sender {
+            cap_bytes: u64::MAX,
+            preferred_pn: None,
+            collecting: false,
+            told: std::collections::HashSet::new(),
+            newest: 0,
+            nodes: std::collections::HashMap::new(),
+            proven: Vec::new(),
+        };
+        let unpack = |packed: &[u8]| {
+            leviculum_lxmf::Message::unpack(
+                packed,
+                None,
+                None,
+                leviculum_lxmf::DeliveryMethod::Direct,
+            )
+            .expect("a copy")
+        };
+        let sends = |commands: Vec<Command>| -> Vec<Vec<u8>> {
+            let mut out: Vec<Vec<u8>> = commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::SendPacked { packed, .. } => Some(packed),
+                    _ => None,
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(vec![OutboxEvent::Packed {
+                message_id: original.message_id,
+                packed: original.pack(),
+                arrived: crate::outbox::Arrived::Direct,
+            }]),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: None,
+            ended: false,
+        };
+        pump_group(&mut store, &mut sender(), &mut engine, None);
+        let before = sends(engine.engine.commands.take());
+        assert_eq!(before.len(), 2, "Lew and Bob");
+        let bobs = store
+            .group_copy_for(&hosted.group.address, &original.message_id, &bob.1)
+            .expect("row")
+            .expect("copy")
+            .copy;
+        // Bob's copy as an older rule made it: the same message in other
+        // words, signed by the group, its id in the row.
+        let now_rule = before
+            .iter()
+            .map(|packed| unpack(packed))
+            .find(|copy| copy.message_id == bobs)
+            .expect("Bob's");
+        let old_rule = leviculum_lxmf::Message::create(
+            now_rule.destination_hash,
+            now_rule.source_hash,
+            &hosted.identity,
+            now_rule.timestamp,
+            now_rule.title.clone(),
+            b"Anna (a rule this program no longer has): Bin gleich da".to_vec(),
+            now_rule.fields.clone(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("the older copy");
+        assert_ne!(old_rule.message_id, bobs);
+        store
+            .group_copy_renamed(&bobs, &old_rule.message_id)
+            .expect("booked under the older rule");
+        drop(engine);
+        drop(store);
+
+        let mut store = Store::open_in(home.path(), lew.1).expect("store again");
+        let hosted = group::hosted(home.path(), &store)
+            .expect("hosted")
+            .pop()
+            .expect("the group");
+        let mut engine = GroupEngine {
+            hosted: hosted.clone(),
+            engine: FakeOutbox::new(Vec::new()),
+            outgoing: Outgoing::new(Policy::default()),
+            selected_pn: None,
+            ended: false,
+        };
+        assert_eq!(resume_group(&mut store, &mut engine, unix_now()), 2);
+        let acts = engine.outgoing.tick(unix_now());
+        sender().carry_out(
+            &mut engine.engine,
+            &mut store,
+            &mut engine.outgoing,
+            acts,
+            None,
+            None,
+        );
+        assert_eq!(
+            sends(engine.engine.commands.take()),
+            before,
+            "both copies, under the rule this program has"
+        );
+        let row = store
+            .group_copy_for(&hosted.group.address, &original.message_id, &bob.1)
+            .expect("row")
+            .expect("copy");
+        assert_eq!(row.copy, bobs, "the row names the copy sent");
+        assert_eq!(row.state, 0, "open");
+        engine.engine.events.push_back(OutboxEvent::Left {
+            message_id: bobs,
+            last: Some(MessageState::Delivered),
+            failure: None,
+        });
+        pump_group(&mut store, &mut sender(), &mut engine, None);
+        let row = store.group_copy(&bobs).expect("row").expect("copy");
+        assert_eq!(row.state, crate::store::groups::COPY_PROVEN);
     }
 
     /// 1307 pass four, the 1330 side finding: a group's copy a propagation

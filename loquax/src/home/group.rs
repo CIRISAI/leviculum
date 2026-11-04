@@ -36,7 +36,8 @@
 //! G2 (1307 pass three):
 //!
 //! - a copy's retries survive a restart: [`rebuild`] makes an open copy
-//!   again from the archived original, byte for byte (study 2.4);
+//!   again from the archived original, byte for byte (study 2.4), or under
+//!   the text rule the program has when the rule changed since (1406);
 //! - a member whose last [`SLOW_PROOFS`] proofs each took more than
 //!   [`SLOW_PROOF_SECS`] is slow ([`measured`]); its lines are held and go
 //!   as one digest per [`DIGEST_WINDOW_SECS`] ([`due_digests`]): the text
@@ -981,11 +982,24 @@ fn copy_for(
 /// The copy `row` booked, made again from the archived original (1307 G2,
 /// study 2.4), at a restart that lost its retries: the same bytes and id,
 /// since a copy is a function of the original, the acceptance time, the
-/// member, the epoch and the group key. The row keeps no epoch, so the
-/// epochs are tried from the group's newest down and the one whose id is
-/// the row's is taken. `None` when the original is no longer archived,
-/// its writer or member is gone from the table, or no epoch makes the id.
-pub fn rebuild(store: &Store, hosted: &Hosted, row: &Copy) -> Result<Option<Outgoing>, String> {
+/// member, the epoch, the group key and the text rule. The row keeps no
+/// epoch, so the epochs are tried from the group's newest down and the one
+/// whose id is the row's is taken.
+///
+/// A copy is the row's by its original and its member, not by its id
+/// (1406): a text rule that changed since (1388 made a photo's text
+/// "Photo from lew" where it was "lew:") makes other bytes under any
+/// epoch, and the restart on the field mailbox ended two open copies so.
+/// When no epoch makes the row's id, the copy is made under the rule this
+/// program has, at the group's newest epoch, and the row is booked under
+/// its id: its proof finds the row, and the member gets the message. A
+/// member that holds the older copy already (from a propagation node) may
+/// see it twice, where ending the row lost it for every member that does
+/// not; a Loquax member drops the second by the `lev` dedup pair.
+///
+/// `None` when the original is no longer archived or its writer or member
+/// is gone from the table.
+pub fn rebuild(store: &mut Store, hosted: &Hosted, row: &Copy) -> Result<Option<Outgoing>, String> {
     let failed = |e: crate::store::StoreError| e.to_string();
     let Some(packed) = store
         .archive_entry(crate::home::KIND_GROUP, &row.original)
@@ -1012,6 +1026,7 @@ pub fn rebuild(store: &Store, hosted: &Hosted, row: &Copy) -> Result<Option<Outg
         flags: member.flags & !MEMBER_GROUPS,
         ..member.clone()
     };
+    let mut current = None;
     for epoch in (1..=newest).rev() {
         for member in [member, &without] {
             let out = copy_for(
@@ -1026,9 +1041,16 @@ pub fn rebuild(store: &Store, hosted: &Hosted, row: &Copy) -> Result<Option<Outg
             if out.id == row.copy {
                 return Ok(Some(out));
             }
+            current.get_or_insert(out);
         }
     }
-    Ok(None)
+    let Some(out) = current else {
+        return Ok(None);
+    };
+    store
+        .group_copy_renamed(&row.copy, &out.id)
+        .map_err(failed)?;
+    Ok(Some(out))
 }
 
 /// The digests due at `now` (study 5.3): for every member with copies held
@@ -2109,7 +2131,8 @@ mod tests {
     /// again from the archived original, byte for byte, a reply's rewritten
     /// target and all, though the epoch moved since (Bob left after it).
     /// Controls: a proven copy is not open; a row whose time is not the
-    /// acceptance time makes no copy (the id is checked, not trusted).
+    /// acceptance time matches no copy made again (the id is checked, not
+    /// trusted), and since 1406 gets one made under a new id.
     #[test]
     fn a_copy_a_restart_cut_off_is_made_again_byte_for_byte() {
         let mut scene = scene();
@@ -2152,7 +2175,7 @@ mod tests {
         assert_eq!(open.len(), 3, "Anna's of Bob's, Lew's and Bob's of Anna's");
         assert!(open.iter().all(|row| row.copy != lews_of_bob));
         for row in &open {
-            let again = rebuild(&scene.store, &hosted, row)
+            let again = rebuild(&mut scene.store, &hosted, row)
                 .expect("rebuild")
                 .expect("made again");
             let before = first
@@ -2167,14 +2190,30 @@ mod tests {
             reply_of(&lews_reply),
             Some(open_copy(&scene, &first, scene.lew.1))
         );
+        // A row whose time is not the acceptance time matches no copy made
+        // again: the id is checked, not trusted. The copy is made at the
+        // row's time under a new id, and the row is booked under it (1406).
         let shifted = Copy {
             sent_at: open[0].sent_at + 1,
             ..open[0].clone()
         };
+        let again = rebuild(&mut scene.store, &hosted, &shifted)
+            .expect("rebuild")
+            .expect("made under the rule there is");
+        assert_ne!(again.id, shifted.copy);
         assert_eq!(
-            rebuild(&scene.store, &hosted, &shifted).expect("rebuild"),
-            None
+            scene
+                .store
+                .group_copy(&again.id)
+                .expect("row")
+                .map(|row| (row.original, row.member)),
+            Some((shifted.original, shifted.member))
         );
+        assert!(scene
+            .store
+            .group_copy(&shifted.copy)
+            .expect("old")
+            .is_none());
     }
 
     fn open_copy(_scene: &Scene, copies: &[Outgoing], member: [u8; 16]) -> [u8; 32] {

@@ -179,7 +179,10 @@ epoch moves, and every member that understands groups gets the new
 membership from the group. A member already in it is skipped, so the
 same request again adds nobody. Beside the requests, the home keeps a
 group going on its own (G2): a copy's retries survive a restart (open
-copies are made again from the archived original, byte for byte), each
+copies are made again from the archived original, byte for byte; one
+whose text rule changed since, so that no copy made again has its id, is
+made under the rule the program has and booked under the new id, where
+the restart ended it before, 1406), each
 group announces every hour on its own clock beside the announce at its
 engine's start, a member whose last three proofs each took more than
 2 s gets its lines held for 60 s and sent as one digest (`lev` key
