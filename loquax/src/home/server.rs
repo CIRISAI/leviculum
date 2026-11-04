@@ -672,7 +672,7 @@ pub fn owes_arrival(home: [u8; 16], packed: &[u8], propagated: bool) -> Option<[
 
 /// Sign the propagation receipts `owed`, per sender the ids that arrived
 /// by propagation in one pump, at the home's clock `received_at`, and put
-/// each in the outbox as [`seen`] puts a read receipt: the new outbox
+/// each in the outbox as the seen mark puts a read receipt: the new outbox
 /// entries, delivered direct first and then by the propagation node.
 pub fn propagation_receipts(
     store: &mut Store,
