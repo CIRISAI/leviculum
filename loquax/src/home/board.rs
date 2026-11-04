@@ -162,6 +162,17 @@ impl Executor {
                     return Report::Idle;
                 }
             }
+            // A link gone stale with a request in flight carries no answer
+            // any more: the line under it broke (a cable, a restarted
+            // lnsd), and the request's own timeout is the whole ask's
+            // budget. Asked again on a fresh link from the cursor, as a
+            // closed link is (1415, the cell `m9_cell_link_breaks_mid_pull`:
+            // without this the pull waited out its 120 s).
+            NodeEvent::LinkStale { link_id } if ours(link_id) && self.request.is_some() => {
+                self.request = None;
+                self.ask
+                    .answered(Err(HomeError::Transfer(String::from("link stale"))))
+            }
             NodeEvent::ResponseReceived {
                 link_id,
                 request_id,
