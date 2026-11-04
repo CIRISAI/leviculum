@@ -2,9 +2,11 @@
 
 Status: concept and wire, decided 2026-11-04 (the reviewer's defaults
 for Lew over the study, order 1393, Refs #232, #450). The codec is built
-(`leviculum-lxmf/src/lev.rs`, key `0x07` and capability bit 2); **no
-Loquax behaviour yet**: no client sets bit 2, sends `0x07` or reads it.
-That is order 1395. The study behind this page is the reviewer's
+(`leviculum-lxmf/src/lev.rs`, key `0x07` and capability bit 2). Order
+1395 built the receipt in Loquax (sending, taking, the words on every
+target) and the asking rule of section B; the request on the wire and
+the home's word of the answer to its devices are not built yet (see
+Status at the end). The study behind this page is the reviewer's
 `2026-11-04-empfangsbestaetigung-propagation` (German, every claim
 cited). The second half of its recommendation, asking lnpnd what became
 of a message, is section B below: built in lnpnd by order 1394, asked
@@ -53,7 +55,7 @@ The **recipient** acknowledges, inside the `lev` namespace
 - messages that **arrived by propagation**: our router hands them on as
   `DeliveryMethod::Propagated` (`leviculum-lxmf/src/message.rs:25-30`,
   set where a collected message is unpacked,
-  `leviculum-lxmf/src/router/propagation_runtime.rs:1711`), as the
+  `leviculum-lxmf/src/router/propagation_runtime.rs:1717`), as the
   reference does with `method=LXMessage.PROPAGATED`
   (`LXMRouter.py:2508`); and
 - whose sender set **capability bit 2**.
@@ -119,9 +121,45 @@ fields[0xFC] = map {
 - **Monotone.** It moves a message to the delivered rung and never back; a
   read receipt or a late proof after it changes nothing that is already
   higher.
-- With a home node, the study proposes the home node sends it when the
-  first device pulls the message, as with seen marks (section 8 of the
-  read-receipts page). Order 1395 settles it.
+- **With a home node, the home node sends it, when the message reaches
+  its archive** (1395). The home node is the recipient's endpoint: it
+  collected the message from the propagation node, as a phone's own router
+  would. Waiting for the first device to pull it, as the study proposed,
+  would make the receipt depend on a phone being online, which a
+  transport proof does not. A client of a home node acknowledges nothing
+  (`loquax/src/ui/arrival.rs:167`, `arrived_propagated`, returns at
+  `home_client`); the devices take the receipt that comes back from the
+  peer as any device does.
+
+### Where it is built (1395)
+
+- **Bit 2 on every send**: `groups::client_caps`
+  (`loquax/src/ui/groups.rs:72`), which `mark_sends` puts on every
+  message (`loquax/src/ui.rs:1850-1854`); not switchable.
+- **The arrival**: the router hands a collected message on as
+  `DeliveryMethod::Propagated`; the engine says so after the message
+  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:594`).
+- **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:122`):
+  propagated, bit 2 in the message's own mark, no receipt of either kind,
+  no group copy.
+- **On a device that is its own node**: `arrived_propagated`
+  (`loquax/src/ui/arrival.rs:167`) owes it, once per message (the ledger
+  line `arrival acknowledged to the sender`); `arrival_step`
+  (`loquax/src/ui/arrival.rs:216`) sends it after the read receipt's
+  batch window, 5 s after the first arrival, alone or riding on the next
+  message to that sender. Read wins: an id seen while read receipts go to
+  that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:290`).
+- **On a home node**: the archive step of the daemon's pump
+  (`loquax/src/home/daemon.rs:716`) gathers one pump's arrivals per
+  sender, `owes_arrival` (`loquax/src/home/server.rs:662`) applies the
+  rule to the packed message, and `propagation_receipts`
+  (`loquax/src/home/server.rs:677`) signs each alone into the outbox,
+  direct first and then by the propagation node, logging
+  `HOME propagation receipt to=… ids=… received_at=… message=…`.
+- **Taking it**: `take_lev` (`loquax/src/ui/receipts.rs:192`) hands a
+  `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:319`) before the
+  read-receipts switch is looked at. A `0x07` alone carries no mark and
+  does not change what the peer is believed to say about read receipts.
 
 ## On the ladder
 
@@ -131,10 +169,44 @@ No new rung. The marks are the ladder of the read-receipts page
 | Event | Mark | Words in the detail view |
 |---|---|---|
 | the node took it | one grey tick, as today | "Waiting in the mailbox" |
-| `0x07` came | two grey ticks | "Delivered via the propagation network 10:31" |
-| `0x01` came | two accent ticks | "Read 10:32", as before |
+| `0x07` came | two grey ticks | "Delivered via the propagation network at 10:31" |
+| the node said `collected` | two grey ticks | "Collected from the propagation network at 10:31" |
+| the node said `expired` or `evicted` | one grey tick | "Not collected at the propagation node; perhaps delivered via another" |
+| a proof came | two grey ticks | "Arrived on Anna's device", as before |
+| `0x01` came | two accent ticks | "Read at 10:32", as before |
 
-The screen reader says the words.
+The screen reader says the words. The time is when this device learned
+it. The words in the catalogue (`loquax/src/ui/strings.rs`), English and
+German:
+
+| Key | English | German |
+|---|---|---|
+| `info_delivered_via_pn` | Delivered via the propagation network at %1$s | Über das Propagation-Netz zugestellt um %1$s |
+| `info_collected` | Collected from the propagation network at %1$s | Um %1$s aus dem Propagation-Netz abgeholt |
+| `info_not_collected` | Not collected at the propagation node; perhaps delivered via another | Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt |
+| `state_delivered_via_pn` | Delivered via the propagation network | Über das Propagation-Netz zugestellt |
+| `state_collected` | Collected from the propagation network | Aus dem Propagation-Netz abgeholt |
+
+**Where the words come from.** The message's ledger keeps the witness as
+a line (`delivered via the propagation network`, `collected from the
+propagation network`, `not collected at the propagation node; perhaps via
+another`), so the words survive a restart; `arrival::witness`
+(`loquax/src/ui/arrival.rs:92`) reads it, and a proof that came first
+keeps the device's words. The mark itself is the delivered rung of
+`DELIVERY_GLYPHS`, unchanged.
+
+**On every target.** The window and the phone show the Info rows of
+`ui::info::message_info`, resolved from the catalogue; the phone's Java
+detail view draws those rows, and its `strings_scene.xml` is written from
+the catalogue (`just loquax-strings`). The terminal's detail view says
+the same in its own words (`state  delivered via the propagation network
+10:31`). The scene's mark node carries the screen reader's words
+(`scene::mark_words`, with the bubble's `witness`). **The M9** draws the
+ladder's ASCII rung, `vv` for two ticks, so a receipt and a proof look
+alike there, as they do everywhere; it has no Info view yet, so the words
+reach it only through the scene's mark words, which it does not draw
+today. When the M9 gets an Info, it takes `message_info` as the phone
+does and needs nothing of its own.
 
 ## Who does what else
 
@@ -223,7 +295,7 @@ refusal       uint error code                     0xf4 malformed or over 64 ids,
 - **Open to any link, never identified.** The node never asks who is on
   the link. A home asks over a link of its own that it does not identify,
   not over its sync link, which identifies before `/get`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:569`), or the node
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:575`), or the node
   could tie its identity to the ids and through them to the recipients.
 - **Spaced per link**: a second request within one second on the same
   link is answered `0xf6`. A home asks once per sync round.
@@ -273,6 +345,16 @@ other key in either map (`lev_status::announced_version`).
 - **The home's rule (1395):** ask at most once per sync round, only for
   ids still open, and for at most 30 days after the upload; an id that
   reached `collected`, `delivered` or a receipt is never asked again.
+  Built as `pn_status::Asker` (`loquax/src/pn_status.rs`): a node is
+  asked only after its announce said `{"lev": {"status": _}}`
+  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1936`);
+  the ids come from the upload's proof (`RouterEvent::PropagationUploaded`
+  → `OutboxEvent::Uploaded`); at most 64 ids a request, oldest first;
+  `collected`, `delivered`, `expired` and `evicted` close an id, `held`
+  and `unknown` leave it open; each answer logs
+  `PN_STATUS_ASKED ids=N answered=N`, where answered counts the ids the
+  node named with a word other than `unknown`. The answers fold into the
+  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:345`).
 
 ### For a later cell against lxmd (lane 2)
 
@@ -285,6 +367,22 @@ out), while the same request to lnpnd for an id lxmd's peer sync carried
 over answers `held`, then `collected` after the recipient's stock client
 fetched from lnpnd, and stays `held`, never `collected`, when it fetched
 from lxmd instead.
+
+### For the cell on lane 2: Loquax to a stock recipient over lnpnd
+
+A periculum cell beside `lxmf_pn_loquax_leviculum.toml` must assert,
+once the request is on the wire:
+
+- the stock Python recipient collects from lnpnd and **sends no `0x07`**:
+  no LXMF message from the recipient reaches the sender after the
+  collection, and lnpnd's log shows no upload from it;
+- lnpnd logs `PN_DEPART id=<the transient id> reason=collected` and, on
+  the sender's question, `PN_STATUS ids=1 result=answered`;
+- the sender logs `PN_STATUS_ASKED ids=1 answered=1` and its row of that
+  message ends on two grey ticks with "Collected from the propagation
+  network";
+- the control over a Python `lxmd`: the sender never asks
+  (`PN_STATUS_ASKED` absent) and the row stays on one tick.
 
 ## Privacy
 
@@ -303,6 +401,16 @@ message, as for any reply. Nothing identifies the sender to the node.
   `LNPNDDP2` file, `PN_DEPART` and `PN_STATUS`, the `/lev/status` handler
   with its spacing, the `0xFF` announce entry, the codec in
   `leviculum-lxmf/src/lev_status.rs`.
-- Not built: setting bit 2, sending `0x07` on a propagated arrival, taking
-  it, the words on the ladder, and the home asking `/lev/status` (1395);
-  the cell against lxmd (lane 2).
+- Built (1395): bit 2 on every message; the receipt on a propagated
+  arrival, on a device that is its own node and on a home node; taking it,
+  the words on the ladder in English and German on the terminal, the
+  window and the phone; the asking rule (`pn_status::Asker`), the
+  upload's transient id out of the router, the node's capability out of
+  its announce, and the fold of the answers into the marks.
+- Not built yet: sending the `/lev/status` request over an unidentified
+  link of its own, from the home's sync round and from a phone that is
+  its own node, and the home's word of the answers to its devices (a mark
+  in the archive, as the seen mark is); until then nobody asks. The
+  `Asker` holds its open ids in memory, so ids uploaded before a restart
+  are not asked about; keeping them in the store comes with the request.
+  The cells on lane 2.

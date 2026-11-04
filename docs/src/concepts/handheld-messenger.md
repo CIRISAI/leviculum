@@ -40,7 +40,7 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:434`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:457`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:253`, `loquax/Cargo.toml:257`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
@@ -63,7 +63,7 @@ map as decided on 2026-10-25, and what is open.
   still carries the fetch layer (`leviculum-std`, tokio), so a firmware
   frontend still needs the core as a `no_std` crate of its own.
 - **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:38`):
-  - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:495`);
+  - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:505`);
   - propagation nodes, both the client and the node
     (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:967`);
   - stamps (`CooperativeStamper`, `leviculum-lxmf/src/stamp.rs:269`).
@@ -216,7 +216,7 @@ messenger core holds the same types a board will.
 Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
 place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
 it"; the frontend renders the scene the other three targets already
-render (`Scene`, `loquax/src/ui/scene.rs:966`), and this section records
+render (`Scene`, `loquax/src/ui/scene.rs:980`), and this section records
 what was measured for the plan, the budgets, and the slices. The host
 numbers below are 64-bit figures from a counting allocator, upper bounds
 for the 32-bit board (the 1337 pattern); the spike code ran under
@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:694`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:695`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -791,7 +791,7 @@ that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
 says `more` (`fit_page`, `loquax/src/home/wire.rs:298`; the server's
-`sync`, `loquax/src/home/server.rs:1032`). A message larger than a page
+`sync`, `loquax/src/home/server.rs:1100`). A message larger than a page
 still comes alone, as a resource.
 
 **The bytes, measured** (`loquax-android/tests/m9_client.rs`). The
@@ -1008,7 +1008,7 @@ grows by 17,248 B to 944,768 B (`just build-m9`).
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
-message to the group (`group_state`, `loquax/src/ui/groups.rs:1443`) and
+message to the group (`group_state`, `loquax/src/ui/groups.rs:1444`) and
 the home sends as any message (`/send`). `ask_of`
 (`loquax-m9/src/group.rs:293`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
@@ -1147,7 +1147,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4358`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4375`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1156,7 +1156,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:824`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:825`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1274,7 +1274,7 @@ is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:122`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:592`), which
 the model already returns while the tab is in front (`rooms_scene`,
-`loquax/src/ui/scene.rs:1060`), and its tab in the tab bar the screen
+`loquax/src/ui/scene.rs:1074`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
 list (name, unread count) or the open room's one live line and its lines
 as `who text`, and one input line at the bottom on the chat's editor

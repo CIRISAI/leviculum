@@ -60,7 +60,7 @@ What exists today for one home and carries over:
   (`loquax/src/store.rs:2095`), which adds nothing on a second take-in.
   The sync generalises it to both directions and to paging from a cursor.
 - The rule that authority lives with the key, not with an admission:
-  `may_move` (`loquax/src/home/server.rs:933`). Two homes recognise each
+  `may_move` (`loquax/src/home/server.rs:1001`). Two homes recognise each
   other the same way, by a signature only a key holder can make
   (planned: a `/sibling` request over a link).
 - The ratchet export and import of 1185, `take_over`
@@ -106,7 +106,7 @@ falsifies it:
 Measured on 2026-11-02: nothing lost and every message proven, but no
 home holds what reached another. In the own-ratchets arm each mailbox
 restart is followed within 50 ms by one `LXMF_RX_UNDECRYPTABLE` at the
-home that just announced (the event, `loquax/src/engine.rs:1483`): the
+home that just announced (the event, `loquax/src/engine.rs:1499`): the
 sender sealed to the other home's ratchet before the new announce reached
 it. The stock router's retry heals a single packet; a propagated message
 has no such retry, which is where the loss lives. E4 (hardware, LoRa or
