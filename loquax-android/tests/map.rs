@@ -243,27 +243,38 @@ fn the_phone_draws_the_buildings_as_the_window_does() {
         bare.path().join("maps/firenze.lmr"),
     )
     .expect("the region");
-    // The frame once its names faded in (1205): the renderer's clock
-    // held, then held a second further.
-    let settled = |ask: &MapRequest| {
+    // The frame once its names faded in (1205): the renderer's clock held
+    // at `at_ms` for every frame, then five seconds further. Never the
+    // running clock: a renderer serves all four views, and a name new to
+    // a later one fades in from the clock of its first frame, which on
+    // the running clock is however long the views before it took. Held
+    // back below that, the name was still nothing at "five seconds
+    // later" on a host slow enough, 2502 pixels of the z17 names on the
+    // forge (1405). A renderer's first frame shows its names at once, so
+    // the clock it is made with does not matter.
+    let settled = |ask: &MapRequest, at_ms: u64| {
         let dir = Path::new(&ask.dir);
-        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
-        loquax_android::map::tune_clock(dir, Some(0));
-        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
-        loquax_android::map::tune_clock(dir, Some(5_000));
-        let settled = frame(&loquax_android::map::render(ask, Some(Vec::new()), now()));
+        let draw = || loquax_android::map::render(ask, Some(Vec::new()), now());
+        loquax_android::map::tune_clock(dir, Some(at_ms));
+        let _ = draw();
+        loquax_android::map::tune_clock(dir, Some(at_ms));
+        let _ = draw();
+        loquax_android::map::tune_clock(dir, Some(at_ms + 5_000));
+        let settled = frame(&draw());
         loquax_android::map::tune_clock(dir, None);
         settled
     };
+    let mut at_ms = 0;
     for zoom in [16u8, 17] {
         for (dark, t) in [(false, "light"), (true, "dark")] {
             let ask = |dir: &Path| MapRequest {
                 zoom: Some(zoom),
                 ..request(dir, dark)
             };
-            let (shown, rgba) = settled(&ask(home.path()));
+            at_ms += 10_000;
+            let (shown, rgba) = settled(&ask(home.path()), at_ms);
             assert_eq!((shown.w, shown.h), (W, H));
-            let (_, without) = settled(&ask(bare.path()));
+            let (_, without) = settled(&ask(bare.path()), at_ms);
             let share = same_share(&rgba, &without);
             assert!(
                 share < 95,
