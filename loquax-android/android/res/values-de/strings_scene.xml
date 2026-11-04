@@ -338,7 +338,8 @@
     <string name="scene_select_pin">Stecknadel wählen</string>
     <string name="scene_map_drawing">Kartendarstellung</string>
     <string name="scene_glyph_test">Zeichentest</string>
-    <string name="scene_track_window">Zeitfenster der Spuren</string>
+    <string name="scene_track_window">Zeitraum</string>
+    <string name="scene_tracks_now">Aktuelle Bewegung</string>
     <string name="scene_tracks_today">Heute</string>
     <string name="scene_tracks_yesterday">Gestern</string>
     <string name="scene_tracks_week">Diese Woche</string>

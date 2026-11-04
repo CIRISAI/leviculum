@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use leviculum_map::mercator::{project, LatLon, World};
 
 use crate::telemetry::{span, Fix};
+use crate::ui::strings::{Lang, StrId};
 use crate::when::WallTime;
 
 /// Two consecutive fixes further apart in time than this are not joined
@@ -287,9 +288,12 @@ pub fn episode_start(fixes: &[TrackFix], dwells: &[Dwell], now: i64) -> i64 {
     }
 }
 
-/// The time window the map draws lines in: a map control, not a setting.
-/// The default is the current episode; the five named ones are the strip
-/// in the window, the chips on the phone and `w` in the terminal.
+/// The time window the map draws lines in: a map control, not a setting,
+/// but a hidden one (1419): the map's menu on the phone and in the window
+/// opens a single choice of [`TrackWindow::CHOICES`], `w` steps through
+/// them in the terminal. The default is the current episode; any other
+/// puts its word after the map's title ([`TrackWindow::title`]), so the
+/// reader knows why older lines show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrackWindow {
     /// The current episode (rule 3).
@@ -308,7 +312,7 @@ pub enum TrackWindow {
 }
 
 impl TrackWindow {
-    /// The five named windows, in the strip's order.
+    /// The five named windows, in the menu's order.
     pub const NAMED: [TrackWindow; 5] = [
         TrackWindow::Today,
         TrackWindow::Yesterday,
@@ -316,6 +320,47 @@ impl TrackWindow {
         TrackWindow::Month,
         TrackWindow::All,
     ];
+
+    /// The menu's single choice: the default first, then the named five.
+    pub const CHOICES: [TrackWindow; 6] = [
+        TrackWindow::Episode,
+        TrackWindow::Today,
+        TrackWindow::Yesterday,
+        TrackWindow::Week,
+        TrackWindow::Month,
+        TrackWindow::All,
+    ];
+
+    /// The window's entry in the menu.
+    pub fn label(self) -> StrId {
+        match self {
+            TrackWindow::Episode => StrId::TracksNow,
+            TrackWindow::Today => StrId::TracksToday,
+            TrackWindow::Yesterday => StrId::TracksYesterday,
+            TrackWindow::Week => StrId::TracksWeek,
+            TrackWindow::Month => StrId::TracksMonth,
+            TrackWindow::All => StrId::TracksAll,
+        }
+    }
+
+    /// The word after the map's title: none for the default, which needs
+    /// no reason, else the window's entry.
+    pub fn title_word(self) -> Option<StrId> {
+        match self {
+            TrackWindow::Episode => None,
+            other => Some(other.label()),
+        }
+    }
+
+    /// The map screen's title in `lang`: "Map" with the default, "Map ·
+    /// This week" with another window.
+    pub fn title(self, lang: Lang) -> String {
+        let map = StrId::Map.text(lang);
+        match self.title_word() {
+            None => String::from(map),
+            Some(word) => format!("{map} · {}", word.text(lang)),
+        }
+    }
 
     /// The control's word for it, which the phone's chips send back.
     pub fn word(self) -> &'static str {
@@ -331,38 +376,19 @@ impl TrackWindow {
 
     /// The window a control's word names.
     pub fn of_word(word: &str) -> Option<Self> {
-        [TrackWindow::Episode]
-            .into_iter()
-            .chain(Self::NAMED)
-            .find(|w| w.word() == word)
+        Self::CHOICES.into_iter().find(|w| w.word() == word)
     }
 
     /// The next window `w` steps to in the terminal: now, today, ... all,
     /// now again; `forward` false goes the other way.
     pub fn step(self, forward: bool) -> Self {
-        let all = [
-            TrackWindow::Episode,
-            TrackWindow::Today,
-            TrackWindow::Yesterday,
-            TrackWindow::Week,
-            TrackWindow::Month,
-            TrackWindow::All,
-        ];
+        let all = Self::CHOICES;
         let i = all.iter().position(|w| *w == self).unwrap_or(0);
         let n = all.len();
         all[match forward {
             true => (i + 1) % n,
             false => (i + n - 1) % n,
         }]
-    }
-
-    /// A strip's or a chip's press: the window, or back to the episode
-    /// when it is the one shown.
-    pub fn toggled(self, pressed: TrackWindow) -> Self {
-        match self == pressed {
-            true => TrackWindow::Episode,
-            false => pressed,
-        }
     }
 
     /// The window's span `[from, to)` in unix seconds at `now`, the
@@ -1162,11 +1188,26 @@ mod tests {
         assert_eq!(TrackWindow::Month.bounds(&[], &[], &now).0, first);
         assert_eq!(TrackWindow::Episode.step(true), TrackWindow::Today);
         assert_eq!(TrackWindow::Episode.step(false), TrackWindow::All);
-        assert_eq!(
-            TrackWindow::Week.toggled(TrackWindow::Week),
-            TrackWindow::Episode
-        );
         assert_eq!(TrackWindow::of_word("month"), Some(TrackWindow::Month));
+        assert_eq!(TrackWindow::of_word("now"), Some(TrackWindow::Episode));
+    }
+
+    /// The menu (1419): the default first and marked by nothing in the
+    /// title; any other window puts its word after the map's title.
+    #[test]
+    fn the_title_names_a_window_that_is_not_the_default() {
+        use crate::ui::strings::Lang;
+        assert_eq!(TrackWindow::CHOICES[0], TrackWindow::default());
+        assert_eq!(&TrackWindow::CHOICES[1..], &TrackWindow::NAMED[..]);
+        assert_eq!(TrackWindow::Episode.title_word(), None);
+        assert_eq!(TrackWindow::Episode.title(Lang::De), "Karte");
+        assert_eq!(TrackWindow::Episode.title(Lang::En), "Map");
+        assert_eq!(TrackWindow::Week.title(Lang::De), "Karte · Diese Woche");
+        assert_eq!(TrackWindow::Week.title(Lang::En), "Map · This week");
+        assert_eq!(TrackWindow::All.title(Lang::De), "Karte · Alles");
+        for w in TrackWindow::NAMED {
+            assert_eq!(w.title_word(), Some(w.label()));
+        }
     }
 
     /// Rule 4: a year of a tracker in a handbag, a fix every 15 min, is a

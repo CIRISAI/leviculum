@@ -69,13 +69,15 @@ use loquax::ui::map::{
     fit, fit_at, in_window, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant,
 };
 use loquax::ui::radar;
+use loquax::ui::strings::Lang;
 use loquax::ui::tracks::TrackWindow;
 use loquax::ui::viewload::ViewLoads;
 use loquax::when::WallTime;
 
 use crate::friends;
 use crate::schema::{
-    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, RegionRow, VERSION,
+    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, RegionRow,
+    TrackChoice, VERSION,
 };
 use crate::session::pins_in;
 
@@ -542,14 +544,14 @@ impl Renderer {
         let style = Style::SCREEN.in_theme(table);
         // The running session's tracks at the view's tile zoom (1385);
         // none without a session, as a test or a measuring tool draws.
-        let pressed = request
+        let chosen = request
             .track_window
             .as_deref()
             .and_then(TrackWindow::of_word);
         let unit = (24.0 - f64::from(view.tile_zoom())).exp2();
-        let (tracks, window) = match crate::current() {
-            Some(session) => session.map_tracks(unit, scale, pressed),
-            None => (Vec::new(), TrackWindow::default()),
+        let (tracks, window, lang) = match crate::current() {
+            Some(session) => session.map_tracks(unit, scale, chosen),
+            None => (Vec::new(), TrackWindow::default(), Lang::En),
         };
         // No region touches the view: the radar (1386), every pin saying
         // how far and which way it is from the centre.
@@ -654,6 +656,8 @@ impl Renderer {
             room_north,
             room_south,
             track_window: window.word().to_string(),
+            title: window.title(lang),
+            track_windows: track_choices(window, lang),
         };
         shown
     }
@@ -707,6 +711,20 @@ impl Renderer {
     pub fn names(&self) -> Vec<String> {
         self.frames.names()
     }
+}
+
+/// The map menu's "Time window" sheet (1419) in `lang`: every window in
+/// the menu's order, the default first, `shown` chosen. Java draws the
+/// entries and sends the chosen one's word back.
+pub fn track_choices(shown: TrackWindow, lang: Lang) -> Vec<TrackChoice> {
+    TrackWindow::CHOICES
+        .iter()
+        .map(|&w| TrackChoice {
+            word: w.word().to_string(),
+            label: w.label().text(lang).to_string(),
+            chosen: w == shown,
+        })
+        .collect()
 }
 
 /// The avatar pins of `pins` in the screen's view `shows` (1200), in

@@ -2406,13 +2406,13 @@ pub struct MapRequest {
     pub own_lat_e6: Option<i32>,
     #[serde(default)]
     pub own_lon_e6: Option<i32>,
-    /// A chip of the tracks' time windows pressed (1385): `today`,
-    /// `yesterday`, `week`, `month` or `all`; the one shown again goes
-    /// back to the current movement. The answer's `track_window` says
-    /// which the frame drew.
+    /// A time window chosen in the map menu's sheet (1385, 1419): a
+    /// [`TrackChoice::word`], `now` for the current movement, `today`,
+    /// `yesterday`, `week`, `month` or `all`. The answer's `track_window`
+    /// says which the frame drew.
     #[serde(default)]
     pub track_window: Option<String>,
-    /// The "fit all" chip pressed (1386): every peer with a position
+    /// The map menu's "fit all" chosen (1386): every peer with a position
     /// inside the tracks' time window in view.
     #[serde(default)]
     pub fit_window: bool,
@@ -2574,9 +2574,29 @@ pub struct MapShown {
     #[serde(default)]
     pub filling: bool,
     /// The tracks' time window the frame drew (1385): `now` for the
-    /// current movement, else the chip to mark.
+    /// current movement, else the window's word.
     #[serde(default)]
     pub track_window: String,
+    /// The map screen's title (1419): "Map" with the default window, "Map
+    /// · This week" with another, in the phone's language; empty in a
+    /// prefetch's answer, which draws nothing.
+    #[serde(default)]
+    pub title: String,
+    /// The map menu's "Time window" sheet (1419): its entries in order,
+    /// the default first, the window the frame drew chosen.
+    #[serde(default)]
+    pub track_windows: Vec<TrackChoice>,
+}
+
+/// An entry of the map menu's time window sheet (1419).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackChoice {
+    /// What [`MapRequest::track_window`] sends back when it is chosen.
+    pub word: String,
+    /// Its words in the phone's language.
+    pub label: String,
+    /// The window the frame drew.
+    pub chosen: bool,
 }
 
 /// How long after a frame that says [`MapShown::filling`] the app asks

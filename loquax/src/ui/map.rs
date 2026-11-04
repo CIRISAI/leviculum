@@ -440,6 +440,9 @@ pub struct MapView {
     /// The radar where no region touches the view (1386): the picture is
     /// left blank and these drawn instead.
     pub radar: Option<RadarCells>,
+    /// The tracks' time window's word when it is not the default (1419):
+    /// on the credit's row, so the reader knows why older lines show.
+    pub window_word: Option<String>,
 }
 
 /// The radar in the terminal's cells (1386).

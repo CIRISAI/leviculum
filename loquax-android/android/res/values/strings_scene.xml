@@ -338,7 +338,8 @@
     <string name="scene_select_pin">Select pin</string>
     <string name="scene_map_drawing">Map drawing</string>
     <string name="scene_glyph_test">Glyph test</string>
-    <string name="scene_track_window">Tracks time window</string>
+    <string name="scene_track_window">Time window</string>
+    <string name="scene_tracks_now">Current movement</string>
     <string name="scene_tracks_today">Today</string>
     <string name="scene_tracks_yesterday">Yesterday</string>
     <string name="scene_tracks_week">This week</string>

@@ -1043,6 +1043,22 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
             .boxed(),
         (any::<bool>(), u32s(), u32s(), any::<bool>()).boxed(),
         any::<bool>(),
+        // 1419: the map's title and the time window sheet.
+        (
+            text(),
+            text(),
+            prop::collection::vec(
+                (text(), text(), any::<bool>()).prop_map(|(word, label, chosen)| {
+                    schema::TrackChoice {
+                        word,
+                        label,
+                        chosen,
+                    }
+                }),
+                0..7,
+            ),
+        )
+            .boxed(),
     )
         .prop_map(
             |(
@@ -1050,6 +1066,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                 (own_x, own_y, autoload),
                 (fling, room_north, room_south, loading_here),
                 filling,
+                (track_window, title, track_windows),
             )| {
                 MapShown {
                     own_x,
@@ -1060,6 +1077,9 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                     room_south,
                     loading_here,
                     filling,
+                    track_window,
+                    title,
+                    track_windows,
                     ..shown
                 }
             },

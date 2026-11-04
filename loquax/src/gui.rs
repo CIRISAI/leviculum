@@ -461,8 +461,10 @@ pub enum Message {
     Intent(Intent),
     /// The top bar's gear: the settings page (1233).
     Settings,
-    /// A step of the map's strip of time windows (1385).
+    /// A time window chosen in the map's menu (1385, 1419).
     TrackWindow(loquax::ui::tracks::TrackWindow),
+    /// The map bar's More: its menu open, or closed again (1419).
+    MapMenu,
     /// The mouse on the photo viewer (1269).
     Viewer(viewer::Input),
     /// The viewer's Close.
@@ -738,6 +740,9 @@ struct App {
     help: Option<usize>,
     /// "My code" over the window while it is open (1371).
     code_open: bool,
+    /// The map's menu over the map while it is open (1419): the tracks'
+    /// time window and "fit all".
+    map_menu: bool,
     /// The bubble whose Forward was pressed (1371): its menu lists the
     /// conversations to send the copy to.
     forwarding: Option<NodeId>,
@@ -852,6 +857,7 @@ impl App {
             map_shown: false,
             help: None,
             code_open: false,
+            map_menu: false,
             forwarding: None,
             compose: text_editor::Content::new(),
             reply: None,
@@ -1145,6 +1151,7 @@ impl App {
                 None => self.seen.notice = Some(loquax::ui::NO_OWN_CODE.to_string()),
             },
             Intent::Back | Intent::Dismiss if self.code_open => self.code_open = false,
+            Intent::Back | Intent::Dismiss if self.map_menu => self.map_menu = false,
             Intent::Copy if self.code_open => {
                 if let Some(code) = self.seen.own_code.clone() {
                     return iced::clipboard::write(code);
@@ -1471,7 +1478,10 @@ impl App {
                 self.fit();
                 self.selected = selected.or(self.selected);
             }
-            MapCmd::FitWindow => self.fit_window(),
+            MapCmd::FitWindow => {
+                self.map_menu = false;
+                self.fit_window();
+            }
             MapCmd::Step(next) => {
                 let pins = &self.seen.pins;
                 let at = pins.iter().position(|p| Some(p.peer) == self.selected);
@@ -1497,7 +1507,10 @@ impl App {
                     });
                 }
             }
-            MapCmd::Close => self.screen = Screen::Chats,
+            MapCmd::Close => {
+                self.map_menu = false;
+                self.screen = Screen::Chats;
+            }
             MapCmd::TrackWindow(forward) => {
                 let next = self.seen.track_window.step(forward);
                 self.tell(UiEvent::TrackWindow(next));
@@ -1786,8 +1799,13 @@ impl App {
                 }
                 return Task::none();
             }
-            Message::TrackWindow(pressed) => {
-                self.tell(UiEvent::TrackWindow(pressed));
+            Message::TrackWindow(chosen) => {
+                self.map_menu = false;
+                self.tell(UiEvent::TrackWindow(chosen));
+                return Task::none();
+            }
+            Message::MapMenu => {
+                self.map_menu = !self.map_menu;
                 return Task::none();
             }
             Message::Settings => {
@@ -2448,7 +2466,10 @@ impl App {
                 .on_press(Message::Intent(Intent::Tab(TabId::Chats)))
                 .padding([0, 6])
                 .style(button::text),
-            self.track_strip(),
+            // "Map", or "Map · This week" when the tracks' window is not
+            // the default (1419): why older lines show.
+            text(self.seen.track_window.title(self.lang)).size(13),
+            text("  ").size(13),
             // Always on screen: the region's credit, or the outline's.
             text(credit).size(13),
             container(
@@ -2464,6 +2485,15 @@ impl App {
             .width(Length::Fill)
             .align_right(Length::Fill),
             text(format!("  z{:.1}", self.view.zoom())).size(13),
+            // The map's menu (1419): the time window, rarely needed, is
+            // in it and not on the map.
+            button(text(StrId::Menu.text(self.lang)).size(13))
+                .on_press(Message::MapMenu)
+                .padding([0, 6])
+                .style(match self.map_menu {
+                    true => button::primary,
+                    false => button::text,
+                }),
         ]
         .padding([2, 8]);
         // The picture is a canvas of its own under the pins' canvas: iced
@@ -2476,8 +2506,12 @@ impl App {
         let canvas = Canvas::new(MapCanvas { app: self })
             .width(Length::Fill)
             .height(Length::Fill);
+        let menu: Element<'_, Message> = match self.map_menu {
+            true => self.map_menu(),
+            false => Space::new().into(),
+        };
         let map = container(
-            stack![picture, canvas]
+            stack![picture, canvas, menu]
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
@@ -2493,39 +2527,56 @@ impl App {
 }
 
 impl App {
-    /// The map's strip of time windows (1385): today, yesterday, this
-    /// week, this month, all; the one shown marked, a press on it back to
-    /// the current movement.
-    fn track_strip(&self) -> Element<'_, Message> {
+    /// The map's menu over its bottom right corner (1419): the tracks'
+    /// time window as a single choice, the default first and the one
+    /// shown marked, and "fit all" (1386), every peer inside the window
+    /// in view. A choice closes it.
+    fn map_menu(&self) -> Element<'_, Message> {
         use loquax::ui::tracks::TrackWindow;
-        let word = |w: TrackWindow| match w {
-            TrackWindow::Today => StrId::TracksToday,
-            TrackWindow::Yesterday => StrId::TracksYesterday,
-            TrackWindow::Week => StrId::TracksWeek,
-            TrackWindow::Month => StrId::TracksMonth,
-            TrackWindow::All | TrackWindow::Episode => StrId::TracksAll,
-        };
-        TrackWindow::NAMED
+        let t = self.tokens();
+        let heading = text(StrId::TrackWindow.text(self.lang))
+            .size(13)
+            .color(chat::colour(t.text_secondary));
+        let choices = TrackWindow::CHOICES
             .iter()
-            .fold(row![].spacing(2), |strip, &w| {
+            .fold(column![heading].spacing(2), |list, &w| {
                 let style = match self.seen.track_window == w {
                     true => button::primary,
                     false => button::text,
                 };
-                strip.push(
-                    button(text(word(w).text(Lang::En)).size(13))
+                list.push(
+                    button(text(w.label().text(self.lang)).size(13))
                         .on_press(Message::TrackWindow(w))
-                        .padding([0, 6])
+                        .padding([2, 8])
+                        .width(Length::Fill)
                         .style(style),
                 )
             })
-            // "Fit all" (1386): every peer inside the window in view.
             .push(
-                button(text(StrId::FitWindow.text(Lang::En)).size(13))
+                button(text(StrId::FitWindow.text(self.lang)).size(13))
                     .on_press(Message::Intent(Intent::Map(MapCmd::FitWindow)))
-                    .padding([0, 6])
+                    .padding([2, 8])
+                    .width(Length::Fill)
                     .style(button::text),
             )
+            .width(Length::Fixed(200.0));
+        // The background's ground with a line round it, so the menu
+        // stands off the map under it.
+        let panel = container(choices)
+            .padding(8)
+            .style(move |_: &Theme| container::Style {
+                background: Some(iced::Background::Color(chat::colour(t.background))),
+                border: iced::border::rounded(8)
+                    .color(chat::colour(t.dim))
+                    .width(1.0),
+                ..container::Style::default()
+            });
+        container(panel)
+            .padding(8)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_right(Length::Fill)
+            .align_bottom(Length::Fill)
             .into()
     }
 }
@@ -4259,6 +4310,39 @@ mod tests {
             verb: Verb::Pause,
         }));
         assert_eq!(sent(), [Input::Verb(Verb::Pause)]);
+    }
+
+    /// The tracks' time window is in the map's menu, not on the map
+    /// (1419): the bar has no strip, its title is "Map" with the default;
+    /// More opens the menu with the default first and marked, a choice
+    /// tells the model and closes it, and a window that is not the default
+    /// puts its word after the title; Escape closes an open menu before
+    /// the map. Pixel for pixel the goldens: the map, the menu open, the
+    /// title with "This week".
+    #[test]
+    fn the_time_window_is_in_the_maps_menu() {
+        use loquax::ui::tracks::TrackWindow;
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Intent(Intent::ShowMap { peer: None }));
+        assert_eq!(app.screen, Screen::Map);
+        let _ = told(&mut rx);
+        assert!(!app.map_menu);
+        map::tests::same_as("gui-map-window.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::MapMenu);
+        assert!(app.map_menu);
+        map::tests::same_as("gui-map-window-menu.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::TrackWindow(TrackWindow::Week));
+        assert!(!app.map_menu, "a choice closes the menu");
+        assert_eq!(told(&mut rx), [UiEvent::TrackWindow(TrackWindow::Week)]);
+        // The model's answer, as the shell's next Seen brings it.
+        app.seen.track_window = TrackWindow::Week;
+        map::tests::same_as("gui-map-window-week.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::MapMenu);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert!(!app.map_menu);
+        assert_eq!(app.screen, Screen::Map, "Back closed the menu only");
     }
 
     /// A narrow window stacks as the phone does, and a resize switches

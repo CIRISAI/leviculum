@@ -1686,23 +1686,25 @@ impl Session {
     }
 
     /// The map's tracks on a view whose screen pixel spans `unit` world
-    /// units, drawn at `scale` (1385), after a chip `pressed`; and the
-    /// window they are drawn in.
+    /// units, drawn at `scale` (1385), after a window `chosen` in the map
+    /// menu's sheet (1419); the window they are drawn in, and the phone's
+    /// language the map's title and sheet are said in.
     pub fn map_tracks(
         &self,
         unit: f64,
         scale: f32,
-        pressed: Option<loquax::ui::tracks::TrackWindow>,
+        chosen: Option<loquax::ui::tracks::TrackWindow>,
     ) -> (
         Vec<loquax::ui::tracks::Track>,
         loquax::ui::tracks::TrackWindow,
+        Lang,
     ) {
         let mut inner = self.lock();
-        if let Some(pressed) = pressed {
-            inner.model.track_window = inner.model.track_window.toggled(pressed);
+        if let Some(chosen) = chosen {
+            inner.model.track_window = chosen;
         }
         let window = inner.model.track_window;
-        (inner.model.map_tracks(unit, scale), window)
+        (inner.model.map_tracks(unit, scale), window, inner.lang)
     }
 
     /// The next event, waiting at most `wait`.

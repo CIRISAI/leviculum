@@ -194,9 +194,9 @@ final class MapView extends View {
     private Long y;
     private Long zoomMilli;
     private String selected;
-    /** A chip of the tracks' time windows pressed and not yet drawn (1385). */
+    /** A time window chosen in the map menu and not yet drawn (1385, 1419). */
     private String trackPressed;
-    /** The "fit all" chip pressed and not yet drawn (1386). */
+    /** The map menu's "fit all" chosen and not yet drawn (1386, 1419). */
     private boolean fitWindowPressed;
     /** The last frame's marks (1200), in its view's pixels. */
     private List<Map<String, Object>> marks = Collections.emptyList();
@@ -532,9 +532,9 @@ final class MapView extends View {
     }
 
     /**
-     * A chip of the tracks' time windows pressed (1385): the library
-     * takes the window, or goes back to the current movement when it is
-     * the one shown, and the frame's answer says which it drew.
+     * A time window chosen in the map menu's sheet (1385, 1419): the
+     * library takes the window, and the frame's answer says which it drew
+     * and the title that names it.
      */
     void trackWindow(String word) {
         synchronized (this) {
@@ -545,7 +545,7 @@ final class MapView extends View {
     }
 
     /**
-     * The "fit all" chip pressed (1386): the library fits the view to
+     * The map menu's "fit all" chosen (1386): the library fits the view to
      * every peer with a position inside the tracks' time window.
      */
     void fitWindow() {

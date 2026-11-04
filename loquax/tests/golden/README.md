@@ -136,3 +136,11 @@ and in cells, drawn by
 `ui::tracks::scenes::tests::the_marks_scenes_in_cells_are_the_goldens`.
 The radar scene lies on the Seceda ridge, where no region is, so its
 ground is the radar's blank one with its rings.
+
+`gui-map-window.png`, `gui-map-window-menu.png`, `gui-map-window-week.png`:
+the window's map screen (1419) beside the rail, 900 x 560, light, the
+chat fixture's model with no map frame drawn: the bar with no time strip
+and the title "Map"; the map's menu open over the map's corner, "Time
+window" with the six windows, the current movement marked, and "Fit all";
+the bar's title "Map · This week" once that window is chosen. Drawn by
+`gui::tests::the_time_window_is_in_the_maps_menu`.

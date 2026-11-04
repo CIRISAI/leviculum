@@ -374,11 +374,23 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 public void chat(String peer) {
                     ConversationsActivity.this.chat(peer);
                 }
+
+                @Override
+                public void title(String said) {
+                    if (onMap) {
+                        title.setText(said);
+                    }
+                }
             });
         }
         findViewById(R.id.pane_chats).setVisibility(map ? View.GONE : View.VISIBLE);
         findViewById(R.id.pane_map).setVisibility(map ? View.VISIBLE : View.GONE);
-        title.setText(map ? R.string.map : R.string.tab_chats);
+        if (map && mapPane.title() != null) {
+            // The time window's word after it when not the default (1419).
+            title.setText(mapPane.title());
+        } else {
+            title.setText(map ? R.string.map : R.string.tab_chats);
+        }
         // On the map the search finds friends, in the Friends sheet (1200).
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, getColor(R.color.text)));
         search.setContentDescription(getString(map ? R.string.friends_search : R.string.search));
@@ -475,19 +487,28 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         state.putBoolean(TAB, onMap);
     }
 
-    /** The bar's menu (1199): Settings and Help, nothing else. */
+    /**
+     * The bar's menu (1199): Settings and Help; on the map its Time
+     * window and Fit all first (1419).
+     */
     private void showMenu(View anchor) {
-        showMenu(this, anchor);
+        showMenu(this, anchor, onMap ? mapPane : null);
     }
 
-    /** The main views' menu, on `screen`'s bar. */
-    static void showMenu(final Activity screen, View anchor) {
+    /** The main views' menu, on `screen`'s bar; with `map`, the map's entries first. */
+    static void showMenu(final Activity screen, View anchor, final MapPane map) {
         PopupMenu popup = new PopupMenu(screen, anchor);
-        popup.getMenu().add(0, R.string.settings, 0, R.string.settings);
-        popup.getMenu().add(0, R.string.help, 1, R.string.help);
+        if (map != null) {
+            MapPane.menu(popup.getMenu());
+        }
+        popup.getMenu().add(0, R.string.settings, 1, R.string.settings);
+        popup.getMenu().add(0, R.string.help, 2, R.string.help);
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
+                if (map != null && map.chosen(item.getItemId())) {
+                    return true;
+                }
                 if (item.getItemId() == R.string.help) {
                     // The user help page in the app's language (walk
                     // finding 18): help_url is /help, /help-de in German.

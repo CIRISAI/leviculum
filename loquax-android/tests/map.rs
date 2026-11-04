@@ -199,6 +199,66 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
     same_as("map-florence-z16.png", &rgba, W, H);
 }
 
+/// The map menu's time window (1419) as the frame says it: without a
+/// running session the default, the title "Map" alone, and the sheet's six
+/// entries with the current movement first and chosen; a word Java sends
+/// back is one of the sheet's.
+#[test]
+fn the_frame_carries_the_title_and_the_time_window_sheet() {
+    let home = home();
+    let mut ask = request(home.path(), false);
+    ask.track_window = Some("week".to_string());
+    let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert_eq!(shown.track_window, "now", "no session keeps no window");
+    assert_eq!(shown.title, "Map");
+    let words: Vec<&str> = shown
+        .track_windows
+        .iter()
+        .map(|c| c.word.as_str())
+        .collect();
+    assert_eq!(words, ["now", "today", "yesterday", "week", "month", "all"]);
+    let chosen: Vec<&str> = shown
+        .track_windows
+        .iter()
+        .filter(|c| c.chosen)
+        .map(|c| c.word.as_str())
+        .collect();
+    assert_eq!(chosen, ["now"]);
+    assert_eq!(shown.track_windows[0].label, "Current movement");
+}
+
+/// The sheet and the title in the phone's language for a window that is
+/// not the default (1419): German, "Diese Woche" chosen and after the
+/// title; every entry's word names its window again.
+#[test]
+fn a_window_not_the_default_is_chosen_in_the_sheet_and_named_in_the_title() {
+    use loquax::ui::tracks::TrackWindow;
+    let sheet = loquax_android::map::track_choices(TrackWindow::Week, Lang::De);
+    let labels: Vec<&str> = sheet.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Aktuelle Bewegung",
+            "Heute",
+            "Gestern",
+            "Diese Woche",
+            "Dieser Monat",
+            "Alles"
+        ]
+    );
+    let chosen: Vec<&str> = sheet
+        .iter()
+        .filter(|c| c.chosen)
+        .map(|c| c.word.as_str())
+        .collect();
+    assert_eq!(chosen, ["week"]);
+    for (entry, window) in sheet.iter().zip(TrackWindow::CHOICES) {
+        assert_eq!(TrackWindow::of_word(&entry.word), Some(window));
+    }
+    assert_eq!(TrackWindow::Week.title(Lang::De), "Karte · Diese Woche");
+    assert_eq!(TrackWindow::Episode.title(Lang::De), "Karte");
+}
+
 /// The phone in its dark setting draws the map's dark table: the frame
 /// is the dark picture under its names, and not the light one.
 #[test]

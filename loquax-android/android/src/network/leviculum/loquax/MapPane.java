@@ -18,7 +18,6 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -58,6 +57,14 @@ import java.util.Map;
  * measured from it. Nothing of it is sent: "Share my position" on the
  * empty map (to a chat the user picks) and "Share mine" on a friend's card
  * send it, once, to one peer.
+ *
+ * The tracks' time window (1419) is a map control, but a hidden one: the
+ * bar's menu has "Time window", a single choice of the windows the frame
+ * lists, and "Fit all"; nothing of it is on the map. A window that is not
+ * the default puts its word after the screen's title, "Map · This week",
+ * so the reader knows why older lines show. The entries, the choice and
+ * the title come from the library's frame; Java draws the menu entry and
+ * the sheet.
  */
 final class MapPane implements MapView.Listener {
     /** How long a chip that tells of an event stays. */
@@ -68,9 +75,12 @@ final class MapPane implements MapView.Listener {
     /** What the crosshair did last: nothing, centred once, following. */
     private enum Locate { NONE, CENTRED, FOLLOWING }
 
-    /** Where the pane goes beyond the map: a friend's chat. */
+    /** Where the pane goes beyond the map: a friend's chat, the screen's title. */
     interface Host {
         void chat(String peer);
+
+        /** The map's title the frame says (1419): "Map", or "Map · This week". */
+        void title(String title);
     }
 
     private final Activity activity;
@@ -88,12 +98,8 @@ final class MapPane implements MapView.Listener {
     /** The phone's own fix, while the map is in front and allowed to read it. */
     private Location fix;
     private final MapView map;
-    /**
-     * The tracks' time windows (1385), a row of chips under the event's
-     * chip: the words the library takes, and the chips in that order.
-     */
-    private static final String[] TRACK_WORDS = {"today", "yesterday", "week", "month", "all"};
-    private final TextView[] trackChips = new TextView[TRACK_WORDS.length];
+    /** The title the last frame said (1419), none before the first. */
+    private String title;
     private final Runnable hide = new Runnable() {
         @Override
         public void run() {
@@ -148,86 +154,68 @@ final class MapPane implements MapView.Listener {
         });
         map = new MapView(activity, activity.getFilesDir().getAbsolutePath(), this);
         ((FrameLayout) activity.findViewById(R.id.map)).addView(map);
-        trackRow((FrameLayout) activity.findViewById(R.id.pane_map));
         refresh();
     }
 
     /**
-     * The row of the tracks' time windows (1385) on `pane`, below the
-     * event's chip: Java draws the chips and says which was pressed, the
-     * library keeps the window and draws the tracks.
+     * The map's entries of the bar's menu (1419): "Time window" and "Fit
+     * all", before the main views' own; their ids are their strings.
      */
-    private void trackRow(FrameLayout pane) {
-        int[] names = {
-            R.string.scene_tracks_today, R.string.scene_tracks_yesterday,
-            R.string.scene_tracks_week, R.string.scene_tracks_month, R.string.scene_tracks_all,
-        };
-        float dp = activity.getResources().getDisplayMetrics().density;
-        LinearLayout row = new LinearLayout(activity);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < TRACK_WORDS.length; i++) {
-            final String word = TRACK_WORDS[i];
-            TextView chipView = new TextView(activity);
-            chipView.setText(activity.getString(names[i]));
-            chipView.setTextSize(13);
-            chipView.setTextColor(activity.getColor(R.color.text));
-            chipView.setBackgroundResource(R.drawable.chip);
-            chipView.setElevation(2 * dp);
-            int h = Math.round(12 * dp);
-            int v = Math.round(6 * dp);
-            chipView.setPadding(h, v, h, v);
-            chipView.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View view) {
-                    map.trackWindow(word);
-                }
-            });
-            LinearLayout.LayoutParams at = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            at.setMarginEnd(Math.round(6 * dp));
-            row.addView(chipView, at);
-            trackChips[i] = chipView;
-        }
-        // "Fit all" (1386): every peer inside the time window in view.
-        TextView fitChip = new TextView(activity);
-        fitChip.setText(activity.getString(R.string.scene_fit_window));
-        fitChip.setTextSize(13);
-        fitChip.setTextColor(activity.getColor(R.color.text));
-        fitChip.setBackgroundResource(R.drawable.chip);
-        fitChip.setElevation(2 * dp);
-        int fh = Math.round(12 * dp);
-        int fv = Math.round(6 * dp);
-        fitChip.setPadding(fh, fv, fh, fv);
-        fitChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                map.fitWindow();
-            }
-        });
-        row.addView(fitChip, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        HorizontalScrollView scroll = new HorizontalScrollView(activity);
-        scroll.setHorizontalScrollBarEnabled(false);
-        int side = Math.round(12 * dp);
-        scroll.setPadding(side, 0, side, 0);
-        scroll.setClipToPadding(false);
-        scroll.addView(row);
-        FrameLayout.LayoutParams place = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.START);
-        place.topMargin = Math.round(60 * dp);
-        pane.addView(scroll, place);
+    static void menu(android.view.Menu menu) {
+        menu.add(0, R.string.scene_track_window, 0, R.string.scene_track_window);
+        menu.add(0, R.string.scene_fit_window, 0, R.string.scene_fit_window);
     }
 
-    /** The chip of the window the frame drew marked, the others not. */
-    private void markTrackWindow(String drawn) {
-        for (int i = 0; i < TRACK_WORDS.length; i++) {
-            if (trackChips[i] != null) {
-                boolean on = TRACK_WORDS[i].equals(drawn);
-                trackChips[i].setSelected(on);
-                trackChips[i].setAlpha(on ? 1f : 0.7f);
+    /** A menu entry chosen: whether it was one of the map's. */
+    boolean chosen(int id) {
+        if (id == R.string.scene_track_window) {
+            windowSheet();
+            return true;
+        }
+        if (id == R.string.scene_fit_window) {
+            // "Fit all" (1386): every peer inside the time window in view.
+            map.fitWindow();
+            return true;
+        }
+        return false;
+    }
+
+    /** The title the last frame said, or none before the first (1419). */
+    String title() {
+        return title;
+    }
+
+    /**
+     * The time window's sheet (1419): the frame's entries, the one it drew
+     * marked; a choice goes to the library, which draws the next frame in
+     * it and says the title.
+     */
+    private void windowSheet() {
+        if (lastShown == null) {
+            return;
+        }
+        final List<Map<String, Object>> entries = Core.list(lastShown, "track_windows");
+        if (entries.isEmpty()) {
+            return;
+        }
+        String[] labels = new String[entries.size()];
+        int chosen = -1;
+        for (int i = 0; i < entries.size(); i++) {
+            labels[i] = Core.str(entries.get(i), "label");
+            if (Core.bool(entries.get(i), "chosen")) {
+                chosen = i;
             }
         }
+        new android.app.AlertDialog.Builder(activity)
+                .setTitle(R.string.scene_track_window)
+                .setSingleChoiceItems(labels, chosen, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface dialog, int which) {
+                        map.trackWindow(Core.str(entries.get(which), "word"));
+                        dialog.dismiss();
+                    }
+                })
+                .show();
     }
 
     /**
@@ -475,7 +463,11 @@ final class MapPane implements MapView.Listener {
         }
         lastShown = shown;
         credit.setText(Core.str(shown, "attribution"));
-        markTrackWindow(Core.str(shown, "track_window"));
+        String said = Core.str(shown, "title");
+        if (!said.isEmpty() && !said.equals(title)) {
+            title = said;
+            host.title(said);
+        }
         if (shown.get("notice") != null) {
             say(Core.str(shown, "notice"));
         } else if (!eventShown) {

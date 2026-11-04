@@ -55,7 +55,7 @@ public class MapActivity extends Activity implements Events.Listener {
         menu.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                ConversationsActivity.showMenu(MapActivity.this, menu);
+                ConversationsActivity.showMenu(MapActivity.this, menu, map);
             }
         });
         final String from = getIntent().getStringExtra(SELECTED);
@@ -69,6 +69,11 @@ public class MapActivity extends Activity implements Events.Listener {
                 }
                 startActivity(new Intent(MapActivity.this, ChatActivity.class)
                         .putExtra(ChatActivity.PEER, peer));
+            }
+
+            @Override
+            public void title(String said) {
+                ((TextView) findViewById(R.id.title)).setText(said);
             }
         });
         if (getIntent().hasExtra(FRIEND)) {

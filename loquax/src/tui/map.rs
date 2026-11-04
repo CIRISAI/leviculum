@@ -1407,10 +1407,15 @@ impl MapPainter {
         }
         self.labels = labels;
         // The region's own line, "© OpenStreetMap contributors", or the
-        // outline's; always on the view.
-        let credit = match radar {
-            Some(r) => format!("{} ", r.note),
-            None => format!("{} ", painted.attribution),
+        // outline's; always on the view. A time window that is not the
+        // default goes before it (1419): the reason older lines show.
+        let line = match radar {
+            Some(r) => r.note.as_str(),
+            None => painted.attribution.as_str(),
+        };
+        let credit = match &shown.window_word {
+            Some(word) => format!("{word} · {line} "),
+            None => format!("{line} "),
         };
         let len = credit.chars().count() as u16;
         let x = (area.x + area.width).saturating_sub(len).max(area.x);
@@ -2022,6 +2027,7 @@ mod tests {
             cell_px,
             tracks: Vec::new(),
             radar: None,
+            window_word: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 16,
@@ -2083,6 +2089,24 @@ mod tests {
         assert!(text.contains("● bob · 4 min"));
     }
 
+    /// The time window (1419): no strip, no word with the default; another
+    /// window's word on the credit's row, before the credit.
+    #[test]
+    fn a_window_not_the_default_says_its_word_on_the_credit_row() {
+        let (_, plain) = drawn(Graphics::Halfblocks, None);
+        assert!(!plain.contains("This week"));
+        let mut painter = MapPainter::new(Maps::default(), Graphics::Halfblocks, None);
+        let mut view = shown(painter.setup().cell_px);
+        view.window_word = Some("This week".to_string());
+        let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &view, Style::default()));
+        let row: String = (0..32)
+            .filter_map(|x| terminal.backend().buffer().cell((x, 9)))
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(row.contains("This week · "), "{row:?}");
+    }
+
     /// The smallest shift by which every column of `cols` repeats, the
     /// copies of the world side by side; `None` where none does.
     fn period<T: PartialEq>(cols: &[T]) -> Option<usize> {
@@ -2098,6 +2122,7 @@ mod tests {
         let shown = MapView {
             tracks: Vec::new(),
             radar: None,
+            window_word: None,
             area: leviculum_ui::Rect::new(1, 1, cols, rows),
             viewport: view,
             cell_px: (1, 2),
@@ -2165,6 +2190,7 @@ mod tests {
             cell_px,
             tracks: Vec::new(),
             radar: None,
+            window_word: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2230,6 +2256,7 @@ mod tests {
         let shown = MapView {
             tracks: Vec::new(),
             radar: None,
+            window_word: None,
             area,
             viewport: Viewport::new(
                 at,
@@ -2290,6 +2317,7 @@ mod tests {
             cell_px,
             tracks: Vec::new(),
             radar: None,
+            window_word: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -3053,6 +3081,7 @@ mod tests {
             cell_px,
             tracks: Vec::new(),
             radar: None,
+            window_word: None,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 39,
@@ -3173,6 +3202,7 @@ mod tests {
         MapView {
             tracks: Vec::new(),
             radar: None,
+            window_word: None,
             area: leviculum_ui::Rect::new(0, 0, cols, rows),
             viewport: Viewport::new(
                 centre,

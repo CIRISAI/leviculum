@@ -1585,9 +1585,8 @@ pub enum UiEvent {
     /// The map's centre as the shell's map shows it, or none while it has
     /// no map (1371): what the position sheet's "map centre" row takes.
     MapCentre(Option<leviculum_lxmf::telemetry::Location>),
-    /// The tracks' time window, from the window's strip or the phone's
-    /// chips (1385): pressed, or back to the current episode when the
-    /// pressed one is shown ([`tracks::TrackWindow::toggled`]).
+    /// The tracks' time window chosen in the map's menu (1385, 1419): the
+    /// window's single choice, the default among them.
     TrackWindow(tracks::TrackWindow),
     /// The position sheet's "map centre" row: the map's centre is the own
     /// fix (1371).
@@ -2029,8 +2028,8 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.shares_due()
         }
         UiEvent::EnterPosition { text } => model.enter_position(&text),
-        UiEvent::TrackWindow(pressed) => {
-            model.track_window = model.track_window.toggled(pressed);
+        UiEvent::TrackWindow(chosen) => {
+            model.track_window = chosen;
             Vec::new()
         }
         UiEvent::MapCentre(centre) => {
@@ -4603,6 +4602,10 @@ impl<B> UiModel<B> {
             pins,
             tracks,
             radar,
+            window_word: self
+                .track_window
+                .title_word()
+                .map(|w| w.text(self.lang).to_string()),
         })
     }
 
@@ -11337,6 +11340,36 @@ pub(crate) mod tests {
     /// is selected, and Enter adds it: its conversation opens, named by its
     /// announce, and its pin is a friend's from then on. A contact's pin
     /// and our own are never nearby.
+    /// The tracks' time window (1419): the map's scene has no word with
+    /// the default, the chosen window's word with another; `w` steps,
+    /// the menu's choice sets, the default among them, and a choice of
+    /// the window shown keeps it.
+    #[test]
+    fn the_map_scene_names_a_window_that_is_not_the_default() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert_eq!(model.map_view().expect("open").window_word, None);
+        update(&mut model, key(KeyCode::Char('w')));
+        assert_eq!(model.track_window, tracks::TrackWindow::Today);
+        assert_eq!(
+            model.map_view().expect("open").window_word.as_deref(),
+            Some("Today")
+        );
+        update(&mut model, UiEvent::TrackWindow(tracks::TrackWindow::Week));
+        update(&mut model, UiEvent::TrackWindow(tracks::TrackWindow::Week));
+        assert_eq!(model.track_window, tracks::TrackWindow::Week);
+        model.lang = strings::Lang::De;
+        assert_eq!(
+            model.map_view().expect("open").window_word.as_deref(),
+            Some("Diese Woche")
+        );
+        update(
+            &mut model,
+            UiEvent::TrackWindow(tracks::TrackWindow::Episode),
+        );
+        assert_eq!(model.map_view().expect("open").window_word, None);
+    }
+
     #[test]
     fn a_node_nearby_is_a_neutral_pin_with_a_card_and_enter_adds_it() {
         const STRANGER: [u8; 16] = [0x44; 16];
