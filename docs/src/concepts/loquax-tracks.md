@@ -6,7 +6,9 @@ and how did she get there. So the default picture is the **current
 movement** as lines, and everything older is **collapsed into places**.
 A year of a tracker in a handbag is one large blob at home and a few
 small ones, never a scribble. The older lines stay reachable behind a
-**time window** control on the map: a map control, not a setting.
+**time window** control: a map control, not a setting, but a hidden one
+in the map's menu (Lew, 2026-11-04: the five chips across the map took
+too much room over the place names and are needed rarely).
 
 This page holds the rules and the thresholds the pictures settled
 (order 1385). The rules are pure functions in `loquax::ui::tracks`, one
@@ -124,19 +126,38 @@ them all and added three refinements, marked *settled by the pictures*.
 
 ## The time window
 
-Five named windows and the default: **now** (the current episode),
-**today** (since local midnight), **yesterday** (the local day before),
-**this week** (since Monday 00:00 local), **this month** (since the 1st,
-00:00 local), **all**. A press on the window shown goes back to now.
+Five named windows and the default: **now** (the current episode,
+"Current movement" in the menu), **today** (since local midnight),
+**yesterday** (the local day before), **this week** (since Monday 00:00
+local), **this month** (since the 1st, 00:00 local), **all**.
+
+Nothing of it is on the map (order 1419). It lives in the map's menu as
+"Time window" ("Zeitraum"), a single choice of the six with the default
+first and the one shown marked. While a window other than the default is
+chosen, its word follows the map's title, "Map · This week" ("Karte ·
+Diese Woche"), so the reader knows why older lines show; with the
+default the title is "Map" alone. The entries, the choice and the title
+come from the core (`TrackWindow::CHOICES`, `TrackWindow::title`); the
+frontends draw them.
 
 - **Terminal:** `w` steps to the next window, `W` to the previous, a
-  toast names it ("tracks: week").
-- **Window:** a strip of the five under the map, beside the credit; the
-  one shown is marked.
-- **Phone:** a row of five chips under the event chip. Java only draws
-  the row and sends the pressed word in the map request
-  (`track_window`); the library keeps the window and answers which one it
-  drew.
+  toast names it ("tracks: week"). No strip; the chosen window's word
+  stands before the credit on the map's credit row, only when it is not
+  the default.
+- **Window:** the map bar's More opens the map's menu over the map's
+  corner: "Time window" with the six, and "Fit all". A choice closes it,
+  Escape too. The bar reads "Map · This week" beside Chats.
+- **Phone:** the overflow menu (the three dots) has "Time window" and
+  "Fit all" before Settings and Help. "Time window" opens a single-choice
+  sheet of the frame's `track_windows` (word, label, chosen); the chosen
+  word goes back in the map request (`track_window`), and the frame's
+  `title` is the screen's title. Java draws only the menu entries and the
+  sheet.
+- **M9:** none yet; when the map slice comes, the window is a key on
+  the map screen and the title word after the map's title, as on the
+  others ([A messenger whose core runs
+  anywhere](handheld-messenger.md), "The tracks' time window on the
+  M9").
 
 ## Where the fixes come from
 
@@ -224,8 +245,8 @@ its zooms only while it has a pin, since without one there is no radar.
   the marker (top right of the avatar on the phone, `▯` after the name
   in the terminal, `!` in ASCII). The detail view lists the reading as
   before.
-- **Fit all.** `f` in the terminal and the window, a button at the end
-  of the window's time strip, a chip at the end of the phone's: the view
+- **Fit all.** `f` in the terminal and the window, an entry of the
+  map's menu in the window and on the phone (1419): the view
   fits every peer whose newest fix is inside the tracks' time window; for
   the current episode that is the last 24 h, since a peer silent longer
   ended its episode by the silence. With none inside, every pin. `0`

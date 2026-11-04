@@ -402,6 +402,19 @@ uncertainty of firmware bring-up.
 | 5 | groups: join, member sheet, the group verbs the scene already carries | 2 | the board joins a group made by the phone and reads the digest | the map |
 | 6 | the map, last: the map renderer behind a tab, positions from telemetry, region storage decided (SD against flash) | 3–4 | a position shared by the board shows on the phone's map and the reverse, frame time measured | routing/zoom niceties of the desktop |
 
+### The tracks' time window on the M9 (1419)
+
+Nothing is built for it; this is where it goes when slice 6 brings the
+map. On the phone and in the window the tracks' time window left the
+map for the map's menu ([Loquax: tracks on the map](loquax-tracks.md),
+"The time window"), and the M9 has neither room nor a pointer for a
+menu over the map. So it takes the terminal's way: a key on the map
+screen steps through the six windows (`w` and `W`, the shared rows, so
+the M9's keyboard gets them through the same resolver), and while a
+window other than the default is chosen its word follows the map's
+title ("Map · This week", `TrackWindow::title`), the one line that says
+why older lines show. No strip, no chips, no sheet.
+
 ### Slice one done, on the host (1351)
 
 The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
