@@ -1263,10 +1263,13 @@ dependencies = [
  "embedded-hal-async",
  "esp-bootloader-esp-idf",
  "esp-hal",
+ "esp-storage",
  "leviculum-core",
  "leviculum-log-line",
+ "leviculum-serial-mux",
  "loquax",
  "loquax-m9",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1306,6 +1309,13 @@ version = "0.10.0-dev.5"
 [[package]]
 name = "leviculum-rrc"
 version = "0.10.0-dev.5"
+
+[[package]]
+name = "leviculum-serial-mux"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
 
 [[package]]
 name = "leviculum-ui"

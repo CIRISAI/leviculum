@@ -34,6 +34,9 @@
 extern crate alloc;
 
 pub mod boards;
+pub mod flash;
+pub mod handheld;
+pub mod serial_iface;
 pub mod sx1262;
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -209,6 +212,17 @@ pub fn uptime_ms() -> u64 {
     Instant::now().duration_since_epoch().as_millis()
 }
 
+/// The node's clock: [`uptime_ms`], monotonic from boot. No wall time: the
+/// board has not learned one, and the core says so itself.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EspClock;
+
+impl leviculum_core::traits::Clock for EspClock {
+    fn now_ms(&self) -> u64 {
+        uptime_ms()
+    }
+}
+
 // ---------------------------------------------------------------------
 // The debug log
 // ---------------------------------------------------------------------
@@ -326,14 +340,47 @@ impl<'d> UsbLog<'d> {
 /// Every line this crate writes is formatted ASCII from fixed words and
 /// numbers; [`UartLog::line`] escapes what a formatted argument could
 /// still bring.
+///
+/// Since 1414 the frames are the node's transport as well as the control
+/// envelope's answers, so the line carries the whole contract: every frame
+/// leaves with its XON and XOFF bytes escaped (`escape_flow`) and the
+/// capability report states `serial_mux=1`, so lnsd escapes its own and
+/// strips none of ours. The board sends no flow bytes itself: esp-hal 1.2
+/// keeps `SwFlowControl` in its config and never programs it. Instead
+/// nothing the host sends waits in the 128-byte receive FIFO while the
+/// board writes: every write drains the FIFO into [`RX_KEEP`] bytes of
+/// memory between FIFO-sized pieces, so a frame that arrives during a
+/// 5.7 s frame dump is read when the dump is done, not lost.
 pub struct UartLog<'d> {
     uart: Uart<'d, Blocking>,
+    /// What the host sent while the board was writing.
+    rx: alloc::collections::VecDeque<u8>,
+    /// Bytes lost because `rx` was full.
+    rx_lost: u32,
 }
+
+/// The most host bytes kept while the board writes: a dump's 5.7 s at
+/// 115200 baud is at most 66 KB from a host that never stops, far more
+/// than any host sends; 8 KiB is fourteen full frames.
+pub const RX_KEEP: usize = 8 * 1024;
+
+/// How much is written between two reads of the receive FIFO: less than
+/// the FIFO's 128 bytes arrive in the time this many leave.
+const TX_PIECE: usize = 96;
 
 impl<'d> UartLog<'d> {
     /// Log over `uart`, already configured and pinned.
     pub fn new(uart: Uart<'d, Blocking>) -> Self {
-        Self { uart }
+        Self {
+            uart,
+            rx: alloc::collections::VecDeque::new(),
+            rx_lost: 0,
+        }
+    }
+
+    /// Host bytes lost because the board's keep was full.
+    pub fn rx_lost(&self) -> u32 {
+        self.rx_lost
     }
 
     /// One line, shaped by [`leviculum_log_line::format_line`] as
@@ -371,29 +418,58 @@ impl<'d> UartLog<'d> {
     }
 
     /// One HDLC frame of `payload`, flags included (`leviculum_core`'s
-    /// codec), between lines.
+    /// codec), between lines, its XON and XOFF bytes escaped
+    /// (`leviculum_serial_mux::escape_flow`).
     pub fn frame(&mut self, payload: &[u8]) {
         let mut framed = alloc::vec::Vec::new();
         leviculum_core::framing::hdlc::frame(payload, &mut framed);
-        self.write_all(&framed);
+        let mut wire = alloc::vec::Vec::with_capacity(framed.len() + 8);
+        leviculum_serial_mux::escape_flow(&framed, &mut |piece| wire.extend_from_slice(piece));
+        self.write_all(&wire);
     }
 
     /// All of `bytes`: esp-hal's `write` places what fits in the FIFO and
-    /// says how much. A TX error drops the rest of the write, never the
-    /// boot.
+    /// says how much. The receive FIFO is drained between pieces. A TX
+    /// error drops the rest of the write, never the boot.
     fn write_all(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
-            match self.uart.write(bytes) {
+            self.drain_rx();
+            let piece = bytes.len().min(TX_PIECE);
+            match self.uart.write(&bytes[..piece]) {
                 Ok(n) => bytes = &bytes[n..],
                 Err(_) => return,
+            }
+        }
+        self.drain_rx();
+    }
+
+    /// Move what the receive FIFO holds into the keep.
+    fn drain_rx(&mut self) {
+        let mut buf = [0u8; 128];
+        loop {
+            let n = self.uart.read_buffered(&mut buf).unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            for &byte in &buf[..n] {
+                if self.rx.len() >= RX_KEEP {
+                    self.rx_lost = self.rx_lost.saturating_add(1);
+                } else {
+                    self.rx.push_back(byte);
+                }
             }
         }
     }
 
     /// The bytes the host sent that have arrived, without waiting: how many
-    /// went into `buf`.
+    /// went into `buf`, the kept ones first.
     pub fn read_ready(&mut self, buf: &mut [u8]) -> usize {
-        self.uart.read_buffered(buf).unwrap_or(0)
+        self.drain_rx();
+        let n = buf.len().min(self.rx.len());
+        for (slot, byte) in buf.iter_mut().zip(self.rx.drain(..n)) {
+            *slot = byte;
+        }
+        n
     }
 
     /// `[FW_BUILD]` and `[BOARD]`, as [`UsbLog::identify`] says them, for a

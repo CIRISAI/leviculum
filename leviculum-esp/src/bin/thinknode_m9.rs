@@ -12,8 +12,19 @@
 //! core's Florence region, read in place from the image (slice seven,
 //! 1375: `M`, the arrows, `+` and `-`, Space).
 //!
-//! **Nothing is transmitted.** The LR1110's chip select is parked high so
+//! Since 1414 the image is also a Reticulum node and a client of its home
+//! (`leviculum_esp::handheld`): its identity in flash, one interface, the
+//! host's serial line, and the client record that makes it a device of a
+//! home. Reticulum packets are HDLC frames on the same UART as the log
+//! lines and the control envelope, under the rules of
+//! `leviculum-nrf/serial-mux`: lines whole between frames and free of the
+//! four special bytes, frames with XON and XOFF escaped, and the capability
+//! report stating `serial_mux=1` so lnsd does its half. A frame that is not
+//! the envelope is a packet for the node.
+//!
+//! **Nothing goes on the air.** The LR1110's chip select is parked high so
 //! it ignores the panel's traffic on the shared bus; no opcode reaches it.
+//! The radio is the node's second interface and the next step.
 //!
 //! Over the debug UART (the CH340K, 115200 8N1), in boot order:
 //!
@@ -22,6 +33,10 @@
 //! [BOARD] id=M9 name=Elecrow ThinkNode M9 heap=<psram bytes> t=<ms>
 //! [HEAP] region=psram start=<addr> bytes=<n> t=<ms>
 //! [STACK] bytes=<n> t=<ms>
+//! [FLASH] identity=<offset|none/why> client=<offset|none/why> t=<ms>  (1414)
+//! [IDENTITY] identity=<hash> probe=none lxmf=none source=<flash|generated> stored=<yes|no> t=<ms>
+//! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
+//! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
 //! [DISP] ST7789 320x240 madctl=0xb0 spi_mhz=40 state=up t=<ms>
 //! [KB] addr=0x6d found=yes ... protocol=provisional reg=0x01 len=8 t=<ms>
 //! [CENSUS] renderer held=<n> budget=220000 verdict=ok t=<ms>
@@ -30,6 +45,9 @@
 //! [CENSUS] screen=<groups|invite|members|admin|ask|pick|name> ...  (1366)
 //! [CENSUS] map held=<n> budget=230000 verdict=ok t=<ms>         (1375)
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
+//! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
+//! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
+//! [HOME] page ... / pulled ... / joined=yes ... / failed ...   (as the client asks)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
 //! KBRAW <ms> <hex>          one per poll, every 10 ms
 //! KB <ms> <14 hex>          one per poll, the scan the table made of it
@@ -51,6 +69,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::{
     delay::Delay,
     dma_rx_buffer, dma_tx_buffer,
@@ -68,6 +87,8 @@ use esp_hal::{
 };
 use leviculum_core::envelope::{self, EnvelopeError};
 use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
+use leviculum_esp::flash::Stores;
+use leviculum_esp::handheld::{self, Handheld};
 use leviculum_esp::{boards::thinknode_m9 as m9, uptime_ms, UartLog};
 use loquax::ui::UiModel;
 use loquax_m9::census::{self, Probe, Step};
@@ -76,8 +97,8 @@ use loquax_m9::fixture::{self, Screen};
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
 use loquax_m9::kbraw::{self, Protocol, MAX_ANSWER};
 use loquax_m9::keyboard::{Keyboard, POLL_MS};
-use loquax_m9::render::Renderer;
 use loquax_m9::map::{self, Map};
+use loquax_m9::render::Renderer;
 use loquax_m9::{dump, group, screen};
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -341,6 +362,46 @@ fn main() -> ! {
         format_args!("bytes={}", stack_start - stack_end),
     );
 
+    // The stores, the identity and the node (1414), before the panel: the
+    // flash routines run with the cache off, and nothing else is drawing
+    // through it yet.
+    let mut stores = Stores::open(p.FLASH);
+    log.line(
+        "[FLASH] ",
+        format_args!(
+            "identity={} client={}",
+            stores.identity_slot(),
+            stores.client_slot()
+        ),
+    );
+    // The true random source: the SoC's RNG with the ADC's noise. Kept for
+    // the life of the image; `Trng` refuses to exist without it.
+    let _entropy = TrngSource::new(p.RNG, p.ADC1);
+    let (Ok(mut rng), Ok(node_rng)) = (Trng::try_new(), Trng::try_new()) else {
+        log.line("[NODE] ", format_args!("state=down reason=no-entropy"));
+        halt_with_banner(&mut log, bytes);
+    };
+    let identity = handheld::identity(&mut stores, &mut rng, &mut log);
+    let before = leviculum_esp::heap_live();
+    let mut node = Handheld::new(identity, node_rng);
+    log.line(
+        "[CENSUS] ",
+        format_args!(
+            "node held={} box={} links={} max_answer={}",
+            leviculum_esp::heap_live() - before,
+            core::mem::size_of::<handheld::Core>(),
+            handheld::MAX_LINKS,
+            handheld::MAX_ANSWER
+        ),
+    );
+    log.line(
+        "[NODE] ",
+        format_args!(
+            "state=up iface=serial hw_mtu={} serial_mux=1",
+            leviculum_esp::serial_iface::SERIAL_HW_MTU
+        ),
+    );
+
     // The bus supply on, and every chip select on SPI2 high before the bus
     // exists, so the radio and the card ignore the panel's traffic.
     let vext: m9::VextEnable = p.GPIO18;
@@ -494,6 +555,41 @@ fn main() -> ! {
             ),
         }
     }
+    // The client session's pull (1363's census, measured here since 1414):
+    // thirty 200-byte messages in LoRa pages, and the batch the board runs
+    // with on what it measured.
+    let archive = census::archive(30, 200);
+    let answers = census::lora_answers(&archive);
+    let home_key = node.node.identity().public_key_bytes();
+    let batch = match census::session(&mut probe, &home_key, &answers) {
+        Ok(got) => {
+            log.line(
+                "[CENSUS] ",
+                format_args!(
+                    "{} pages={} entries={}",
+                    census::SessionLine(&got),
+                    answers.len(),
+                    archive.len()
+                ),
+            );
+            census::batch(&got, handheld::MAX_ANSWER)
+        }
+        Err(error) => {
+            log.line("[CENSUS] ", format_args!("session=pull failed={error}"));
+            census::batch(&Step::default(), handheld::MAX_ANSWER)
+        }
+    };
+    drop(answers);
+    drop(archive);
+    match stores.load_client() {
+        Ok(Some(record)) => node.client(record, batch, &mut log),
+        Ok(None) => log.line(
+            "[HOME] ",
+            format_args!("client=none page={}", batch.page_bytes),
+        ),
+        Err(error) => log.line("[HOME] ", format_args!("client=unread error={error}")),
+    }
+
     let mut model = fixture::model();
     // The M9's own cursor over a group's sheet or picker (slice six).
     let mut row = 0;
@@ -521,6 +617,14 @@ fn main() -> ! {
             }
         }
         for data in requests {
+            if matches!(
+                envelope::decode_frame(&data),
+                Err(EnvelopeError::NotEnvelope)
+            ) {
+                // Not the control envelope: a Reticulum packet for the node.
+                node.packet(&data, uptime_ms(), &mut stores, &mut log);
+                continue;
+            }
             control(
                 &data,
                 &mut model,
@@ -531,6 +635,8 @@ fn main() -> ! {
                 &mut log,
             );
         }
+
+        node.turn(uptime_ms(), &mut stores, &mut log);
 
         if now < next_poll {
             continue;
@@ -574,8 +680,8 @@ fn main() -> ! {
 }
 
 /// One control frame from the host: the envelope's capability query and
-/// `FRAME_DUMP`; everything else envelope-shaped is refused by name, and
-/// anything else (this image carries no transport) is dropped.
+/// `FRAME_DUMP`; everything else envelope-shaped is refused by name.
+/// Frames that are not the envelope are the node's and never come here.
 fn control(
     data: &[u8],
     model: &mut UiModel<Field>,
@@ -598,10 +704,12 @@ fn control(
     };
     match frame.frame_type {
         envelope::TYPE_CAPABILITIES if frame.payload.is_empty() => {
-            log.frame(&envelope::encode_capability_report(&[
-                envelope::TYPE_CAPABILITIES,
-                envelope::TYPE_FRAME_DUMP,
-            ]));
+            // `serial_mux=1`: the one UART carries text and frames, so lnsd
+            // escapes its flow bytes and strips the line's (1414).
+            log.frame(&envelope::encode_capability_report_with_facts(
+                &[envelope::TYPE_CAPABILITIES, envelope::TYPE_FRAME_DUMP],
+                &[envelope::FACT_SERIAL_MUX],
+            ));
         }
         envelope::TYPE_FRAME_DUMP => match envelope::decode_frame_dump_payload(frame.payload) {
             None => log.frame(&envelope::encode_refusal(

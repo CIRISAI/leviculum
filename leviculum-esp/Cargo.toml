@@ -45,6 +45,18 @@ esp-hal = { version = "1.2.1", features = ["esp32s3", "unstable"] }
 # Without it `espflash save-image` produces an image the ROM refuses.
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 
+# The flash behind the partition table and the stores in it (1414,
+# `src/flash.rs`): the node's identity and the Loquax client record. The
+# version esp-bootloader-esp-idf already pulls for the same chip.
+esp-storage = { version = "0.10.0", features = ["esp32s3"] }
+# The single-UART rules the M9's one port runs under since its frames carry
+# the node (1414): the flow-byte escape for every frame, and the
+# serial interface's HW_MTU. `no_std`, no dependencies but the core.
+leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
+# `CryptoRngCore`, named in the node's type; esp-hal's `Trng` implements it
+# through `unstable`. The version the core resolves to.
+rand_core = { version = "0.6", default-features = false }
+
 # The SX1262 buses are async, because `leviculum_core::sx126x`'s traits
 # are. `Spi<'_, Async>` implements `embedded_hal_async::spi::SpiBus`.
 embedded-hal-async = "1"
@@ -83,7 +95,9 @@ name = "heltec_v4"
 path = "src/bin/heltec_v4.rs"
 
 # The ThinkNode M9 as a Loquax handheld (order 1361): the renderer on the
-# panel, the keyboard, no radio yet. `just build-m9` builds it.
+# panel, the keyboard, and since 1414 a Reticulum node on its serial port
+# and a client of its home; no radio yet. `just build-m9` builds it with
+# `partitions-m9.csv`.
 [[bin]]
 name = "thinknode_m9"
 path = "src/bin/thinknode_m9.rs"

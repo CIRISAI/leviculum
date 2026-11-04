@@ -10,7 +10,8 @@
 #   STACK_HEADROOM board=thinknode_m9 stack=<bytes> need=<bytes>
 #
 # `used` is the application image espflash writes, `free` what is left of
-# the application partition of espflash's default table for 16 MB, both read
+# the application partition of the M9's table (`leviculum-esp/
+# partitions-m9.csv`, 8 MiB since 1414 made room for the stores), both read
 # off espflash's own "App/part. size: <used>/<partition> bytes" line. The
 # stack is the `.stack` section the linker leaves in internal RAM (the UI
 # heap is PSRAM); `need` is the open chat's scene and draw ceilings of
@@ -95,6 +96,7 @@ log="$ROOT/target/tmp/m9-image.log"
 if ! (source "$HOME/export-esp.sh" >/dev/null && export PATH="$HOME/.cargo/bin:$PATH" \
         && cd "$ESP" && cargo build --release --locked --bin thinknode_m9 \
         && espflash save-image --chip esp32s3 --flash-size 16mb \
+            --partition-table "$ESP/partitions-m9.csv" \
             "$OUT/thinknode_m9" "$OUT/thinknode_m9.bin") >"$log" 2>&1; then
     tail -30 "$log"
     echo "$TAG FAIL the image did not build or package (the full log: $log)"
