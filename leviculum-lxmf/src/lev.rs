@@ -15,10 +15,15 @@
 //! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text, uint left_out?], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them; `left_out` only on a line that stands for what was not sent ([`LEFT_OUT_PHOTO`] and its siblings) |
 //!
 //! Capability bit 1 says "I understand groups": a group's home sends such a
-//! member its copies with key `0x02` and the bare text, and every other
-//! member the text with the sender's name in front
-//! (`docs/drafts/group-chats-study-2026-11.md`, "The fan-out field" and
-//! "Interop for stock clients").
+//! member its copies with key `0x02`. Every member, that one too, gets the
+//! text with the sender's name in front, `"Anna: text"`, one wire shape for
+//! all; a reader that understands groups takes the writer from `0x02` and
+//! strips the name it knows for them, and the prefix is what still names
+//! the writer when the field is lost on the way (1388, 2026-11-04; the
+//! study, `docs/drafts/group-chats-study-2026-11.md`, "The fan-out field"
+//! and "Interop for stock clients", said the bare text). A copy without
+//! words says what it carries and from whom instead, `"Photo from Anna"`
+//! ([`StandIn`]).
 //!
 //! Key `0x03` (1307 pass four) is the study's group status (2.3) with one
 //! element appended, `readers`: the members whose newest message said bit
@@ -38,9 +43,13 @@
 //! receipt is sent, and what it does to a message's state, is the
 //! client's business.
 
-use crate::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
+use crate::constants::{
+    FIELD_AUDIO, FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE, FIELD_FILE_ATTACHMENTS, FIELD_IMAGE,
+    FIELD_TELEMETRY,
+};
 use crate::message::Field;
 use crate::msgpack::{self, Kind};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// The type `FIELD_CUSTOM_TYPE` names the namespace by.
@@ -79,6 +88,85 @@ pub const LEFT_OUT_VOICE: u64 = 2;
 pub const LEFT_OUT_FILE: u64 = 3;
 /// See [`LEFT_OUT_PHOTO`].
 pub const LEFT_OUT_GONE: u64 = 4;
+
+/// What a group's copy without words carries (1388): its text is then the
+/// home's English sentence naming the kind and the writer, `"Photo from
+/// Anna"`, where a copy with words says `"Anna: text"`. A stock client
+/// reads the sentence; a reader that understands groups knows it by the
+/// copy's `0x02` and the writer's name ([`StandIn::read`]) and draws the
+/// bubble without it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandIn {
+    /// `FIELD_IMAGE`.
+    Photo,
+    /// `FIELD_AUDIO`.
+    Voice,
+    /// `FIELD_FILE_ATTACHMENTS`.
+    File,
+    /// `FIELD_TELEMETRY`, a position.
+    Position,
+}
+
+impl StandIn {
+    /// Every kind, in the order [`StandIn::of`] picks one.
+    pub const ALL: [StandIn; 4] = [
+        StandIn::Photo,
+        StandIn::Voice,
+        StandIn::File,
+        StandIn::Position,
+    ];
+
+    /// The sentence's words before the name, as they go on the wire.
+    pub fn lead(self) -> &'static str {
+        match self {
+            StandIn::Photo => "Photo from ",
+            StandIn::Voice => "Voice message from ",
+            StandIn::File => "File from ",
+            StandIn::Position => "Position from ",
+        }
+    }
+
+    /// The field that makes a message this kind.
+    pub fn field(self) -> i64 {
+        match self {
+            StandIn::Photo => FIELD_IMAGE,
+            StandIn::Voice => FIELD_AUDIO,
+            StandIn::File => FIELD_FILE_ATTACHMENTS,
+            StandIn::Position => FIELD_TELEMETRY,
+        }
+    }
+
+    /// The kind a message of `fields` stands in as: a photo before a voice
+    /// message before a file before a position, as a bubble draws the
+    /// first. `None` for a message that carries none of them.
+    pub fn of(fields: &[Field]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| fields.iter().any(|(key, _)| *key == kind.field()))
+    }
+
+    /// The sentence for `name`'s message: `"Photo from Anna"`.
+    pub fn wire(self, name: &str) -> String {
+        let mut out = String::from(self.lead());
+        out.push_str(name);
+        out
+    }
+
+    /// Whether `body` of a copy with `fields` is the sentence for its kind
+    /// naming `name`: what a reader that knows the writer's name checks.
+    pub fn read(body: &str, fields: &[Field], name: &str) -> bool {
+        Self::of(fields).is_some_and(|kind| {
+            body.strip_prefix(kind.lead())
+                .is_some_and(|rest| rest == name)
+        })
+    }
+
+    /// The name in `body` when it is the sentence for the kind of `fields`:
+    /// the reader's way when the membership names no one for the writer.
+    pub fn name_in<'a>(body: &'a str, fields: &[Field]) -> Option<&'a str> {
+        body.strip_prefix(Self::of(fields)?.lead())
+    }
+}
 
 /// Capability bit 0: the sender sends read receipts and wants them.
 pub const CAP_READ_RECEIPTS: u64 = 1;
@@ -953,5 +1041,38 @@ mod tests {
             };
             assert_eq!(Lev::from_fields(&lev.fields()), Some(lev));
         }
+    }
+
+    /// 1388: a copy without words is the kind's sentence naming the
+    /// writer, a reader knows it by the name it holds for them, and a
+    /// sentence of another kind, or naming someone else, is text.
+    #[test]
+    fn a_stand_in_names_the_kind_and_the_writer() {
+        let photo: [Field; 1] = [(FIELD_IMAGE, alloc::vec![0x90])];
+        let voice_and_file: [Field; 2] = [
+            (FIELD_FILE_ATTACHMENTS, alloc::vec![0x90]),
+            (FIELD_AUDIO, alloc::vec![0x90]),
+        ];
+        let position: [Field; 1] = [(FIELD_TELEMETRY, alloc::vec![0x80])];
+        assert_eq!(StandIn::of(&photo), Some(StandIn::Photo));
+        assert_eq!(StandIn::of(&voice_and_file), Some(StandIn::Voice));
+        assert_eq!(StandIn::of(&position), Some(StandIn::Position));
+        assert_eq!(StandIn::of(&[]), None);
+        let wire: alloc::vec::Vec<_> = StandIn::ALL.iter().map(|k| k.wire("lew")).collect();
+        assert_eq!(
+            wire,
+            [
+                "Photo from lew",
+                "Voice message from lew",
+                "File from lew",
+                "Position from lew"
+            ]
+        );
+        assert!(StandIn::read("Photo from a:b", &photo, "a:b"));
+        assert!(!StandIn::read("Photo from lew", &photo, "anna"));
+        assert!(!StandIn::read("File from lew", &photo, "lew"));
+        assert!(!StandIn::read("Photo from lew", &[], "lew"));
+        assert_eq!(StandIn::name_in("Photo from lew", &photo), Some("lew"));
+        assert_eq!(StandIn::name_in("lew: Photo from lew", &photo), None);
     }
 }
