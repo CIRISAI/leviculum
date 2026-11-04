@@ -158,6 +158,7 @@ pub mod search;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod tracks;
 pub mod verbs;
 pub mod viewload;
 pub mod voice;
