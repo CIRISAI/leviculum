@@ -455,6 +455,14 @@ pub fn drive<P: Program>(
                 pending.present_ms = ms(t.elapsed());
                 pending.at = start.elapsed().as_secs_f64();
                 pending.marked = program.marked();
+                crate::fps::emulated(
+                    Instant::now(),
+                    crate::fps::Parts {
+                        update: pending.update_ms,
+                        draw: pending.draw_ms,
+                        present: pending.present_ms,
+                    },
+                );
                 run.frames.push(std::mem::take(&mut pending));
                 run.seconds = start.elapsed().as_secs_f64();
                 drawn = true;

@@ -16,8 +16,8 @@
 //!   software renderer is tiny-skia filling the damaged part of the window
 //!   and softbuffer handing it to the display server (iced's `present`).
 //!
-//! [`overlay`] shows the last second's numbers in a corner, drawn on a
-//! canvas each frame, so a frame that builds no view still updates them;
+//! [`overlay`] shows the last second's numbers in a corner, drawn anew
+//! each frame, so a frame that builds no view still updates them;
 //! the program's log gets them as one `WINDOW_FRAME` line a second while
 //! the window draws more than one frame a second.
 
@@ -26,9 +26,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Text};
+use iced::advanced::text::{self, Renderer as _};
+use iced::advanced::widget::Tree;
+use iced::advanced::{layout, renderer, Layout, Renderer as _, Widget};
 use iced::widget::container;
-use iced::{mouse, Color, Element, Font, Length, Point, Rectangle, Renderer, Theme};
+use iced::{
+    alignment, mouse, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer,
+    Size, Theme,
+};
 
 /// The window over which the numbers are taken.
 const WINDOW: Duration = Duration::from_secs(1);
@@ -43,6 +48,24 @@ pub fn enable(log: fn(&str)) {
     let _ = LOG.set(log);
     ON.store(true, Ordering::Relaxed);
     iced_debug::set_sink(sink);
+}
+
+/// Stop measuring: the overlay and the meter off again. For a bench that
+/// measures a window with and without the overlay in one process (1456).
+pub fn disable() {
+    ON.store(false, Ordering::Relaxed);
+}
+
+/// A frame an emulated window ([`crate::headless::drive`]) presented at
+/// `at`, its parts handed to the meter as iced's spans hand a window's,
+/// so the overlay's numbers change per frame as in the window.
+pub(crate) fn emulated(at: Instant, parts: Parts) {
+    if enabled() {
+        let mut meter = meter();
+        meter.pending = Parts::default();
+        meter.updates.clear();
+        let _ = meter.presented(at, parts);
+    }
 }
 
 /// Whether the meter runs.
@@ -266,7 +289,7 @@ fn ms(d: Duration) -> f64 {
 /// The numbers in the window's top right corner, over whatever is there,
 /// taking no pointer; empty until a frame was measured.
 pub fn overlay<'a, M: 'a>() -> Element<'a, M> {
-    container(Canvas::new(Overlay).width(250).height(62))
+    container(Element::new(Overlay))
         .width(Length::Fill)
         .height(Length::Fill)
         .align_right(Length::Fill)
@@ -274,38 +297,71 @@ pub fn overlay<'a, M: 'a>() -> Element<'a, M> {
         .into()
 }
 
+/// The overlay's box.
+const BOX: Size = Size::new(250.0, 62.0);
+
+/// The numbers, read anew at every draw, so a frame that builds no view
+/// still shows them. Drawn as a widget, not on a canvas (1456): a
+/// canvas's text has no bottom and no clip (iced_tiny_skia 0.14.1,
+/// `geometry.rs`), so every change of a number damaged a column from the
+/// text to the window's foot and redrew all it cut; this text is bounded
+/// and clipped to the box, and a change damages the box.
 struct Overlay;
 
-impl<M> canvas::Program<M> for Overlay {
-    type State = ();
+impl<M> Widget<M, Theme, Renderer> for Overlay {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(BOX.width), Length::Fixed(BOX.height))
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(limits.resolve(BOX.width, BOX.height, BOX))
+    }
 
     fn draw(
         &self,
-        _state: &(),
-        renderer: &Renderer,
+        _tree: &Tree,
+        renderer: &mut Renderer,
         _theme: &Theme,
-        bounds: Rectangle,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
         _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
+        _viewport: &Rectangle,
+    ) {
         let Some(snapshot) = snapshot() else {
-            return Vec::new();
+            return;
         };
-        let mut frame = Frame::new(renderer, bounds.size());
-        frame.fill(
-            &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 6.0.into()),
+        let bounds = layout.bounds();
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds,
+                border: Border::default().rounded(6.0),
+                ..renderer::Quad::default()
+            },
             Color::from_rgba8(0, 0, 0, 0.72),
         );
         for (i, line) in snapshot.lines().into_iter().enumerate() {
-            frame.fill_text(Text {
-                content: line,
-                position: Point::new(8.0, 5.0 + 18.0 * i as f32),
-                color: Color::WHITE,
-                size: 13.0.into(),
-                font: Font::MONOSPACE,
-                ..Text::default()
-            });
+            renderer.fill_text(
+                text::Text {
+                    content: line,
+                    bounds: Size::new(bounds.width - 16.0, 18.0),
+                    size: Pixels(13.0),
+                    line_height: text::LineHeight::default(),
+                    font: Font::MONOSPACE,
+                    align_x: text::Alignment::Left,
+                    align_y: alignment::Vertical::Top,
+                    shaping: text::Shaping::Basic,
+                    wrapping: text::Wrapping::None,
+                },
+                Point::new(bounds.x + 8.0, bounds.y + 5.0 + 18.0 * i as f32),
+                Color::WHITE,
+                bounds,
+            );
         }
-        vec![frame.into_geometry()]
     }
 }
 
@@ -313,6 +369,60 @@ impl<M> canvas::Program<M> for Overlay {
 mod tests {
     use super::*;
     use iced_debug::Stage;
+
+    /// The overlay's numbers changing damage its box and nothing else
+    /// (1456): drawn over a 400 by 600 window and presented, a second
+    /// frame with other numbers rasterises at most the box's share of the
+    /// window. A canvas's text, which has no bottom, damaged a column to
+    /// the window's foot, more than an eighth of this window, which the
+    /// compositor then draws whole.
+    #[test]
+    fn a_change_of_the_numbers_damages_the_box_alone() {
+        use crate::headless::{software, Surface};
+        use iced::advanced::renderer::Renderer as _;
+        let (w, h) = (400u32, 600u32);
+        let mut renderer = software(Font::DEFAULT).expect("a renderer");
+        let mut surface = Surface::new(w, h).expect("a surface");
+        let t0 = Instant::now();
+        let mut frame = |at: Duration, present: f64| {
+            let _ = meter().presented(
+                t0 + at,
+                Parts {
+                    update: 1.0,
+                    draw: 2.0,
+                    present,
+                },
+            );
+            let mut view: Element<'_, u8> = overlay();
+            let mut tree = Tree::new(&view);
+            let size = Size::new(w as f32, h as f32);
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            renderer.reset(Rectangle::with_size(size));
+            view.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &Theme::Light,
+                &renderer::Style {
+                    text_color: Color::BLACK,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(size),
+            );
+            surface.present(&mut renderer, Color::WHITE)
+        };
+        assert_eq!(frame(Duration::ZERO, 3.0), 1.0);
+        let changed = frame(Duration::from_millis(16), 47.0);
+        let most = (BOX.width + 12.0) * (BOX.height + 12.0) / (w * h) as f32;
+        assert!(
+            changed > 0.0 && changed <= most,
+            "{changed} of the window, at most {most}"
+        );
+    }
 
     /// A frame is what was spent between two presents: the program's
     /// updates and the widgets' events as `update`, less the updates
