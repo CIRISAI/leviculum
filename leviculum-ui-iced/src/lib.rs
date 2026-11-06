@@ -40,6 +40,9 @@ pub mod smooth;
 pub mod wave;
 pub mod window_icon;
 
+#[cfg(test)]
+mod fast_paths;
+
 pub use icon::{drawing, Icon};
 pub use paint::{colour, rgb, Palette};
 pub use window_icon::window_icon;

@@ -115,6 +115,10 @@ exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapf
 # draws the whole window when the damage fragments; the headless surface
 # the bench measures calls the same function. iced's renderer type is
 # fixed by its feature, so a wrapper of our own cannot reach the present.
+# Since 1442 it also takes away work where a rectangle is a rectangle
+# (`fast.rs`): the background and the clip mask written as rows, the
+# same bytes tiny-skia's scan converter writes, held to it by
+# leviculum-ui-iced's `fast_paths` tests.
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
 termbg = { path = "vendor/termbg" }

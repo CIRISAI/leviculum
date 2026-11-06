@@ -1,0 +1,242 @@
+//! Leviculum's patch (1442): the renderer's work taken away where a
+//! rectangle is a rectangle. tiny-skia fills an axis-aligned rectangle
+//! without anti-aliasing through its scan converter and a raster
+//! pipeline, keeps a clip as a mask the size of the window that every
+//! clipped pixel reads, and draws an opaque picture at a whole-pixel
+//! offset as a pattern shader sampling it pixel by pixel. Each of these
+//! is a row copy or a row fill of the same bytes; this module computes
+//! them, and the tests in `leviculum-ui-iced` (`fast_paths`) hold every
+//! one of them to tiny-skia's own result, byte for byte.
+
+use crate::core::Rectangle;
+
+/// A rectangle of whole pixels, `x0..x1` by `y0..y1`, never empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Px {
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+impl Px {
+    /// The pixels both cover; `None` when they do not meet.
+    pub fn intersect(self, other: Px) -> Option<Px> {
+        let x0 = self.x0.max(other.x0);
+        let y0 = self.y0.max(other.y0);
+        let x1 = self.x1.min(other.x1);
+        let y1 = self.y1.min(other.y1);
+        (x0 < x1 && y0 < y1).then_some(Px { x0, y0, x1, y1 })
+    }
+}
+
+/// The edge a non-anti-aliased fill puts at `v`: tiny-skia converts the
+/// coordinate to 26.6 fixed point by truncation (`fdot6::from_f32`) and
+/// rounds that to a pixel (`fdot6::round`), a pixel is covered when its
+/// centre lies inside.
+fn edge(v: f32) -> i64 {
+    let fixed = (v * 64.0) as i32;
+    (i64::from(fixed) + 32) >> 6
+}
+
+/// The pixels a fill of `bounds` without anti-aliasing covers on a
+/// `width` by `height` target, as tiny-skia's scan converter covers them
+/// (`Mask::fill_path` and `PixmapMut::fill_path` of the rectangle's
+/// path, `anti_alias: false`); `None` when it covers none.
+pub fn covered(bounds: Rectangle, width: u32, height: u32) -> Option<Px> {
+    if !(bounds.width > 0.0 && bounds.height > 0.0)
+        || !bounds.x.is_finite()
+        || !bounds.y.is_finite()
+        || !bounds.width.is_finite()
+        || !bounds.height.is_finite()
+    {
+        return None;
+    }
+    let clamp = |v: i64, max: u32| v.clamp(0, i64::from(max)) as u32;
+    let x0 = clamp(edge(bounds.x), width);
+    let x1 = clamp(edge(bounds.x + bounds.width), width);
+    let y0 = clamp(edge(bounds.y), height);
+    let y1 = clamp(edge(bounds.y + bounds.height), height);
+    (x0 < x1 && y0 < y1).then_some(Px { x0, y0, x1, y1 })
+}
+
+/// The four bytes tiny-skia stores for `color` filled with the `Source`
+/// blend and no anti-aliasing: the same pipeline run on one pixel.
+pub fn solid_pixel(color: tiny_skia::Color) -> [u8; 4] {
+    let Some(mut one) = tiny_skia::Pixmap::new(1, 1) else {
+        return [0; 4];
+    };
+    let Some(rect) = tiny_skia::Rect::from_xywh(0.0, 0.0, 1.0, 1.0) else {
+        return [0; 4];
+    };
+    one.fill_path(
+        &tiny_skia::PathBuilder::from_rect(rect),
+        &tiny_skia::Paint {
+            shader: tiny_skia::Shader::SolidColor(color),
+            anti_alias: false,
+            blend_mode: tiny_skia::BlendMode::Source,
+            ..Default::default()
+        },
+        tiny_skia::FillRule::default(),
+        tiny_skia::Transform::identity(),
+        None,
+    );
+    let d = one.data();
+    [d[0], d[1], d[2], d[3]]
+}
+
+/// `px` written over `rect` of the `width` pixels wide RGBA8 `pixels`.
+pub fn fill(pixels: &mut [u8], width: u32, rect: Px, px: [u8; 4]) {
+    let stride = width as usize * 4;
+    let (x0, x1) = (rect.x0 as usize * 4, rect.x1 as usize * 4);
+    for row in pixels
+        .chunks_exact_mut(stride)
+        .skip(rect.y0 as usize)
+        .take((rect.y1 - rect.y0) as usize)
+    {
+        for p in row[x0..x1].chunks_exact_mut(4) {
+            p.copy_from_slice(&px);
+        }
+    }
+}
+
+/// `value` written over `rect` of the `width` wide one-byte `mask`.
+pub fn fill_mask(mask: &mut [u8], width: u32, rect: Px, value: u8) {
+    let stride = width as usize;
+    for row in mask
+        .chunks_exact_mut(stride)
+        .skip(rect.y0 as usize)
+        .take((rect.y1 - rect.y0) as usize)
+    {
+        row[rect.x0 as usize..rect.x1 as usize].fill(value);
+    }
+}
+
+/// The clip as tiny-skia's mask holds it, kept lazily (1442): a layer
+/// names its clip rectangle, the mask is written only when a draw that
+/// crosses it asks for it, and then only the rows of the rectangle it
+/// held before and of the one it holds now, where tiny-skia's
+/// `adjust_clip_mask` cleared all of the window's bytes and filled the
+/// rectangle's path through the scan converter, once per layer and
+/// damage rectangle. The mask a draw is handed is unknown to it: the
+/// first time it is asked within a draw, it clears all of it.
+#[derive(Debug, Default)]
+pub struct Clip {
+    want: Option<Rectangle>,
+    have: Option<Option<Px>>,
+}
+
+impl Clip {
+    /// A new draw over a mask whose content is not known.
+    pub fn reset(&mut self) {
+        self.want = None;
+        self.have = None;
+    }
+
+    /// The clip is `bounds` from here on.
+    pub fn set(&mut self, bounds: Rectangle) {
+        self.want = Some(bounds);
+    }
+
+    /// The pixels the clip covers on a `width` by `height` target.
+    pub fn rect(&self, width: u32, height: u32) -> Option<Px> {
+        self.want.and_then(|b| covered(b, width, height))
+    }
+
+    /// `mask` holding the clip, as `adjust_clip_mask` left it.
+    pub fn mask<'a>(
+        &mut self,
+        mask: &'a mut tiny_skia::Mask,
+    ) -> &'a tiny_skia::Mask {
+        let (w, h) = (mask.width(), mask.height());
+        let want = self.rect(w, h);
+        match self.have {
+            Some(have) if have == want => {}
+            Some(have) => {
+                if let Some(old) = have {
+                    fill_mask(mask.data_mut(), w, old, 0);
+                }
+                if let Some(new) = want {
+                    fill_mask(mask.data_mut(), w, new, 255);
+                }
+            }
+            None => {
+                mask.data_mut().fill(0);
+                if let Some(new) = want {
+                    fill_mask(mask.data_mut(), w, new, 255);
+                }
+            }
+        }
+        self.have = Some(want);
+        mask
+    }
+}
+
+/// tiny-skia's rounding of a whole-pixel coordinate (`Rect::round`,
+/// `saturate_round`: a half added, then truncated toward zero): a
+/// negative one moves a pixel toward zero.
+fn round(v: i32) -> i64 {
+    (v as f32 + 0.5) as i64
+}
+
+/// The opaque `src` drawn at whole pixels `(x, y)` onto `dst` within
+/// `clip`, where tiny-skia's `draw_pixmap` with an identity transform and
+/// full opacity samples the pattern at the pixel itself (nearest, as an
+/// integer translation is) and blends source-over, which for an opaque
+/// source is the source: a row copy. As tiny-skia draws it: its rectangle
+/// rounds a negative corner a pixel toward zero and keeps its size, the
+/// pattern pads, so a picture hanging off the left or top edge gets its
+/// last column or row once more on the far side.
+pub fn blit_opaque(
+    dst: &mut tiny_skia::PixmapMut<'_>,
+    src: tiny_skia::PixmapRef<'_>,
+    x: i32,
+    y: i32,
+    clip: Option<Px>,
+) {
+    let (dw, dh) = (dst.width(), dst.height());
+    let (sw, sh) = (src.width(), src.height());
+    let (rx, ry) = (round(x), round(y));
+    let x0 = rx.clamp(0, i64::from(dw)) as u32;
+    let y0 = ry.clamp(0, i64::from(dh)) as u32;
+    let x1 = (rx + i64::from(sw)).clamp(0, i64::from(dw)) as u32;
+    let y1 = (ry + i64::from(sh)).clamp(0, i64::from(dh)) as u32;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let mut area = Px { x0, y0, x1, y1 };
+    if let Some(clip) = clip {
+        match area.intersect(clip) {
+            Some(a) => area = a,
+            None => return,
+        }
+    }
+    // The source column of a target column, padded at the far edge.
+    let column =
+        |d: u32| (i64::from(d) - i64::from(x)).min(i64::from(sw) - 1) as usize;
+    let row_of =
+        |d: u32| (i64::from(d) - i64::from(y)).min(i64::from(sh) - 1) as usize;
+    // The columns that map one to one, and the padded one after them.
+    let straight_end = (i64::from(x) + i64::from(sw))
+        .clamp(i64::from(area.x0), i64::from(area.x1))
+        as u32;
+    let sstride = sw as usize * 4;
+    let dstride = dw as usize * 4;
+    let s = src.data();
+    let d = dst.data_mut();
+    for row in area.y0..area.y1 {
+        let from = row_of(row) * sstride;
+        let to = row as usize * dstride;
+        if area.x0 < straight_end {
+            let a = from + column(area.x0) * 4;
+            let len = (straight_end - area.x0) as usize * 4;
+            let b = to + area.x0 as usize * 4;
+            d[b..b + len].copy_from_slice(&s[a..a + len]);
+        }
+        for col in straight_end.max(area.x0)..area.x1 {
+            let a = from + column(col) * 4;
+            let b = to + col as usize * 4;
+            d[b..b + 4].copy_from_slice(&s[a..a + 4]);
+        }
+    }
+}

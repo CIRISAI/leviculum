@@ -9,6 +9,8 @@ use crate::text;
 #[derive(Debug)]
 pub struct Engine {
     text_pipeline: text::Pipeline,
+    /// Leviculum's patch (1442): the clip mask, kept lazily.
+    pub(crate) clip: crate::fast::Clip,
 
     #[cfg(feature = "image")]
     pub(crate) raster_pipeline: crate::raster::Pipeline,
@@ -20,6 +22,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             text_pipeline: text::Pipeline::new(),
+            clip: crate::fast::Clip::default(),
             #[cfg(feature = "image")]
             raster_pipeline: crate::raster::Pipeline::new(),
             #[cfg(feature = "svg")]
@@ -43,7 +46,7 @@ impl Engine {
         }
 
         let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-            .then_some(clip_mask as &_);
+            .then(|| self.clip.mask(clip_mask));
 
         let transform = into_transform(transformation);
 
@@ -351,8 +354,8 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
-                        Some(clip_mask as &_)
+                        self.clip.set(clip_bounds);
+                        Some(self.clip.mask(clip_mask))
                     }
                 };
 
@@ -389,8 +392,8 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
-                        Some(clip_mask as &_)
+                        self.clip.set(clip_bounds);
+                        Some(self.clip.mask(clip_mask))
                     }
                 };
 
@@ -424,8 +427,8 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
-                        Some(clip_mask as &_)
+                        self.clip.set(clip_bounds);
+                        Some(self.clip.mask(clip_mask))
                     }
                 };
 
@@ -468,7 +471,7 @@ impl Engine {
                 }
 
                 let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-                    .then_some(clip_mask as &_);
+                    .then(|| self.clip.mask(clip_mask));
 
                 self.text_pipeline.draw_raw(
                     &buffer,
@@ -508,7 +511,7 @@ impl Engine {
                 }
 
                 let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-                    .then_some(clip_mask as &_);
+                    .then(|| self.clip.mask(clip_mask));
 
                 pixels.fill_path(
                     path,
@@ -539,7 +542,7 @@ impl Engine {
                 }
 
                 let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-                    .then_some(clip_mask as &_);
+                    .then(|| self.clip.mask(clip_mask));
 
                 pixels.stroke_path(
                     path,
@@ -570,7 +573,7 @@ impl Engine {
                 }
 
                 let clip_mask = (!physical_bounds.is_within(&_clip_bounds))
-                    .then_some(_clip_mask as &_);
+                    .then(|| self.clip.mask(_clip_mask));
 
                 let center = physical_bounds.center();
                 let radians = f32::from(image.rotation);
@@ -600,7 +603,7 @@ impl Engine {
                 }
 
                 let clip_mask = (!physical_bounds.is_within(&_clip_bounds))
-                    .then_some(_clip_mask as &_);
+                    .then(|| self.clip.mask(_clip_mask));
 
                 let center = physical_bounds.center();
                 let radians = f32::from(svg.rotation);
@@ -831,30 +834,4 @@ fn rounded_box_sdf(
     let y = (to_center.y.abs() - size.height() + radius).max(0.0);
 
     (x.powf(2.0) + y.powf(2.0)).sqrt() - radius
-}
-
-pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
-    clip_mask.clear();
-
-    let path = {
-        let mut builder = tiny_skia::PathBuilder::new();
-        builder.push_rect(
-            tiny_skia::Rect::from_xywh(
-                bounds.x,
-                bounds.y,
-                bounds.width,
-                bounds.height,
-            )
-            .unwrap(),
-        );
-
-        builder.finish().unwrap()
-    };
-
-    clip_mask.fill_path(
-        &path,
-        tiny_skia::FillRule::EvenOdd,
-        false,
-        tiny_skia::Transform::default(),
-    );
 }

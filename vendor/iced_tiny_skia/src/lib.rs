@@ -3,6 +3,8 @@
 pub mod window;
 
 mod engine;
+#[doc(hidden)]
+pub mod fast;
 mod layer;
 mod primitive;
 mod settings;
@@ -76,33 +78,22 @@ impl Renderer {
 
         self.layers.flush();
 
+        // Leviculum's patch (1442): the clip mask's content is not known
+        // to this draw; the background is the bytes tiny-skia's fill of
+        // it stores, written as rows (`fast`).
+        self.engine.clip.reset();
+        let background =
+            fast::solid_pixel(engine::into_color(background_color));
+
         for &damage_bounds in damage {
             let damage_bounds = damage_bounds * scale_factor;
 
-            let path = tiny_skia::PathBuilder::from_rect(
-                tiny_skia::Rect::from_xywh(
-                    damage_bounds.x,
-                    damage_bounds.y,
-                    damage_bounds.width,
-                    damage_bounds.height,
-                )
-                .expect("Create damage rectangle"),
-            );
-
-            pixels.fill_path(
-                &path,
-                &tiny_skia::Paint {
-                    shader: tiny_skia::Shader::SolidColor(engine::into_color(
-                        background_color,
-                    )),
-                    anti_alias: false,
-                    blend_mode: tiny_skia::BlendMode::Source,
-                    ..Default::default()
-                },
-                tiny_skia::FillRule::default(),
-                tiny_skia::Transform::identity(),
-                None,
-            );
+            if let Some(rect) =
+                fast::covered(damage_bounds, pixels.width(), pixels.height())
+            {
+                let width = pixels.width();
+                fast::fill(pixels.data_mut(), width, rect, background);
+            }
 
             for layer in self.layers.iter() {
                 let Some(layer_bounds) =
@@ -111,7 +102,7 @@ impl Renderer {
                     continue;
                 };
 
-                engine::adjust_clip_mask(clip_mask, layer_bounds);
+                self.engine.clip.set(layer_bounds);
 
                 if !layer.quads.is_empty() {
                     let render_span = debug::render(debug::Primitive::Quad);
@@ -139,7 +130,7 @@ impl Renderer {
                             continue;
                         };
 
-                        engine::adjust_clip_mask(clip_mask, group_bounds);
+                        self.engine.clip.set(group_bounds);
 
                         for primitive in group.as_slice() {
                             self.engine.draw_primitive(
@@ -152,7 +143,7 @@ impl Renderer {
                             );
                         }
 
-                        engine::adjust_clip_mask(clip_mask, layer_bounds);
+                        self.engine.clip.set(layer_bounds);
                     }
 
                     render_span.finish();
