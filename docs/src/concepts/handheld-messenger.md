@@ -618,7 +618,7 @@ yet. Both end in the same join.
   (`loquax/src/home/code.rs:226`) shows it in fives, so the eye keeps its
   place against the code it copies.
 - **The join without the waiting** (`Join` then, `Ask` since 1363,
-  `loquax/src/home/ask.rs:288`): the seam this page asked for, cut as the
+  `loquax/src/home/ask.rs:294`): the seam this page asked for, cut as the
   store's. The path ladder (`PathLadder`, `loquax/src/home/ask.rs:68`;
   requests at 0, 7, 21, 49 and 105 s, then a minute apart), the per-hop
   link budget of rule 3 (`establishment_ms`,
@@ -626,7 +626,7 @@ yet. Both end in the same join.
   (`join_outcome`, `loquax/src/home/ask.rs:128`) are `no_std` and shared:
   the desktop's `open` takes the ladder and the budget from there, and
   `HomeError` lives there. The join is a set of `Step`s
-  (`loquax/src/home/ask.rs:244`), request a path, connect, identify, send
+  (`loquax/src/home/ask.rs:250`), request a path, connect, identify, send
   `/join`, done, which the platform performs and reports back; a report
   out of turn ends the join instead of being read as the home's word.
 
@@ -751,11 +751,11 @@ links, the record in flash, the census line at boot) waits for the
 image of slice four to run.
 
 **The client moved down.** `home::ask` is now the whole ask, not only
-the join: `Ask` (`loquax/src/home/ask.rs:288`) over a `Verb`
-(`loquax/src/home/ask.rs:165`), `/join`, `/sync` page by page, `/send`,
+the join: `Ask` (`loquax/src/home/ask.rs:294`) over a `Verb`
+(`loquax/src/home/ask.rs:171`), `/join`, `/sync` page by page, `/send`,
 `/mark` and `/group`, with an `Outcome`
-(`loquax/src/home/ask.rs:213`). The platform performs the `Step`s
-(`loquax/src/home/ask.rs:244`) as before; two are new. `Page` hands out
+(`loquax/src/home/ask.rs:219`). The platform performs the `Step`s
+(`loquax/src/home/ask.rs:250`) as before; two are new. `Page` hands out
 one page of a pull and the ask keeps none of it, so a pull's memory is
 one page however long the archive. `Close` says an answer was lost: the
 same request goes again on a fresh link, at most `ATTEMPTS`
@@ -1004,7 +1004,7 @@ ceilings, so the image's stack need stays the open chat's. The image
 grows by 17,248 B to 944,768 B (`just build-m9`).
 
 **The verbs, asked of a home.** `Verb::Group` of the ask
-(`GroupVerb`, `loquax/src/home/ask.rs:192`) now carries all five a
+(`GroupVerb`, `loquax/src/home/ask.rs:198`) now carries all five a
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
@@ -1233,7 +1233,7 @@ region 197,972 B of it.
 - **Getting a region onto the board.** The phone loads its regions by
   HTTP range requests (`loquax::mapload`); the board has no IP. No
   `Ask` verb carries a region today: the five are join, pull, send, mark
-  and the group verbs (`Verb`, `loquax/src/home/ask.rs:165`). The shape
+  and the group verbs (`Verb`, `loquax/src/home/ask.rs:171`). The shape
   that fits is a sixth, a region asked of the home in LoRa pages the way
   `Pull` pages the archive (`LORA_PAGE_BYTES`, 412 B,
   `loquax/src/home/ask.rs:146`, the link MDU less the response frame),
@@ -1349,7 +1349,7 @@ the cache those routines switch off.
 
 **The client's board half.** `loquax::home::board` (`no_std`):
 
-- **The executor** (`Executor`, `loquax/src/home/board.rs:156`) performs
+- **The executor** (`Executor`, `loquax/src/home/board.rs:157`) performs
   an `Ask`'s steps over a `NodeCore` and the events the node raises:
   path requests, `connect`, `identify_link`, `send_request`, the
   response or its timeout, a closed link. The board's loop hands it the
@@ -1357,19 +1357,19 @@ the cache those routines switch off.
   `TickOutput`. A link that closes with a request in flight is a lost
   answer, so the ask opens a fresh link and asks again from the last
   entry it took (`ATTEMPTS` = 3).
-- **The session** (`Session`, `loquax/src/home/board.rs:435`): an ask
+- **The session** (`Session`, `loquax/src/home/board.rs:465`): an ask
   that does not get through waits 30 s before the next, doubling up to
   15 min; one that gets through resets it, and a pull goes every 5 min
   while no wake says sooner. What it shows is the phone's sentence
-  (`notice`, `loquax/src/home/board.rs:481`): "Your mailbox is not
+  (`notice`, `loquax/src/home/board.rs:511`): "Your mailbox is not
   connected" for no path, no link, no answer or a refusal.
-- **The batch** (`Batch`, `loquax/src/home/board.rs:52`): the page is
+- **The batch** (`Batch`, `loquax/src/home/board.rs:53`): the page is
   the LoRa page while the board's session census keeps `SESSION_PEAK`,
   a smaller one in proportion when it does not (`census::batch`,
   `loquax-m9/src/census.rs:334`); the board runs the census at boot and
   picks its batch from what it measured. An answer longer than the
   board takes asks the same page smaller on the same link
-  (`Ask::refit`, `loquax/src/home/ask.rs:469`) down to 64 B; a single
+  (`Ask::refit`, `loquax/src/home/ask.rs:500`) down to 64 B; a single
   message that fits no page ends the pull with an error, never a panic
   and never a skipped message. The answer ceiling is the largest message
   the board takes in, 256 KiB on the PSRAM heap, not the session's room.
@@ -1432,7 +1432,7 @@ client that joins with it. A text that is no code is refused
 
 **The join, the pull, the screen.** The client of 1414 now hands every
 pulled page to the board's loop, which folds it into the model the
-screen draws (`board::fold`, `loquax/src/home/board.rs:635`; the
+screen draws (`board::fold`, `loquax/src/home/board.rs:665`; the
 board's `take_in` without an engine: a message the home took in, one of
 the home's devices sent, a mark, a name). A board that is a device of a
 home draws that model from boot: its chats list and its chats come from
@@ -1440,7 +1440,7 @@ the archive, and a line typed in a chat is the home's `/send`, queued
 ahead of the next pull. The board checks no signature (it holds no
 sender's identity), so received messages show unverified. The top bar
 says the home at its right end (`board::Word`,
-`loquax/src/home/board.rs:523`): "Joining your mailbox", "Fetched N of
+`loquax/src/home/board.rs:553`): "Joining your mailbox", "Fetched N of
 M", "Mailbox unreachable", "You. Your mailbox is connected.", and for a
 refused code "The mailbox did not take this code. Make a new one on the
 computer." M is the home's: a paged `/sync` answer now carries how many
@@ -1455,7 +1455,7 @@ was red first: the core says `LinkStale` about ten seconds after the
 line went, but the request's timeout is the whole ask's budget, so the
 pull waited out its 120 s with 4 of 24 entries. The executor now takes
 a stale link with a request in flight as a lost answer and asks again
-on a fresh link from the cursor (`loquax/src/home/board.rs:265`); the
+on a fresh link from the cursor (`loquax/src/home/board.rs:266`); the
 cell went green, 24 of 24, none twice, 13.9 s. On LoRa a link goes
 stale much later than on the host's line, so the recovery there takes
 that much longer.

@@ -160,6 +160,12 @@ pub const RESPONSE_OVERHEAD: usize = 1 + 18;
 /// `answer_retrying`).
 pub const ATTEMPTS: u8 = 3;
 
+/// How often a request whose answer did not come in its time is asked
+/// again on the same link while that link stays up (1440): a frame the
+/// line lost, not a link that broke. Counted per request: a page that
+/// arrives starts the count again.
+pub const REPEATS: u8 = 3;
+
 /// What a client asks its home.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verb {
@@ -293,6 +299,8 @@ pub struct Ask {
     ladder: PathLadder,
     state: State,
     attempts: u8,
+    /// Times the request in flight was asked again on its link.
+    repeats: u8,
     first: u64,
     entries: usize,
     pages: usize,
@@ -321,6 +329,7 @@ impl Ask {
             ladder: PathLadder::new(),
             state: State::Path,
             attempts: 1,
+            repeats: 0,
             first: 0,
             entries: 0,
             pages: 0,
@@ -461,6 +470,28 @@ impl Ask {
         }
     }
 
+    /// The answer to the request did not come in its time, on a link that
+    /// is still up (1440): the line lost a frame of it, so the same
+    /// request goes again on the same link, up to [`REPEATS`] times. A
+    /// pull's request asks from its cursor and says its page, so a repeat
+    /// brings the same page and a late first answer is dropped by its
+    /// request id. Past the repeats, or for a verb that must not be asked
+    /// twice, it is what [`Self::answered`] makes of a timeout.
+    pub fn lost(&mut self) -> Step {
+        if self.state == State::Asking && self.verb.idempotent() && self.repeats < REPEATS {
+            self.repeats += 1;
+            return self.request();
+        }
+        self.answered(Err(HomeError::Timeout))
+    }
+
+    /// Whether the request may be asked again on its link
+    /// ([`Self::lost`]): every verb but the join, whose token is spent by
+    /// the first ask that reaches the home.
+    pub fn repeatable(&self) -> bool {
+        self.verb.idempotent()
+    }
+
     /// The answer to a pull's page came larger than the device takes: ask
     /// the same page again, at most `page_bytes` (1414). Only a smaller
     /// page than the one asked; a page that cannot shrink any more ends the
@@ -555,6 +586,7 @@ impl Ask {
                     Err(error) => return self.finish(Err(error)),
                 };
                 self.first = page.first;
+                self.repeats = 0;
                 self.entries += page.entries.len();
                 self.pages += 1;
                 let last = page.entries.last().map(|entry| entry.seq);

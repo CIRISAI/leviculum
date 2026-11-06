@@ -58,6 +58,9 @@ struct Home {
     /// Closes the link instead of answering this `/sync`, counted from 1,
     /// once.
     break_at: Option<usize>,
+    /// Answers this `/sync`, counted from 1, once, and the line loses
+    /// every packet of the answer; the link stays up (1440).
+    lose_at: Option<usize>,
     syncs: usize,
     /// The page each answered `/sync` asked, and its cursor.
     asked: Vec<Option<u64>>,
@@ -187,6 +190,7 @@ impl Bench {
                 archive,
                 silent: false,
                 break_at: None,
+                lose_at: None,
                 syncs: 0,
                 asked: Vec::new(),
                 cursors: Vec::new(),
@@ -237,6 +241,10 @@ impl Bench {
                     continue;
                 }
             }
+            let lost = path == SYNC_PATH && self.home.lose_at == Some(self.home.syncs);
+            if lost {
+                self.home.lose_at = None;
+            }
             let answer = self.home.answer(&link_id, &path, &data);
             let sent = if self.home.node.response_fits_packet(&link_id, answer.len()) {
                 self.home
@@ -250,7 +258,7 @@ impl Bench {
                     .expect("resource response")
                     .1
             };
-            if !self.home.silent {
+            if !self.home.silent && !lost {
                 self.to_board.extend(Self::sends(&sent));
             }
         }
@@ -483,6 +491,77 @@ fn a_link_that_breaks_mid_pull_resumes_from_the_cursor() {
         "took {} ms",
         bench.now() - start
     );
+}
+
+/// Unhappy path 1b (1440): the line loses the answer to the second
+/// page and the link stays up, as the M9's UART lost a page under announce
+/// traffic. The same request goes again on the same link once the
+/// request's own bound (six round trips and 11.25 s) runs out, not at the
+/// end of the pull's budget, and brings the same page: nothing twice,
+/// nothing lost, one link.
+#[test]
+fn a_lost_page_on_a_live_link_is_asked_again_within_the_rtt_bound() {
+    let archive: Vec<_> = (1..=6).map(|seq| entry(seq, 150)).collect();
+    let mut bench = Bench::new(archive);
+    let record = bench.join();
+    bench.home.lose_at = Some(2);
+    let start = bench.now();
+    let pulled = bench.pull(&record, lora());
+    assert!(
+        matches!(
+            pulled,
+            Some(Ok(Outcome::Pulled {
+                cursor: 6,
+                entries: 6,
+                ..
+            }))
+        ),
+        "{pulled:?}"
+    );
+    assert_eq!(bench.seqs(), (1..=6).collect::<Vec<_>>());
+    assert_eq!(bench.home.lose_at, None, "an answer was lost");
+    // The repeat asked from the same cursor as the lost one.
+    assert_eq!(bench.home.syncs, bench.pages.len() + 1);
+    assert_eq!(bench.home.cursors[1], bench.home.cursors[2]);
+    let took = bench.now() - start;
+    let bound = leviculum_core::node::request::request_timeout_ms(
+        leviculum_core::constants::CHANNEL_DEFAULT_RTT_MS,
+    );
+    assert!(
+        took < bound + 5_000,
+        "took {took} ms, the bound is {bound} ms; the pull's budget is 120 s"
+    );
+}
+
+/// A join is never asked twice on its link: its token is spent by the
+/// first ask that reaches the home, so a lost answer ends it.
+#[test]
+fn a_lost_join_answer_is_not_asked_again() {
+    let mut record = {
+        let bench = Bench::new(std::vec![]);
+        ClientRecord::pending(&bench.device, &bench.code, "M9").expect("record")
+    };
+    let mut ask = record.join(0, 60_000).expect("pending").expect("ask");
+    assert!(!ask.repeatable());
+    assert!(matches!(ask.poll(0, Some(1)), Step::Connect { .. }));
+    assert_eq!(ask.linked(Ok(())), Step::Identify);
+    assert!(matches!(ask.identified(Ok(())), Step::Request { .. }));
+    assert_eq!(ask.lost(), Step::Done(Err(HomeError::Timeout)));
+    record.admission = Admission::Admitted;
+    let mut pull = record.pull(64, 0, 60_000).expect("admitted").expect("ask");
+    assert!(pull.repeatable());
+    assert!(matches!(pull.poll(0, Some(1)), Step::Connect { .. }));
+    assert_eq!(pull.linked(Ok(())), Step::Identify);
+    let Step::Request { data: first, .. } = pull.identified(Ok(())) else {
+        panic!("no request");
+    };
+    for _ in 0..crate::home::ask::REPEATS {
+        let Step::Request { data, .. } = pull.lost() else {
+            panic!("not asked again");
+        };
+        assert_eq!(data, first, "the repeat is the same request");
+    }
+    assert_eq!(pull.lost(), Step::Close, "past the repeats, a fresh link");
 }
 
 /// Unhappy path 2: the home answers nothing. The path ladder asks inside

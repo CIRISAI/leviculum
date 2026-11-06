@@ -15,6 +15,7 @@
 use alloc::format;
 use alloc::string::String;
 
+use leviculum_core::node::request::request_timeout_ms;
 use leviculum_core::node::{NodeCore, NodeEvent};
 use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::{DestinationHash, Identity, LinkId, TickOutput};
@@ -286,7 +287,13 @@ impl Executor {
                 request_id,
             } if ours(link_id) && self.request == Some(*request_id) => {
                 self.request = None;
-                self.ask.answered(Err(HomeError::Timeout))
+                // A link still up lost a frame of the answer, not the
+                // home: the same request again on it (1440).
+                if node.link(link_id).is_some_and(|link| link.is_active()) {
+                    self.ask.lost()
+                } else {
+                    self.ask.answered(Err(HomeError::Timeout))
+                }
             }
             _ => return Report::Idle,
         };
@@ -311,6 +318,29 @@ impl Executor {
         let page = class.page_bytes(link.mdu(), bps, batch);
         self.ask.fit_link(page);
         self.fitted = Some((class, page));
+    }
+
+    /// How long the request about to go waits for its answer (1440): for
+    /// a request that may be asked again ([`Ask::lost`]), the bound
+    /// Reticulum gives every request on a link, six round trips of the
+    /// link plus 11.25 s of grace (`request_timeout_ms`, Python's
+    /// `Link.request`), so a page whose answer the line lost is asked
+    /// again within it rather than at the end of the ask's budget; on a
+    /// serial link that is about 12 s, on a LoRa link with a 2 s round
+    /// trip about 23 s. A response that comes as a resource is watched by
+    /// the resource from its first part on. A join waits out its budget.
+    /// Never past the budget.
+    fn answer_wait_ms<R: CryptoRngCore, C: Clock, S: Storage>(
+        &self,
+        node: &NodeCore<R, C, S>,
+        now_ms: u64,
+    ) -> u64 {
+        let left = self.ask.left_ms(now_ms);
+        let rtt = self.link.as_ref().and_then(|link| node.link(link));
+        match rtt {
+            Some(link) if self.ask.repeatable() => request_timeout_ms(link.rtt_ms()).min(left),
+            _ => left,
+        }
     }
 
     fn path<R: CryptoRngCore, C: Clock, S: Storage>(&self, node: &NodeCore<R, C, S>) -> Option<u8> {
@@ -357,10 +387,10 @@ impl Executor {
                     None => self.ask.identified(Err(String::from("no link"))),
                 },
                 Step::Request { path, data } => {
-                    let left = self.ask.left_ms(now_ms);
+                    let wait = self.answer_wait_ms(node, now_ms);
                     let sent = match self.link {
                         Some(link) => node
-                            .send_request(&link, path, Some(&data), Some(left))
+                            .send_request(&link, path, Some(&data), Some(wait))
                             .map_err(|error| format!("{error:?}")),
                         None => Err(String::from("no link")),
                     };
