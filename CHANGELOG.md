@@ -17,6 +17,9 @@ git tag, not the version string. -->
   established or still establishing, with close frames and `LinkClosed`
   events. A link landing after the host's last close pass no longer stays
   frozen on a stopped node. `stop(&mut self)` still leaves links in the table.
+- `send_on_link` and `send_on_link_timed` return `SendError::TooLarge` for a
+  frame over the Channel limit, not `LinkFailed`. A link that moved onto a
+  direct path has a smaller MDU, and that size error read as a dead link.
 
 ## [0.33.0+ciris.1] — CIRIS fork
 

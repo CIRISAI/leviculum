@@ -1026,6 +1026,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             };
             sent.map_err(|e| match e {
+                // A link that moved onto a direct path has a smaller MDU;
+                // that is a size to fix, not a dead link.
+                ChannelError::TooLarge => send::SendError::TooLarge,
                 ChannelError::Busy => send::SendError::Busy,
                 ChannelError::PacingDelay { ready_at_ms } => {
                     send::SendError::PacingDelay { ready_at_ms }
