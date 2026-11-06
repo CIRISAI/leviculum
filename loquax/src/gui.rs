@@ -84,6 +84,8 @@ use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 const COMPACT_TABS: f32 = 72.0;
 /// The list of peers on the left, in logical pixels.
 const LIST_WIDTH: f32 = 260.0;
+/// The map bar's height: a line of 13 pixel text and its padding (1441).
+const MAP_BAR: f32 = 21.0;
 /// The window's size when it opens.
 const WINDOW: (f32, f32) = (1100.0, 720.0);
 /// From this width on the window is Wide (1218): the rail, the list and
@@ -2657,6 +2659,11 @@ impl App {
             .shown
             .as_ref()
             .map_or(String::new(), |s| s.attribution.clone());
+        // The bar's words on one line each and the bar of one height
+        // (1441): a notice or a credit too long for it wrapped to a second
+        // line, which took the map 17 pixels of height while a pan loaded
+        // its tiles, and the map's frame was drawn anew at the new size.
+        let line = |words: String| text(words).size(13).wrapping(text::Wrapping::None);
         let bar = row![
             button(text("Chats").size(13))
                 .on_press(Message::Intent(Intent::Tab(TabId::Chats)))
@@ -2664,23 +2671,21 @@ impl App {
                 .style(button::text),
             // "Map", or "Map · This week" when the tracks' window is not
             // the default (1419): why older lines show.
-            text(self.seen.track_window.title(self.lang)).size(13),
-            text("  ").size(13),
+            line(self.seen.track_window.title(self.lang)),
+            line("  ".to_string()),
             // Always on screen: the region's credit, or the outline's.
-            text(credit).size(13),
-            container(
-                text(
-                    [self.seen.loading.clone(), self.seen.notice.clone()]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join(" · ")
-                )
-                .size(13)
-            )
+            line(credit),
+            container(line(
+                [self.seen.loading.clone(), self.seen.notice.clone()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            ))
             .width(Length::Fill)
-            .align_right(Length::Fill),
-            text(format!("  z{:.1}", self.view.zoom())).size(13),
+            .align_right(Length::Fill)
+            .clip(true),
+            line(format!("  z{:.1}", self.view.zoom())),
             // The map's menu (1419): the time window, rarely needed, is
             // in it and not on the map.
             button(text(StrId::Menu.text(self.lang)).size(13))
@@ -2691,7 +2696,8 @@ impl App {
                     false => button::text,
                 }),
         ]
-        .padding([2, 8]);
+        .padding([2, 8])
+        .height(MAP_BAR);
         // The picture is a canvas of its own under the pins' canvas: iced
         // draws a canvas's images above its fills, which would hide the
         // markers. On a canvas it is drawn where the view moved it since
@@ -4599,6 +4605,56 @@ mod tests {
             verb: Verb::Pause,
         }));
         assert_eq!(sent(), [Input::Verb(Verb::Pause)]);
+    }
+
+    /// The map's pane keeps its size whatever its words say (1441): the
+    /// peers' column is the list's width with a short name and a long
+    /// one, and the map beside it the same rectangle with a long notice
+    /// and a long credit in its bar, which before wrapped to a second line
+    /// and took the map 17 pixels of height while a pan loaded its tiles,
+    /// the window Lew measured and a small one. The control: the column
+    /// is where the test looks for it, the list's width.
+    #[test]
+    fn the_maps_pane_keeps_its_size_whatever_its_words() {
+        use iced::advanced::Layout;
+        let long = "a long notice that goes on past the bar's width: Loading the region of Frankfurt am Main and its surroundings, 45 of 120 tiles, about two minutes left";
+        for (w, h) in [(1280u32, 1190u32), (900, 560)] {
+            let mut panes = Vec::new();
+            for (label, notice) in [
+                ("al", None),
+                (
+                    "a peer whose name is far wider than the column of peers",
+                    Some(long),
+                ),
+            ] {
+                let mut app =
+                    window_over_florence(vec![pin(1, label, 43.7752, 11.2640)], 14 * MILLI);
+                app.window = Size::new(w as f32, h as f32);
+                app.seen.notice = notice.map(str::to_string);
+                app.seen.loading = notice.map(str::to_string);
+                let _ = run(&mut app);
+                let node =
+                    leviculum_ui_iced::headless::layout(app.view(), w, h).expect("a renderer");
+                // The rail, then the map screen: the column and the map
+                // over its bar.
+                let screen = Layout::new(&node)
+                    .children()
+                    .nth(1)
+                    .expect("the map screen");
+                let mut parts = screen.children();
+                let column = parts.next().expect("the column").bounds();
+                let map = parts
+                    .next()
+                    .expect("the map")
+                    .children()
+                    .next()
+                    .expect("the map")
+                    .bounds();
+                assert_eq!(column.width, LIST_WIDTH, "{label}");
+                panes.push((column.x, column.width, map));
+            }
+            assert_eq!(panes[0], panes[1], "{w} x {h}");
+        }
     }
 
     /// The tracks' time window is in the map's menu, not on the map
