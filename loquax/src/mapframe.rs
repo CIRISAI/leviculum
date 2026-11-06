@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use leviculum_map::labels::{LabelKind, Rect, ViewLabel, SUBPIXEL};
+use leviculum_map::ladder::{Ladder, Layers, Pass};
 use leviculum_map::viewport::{ExactView, Viewport, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 
@@ -121,7 +122,8 @@ pub struct Shot {
     pub tile_zoom: u8,
     /// The step nearest the view's zoom: the data's zoom.
     pub rest_zoom: u8,
-    /// Tiles it needed and did not draw: ask again.
+    /// Tiles it needed and did not draw, and one more while a frame at
+    /// rest still adds passes (1422): ask again.
     pub missing: usize,
     /// Tiles drawn while a region in them was still arriving (1291): ask
     /// again as the region gains tiles.
@@ -132,6 +134,13 @@ pub struct Shot {
     pub attribution: String,
     /// The maps directory's epoch it was drawn at.
     pub epoch: u64,
+    /// The rung of the frame budget a moving frame runs at (1422,
+    /// [`Ladder`]), for a frontend's own passes to follow.
+    pub rung: u8,
+    /// The passes this frame ran: all of them unless it moved at a lower
+    /// rung, or it is a frame at rest that still adds passes, which then
+    /// counts in [`missing`](Self::missing) as one owed.
+    pub layers: Layers,
 }
 
 impl Shot {
@@ -148,6 +157,8 @@ impl Shot {
             fading: framed.fading,
             attribution: framed.attribution,
             epoch: framed.epoch,
+            rung: framed.rung,
+            layers: framed.layers,
         }
     }
 
@@ -163,6 +174,8 @@ impl Shot {
             fading: self.fading,
             attribution: self.attribution,
             epoch: self.epoch,
+            rung: self.rung,
+            layers: self.layers,
         };
         (self.rgba, framed)
     }
@@ -181,6 +194,8 @@ pub struct Framed {
     pub fading: bool,
     pub attribution: String,
     pub epoch: u64,
+    pub rung: u8,
+    pub layers: Layers,
 }
 
 /// Where [`Frames`] composes a frame: a buffer of its own, handed out
@@ -271,6 +286,19 @@ pub struct Frames {
     names_off: bool,
     /// The [`Mip`] of each name shown, by its mask, which it holds.
     mips: HashMap<usize, (Arc<Mask>, Arc<Mip>)>,
+    /// The frame budget (1422): the rung moving frames run at, from the
+    /// passes' measured times.
+    ladder: Ladder,
+    /// The passes the frames at rest since the last moving one ran, and
+    /// those of them skipped for memory, at the view they ran at.
+    rest_done: Layers,
+    rest_skipped: Layers,
+    rest_view: Option<ExactView>,
+    /// The bytes the passes with buffers of their own may take, beside
+    /// what the system has free: a measuring tool's low memory.
+    heap_limit: Option<usize>,
+    /// Each pass the last frame ran and its microseconds.
+    trace: Vec<(Pass, u32)>,
 }
 
 /// What a frame that zooms spends placing its names (1225): a measuring
@@ -463,6 +491,12 @@ impl Frames {
             cost: PlaceCost::default(),
             names_off: false,
             mips: HashMap::new(),
+            ladder: Ladder::new(),
+            rest_done: Layers::NONE,
+            rest_skipped: Layers::NONE,
+            rest_view: None,
+            heap_limit: None,
+            trace: Vec::new(),
         }
     }
 
@@ -528,9 +562,12 @@ impl Frames {
 
     /// One frame for `ask` into `target`.
     fn draw(&mut self, ask: &Ask<'_>, target: Target<'_>) -> Framed {
+        let started = Instant::now();
         self.rest = None;
         self.plan = None;
         self.painter.refresh();
+        self.trace.clear();
+        let layers = self.layers(ask);
         let view = ask.view;
         let rest_zoom = view.tile_zoom();
         // At a whole step the frame's centre sits on a whole pixel of it:
@@ -604,9 +641,11 @@ impl Frames {
             }
         };
         self.last_zoom = Some(tile_zoom);
-        if !ask.moving && missing == 0 {
+        let refining = ask.now_ms.is_some() && !ask.moving && self.rest_done != Layers::ALL;
+        if !ask.moving && missing == 0 && !refining {
             self.rest = Some((asked, ask.zooms));
         }
+        let mut at = self.passed(Pass::Ground, started);
         let (w, h) = drawn.size();
         let (scale, theme) = (ask.scale, ask.style.theme);
         let type_ = &mut self.type_;
@@ -619,7 +658,7 @@ impl Frames {
         let now = ask.now_ms;
         // No region here: the radar's blank ground and rings instead of
         // the outline and its names (1386).
-        if let Some(radar) = ask.radar {
+        if let Some(radar) = ask.radar.filter(|_| layers.has(Pass::Radar)) {
             let per_px = crate::ui::radar::metres_per_unit(radar.centre) * drawn.unit();
             screenmap::draw_radar(
                 rgba,
@@ -632,14 +671,18 @@ impl Frames {
                 theme,
                 &mut self.type_,
             );
+            at = self.passed(Pass::Radar, at);
         }
         let names_off = self.names_off || ask.radar.is_some();
+        // Placed anew only where the rung or the view at rest has them;
+        // otherwise the names ride along as the sprites they were.
+        let place = layers.has(Pass::Labels);
         // The screen's view and its margins: where a frame at rest at this
         // zoom places its names, and the frame drawn unless the frontend
         // scales it.
         let mut exact = view.on_whole_pixel();
         exact.resize(fw, fh);
-        if !names_off && !ask.moving {
+        if !names_off && !ask.moving && place {
             // At rest the names are placed anew over the frame, at the
             // exact scale, after the pins, and kept in world terms; asked
             // again while they fade, the same frame keeps them.
@@ -668,7 +711,7 @@ impl Frames {
                 self.rest_key = Some(key);
             }
             self.rested = Some(view.zoom_milli());
-        } else if !names_off {
+        } else if !names_off && ask.moving && place {
             // A frame that moves at another zoom than its names were
             // placed at, or into a frame of another step, places them
             // anew (1225); a pan at their zoom moves them.
@@ -739,17 +782,25 @@ impl Frames {
         }
         // A name fading in from nothing is not drawn yet, but fades.
         self.fading = !self.leaving.is_empty() || self.fades.iter().any(|fade| !fade.settled(now));
-        screenmap::draw_tracks(
-            rgba,
-            w,
-            h,
-            ask.tracks,
-            |p| drawn.to_screen(p),
-            scale,
-            theme,
-            &mut self.type_,
-        );
-        if ask.draw_pins {
+        // Names that only rode along are no measure of placing them.
+        at = match !names_off && place {
+            true => self.passed(Pass::Labels, at),
+            false => Instant::now(),
+        };
+        if layers.has(Pass::Tracks) && !ask.tracks.is_empty() {
+            screenmap::draw_tracks(
+                rgba,
+                w,
+                h,
+                ask.tracks,
+                |p| drawn.to_screen(p),
+                scale,
+                theme,
+                &mut self.type_,
+            );
+            at = self.passed(Pass::Tracks, at);
+        }
+        if ask.draw_pins && layers.has(Pass::Pins) {
             screenmap::draw_pins(
                 rgba,
                 w,
@@ -760,19 +811,117 @@ impl Frames {
                 theme,
                 &mut self.type_,
             );
+            self.passed(Pass::Pins, at);
         }
         self.placed = placed;
+        if ask.now_ms.is_some() && ask.moving {
+            self.ladder.motion_frame(micros(started));
+        }
         Framed {
             view: drawn,
             shows,
             tile_zoom,
             rest_zoom,
-            missing,
+            missing: missing + usize::from(refining),
             filling: self.tiles.filling(),
             fading: self.fading,
             attribution,
             epoch: self.painter.epoch(),
+            rung: self.ladder.rung(),
+            layers,
         }
+    }
+
+    /// The passes `ask` runs (1422): every one for a frame without a
+    /// clock (a still picture, a test, a measuring tool); a moving frame
+    /// those of the ladder's rung; a frame at rest those it has run since
+    /// the view came to rest and the next that fit one budget (all of
+    /// them under a held rung), less those skipped for memory. A gesture starts at the first
+    /// moving frame and ends at the first frame at rest.
+    fn layers(&mut self, ask: &Ask<'_>) -> Layers {
+        if ask.now_ms.is_none() {
+            return Layers::ALL;
+        }
+        if ask.moving {
+            self.ladder.gesture_start();
+            self.rest_done = Layers::NONE;
+            self.rest_skipped = Layers::NONE;
+            self.rest_view = None;
+            return self.ladder.motion_layers();
+        }
+        self.ladder.gesture_end();
+        if self.rest_view != Some(ask.view) {
+            self.rest_done = Layers::NONE;
+            self.rest_skipped = Layers::NONE;
+            self.rest_view = Some(ask.view);
+        }
+        let (fw, fh) = frame_size(ask);
+        let names = match self.sprite_bytes() {
+            0 => fw as usize * fh as usize,
+            n => n,
+        };
+        let free = self.free_bytes();
+        let bytes = |p| match p {
+            Pass::Labels => names,
+            _ => 0,
+        };
+        // A held rung is a measuring tool's or a test's: its frame at
+        // rest is the full one at once.
+        let (run, skipped) = match self.ladder.held() {
+            Some(_) => self.ladder.rest_all(free, bytes),
+            None => self.ladder.rest_plan(self.rest_done, free, bytes),
+        };
+        self.rest_done = run;
+        self.rest_skipped = self.rest_skipped.union(skipped);
+        run.without(self.rest_skipped)
+    }
+
+    /// `pass` ran from `from` to now: timed, traced and told the ladder.
+    /// Now, for the next pass.
+    fn passed(&mut self, pass: Pass, from: Instant) -> Instant {
+        let now = Instant::now();
+        let us = u32::try_from(now.duration_since(from).as_micros()).unwrap_or(u32::MAX);
+        self.ladder.observe(pass, us);
+        self.trace.push((pass, us));
+        now
+    }
+
+    /// The bytes free for a pass's own buffer: what the system says is
+    /// available, within the limit a measuring tool set less the tiles
+    /// held.
+    pub fn free_bytes(&self) -> usize {
+        let system = available_bytes().unwrap_or(usize::MAX);
+        match self.heap_limit {
+            Some(limit) => system.min(limit.saturating_sub(self.tiles.bytes())),
+            None => system,
+        }
+    }
+
+    /// The frame budget's planner.
+    pub fn ladder(&self) -> &Ladder {
+        &self.ladder
+    }
+
+    /// Hold moving frames at `rung`, and run every pass in each frame at
+    /// rest, or with `None` let the times pick both again.
+    pub fn hold_rung(&mut self, rung: Option<u8>) {
+        self.ladder.hold(rung);
+    }
+
+    /// The passes the last frame ran, each with its microseconds.
+    pub fn trace(&self) -> &[(Pass, u32)] {
+        &self.trace
+    }
+
+    /// The passes the view at rest skipped for memory.
+    pub fn rest_skipped(&self) -> Layers {
+        self.rest_skipped
+    }
+
+    /// Limit the bytes the passes with buffers of their own may take,
+    /// the tiles held counted against it: a measuring tool's low memory.
+    pub fn set_heap_limit(&mut self, bytes: Option<usize>) {
+        self.heap_limit = bytes;
     }
 
     /// The sprites of `names`, placed in the frame they are drawn in.
@@ -1179,6 +1328,26 @@ fn reach_of(l: &ViewLabel) -> [i64; 4] {
         r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
     }
     r
+}
+
+/// Microseconds since `started`.
+fn micros(started: Instant) -> u32 {
+    u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX)
+}
+
+/// The memory the system has available, from `/proc/meminfo`; `None`
+/// where it does not say.
+fn available_bytes() -> Option<usize> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib: usize = info
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kib.saturating_mul(1024))
 }
 
 /// The nanoseconds since `started`.
@@ -1648,5 +1817,55 @@ mod tests {
         assert_eq!(got.tile_zoom, 14);
         assert_eq!(got.missing, 0);
         assert!(got.rgba.chunks_exact(4).all(|p| p[3] == 0xff));
+    }
+
+    /// 1422: a frame at rest on a device whose passes are slow adds them
+    /// back as the budget holds them, owing one more frame until the
+    /// picture is full; a pass whose buffer the memory cannot hold is
+    /// skipped and the picture still ends full; a moving frame runs the
+    /// held rung's passes; a frame without a clock runs every one. The
+    /// costs are set, not measured, so the host's speed decides nothing.
+    #[test]
+    fn a_frame_at_rest_adds_the_passes_its_budget_holds() {
+        use leviculum_map::ladder::BUDGET_US;
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        let view = ExactView::new(centre, 15 * MILLI, 480, 320);
+        let at = |now: Option<u64>, moving: bool, view: ExactView| Ask {
+            now_ms: now,
+            ..ask(view, moving, 1.0, MapTheme::Light)
+        };
+
+        let mut frames = florence();
+        // A slow device: the ground and the names a budget each.
+        frames.ladder.observe(Pass::Ground, BUDGET_US);
+        frames.ladder.observe(Pass::Labels, BUDGET_US);
+        let first = frames.frame(&at(Some(0), false, view));
+        assert!(first.layers.has(Pass::Ground) && first.layers.has(Pass::Pins));
+        assert!(!first.layers.has(Pass::Labels), "the names wait a frame");
+        assert!(first.missing >= 1, "owing the names, it asks again");
+        let second = frames.frame(&at(Some(16), false, view));
+        assert_eq!(second.layers, Layers::ALL);
+        assert_eq!(second.missing, 0, "full");
+
+        // Too little memory for the names' sprites: skipped, not owed.
+        let mut frames = florence();
+        frames.set_heap_limit(Some(0));
+        let low = frames.frame(&at(Some(0), false, view));
+        assert!(!low.layers.has(Pass::Labels));
+        assert_eq!(frames.rest_skipped(), Layers::NONE.with(Pass::Labels));
+        assert_eq!(low.missing, 0, "full without them");
+        frames.set_heap_limit(None);
+
+        // Moving at the minimal rung the names ride, at the full one
+        // they are placed.
+        let mut frames = florence();
+        let _ = frames.frame(&at(Some(0), false, view));
+        frames.hold_rung(Some(2));
+        let mut moved = view;
+        moved.pan(40, 0);
+        let minimal = frames.frame(&at(Some(16), true, moved));
+        assert_eq!((minimal.rung, minimal.layers), (2, Layers::of_rung(2)));
+        frames.hold_rung(None);
+        assert_eq!(frames.frame(&at(None, true, moved)).layers, Layers::ALL);
     }
 }

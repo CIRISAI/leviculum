@@ -4606,6 +4606,7 @@ impl<B> UiModel<B> {
                 .track_window
                 .title_word()
                 .map(|w| w.text(self.lang).to_string()),
+            moving: self.map_press.as_ref().is_some_and(|p| p.dragging),
         })
     }
 

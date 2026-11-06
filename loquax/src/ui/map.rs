@@ -443,6 +443,9 @@ pub struct MapView {
     /// The tracks' time window's word when it is not the default (1419):
     /// on the credit's row, so the reader knows why older lines show.
     pub window_word: Option<String>,
+    /// A pointer drags the view (1422): the frame budget's gesture, from
+    /// the button going down past a drag to it coming up.
+    pub moving: bool,
 }
 
 /// The radar in the terminal's cells (1386).

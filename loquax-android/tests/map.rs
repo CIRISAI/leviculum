@@ -50,6 +50,10 @@ fn home() -> tempfile::TempDir {
         "map_autoload = off\n",
     )
     .expect("config");
+    // Every frame at rest the full picture and every moving frame at the
+    // full rung, however fast the host draws (1422): a test reads what
+    // one frame shows. A test of the ladder lets go.
+    loquax_android::map::hold_rung(home.path(), Some(0));
     home
 }
 
@@ -296,6 +300,7 @@ fn the_phone_draws_the_buildings_as_the_window_does() {
         .join("../leviculum-map/fixtures/buildings/firenze.lmr");
     std::fs::copy(fixture, maps.join("firenze.lmr")).expect("the region");
     let bare = tempfile::tempdir().expect("bare");
+    loquax_android::map::hold_rung(bare.path(), Some(0));
     std::fs::create_dir_all(bare.path().join("maps")).expect("maps");
     std::fs::copy(
         home.path().join(loquax::config::CONFIG_FILE),

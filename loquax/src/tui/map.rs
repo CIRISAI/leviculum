@@ -36,6 +36,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use leviculum_map::cells::{self, Encoding, Sets};
 use leviculum_map::draw::Ink;
 use leviculum_map::labels::{LabelKind, ViewLabel};
+use leviculum_map::ladder::{Ladder, Pass};
 use leviculum_map::viewport::{Viewport, MAX_VIEW_ZOOM};
 use leviculum_mapfill::frame::{rgb888, Frame};
 use leviculum_mapfill::style::{MapTheme, Style as MapStyle};
@@ -665,6 +666,8 @@ struct Painted {
     glyphs: Vec<cells::Cell>,
     /// The names of the view, placed in cells at render time.
     names: Vec<ViewLabel>,
+    /// Microseconds the paint took: the frame budget's ground (1422).
+    paint_us: u32,
 }
 
 /// One paint asked for: the view, the cells its picture covers, and the
@@ -708,6 +711,14 @@ impl Canvas {
     /// Draw `ask`'s view, and encode it under kitty or sixel or as a text
     /// technique's cells.
     fn paint(&mut self, ask: Ask) -> Painted {
+        let started = Instant::now();
+        let mut painted = self.paint_view(ask);
+        painted.paint_us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+        painted
+    }
+
+    /// [`paint`](Self::paint), untimed.
+    fn paint_view(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
         // Places, waters and parks, and the streets and rivers, which the
         // cells name where they run level.
@@ -724,6 +735,7 @@ impl Canvas {
                 picture: None,
                 glyphs: cells::encode(&source, encoding, &self.sets),
                 names,
+                paint_us: 0,
             };
         }
         let (w, h) = view.size();
@@ -746,6 +758,7 @@ impl Canvas {
             picture,
             glyphs: Vec::new(),
             names,
+            paint_us: 0,
         }
     }
 
@@ -1015,6 +1028,10 @@ pub struct MapPainter {
     tier: Tier,
     /// The map's colour table.
     theme: MapTheme,
+    /// The frame budget (1422): a drag is the gesture, the paint the
+    /// ground, the names placed in cells a pass the minimal rung leaves
+    /// to the frame at rest.
+    ladder: Ladder,
 }
 
 impl MapPainter {
@@ -1070,7 +1087,14 @@ impl MapPainter {
             nudge: false,
             tier: Tier::Truecolor,
             theme: MapTheme::Light,
+            ladder: Ladder::new(),
         }
+    }
+
+    /// Hold drags at `rung` whatever they cost: a test's.
+    #[cfg(test)]
+    fn hold_rung(&mut self, rung: Option<u8>) {
+        self.ladder.hold(rung);
     }
 
     /// Draw for a screen in `tier` from the next frame on.
@@ -1198,7 +1222,39 @@ impl MapPainter {
             epoch: self.maps.epoch(),
             style: self.style(),
         };
-        self.paint(ask, Instant::now());
+        let started = Instant::now();
+        match shown.moving {
+            true => self.ladder.gesture_start(),
+            false => self.ladder.gesture_end(),
+        }
+        let paints = self.paints;
+        self.paint(ask, started);
+        // A new picture's paint is the ground's time; a frame that only
+        // places labels over the last one has none.
+        let ground_us = (self.paints != paints)
+            .then(|| self.painted.as_ref().map(|p| p.paint_us))
+            .flatten();
+        if let Some(us) = ground_us {
+            self.ladder.observe(Pass::Ground, us);
+        }
+        let place = !shown.moving || self.ladder.motion_layers().has(Pass::Labels);
+        self.render_painted(frame, shown, muted, ask, place);
+        if let Some(us) = ground_us.filter(|_| shown.moving) {
+            let own = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+            self.ladder.motion_frame(us.saturating_add(own));
+        }
+    }
+
+    /// [`render`](Self::render) once `ask` is asked of the painter: the
+    /// map's names placed only with `place`.
+    fn render_painted(
+        &mut self,
+        frame: &mut TermFrame,
+        shown: &MapView,
+        muted: Style,
+        ask: Ask,
+        place: bool,
+    ) {
         let graphics = self.graphics;
         // The view is the model's, laid out for the size it last heard of;
         // the frame is the terminal's now. Between a shrink and its resize
@@ -1327,10 +1383,14 @@ impl MapPainter {
                 Some((col, row, l.text.chars().count() as u16))
             })
             .collect();
-        let names = match fits && radar.is_none() {
+        let names = match fits && radar.is_none() && place {
             true => {
                 let at = leviculum_ui::Rect::new(area.x, area.y, area.width, area.height);
-                place_names(&painted.names, at, self.setup.cell_px, &taken)
+                let started = Instant::now();
+                let names = place_names(&painted.names, at, self.setup.cell_px, &taken);
+                let us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+                self.ladder.observe(Pass::Labels, us);
+                names
             }
             false => Vec::new(),
         };
@@ -2028,6 +2088,7 @@ mod tests {
             tracks: Vec::new(),
             radar: None,
             window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 16,
@@ -2123,6 +2184,7 @@ mod tests {
             tracks: Vec::new(),
             radar: None,
             window_word: None,
+            moving: false,
             area: leviculum_ui::Rect::new(1, 1, cols, rows),
             viewport: view,
             cell_px: (1, 2),
@@ -2191,6 +2253,7 @@ mod tests {
             tracks: Vec::new(),
             radar: None,
             window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2230,6 +2293,51 @@ mod tests {
         assert_eq!(frame, PINNED_NAMES, "{frame}");
     }
 
+    /// 1422: a drag is the frame budget's gesture. At the minimal rung a
+    /// frame while the pointer drags leaves the map's names out, as the
+    /// pixel screens let them ride; the frame as the button comes up puts
+    /// them back. At the full rung the drag keeps them.
+    #[test]
+    fn a_drag_at_the_minimal_rung_leaves_the_names_to_the_rest() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = MapPainter::new(Maps::new(Some(dir)), Graphics::Braille, None);
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (60u16, 20u16);
+        let at = project(LatLon::from_degrees(43.7755, 11.2672));
+        let shown = |moving: bool| MapView {
+            area: leviculum_ui::Rect::new(0, 0, cols, rows),
+            viewport: Viewport::new(
+                at,
+                15,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving,
+            pins: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
+        let mut text = |painter: &mut MapPainter, moving: bool| {
+            let Ok(_) = terminal.draw(|f| painter.render(f, &shown(moving), Style::default()));
+            let buffer = terminal.backend().buffer().clone();
+            (0..rows)
+                .flat_map(|y| (0..cols).map(move |x| (x, y)))
+                .filter_map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect::<String>()
+        };
+        painter.hold_rung(Some(2));
+        assert!(!text(&mut painter, true).contains("Piazza"), "riding");
+        assert!(painter.ladder.moving());
+        assert!(text(&mut painter, false).contains("Piazza"), "at rest");
+        assert!(!painter.ladder.moving());
+        painter.hold_rung(Some(0));
+        assert!(text(&mut painter, true).contains("Piazza"), "the full rung");
+    }
+
     /// 1302: a node the mesh shows that is no contact is drawn beside a
     /// friend's pin in the muted grey, its announced name beside it, the
     /// friend's in the plain text colour; the frame pinned as text.
@@ -2257,6 +2365,7 @@ mod tests {
             tracks: Vec::new(),
             radar: None,
             window_word: None,
+            moving: false,
             area,
             viewport: Viewport::new(
                 at,
@@ -2318,6 +2427,7 @@ mod tests {
             tracks: Vec::new(),
             radar: None,
             window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -3015,6 +3125,7 @@ mod tests {
             picture: None,
             glyphs: Vec::new(),
             names: Vec::new(),
+            paint_us: 0,
         }
     }
 
@@ -3082,6 +3193,7 @@ mod tests {
             tracks: Vec::new(),
             radar: None,
             window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 39,
@@ -3203,6 +3315,7 @@ mod tests {
             tracks: Vec::new(),
             radar: None,
             window_word: None,
+            moving: false,
             area: leviculum_ui::Rect::new(0, 0, cols, rows),
             viewport: Viewport::new(
                 centre,

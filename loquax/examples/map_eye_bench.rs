@@ -8,7 +8,7 @@
 //! spans and pixels (`leviculum-map/tests/golden.rs`), never clocks.
 //!
 //! ```sh
-//! cargo run --release -p loquax --features screenmap --example map_eye_bench -- MAPS [--quick] [--label L] [--against BIN | --baseline FILE] [--write FILE]
+//! cargo run --release -p loquax --features screenmap --example map_eye_bench -- MAPS [--quick] [--no-ladder] [--label L] [--against BIN | --baseline FILE] [--write FILE]
 //! ```
 //!
 //! `MAPS` holds the Frankfurt region (LMR3 with names and buildings, the
@@ -51,10 +51,11 @@ use std::process::Command;
 use std::time::Instant;
 
 use leviculum_map::draw::Ink;
+use leviculum_map::ladder::{Layers, Pass, BUDGET_US, RUNGS};
 use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::viewport::{ExactView, Viewport, MILLI};
 use leviculum_mapfill::style::Style;
-use loquax::mapframe::{Ask, Frames};
+use loquax::mapframe::{Ask, Frames, Shot};
 use loquax::picture::{Maps, Painter};
 use loquax::ui::map::MapPin;
 use loquax::ui::tracks::{Age, Track};
@@ -236,6 +237,9 @@ struct Reps {
     /// Repetitions of a warm measurement, and of a cold one.
     warm: usize,
     cold: usize,
+    /// The frame budget's traces after the line (`--no-ladder` drops
+    /// them).
+    ladder: bool,
 }
 
 /// Measure `scene` in this process and print its line.
@@ -360,6 +364,159 @@ fn run_scene(maps: &Path, scene: Scene, reps: &Reps) {
         (with_tracks - frame_ms).max(0.0),
         vm_hwm_kib(),
     );
+    if reps.ladder {
+        let scene_key = format!("scene={} size={w}x{h} zoom={}", scene.name, scene.zoom);
+        let ask = |view: ExactView, moving: bool, now_ms: u64| Ask {
+            view,
+            margin,
+            moving,
+            style: scene.style,
+            scale: scene.scale,
+            pins: &pins,
+            selected: None,
+            zooms: (3, 18),
+            draw_pins: true,
+            tracks: &tracks,
+            radar: None,
+            measure: None,
+            now_ms: Some(now_ms),
+            scaled_while_moving: true,
+        };
+        ladder(&mut frames, &scene_key, base, &ask);
+    }
+}
+
+/// The names of the passes in `layers`, or `-`.
+fn names(layers: Layers) -> String {
+    let n: Vec<&str> = Pass::ALL
+        .iter()
+        .filter(|p| layers.has(**p))
+        .map(|p| p.name())
+        .collect();
+    match n.is_empty() {
+        true => "-".to_string(),
+        false => n.join(","),
+    }
+}
+
+/// The passes of the last frame with their microseconds.
+fn pass_us(frames: &Frames) -> String {
+    let t: Vec<String> = frames
+        .trace()
+        .iter()
+        .map(|(p, us)| format!("{}:{us}", p.name()))
+        .collect();
+    t.join(",")
+}
+
+/// One frame of `ask`, timed, its buffer given back.
+fn shot(frames: &mut Frames, ask: &Ask<'_>) -> (f64, Shot) {
+    let t = Instant::now();
+    let shot = frames.frame(ask);
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    (ms, shot)
+}
+
+/// The frame budget's planner at work (1422, study section 4 "je
+/// Stufe"): each rung held, a moving frame with its tiles owed and the
+/// frame at rest that replaces it (`MAP_LADDER rung=`); then the ladder
+/// free: a scripted pan of 60 frames (`MAP_LADDER frame=`), the view at
+/// rest growing back pass by pass (`MAP_REFINE step=`) to the full
+/// picture (`full_at_ms=`); then the same rest under a memory too small
+/// for the names' sprites, which skips them and still ends full.
+fn ladder<'a>(
+    frames: &mut Frames,
+    key: &str,
+    base: ExactView,
+    ask: &dyn Fn(ExactView, bool, u64) -> Ask<'a>,
+) {
+    let mut clock = 0u64;
+    let mut tick = |ms: f64| {
+        clock += (ms.ceil() as u64).max(1);
+        clock
+    };
+    for rung in 0..RUNGS {
+        frames.hold_rung(Some(rung));
+        let (_, s) = shot(frames, &ask(base, false, tick(0.0)));
+        frames.recycle(s.rgba);
+        // The tiles owed: only a moving frame that must draw tiles feels
+        // the rung in the tile path.
+        frames.clear_tiles();
+        let mut v = base;
+        v.pan(40, 0);
+        let (motion, s) = shot(frames, &ask(v, true, tick(0.0)));
+        let motion_passes = pass_us(frames);
+        frames.recycle(s.rgba);
+        let (rest, s) = shot(frames, &ask(v, false, tick(motion)));
+        frames.recycle(s.rgba);
+        println!(
+            "MAP_LADDER {key} rung={rung} motion_ms={motion:.2} rest_ms={rest:.2} motion_pass_us={motion_passes} rest_pass_us={}",
+            pass_us(frames)
+        );
+    }
+    frames.hold_rung(None);
+    let rest_at = |frames: &mut Frames, label: &str, clock: &mut dyn FnMut(f64) -> u64| {
+        let mut full_at = 0.0;
+        for step in 0..32 {
+            let (ms, s) = shot(frames, &ask(base, false, clock(0.0)));
+            let _ = clock(ms);
+            full_at += ms;
+            let done = s.missing == 0;
+            println!(
+                "MAP_REFINE {key} run={label} step={step} pass={} ms={ms:.2} free_kib={} skipped={} rung={}",
+                names(s.layers),
+                frames.free_bytes() / 1024,
+                names(frames.rest_skipped()),
+                s.rung,
+            );
+            frames.recycle(s.rgba);
+            if done {
+                println!(
+                    "MAP_REFINE {key} run={label} full_at_ms={full_at:.2} steps={} budget_ms={:.1}",
+                    step + 1,
+                    f64::from(BUDGET_US) / 1e3
+                );
+                return;
+            }
+        }
+        println!("MAP_REFINE {key} run={label} full_at_ms=never");
+    };
+    // The gesture: 60 frames, 8 pixels each, with the clock running.
+    let (mut over, mut ups) = (0usize, 0usize);
+    let mut last = frames.ladder().rung();
+    for i in 0..60 {
+        let mut v = base;
+        v.pan(8 * (i + 1), 4 * (i + 1));
+        let (ms, s) = shot(frames, &ask(v, true, tick(0.0)));
+        tick(ms);
+        if ms > f64::from(BUDGET_US) / 1e3 {
+            over += 1;
+        }
+        if s.rung < last {
+            ups += 1;
+        }
+        last = s.rung;
+        println!(
+            "MAP_LADDER {key} frame={i} ms={ms:.2} ema_ms={:.2} rung={} pass_us={}",
+            f64::from(frames.ladder().motion_us().unwrap_or(0)) / 1e3,
+            frames.ladder().rung(),
+            pass_us(frames)
+        );
+        frames.recycle(s.rgba);
+    }
+    println!(
+        "MAP_LADDER {key} gesture_end rung={last} frames_over_budget={over} ups_in_gesture={ups}"
+    );
+    rest_at(frames, "free", &mut tick);
+    // Low memory: the tiles held plus a few KiB, so the names' sprites
+    // do not fit; the picture still ends full, the names skipped.
+    let mut v = base;
+    v.pan(4, 0);
+    let (_, s) = shot(frames, &ask(v, true, tick(0.0)));
+    frames.recycle(s.rgba);
+    frames.set_heap_limit(Some(frames.tile_memory().1 + 4096));
+    rest_at(frames, "low_memory", &mut tick);
+    frames.set_heap_limit(None);
 }
 
 /// A `MAP_BENCH` line's scene key and its columns.
@@ -434,9 +591,9 @@ fn child(bin: &Path, maps: &Path, scene: &Scene, quick: bool) -> Vec<String> {
 fn table(label: &str, lines: &[String]) {
     println!();
     println!(
-        "| {label} | ground | labels | tracks | compose | frame | cold | pan | zoom | peak KiB |"
+        "| {label} | ground | labels | tracks | compose | frame | cold | cold nw | pan | zoom | peak KiB |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|");
     for (key, cols) in lines.iter().filter_map(|l| parse(l)) {
         let c = |k: &str| cols.get(k).map_or("-".to_string(), |v| format!("{v:.2}"));
         println!(
@@ -493,9 +650,18 @@ fn main() {
             .cloned()
     };
     let quick = flag("--quick");
+    let ladder = !flag("--no-ladder");
     let reps = match quick {
-        true => Reps { warm: 3, cold: 1 },
-        false => Reps { warm: 9, cold: 5 },
+        true => Reps {
+            warm: 3,
+            cold: 1,
+            ladder,
+        },
+        false => Reps {
+            warm: 9,
+            cold: 5,
+            ladder,
+        },
     };
     if let Some(key) = value("--scene") {
         let Some(scene) = SCENES.iter().find(|s| s.key() == key) else {

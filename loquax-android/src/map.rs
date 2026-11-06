@@ -786,6 +786,10 @@ pub fn marks(
 /// process one a test.
 static RENDERERS: Mutex<Vec<Renderer>> = Mutex::new(Vec::new());
 
+/// Rungs held for directories whose renderer is not made yet
+/// ([`hold_rung`]): it starts held.
+static HELD_RUNGS: Mutex<Vec<(PathBuf, Option<u8>)>> = Mutex::new(Vec::new());
+
 /// One map frame for `request`, as [`crate::schema::frame`] lays it out.
 /// The pins are `pins`' when given, the running session's, or the store's
 /// in the request's directory. The host's path, the tests' and the
@@ -902,7 +906,14 @@ fn with_dir<T>(dir: &Path, f: impl FnOnce(&mut Renderer) -> T) -> T {
     let at = match renderers.iter().position(|r| r.dir == dir) {
         Some(at) => at,
         None => {
-            renderers.push(Renderer::new(dir));
+            let mut renderer = Renderer::new(dir);
+            let mut held = HELD_RUNGS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(i) = held.iter().position(|(d, _)| d == dir) {
+                renderer.frames.hold_rung(held.swap_remove(i).1);
+            }
+            renderers.push(renderer);
             renderers.len() - 1
         }
     };
@@ -1000,6 +1011,28 @@ pub fn tune_clock(dir: &Path, now_ms: Option<u64>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(r) = renderers.iter_mut().find(|r| r.dir == dir) {
         r.held_ms = now_ms;
+    }
+}
+
+/// Hold the frame budget of the renderer over `dir` at `rung` (1422):
+/// moving frames at that rung, every frame at rest the full one at once;
+/// with `None` the measured times pick both again. A test that reads
+/// what one frame at rest shows holds it, or how fast the host draws
+/// decides how many frames the picture takes to grow full. Before the
+/// directory's first frame the renderer it makes starts held.
+pub fn hold_rung(dir: &Path, rung: Option<u8>) {
+    let mut renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match renderers.iter_mut().find(|r| r.dir == dir) {
+        Some(r) => r.frames.hold_rung(rung),
+        None => {
+            let mut held = HELD_RUNGS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            held.retain(|(d, _)| d != dir);
+            held.push((dir.to_path_buf(), rung));
+        }
     }
 }
 
