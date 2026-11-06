@@ -269,7 +269,7 @@ A plain build (no flash) is:
 cargo build --release
 ```
 
-(`leviculum-nrf/README.md:23`)
+(The build line: `leviculum-nrf/README.md:23`.)
 
 Flashing goes through `scripts/nrf-flash.sh`: it builds the release
 binary at the fixed build path of `scripts/nrf-rustflags.sh`, in a
@@ -287,7 +287,7 @@ build says that image is not the reproducible one.
 > bsp-t114`: it builds at the fixed path of `scripts/nrf-rustflags.sh`,
 > so a clone of the same commit builds the same bytes, prints the
 > image's sha256, and hands the ELF to `tools/uf2-runner.sh`.
-> (`leviculum-nrf/README.md:23`)
+> (`leviculum-nrf/README.md:23`, quoted whole.)
 
 ### Touch-free vs. manual double-tap
 
