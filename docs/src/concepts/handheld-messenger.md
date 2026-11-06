@@ -421,10 +421,10 @@ The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
 `thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
 m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
 positive control). It words the chats list scene in cells
-(`lines`, `loquax-m9/src/screen.rs:127`) and draws them through
+(`lines`, `loquax-m9/src/screen.rs:133`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
-mousefood (`draw`, `loquax-m9/src/render.rs:64`). Mousefood's own
+mousefood (`draw`, `loquax-m9/src/render.rs:77`). Mousefood's own
 `framebuffer` is off: the cells go straight into the caller's frame, and
 the crate's `framebuffer` feature turns it back on for the board's DMA
 measurement. What the slice settled on the host:
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:387`).
+  (`narrow`, `loquax-m9/src/screen.rs:401`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:332`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:346`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -506,8 +506,8 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   the cursor nine bubbles, opens the line and types an emoji with one
   renderer, and must equal a fresh draw.
 - **What the M9 shows of a model** (`scene`,
-  `loquax-m9/src/screen.rs:110`, and `Look::of`,
-  `loquax-m9/src/screen.rs:88`). The Compact scene, which is the open chat
+  `loquax-m9/src/screen.rs:116`, and `Look::of`,
+  `loquax-m9/src/screen.rs:94`). The Compact scene, which is the open chat
   alone, with the cursor of the pane the keys are in; and the list while
   the keys are on the list. The model's back from the chat moves the keys
   to the list and keeps the chat open, as the terminal's panes do, so a
@@ -672,7 +672,7 @@ draws is the scene the terminal, the window and the phone already draw.
   goes through mousefood into `loquax-m9`'s frame, which keeps the band
   of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:73`), and the
   board sends only that band through the row window (`flush`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:193`): the full frame's 30.8 ms
+  `leviculum-esp/src/bin/thinknode_m9.rs:196`): the full frame's 30.8 ms
   is the first draw's cost, a moved cursor sends two entries. The
   redraw test drives one renderer through four keys and must equal a
   fresh draw, its band flushed into a second frame
@@ -848,16 +848,16 @@ to the page.
 code the phone shows on the board's keys. The controller's answers, one
 ASCII code per press as the board measured (1427), go through the read
 and the driver (`MEASURED`, `Key::of`). The key events go into the pairing
-screen (`Pairing`, `loquax-m9/src/pair.rs:31`). After 20 characters, a
+screen (`Pairing`, `loquax-m9/src/pair.rs:32`). After 20 characters, a
 `9` (not base32) reads "character 21 cannot stand there".
 Backspace takes it back, the remaining 120 characters follow, and Enter
 gives the `HomeCode` the phone showed. The join (`Pairing::join`,
-`loquax-m9/src/pair.rs:64`) then runs over the mesh. The home logs
+`loquax-m9/src/pair.rs:65`) then runs over the mesh. The home logs
 `HOME admitted`, and its store lists the board's identity under the
 name its owner gave the code. The board's own `DEVICE_NAME`, "M9", is
 what it sends, but the home names a device by its code. The screen
 shows the code in fives, wrapped at a group's end to the 53 cells
-(`Pairing::lines`, `loquax-m9/src/pair.rs:70`), and one verdict line.
+(`Pairing::lines`, `loquax-m9/src/pair.rs:71`), and one verdict line.
 
 **The session's heap.** `census::session`
 (`loquax-m9/src/census.rs:253`) is a routine the board can run as it
@@ -902,7 +902,7 @@ group keys run the node's `Action` the way a tap does (`hit`,
 `loquax-m9/src/group.rs:136`), and nothing new enters the model. The
 cursor over the sheet's and the picker's rows is the M9's own, as a
 finger is the phone's: a row index the board keeps beside the model
-(`Look::row`, `loquax-m9/src/screen.rs:65`), back to the first row
+(`Look::row`, `loquax-m9/src/screen.rs:71`), back to the first row
 whenever another screen opens, kept when the sheet's question is
 answered (`press`, `loquax-m9/src/group.rs:249`). The board's key loop
 now goes through `press`; a key no group screen takes goes to the model
@@ -1013,7 +1013,7 @@ the home sends as any message (`/send`). `ask_of`
 (`loquax-m9/src/group.rs:293`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
 The harness test (`the_boards_group_keys_make_join_add_leave_and_delete_on_real_homes`,
-`loquax-android/tests/m9_client.rs:798`) runs it against two real homes
+`loquax-android/tests/m9_client.rs:770`) runs it against two real homes
 on a transport node, each verb a walk of the board's keys:
 
 - as the admin, on its own home: `n`, Anna ticked, Enter, "Seilschaft",
@@ -1092,7 +1092,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
 - **Pixels** is the map core's filler painting the view straight into
   the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:257`); the
   whole screen adds the bar's and the legend's cells and the pins
-  (`Renderer::show`, `loquax-m9/src/render.rs:71`).
+  (`Renderer::show`, `loquax-m9/src/render.rs:84`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
   drawn at four by eight source pixels a cell, encoded into glyphs and
   drawn by ratatui through mousefood. The atlas has two of the
@@ -1143,11 +1143,11 @@ buildings). A draw is the cells first with the picture's rows blank,
 then the map over them, then the pins; ratatui draws only cells that
 changed, so the next map leaves the blank rows alone, and the renderer
 clears its cells when the screen leaves the map
-(`leave_map`, `loquax-m9/src/render.rs:103`), or the list would keep
+(`leave_map`, `loquax-m9/src/render.rs:116`), or the list would keep
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4462`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4461`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1271,7 +1271,7 @@ All targets:
 The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
-a branch in `lines` (`loquax-m9/src/screen.rs:127`) for the scene's
+a branch in `lines` (`loquax-m9/src/screen.rs:133`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:592`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1074`), and its tab in the tab bar the screen
@@ -1415,7 +1415,7 @@ the host; the board half is the reviewer's walk below, nothing was
 flashed in the pass.
 
 **The code, two ways.** Typed: a board without a client record opens on
-the pairing screen (`pair::screen`, `loquax-m9/src/pair.rs:94`), the
+the pairing screen (`pair::screen`, `loquax-m9/src/pair.rs:95`), the
 code in fives as it is typed on the keys with the verdict under it;
 Enter on a whole code that checks takes it, Back leaves for the
 fixture. Written: `lnflash --home <code> --port <tty>`
