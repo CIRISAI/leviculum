@@ -787,6 +787,7 @@ fn main() -> ! {
                 }
                 log.raw(&kbraw::raw_line(ms, &answer[..KB.len]));
                 let mut events = Vec::new();
+                let mut command = None;
                 match KB.read(&answer[..KB.len]) {
                     Read::Idle => {}
                     Read::Mixed => log.line("[KB] ", format_args!("answer=mixed")),
@@ -794,8 +795,24 @@ fn main() -> ! {
                         if let Some(key) = Key::of(code) {
                             log.raw(&keyboard::key_line(ms, code, key));
                             events.extend(key.event());
+                            command = key.command();
                         }
                     }
+                }
+                // A control that runs a command (1440): the chats list, the
+                // compose line, the map. Not on the pairing screen, which
+                // only Back leaves.
+                if let (Some(command), None) = (command, shown.pairing.as_ref()) {
+                    keyboard::run(&mut model, &mut row, command);
+                    redraw(
+                        &mut renderer,
+                        &mut map,
+                        &mut panel,
+                        &model,
+                        row,
+                        &shown,
+                        &mut log,
+                    );
                 }
                 if !events.is_empty() {
                     for event in events {

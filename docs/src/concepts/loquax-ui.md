@@ -517,9 +517,10 @@ on it does:
 - the terminal: `P` in the list or the conversation, a click on the
   list's title (the reader's own name), and the palette's `my code`
   open it as a detail view; `s` there copies the code, Esc closes it;
-- the M9: the house key will open it (1440's role table), but the M9's
-  keyboard names no house key yet (`NAMED_SPECIALS` is empty until the
-  reviewer's key walk), so the cell below says missing.
+- the M9: the house key (provisionally `0x82`, `SPECIALS` in
+  `loquax-m9/src/keyboard.rs`, 1440) leads to the start screen, which
+  is the chats list until the overview exists; the M9 draws no profile
+  yet, so the cell below says missing.
 
 Goldens: `loquax/tests/golden/gui-profile-light.png`,
 `loquax/tests/fixtures/tui_profile.frames`,
@@ -605,7 +606,7 @@ it). A missing cell is the next order.
 | `AddContact` | a friend's code pasted or scanned: the contact | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no way to add a contact |
 | `Group` | New group, Join, the member sheet, Leave, Remove | built (`session.rs`) | built (`gui.rs`) | built (palette) | built (`group.rs`) |
 | `NewConversation` | the bar's pencil: a new chat | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no way to start a chat |
-| `Profile` | a tap or click on the reader's avatar, `P`, `my code` | built (`session.rs`) | built (`gui.rs`) | built (key) | **missing**: the house key opens it (1440's role table); the M9's keys name no house key yet |
+| `Profile` | a tap or click on the reader's avatar, `P`, `my code` | built (`session.rs`) | built (`gui.rs`) | built (key) | **missing**: the house key (provisionally 0x82) leads to the start screen; the M9 draws no profile yet |
 | `ShareCode` | the profile's "Share my address" | built (`ProfileActivity.java`) | built (`gui.rs`) | built (`ui.rs`) | n/a: no clipboard or share sheet |
 | `Name` | the name recipients see | built (`session.rs`) | **missing**: the profile shows the name, nothing sets it | **missing**: the profile shows the name, nothing sets it | **missing**: the name is the pairing's |
 | `Scroll` | the list's cursor up and down | n/a: the list scrolls itself | built (`gui.rs`) | built (key) | built (`keys.rs`) |

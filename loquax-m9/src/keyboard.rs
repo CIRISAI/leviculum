@@ -16,18 +16,33 @@
 //!
 //! So the driver keeps no state: one non-zero read is one press, its code
 //! is a [`Key`], and a key with a name is the [`KeyEvent`] the shared
-//! resolver reads ([`crate::keys::event`]). A key whose code is not named
-//! yet is [`Key::Special`], printed `special_0x86`, and makes no event:
-//! the reviewer's walk (press each key in layout order, read the `KEY`
-//! lines) names it in [`NAMED_SPECIALS`]. Repeat is the controller's: a
+//! resolver reads ([`crate::keys::event`]). Repeat is the controller's: a
 //! code read again is a press again; the driver adds none, because no read
 //! says a key is still down.
+//!
+//! The keys that are no character (1440) are the M9's own controls above
+//! the QWERTY block, left to right (Lew's photo of 2026-11-06): a key with
+//! two speech bubbles; a house above a square speech bubble; the ring with
+//! four directions and a centre press; a back arrow above a position pin;
+//! a map key. Each has a [`Role`], the one a WhatsApp and Google Maps user
+//! expects ([`SPECIALS`]). Which code is which key is not proven yet: the
+//! bench saw `0xb4`..`0xb7` come as a group, so they are the ring in the
+//! CardKB order (left, up, down, right), `0x81`..`0x86` the six symbol keys
+//! in layout order, and `0x90`, never pressed, the ring's centre. The
+//! reviewer's walk presses them in the fixed order bubbles, house, square
+//! bubble, back, pin, map, then ring left, up, down, right, centre, reads
+//! the `KEY` lines, and the table is corrected from that. A code nothing
+//! names is [`Key::Special`], printed `special_0x91`, and makes no event.
 
 use alloc::string::String;
 use core::fmt::Write;
 
-use leviculum_ui::input::KeyEvent;
+use alloc::vec::Vec;
+use leviculum_ui::commands::Command;
+use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+use loquax::ui::{update, UiEffect, UiEvent, UiModel};
 
+use crate::field::Field;
 use crate::keys::{event, M9Key};
 
 /// How often the firmware polls while the panel is lit: below the 15 ms
@@ -36,47 +51,144 @@ use crate::keys::{event, M9Key};
 /// (`0x65` then `0x83` at 9,308,471 and 9,308,481 ms).
 pub const POLL_MS: u32 = 10;
 
-/// The codes the walk has named among those that are no character. Empty
-/// until the reviewer's walk reads which of `0x81`..`0x86`, `0x90` and
-/// `0xb4`..`0xb7` are the arrows, Back and the side buttons: nothing here
-/// takes them from a foreign keyboard's table.
-pub const NAMED_SPECIALS: &[(u8, M9Key)] = &[];
+/// What an M9 control does (1440), by the key's symbol: the roles a
+/// user who knows WhatsApp and Google Maps reads off it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Two speech bubbles: the chats list, from anywhere.
+    Chats,
+    /// The house: the start screen, the mailbox's state in its top bar.
+    /// Until the overview screen exists that is the chats list.
+    Home,
+    /// The square speech bubble: a new message, to the contact under the
+    /// list's cursor, in its compose line.
+    NewMessage,
+    /// The back arrow: back one level.
+    Back,
+    /// The position pin: share my location. Named only until the M9 draws
+    /// the position sheet; it does nothing yet, rather than open a question
+    /// the M9 cannot show.
+    Pin,
+    /// The map key: the map tab.
+    Map,
+    /// The ring: move the selection, switch or page, select.
+    RingLeft,
+    RingUp,
+    RingDown,
+    RingRight,
+    RingCentre,
+}
+
+impl Role {
+    /// The name a `KEY` line gives it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Chats => "chats",
+            Self::Home => "home",
+            Self::NewMessage => "new_message",
+            Self::Back => "back",
+            Self::Pin => "pin",
+            Self::Map => "map",
+            Self::RingLeft => "ring_left",
+            Self::RingUp => "ring_up",
+            Self::RingDown => "ring_down",
+            Self::RingRight => "ring_right",
+            Self::RingCentre => "ring_centre",
+        }
+    }
+
+    /// The key it is to the shared key table, when it is one: the ring's
+    /// arrows and centre (Enter: select, open, in the compose line send),
+    /// and Back.
+    pub fn key(self) -> Option<M9Key> {
+        Some(match self {
+            Self::Back => M9Key::Back,
+            Self::RingLeft => M9Key::Left,
+            Self::RingUp => M9Key::Up,
+            Self::RingDown => M9Key::Down,
+            Self::RingRight => M9Key::Right,
+            Self::RingCentre => M9Key::Enter,
+            Self::Chats | Self::Home | Self::NewMessage | Self::Pin | Self::Map => return None,
+        })
+    }
+
+    /// The command it runs, as a GUI's menu runs one, when it is no key:
+    /// the terminal's palette verbs for the same roles.
+    pub fn command(self) -> Option<Command> {
+        match self {
+            Self::Chats | Self::Home => Some(Command::FocusConversations),
+            Self::NewMessage => Some(Command::FocusCompose),
+            Self::Map => Some(Command::Map),
+            _ => None,
+        }
+    }
+}
+
+/// The codes that are no character, and their roles: provisional, by the
+/// most plausible layout, until the reviewer's walk proves them
+/// (module docs).
+pub const SPECIALS: [(u8, Role); 11] = [
+    (0x81, Role::Chats),
+    (0x82, Role::Home),
+    (0x83, Role::NewMessage),
+    (0x84, Role::Back),
+    (0x85, Role::Pin),
+    (0x86, Role::Map),
+    (0xb4, Role::RingLeft),
+    (0xb5, Role::RingUp),
+    (0xb6, Role::RingDown),
+    (0xb7, Role::RingRight),
+    (0x90, Role::RingCentre),
+];
 
 /// What one code is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     /// A key the M9 screens know.
     Named(M9Key),
+    /// One of the M9's own controls.
+    Role(Role),
     /// A code the controller sends that nothing names yet.
     Special(u8),
 }
 
 impl Key {
     /// The key `code` is: printable ASCII a character, `0x0d` Enter,
-    /// `0x08` Backspace, a code of [`NAMED_SPECIALS`] its key, any other
+    /// `0x08` Backspace, a code of [`SPECIALS`] its role, any other
     /// [`Key::Special`]. Zero is no key (an idle read).
     pub fn of(code: u8) -> Option<Self> {
-        Self::of_in(code, NAMED_SPECIALS)
+        Self::of_in(code, &SPECIALS)
     }
 
-    fn of_in(code: u8, named: &[(u8, M9Key)]) -> Option<Self> {
+    fn of_in(code: u8, named: &[(u8, Role)]) -> Option<Self> {
         Some(match code {
             0x00 => return None,
             0x08 => Self::Named(M9Key::Backspace),
             0x0d => Self::Named(M9Key::Enter),
             0x20..=0x7e => Self::Named(M9Key::Char(char::from(code))),
             _ => match named.iter().find(|(c, _)| *c == code) {
-                Some((_, key)) => Self::Named(*key),
+                Some((_, role)) => Self::Role(*role),
                 None => Self::Special(code),
             },
         })
     }
 
-    /// The key event the M9 screens read, none for a key not named yet.
+    /// The key event the M9 screens read: a key's, a role's that is a key
+    /// ([`Role::key`]); none for a role that runs a command, nor for a
+    /// code not named yet.
     pub fn event(self) -> Option<KeyEvent> {
         match self {
             Self::Named(key) => Some(event(key)),
+            Self::Role(role) => role.key().map(event),
             Self::Special(_) => None,
+        }
+    }
+
+    /// The command a role runs ([`Role::command`]), handed to [`run`].
+    pub fn command(self) -> Option<Command> {
+        match self {
+            Self::Role(role) => role.command(),
+            _ => None,
         }
     }
 
@@ -94,6 +206,7 @@ impl Key {
             Self::Named(M9Key::Down) => write!(out, "down"),
             Self::Named(M9Key::Left) => write!(out, "left"),
             Self::Named(M9Key::Right) => write!(out, "right"),
+            Self::Role(role) => write!(out, "{}", role.name()),
             Self::Special(code) => write!(out, "special_{code:#04x}"),
         };
         out
@@ -106,6 +219,20 @@ pub fn key_line(ms: u32, code: u8, key: Key) -> String {
     let mut out = String::with_capacity(40);
     let _ = write!(out, "KEY {ms} code={code:#04x} name={}", key.name());
     out
+}
+
+/// Run a role's command on `model`, the M9's cursor `row` back at the
+/// top: the chats list closes the map first, so it is reached from
+/// anywhere.
+pub fn run(model: &mut UiModel<Field>, row: &mut usize, command: Command) -> Vec<UiEffect> {
+    let mut effects = Vec::new();
+    if command == Command::FocusConversations && crate::map::shown(model) {
+        let back = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        effects.extend(update(model, UiEvent::Key(back)));
+    }
+    effects.extend(update(model, UiEvent::Run(command)));
+    *row = 0;
+    effects
 }
 
 #[cfg(test)]
@@ -131,26 +258,97 @@ mod tests {
         assert_eq!(Key::of(0x00), None, "an idle read is no key");
     }
 
-    /// The codes the capture saw that are no character stay unnamed until
-    /// the walk, and make no event; the positive control names one through
-    /// the same lookup and gets its event.
+    /// The provisional table (1440): every code the capture saw that is
+    /// no character has a role, in the walk's order, and a code nothing
+    /// names stays a special that makes no event.
     #[test]
-    fn an_unnamed_special_makes_no_event_and_a_named_one_does() {
-        for code in [
-            0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x90, 0xb4, 0xb5, 0xb6, 0xb7,
-        ] {
+    fn the_specials_have_their_provisional_roles() {
+        let walk: Vec<(u8, &str)> = SPECIALS
+            .iter()
+            .map(|(code, role)| (*code, role.name()))
+            .collect();
+        assert_eq!(
+            walk,
+            [
+                (0x81, "chats"),
+                (0x82, "home"),
+                (0x83, "new_message"),
+                (0x84, "back"),
+                (0x85, "pin"),
+                (0x86, "map"),
+                (0xb4, "ring_left"),
+                (0xb5, "ring_up"),
+                (0xb6, "ring_down"),
+                (0xb7, "ring_right"),
+                (0x90, "ring_centre"),
+            ]
+        );
+        let code_of = |key: KeyEvent| key.code;
+        let ring = |code: u8| Key::of(code).and_then(Key::event).map(code_of);
+        assert_eq!(ring(0xb4), Some(KeyCode::Left));
+        assert_eq!(ring(0xb5), Some(KeyCode::Up));
+        assert_eq!(ring(0xb6), Some(KeyCode::Down));
+        assert_eq!(ring(0xb7), Some(KeyCode::Right));
+        assert_eq!(ring(0x90), Some(KeyCode::Enter));
+        assert_eq!(ring(0x84), Some(KeyCode::Esc));
+        let command = |code: u8| Key::of(code).and_then(Key::command);
+        assert_eq!(command(0x81), Some(Command::FocusConversations));
+        assert_eq!(command(0x82), Some(Command::FocusConversations));
+        assert_eq!(command(0x83), Some(Command::FocusCompose));
+        assert_eq!(command(0x86), Some(Command::Map));
+        let pin = Key::of(0x85).expect("a key");
+        assert_eq!((pin.event(), pin.command()), (None, None));
+        for code in [0x91, 0x80, 0xff] {
             let key = Key::of(code).expect("a non-zero code is a key");
             assert_eq!(key, Key::Special(code));
-            assert_eq!(key.event(), None);
+            assert_eq!((key.event(), key.command()), (None, None));
         }
-        assert_eq!(
-            Key::of(0x86).map(Key::name).as_deref(),
-            Some("special_0x86")
-        );
-        let named = Key::of_in(0xb5, &[(0xb5, M9Key::Up)]).expect("a key");
-        assert_eq!(named, Key::Named(M9Key::Up));
-        let up = named.event().expect("a named key is an event");
-        assert_eq!((up.code, up.kind), (KeyCode::Up, KeyEventKind::Press));
+        let up = Key::of(0xb5).and_then(Key::event).expect("an event");
+        assert_eq!(up.kind, KeyEventKind::Press);
+    }
+
+    /// Each role moves the M9's screen as its symbol says, on the fixture
+    /// the board opens on: the ring down moves the list's cursor, its
+    /// centre opens the chat, the chats key and the house bring the list
+    /// back from the chat and from the map, the square bubble opens the
+    /// compose line of the contact under the cursor, the map key the map,
+    /// the back arrow leaves the chat.
+    #[test]
+    fn every_role_moves_the_screen_from_the_list() {
+        use loquax::ui::Pane;
+        let press = |model: &mut UiModel<Field>, row: &mut usize, code: u8| {
+            let key = Key::of(code).expect("a key");
+            if let Some(event) = key.event() {
+                crate::group::press(model, row, &event);
+            }
+            if let Some(command) = key.command() {
+                run(model, row, command);
+            }
+        };
+        let mut row = 0;
+        let mut model = crate::fixture::model();
+        assert_eq!(model.focus, Pane::Conversations);
+        let at = model.selected;
+        press(&mut model, &mut row, 0xb6);
+        assert_ne!(model.selected, at, "ring down moves the list's cursor");
+        press(&mut model, &mut row, 0xb5);
+        assert_eq!(model.selected, at, "ring up moves it back");
+        press(&mut model, &mut row, 0x90);
+        assert_eq!(model.focus, Pane::Messages, "the centre opens the chat");
+        press(&mut model, &mut row, 0x84);
+        assert_eq!(model.focus, Pane::Conversations, "back leaves it");
+        press(&mut model, &mut row, 0x90);
+        press(&mut model, &mut row, 0x81);
+        assert_eq!(model.focus, Pane::Conversations, "the bubbles: the list");
+        press(&mut model, &mut row, 0x83);
+        assert_eq!(model.focus, Pane::Compose, "the square bubble: compose");
+        press(&mut model, &mut row, 0x82);
+        assert_eq!(model.focus, Pane::Conversations, "the house: the list");
+        press(&mut model, &mut row, 0x86);
+        assert!(crate::map::shown(&model), "the map key: the map");
+        press(&mut model, &mut row, 0x81);
+        assert!(!crate::map::shown(&model), "the bubbles close the map");
+        assert_eq!(model.focus, Pane::Conversations);
     }
 
     #[test]
@@ -160,6 +358,8 @@ mod tests {
         assert_eq!(line(0x20), "KEY 9308251 code=0x20 name=space");
         assert_eq!(line(0x0d), "KEY 9308251 code=0x0d name=enter");
         assert_eq!(line(0x08), "KEY 9308251 code=0x08 name=backspace");
-        assert_eq!(line(0xb7), "KEY 9308251 code=0xb7 name=special_0xb7");
+        assert_eq!(line(0xb7), "KEY 9308251 code=0xb7 name=ring_right");
+        assert_eq!(line(0x81), "KEY 9308251 code=0x81 name=chats");
+        assert_eq!(line(0x91), "KEY 9308251 code=0x91 name=special_0x91");
     }
 }

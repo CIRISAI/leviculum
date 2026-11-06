@@ -581,11 +581,14 @@ this slice.
   keyboard controller, measured"). 1427 replaced the matrix driver with
   the measured one; the scan frame, the `KB` line and the test layout are
   gone.
-- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:58`) keeps no
+- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:159`) keeps no
   state: a non-zero code is one press, printable ASCII a character,
-  `0x0d` Enter, `0x08` Backspace, a code of `NAMED_SPECIALS`
-  (`loquax-m9/src/keyboard.rs:43`) its named key, any other
-  `special_0x..`, which makes no key event until the walk names it.
+  `0x0d` Enter, `0x08` Backspace, a code of `SPECIALS`
+  (`loquax-m9/src/keyboard.rs:130`) its control's role, any other
+  `special_0x..`, which makes no key event. A role is a key of the
+  shared table (the ring and Back) or a palette command run as a GUI's
+  menu runs one (the chats list, the compose line, the map;
+  `keyboard::run`), provisional until the walk proves the codes (1440).
   Repeat is the controller's, if it has any: a code read again is a
   press again. What comes out is the key events the table of slices one
   and two resolves; the M9 still binds nothing of its own.

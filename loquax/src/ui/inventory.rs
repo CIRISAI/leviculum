@@ -631,7 +631,7 @@ pub const INVENTORY: &[Row] = &[
         window: at(GUI, "Intent::Profile"),
         terminal: KEY,
         m9: missing(
-            "the house key opens it (1440's role table); the M9's keys name no house key yet",
+            "the house key (provisionally 0x82) leads to the start screen; the M9 draws no profile yet",
         ),
     },
     Row {

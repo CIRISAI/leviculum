@@ -124,18 +124,19 @@ mod tests {
     /// The first 60 presses of the bench capture, through the measured
     /// protocol and the driver, name the keys Lew pressed: the top letter
     /// row, the home row backwards, the bottom row, then the keys that
-    /// are no character, which stay `special_` until the walk.
+    /// are no character, by their provisional roles (1440,
+    /// [`crate::keyboard::SPECIALS`]) until the walk proves them.
     #[test]
     fn the_bench_capture_replays_to_its_key_names() {
         let names = names(CAPTURE);
-        let want = "q w e special_0x83 r t y special_0xb6 u enter i o p special_0x84 \
+        let want = "q w e new_message r t y ring_down u enter i o p back \
                     i u y t g f d s z x c v b n m m j h g t \
-                    special_0x81 special_0x83 special_0x82 \
-                    special_0x86 special_0x86 special_0x86 special_0x86 \
-                    special_0xb7 special_0xb7 special_0xb6 special_0xb4 special_0xb5 \
-                    special_0x86 special_0x85 special_0x84 special_0x86 e d \
-                    special_0x83 special_0x82 special_0x83 space special_0x90 \
-                    special_0x83 special_0x86 special_0x86";
+                    chats new_message home \
+                    map map map map \
+                    ring_right ring_right ring_down ring_left ring_up \
+                    map pin back map e d \
+                    new_message home new_message space ring_centre \
+                    new_message map map";
         assert_eq!(names.join(" "), want);
         assert_eq!(names.len(), 60);
     }

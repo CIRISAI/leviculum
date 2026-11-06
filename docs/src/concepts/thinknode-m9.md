@@ -368,9 +368,15 @@ and `distinct-20261104.txt`):
   controller resolves its layers itself. No upper-case letter was
   pressed in the capture.
 - **The keys that are no character** sent `0x81`..`0x86`, `0x90` and
-  `0xb4`..`0xb7`. Which is which (the arrows, Back, Shift, Sym, the side
-  buttons) is the walk's to read, below; until then the image names them
-  `special_0x86` and gives them no action.
+  `0xb4`..`0xb7`. Since 1440 they carry provisional roles by the most
+  plausible layout (`SPECIALS`, `loquax-m9/src/keyboard.rs`): the ring
+  `0xb4` left, `0xb5` up, `0xb6` down, `0xb7` right (the CardKB order,
+  they came as a group), `0x90` its centre (Enter); `0x81`..`0x86` the
+  six symbol keys left to right, top before bottom: two bubbles (the
+  chats list), house (the start screen), square bubble (a new message to
+  the contact under the cursor), back arrow (back), position pin (named,
+  no action until the M9 draws the position sheet), map (the map tab).
+  The walk below proves or corrects the table.
 - **No key-up, no state byte.** No read carries a release. The last byte
   of the `KB` line the provisional matrix decoder printed beside each
   answer (`86868686868602`) looked like a state byte; it is the code's
@@ -381,11 +387,14 @@ and `distinct-20261104.txt`):
 
 **The walk** (for the reviewer, one flash of the current image): attach
 the reader, press each key once in layout order, row by row from the top
-left, then each side button, then hold one letter for two seconds and
-press one letter with Shift and one with Sym. Each press prints `KBRAW
-<ms> <code x8>` and then `KEY <ms> code=0x6b name=k`; a `special_0x..`
-name is a key to enter in `NAMED_SPECIALS` (`loquax-m9/src/keyboard.rs`),
-and a held letter's lines tell whether the controller repeats.
+left, then the controls in the fixed order bubbles, house, square bubble,
+back, pin, map, ring left, up, down, right, centre, then hold one letter
+for two seconds and press one letter with Shift and one with Sym. Each
+press prints `KBRAW <ms> <code x8>` and then `KEY <ms> code=0x6b name=k`;
+a control prints its provisional role (`name=chats`, `name=ring_up`),
+which the walk checks against the order pressed, and a `special_0x..`
+name is a code `SPECIALS` (`loquax-m9/src/keyboard.rs`) does not know
+yet. A held letter's lines tell whether the controller repeats.
 
 ### GNSS
 
