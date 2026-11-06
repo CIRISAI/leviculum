@@ -355,3 +355,25 @@ fn forwarded_links_are_metered_and_a_cap_drops_above_it() {
     assert_eq!(after.link_id, *link.as_bytes());
     assert_eq!(after.destination_hash, *dest.as_bytes());
 }
+
+/// leviculum#97: closing everything takes a link still establishing too, the
+/// one a host's own close pass cannot have seen.
+#[test]
+fn close_all_links_takes_one_still_establishing() {
+    let mut mesh = Mesh::new();
+    let relay = mesh.relay_id(0);
+    let (key, dest) = (mesh.key, mesh.dest);
+    let (_, out) = mesh.a.connect_via(dest, &key, relay, None).unwrap();
+    let fwd = packets(&mesh.c[0].handle_packet(InterfaceId(mesh.c_a[0]), &packets(&out)[0]));
+    let _ = mesh.b.handle_packet(InterfaceId(mesh.b_to[0]), &fwd[0]);
+    assert_eq!(mesh.b.link_list().len(), 1, "landing on B");
+    assert_eq!(mesh.a.link_list().len(), 1, "pending on A");
+    let closed = mesh.b.close_all_links();
+    assert!(closed
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::LinkClosed { .. })));
+    assert!(mesh.b.link_list().is_empty());
+    let _ = mesh.a.close_all_links();
+    assert!(mesh.a.link_list().is_empty());
+}

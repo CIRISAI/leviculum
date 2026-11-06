@@ -20,7 +20,7 @@ use crate::sync_ext::MutexRecover;
 
 /// What one run of the node owns. Empty (all `None`) while stopped.
 pub(crate) struct RunState {
-    pub(crate) shutdown_tx: Option<watch::Sender<bool>>,
+    pub(crate) shutdown_tx: Option<watch::Sender<StopSignal>>,
     pub(crate) runner_handle: Option<tokio::task::JoinHandle<()>>,
     /// The node's own runtime, hosting the event loop and every interface
     /// task. Shut down by `stop`, which is what closes every socket.
@@ -95,4 +95,20 @@ impl ReticulumNode {
     pub(crate) fn action_dispatch_tx(&self) -> mpsc::Sender<TickOutput> {
         self.run.lock_recover().action_dispatch_tx.clone()
     }
+}
+
+/// What the event loop is told about stopping (leviculum#97).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopSignal {
+    /// Keep running.
+    Run,
+    /// Stop; links stay in the table, as [`ReticulumNode::stop`] always left
+    /// them.
+    ///
+    /// [`ReticulumNode::stop`]: super::ReticulumNode::stop
+    Stop,
+    /// Stop, closing every link last thing (`stop_shared`): the loop is the
+    /// only thing that can still land one, so once it has closed them
+    /// nothing is left frozen for a host to find on a stopped node.
+    StopClosingLinks,
 }

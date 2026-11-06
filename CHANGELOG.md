@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.34.0+ciris.1] — CIRIS fork
+
+### Fixed
+
+- `stop_shared` closes every link as the event loop exits (leviculum#97),
+  established or still establishing, with close frames and `LinkClosed`
+  events. A link landing after the host's last close pass no longer stays
+  frozen on a stopped node. `stop(&mut self)` still leaves links in the table.
+
 ## [0.33.0+ciris.1] — CIRIS fork
 
 Steering, metering and live-media asks from CIRISEdge for the CIRIS mesh

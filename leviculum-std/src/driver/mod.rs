@@ -1274,7 +1274,7 @@ struct EventLoopChannels {
     /// interface only; see [`crate::interfaces::PeerEvent`] for why both
     /// share one ordered channel.
     peer_event_rx: mpsc::Receiver<(InterfaceId, crate::interfaces::PeerEvent)>,
-    shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<lifecycle::StopSignal>,
 }
 
 /// Runtime auto-connect wiring handed to the event loop (Codeberg #32).
@@ -1754,7 +1754,7 @@ impl Drop for ReticulumNode {
             counter.end();
         }
         if let Some(tx) = run.shutdown_tx {
-            let _ = tx.send(true);
+            let _ = tx.send(lifecycle::StopSignal::Stop);
         }
         if let Some(handle) = run.runner_handle {
             let deadline = std::time::Instant::now() + DROP_FLUSH_BOUND;
@@ -2242,7 +2242,7 @@ impl ReticulumNode {
             );
         }
 
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(lifecycle::StopSignal::Run);
         run.shutdown_tx = Some(shutdown_tx);
 
         // Channel for dispatching TickOutput from outside the event loop.
@@ -2688,16 +2688,24 @@ impl ReticulumNode {
     /// This signals the event loop to stop, waits for completion, and persists
     /// known destinations to disk.
     pub async fn stop(&mut self) -> Result<(), Error> {
-        self.stop_shared().await
+        self.stop_run(lifecycle::StopSignal::Stop).await
     }
 
     /// [`stop`](Self::stop) through a shared handle (+ciris, leviculum#90).
+    /// Unlike `stop`, it closes every link as the event loop exits, close
+    /// frames and `LinkClosed` events included, so a link that landed after
+    /// the host's last look is not left frozen on a stopped node
+    /// (leviculum#97).
     /// Returns once the event loop has exited, every interface socket and
     /// listener is closed, and the traffic-counter thread has ended. Calls
     /// that need a running node then fail as not running until the next
     /// [`start_shared`](Self::start_shared). Stopping a stopped node is a
     /// no-op.
     pub async fn stop_shared(&self) -> Result<(), Error> {
+        self.stop_run(lifecycle::StopSignal::StopClosingLinks).await
+    }
+
+    async fn stop_run(&self, signal: lifecycle::StopSignal) -> Result<(), Error> {
         // Take the whole run out under the lock, then tear it down without
         // it: the waits below are awaits (leviculum#90).
         let run = {
@@ -2708,7 +2716,7 @@ impl ReticulumNode {
 
         // Signal shutdown
         if let Some(tx) = run.shutdown_tx {
-            let _ = tx.send(true);
+            let _ = tx.send(signal);
         }
 
         // Wait for runner to finish
@@ -6018,7 +6026,8 @@ async fn run_event_loop(
 
             // Branch 4: Shutdown — bounded graceful drain (Codeberg #77).
             _ = shutdown.changed() => {
-                if *shutdown.borrow() {
+                let stop_signal = *shutdown.borrow();
+                if stop_signal != lifecycle::StopSignal::Run {
                     tracing::info!("Node shutdown requested");
                     // Close the intake first (L-0058). The flush below awaits,
                     // and an open channel would accept outputs during it that
@@ -6096,6 +6105,31 @@ async fn run_event_loop(
                             &completions,
             &mut assembler,
             &plane_counters,
+                            &mut breakers,
+                            core_processor.as_mut(),
+                        );
+                    }
+                    // leviculum#97: a link that landed after the host's last
+                    // look is closed here, close frame and LinkClosed included;
+                    // nothing is read from an interface after this point.
+                    if stop_signal == lifecycle::StopSignal::StopClosingLinks {
+                        let output = inner.lock_recover().close_all_links();
+                        let _ = dispatch_output(
+                            output,
+                            &mut registry,
+                            event_sink.as_mut(),
+                            &inner,
+                            &mut retry_queues,
+                            &mut retry_queue_warned,
+                            &mut retry_queue_max_depth,
+                            &ifac_configs,
+                            remote_mgmt.as_ref(),
+                            discovery_storage.as_deref(),
+                            discovery_network_identity.as_deref(),
+                            &mut discovery_heard_ifac,
+                            &completions,
+                            &mut assembler,
+                            &plane_counters,
                             &mut breakers,
                             core_processor.as_mut(),
                         );
@@ -11562,7 +11596,7 @@ mod tests {
     /// optional disabled, and the senders held open for the test's duration.
     struct FlushLoopHarness {
         action_tx: mpsc::Sender<TickOutput>,
-        shutdown_tx: watch::Sender<bool>,
+        shutdown_tx: watch::Sender<lifecycle::StopSignal>,
         loop_handle: tokio::task::JoinHandle<()>,
         out_rx: mpsc::Receiver<crate::interfaces::OutgoingPacket>,
         _in_tx: mpsc::Sender<IncomingPacket>,
@@ -11615,7 +11649,7 @@ mod tests {
         let (tunnel_tx, tunnel_rx) = mpsc::channel(1);
         let (remove_tx, remove_rx) = mpsc::channel(1);
         let (peer_event_tx, peer_event_rx) = mpsc::channel(1);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(lifecycle::StopSignal::Run);
 
         let loop_handle = tokio::spawn(run_event_loop(
             core,
@@ -11792,7 +11826,10 @@ mod tests {
         }
         assert_eq!(harness.out_rx.len(), 1, "the first frame is queued");
 
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         // Let the loop take the shutdown branch and park in the flush.
         for _ in 0..10 {
             tokio::task::yield_now().await;
@@ -11825,7 +11862,10 @@ mod tests {
         let mut harness = spawn_flush_loop(Arc::clone(&core), 3600);
 
         let permit = harness.action_tx.reserve().await.expect("loop is live");
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
@@ -11934,7 +11974,10 @@ mod tests {
             .count();
         assert_eq!(stale, 2, "one stale line per dropped event");
 
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         harness.loop_handle.await.expect("loop exits cleanly");
     }
 
@@ -11967,7 +12010,10 @@ mod tests {
         assert_eq!(frame.data, vec![0xAB; 32].into());
 
         gate.release_tx.send(()).expect("blocked hook receives");
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         harness.loop_handle.await.expect("loop exits cleanly");
     }
 
@@ -12032,7 +12078,10 @@ mod tests {
         .expect("the announce must be processed while the flush write is in flight");
 
         gate.release_tx.send(()).expect("blocked hook receives");
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         harness.loop_handle.await.expect("loop exits cleanly");
     }
 
@@ -12092,7 +12141,10 @@ mod tests {
             "the path must carry the peer link the announce arrived through"
         );
 
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         harness.loop_handle.await.expect("loop exits cleanly");
     }
 
@@ -12129,7 +12181,10 @@ mod tests {
             .expect("hook channel open");
         assert_eq!(second, 2);
 
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         harness.loop_handle.await.expect("loop exits cleanly");
     }
 
@@ -12147,7 +12202,10 @@ mod tests {
         let mut harness = spawn_flush_loop(Arc::clone(&core), 1);
         gate.entered_rx.recv().await.expect("flush begins");
 
-        harness.shutdown_tx.send(true).expect("loop is live");
+        harness
+            .shutdown_tx
+            .send(lifecycle::StopSignal::Stop)
+            .expect("loop is live");
         assert!(
             tokio::time::timeout(Duration::from_millis(300), &mut harness.loop_handle)
                 .await

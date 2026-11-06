@@ -157,6 +157,17 @@ pub(crate) struct LinkTelemetry {
 }
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
+    /// Close every link in the table, established or still establishing
+    /// (leviculum#97), as [`close_link`](Self::close_link) closes one.
+    pub fn close_all_links(&mut self) -> crate::transport::TickOutput {
+        let ids: Vec<LinkId> = self.links.keys().copied().collect();
+        let mut output = crate::transport::TickOutput::empty();
+        for id in ids {
+            output.merge(self.close_link(&id));
+        }
+        output
+    }
+
     /// Every link in the table, live or establishing, with its role, state,
     /// age and idle time (leviculum#77).
     pub fn link_list(&self) -> Vec<LinkInfo> {
