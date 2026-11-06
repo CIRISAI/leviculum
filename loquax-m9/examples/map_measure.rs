@@ -12,7 +12,8 @@
 //! ```
 //!
 //! Each region is viewed at its centre at zooms 13 to 15 over the M9's
-//! picture, 318 x 210 pixels (53 x 21 cells). A row is the median of 50
+//! picture, 320 x 180 pixels (32 x 9 cells of the 10 x 20 atlas; 318 x 210
+//! and 53 x 21 when 1375 measured, in the 6 x 10). A row is the median of 50
 //! runs after one warm-up; a pan is two views an eighth apart drawn in
 //! turn, so ratatui's diff sees what a key that pans gives it. Host times
 //! are upper bounds for nothing: the board is about twenty times slower

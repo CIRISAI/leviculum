@@ -80,7 +80,7 @@ fn the_map_pins_come_from_shares_an_announce_and_the_gnss_fix() {
     assert!(without.map_pins().iter().all(|p| p.peer != OWN));
 }
 
-/// The model's view is the picture's pixels: 53 x 21 cells of 6 x 10.
+/// The model's view is the picture's pixels: 32 x 9 cells of 10 x 20.
 #[test]
 fn the_view_is_the_picture_in_pixels() {
     let model = Screen::Map.model();

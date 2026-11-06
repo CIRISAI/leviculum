@@ -9,7 +9,9 @@
 //! frames into [`frame::Frame`] and pins them as PNG goldens
 //! (`tests/golden.rs`); the board will draw them into its panel.
 //!
-//! - [`screen`]: the scene as styled lines, 53 x 24 cells, the chats list
+//! - [`font`]: the 10 x 20 atlas the cells are set in, 32 x 12 of them,
+//!   and what a cell measures on the panel (1428).
+//! - [`screen`]: the scene as styled lines, 32 x 12 cells, the chats list
 //!   and the delivery marks on their ASCII ladder (the atlas has no tick),
 //!   and which scene and cursor a model shows.
 //! - [`chat`]: the open chat under its bar, the bubbles and the compose
@@ -47,6 +49,7 @@ pub mod chat;
 pub mod dump;
 pub mod field;
 pub mod fixture;
+pub mod font;
 pub mod frame;
 pub mod group;
 pub mod home;

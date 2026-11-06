@@ -39,8 +39,9 @@ leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", default-features = fa
 # ratatui without a backend: mousefood is the backend. The 2026-10-25
 # decision (docs/src/concepts/gui-toolkit.md, "Decision").
 ratatui = { version = "0.30.2", default-features = false }
-# `fonts` is the Unicode 6x10 atlas (umlauts, Greek, Cyrillic, the box
-# runs): 53 x 24 cells on the 320 x 240 panel. Not `framebuffer`, above.
+# `fonts` are the Unicode atlases (umlauts, Greek, Cyrillic, the box
+# runs); the M9 sets its cells in the 10x20, 32 x 12 on the 320 x 240
+# panel (src/font.rs, 1428). Not `framebuffer`, above.
 mousefood = { version = "0.5.3", default-features = false, features = ["fonts"] }
 embedded-graphics = "0.8"
 # The map (slice seven, 1375): the model's view drawn by the map core's

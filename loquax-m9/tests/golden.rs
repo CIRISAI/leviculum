@@ -34,6 +34,7 @@ use loquax::ui::strings::Lang;
 use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel, NONE_OPEN};
 use loquax::when::WallTime;
 use loquax_m9::field::Field;
+use loquax_m9::font::CELL_PX;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
 use loquax_m9::kbraw::{self, Read, MEASURED};
 use loquax_m9::keyboard::Key;
@@ -180,8 +181,9 @@ fn a_moved_timestamp_moves_its_row_and_nothing_else() {
     when.unix_secs -= 2 * 86_400;
     let (top, bottom) = changed_rows(&draw(&scene), &draw(&moved))
         .unwrap_or_else(|| panic!("moving {at:?}'s time changed no pixel"));
-    // The top bar is one cell row of 10 px, each entry ENTRY_ROWS more.
-    let band = (10 + row * ENTRY_ROWS * 10)..(10 + (row + 1) * ENTRY_ROWS * 10);
+    // The top bar is one cell row, each entry ENTRY_ROWS more.
+    let cell = usize::from(CELL_PX.1);
+    let band = (cell + row * ENTRY_ROWS * cell)..(cell + (row + 1) * ENTRY_ROWS * cell);
     assert!(
         band.contains(&top) && band.contains(&bottom),
         "the change is in pixel rows {top}..={bottom}, the row's band is {band:?}"
@@ -531,17 +533,47 @@ fn a_group_chat_is_the_golden_frame() {
     let lines = screen::lines(&scene, &look, COLS, ROWS);
     let rows: Vec<String> = lines.iter().map(row_text).collect();
     let has = |words: &str| rows.iter().any(|r| r.contains(words));
+    // The last screen, twelve rows: the newest lines from the bottom up.
     for words in [
         "Anna",
         "Bob",
-        "Brot ist alle",
-        "Ich bring welches mit ?",
         "Bis gleich",
         "Wer kommt noch?",
         "arrived late",
         "Ich komme um acht",
     ] {
         assert!(has(words), "{words:?} is not on the screen: {rows:#?}");
+    }
+    // The digest's lines stand above it, where the cursor scrolls: they
+    // are not on the last screen, and with the cursor on the digest, or
+    // on Anna's next line (the digest's lines share one message's key, so
+    // the cursor stands on its first), each is.
+    for (words, body) in [
+        ("Brot ist alle", "Brot ist alle"),
+        ("Ich bring welches mit ?", "Bis gleich"),
+    ] {
+        let key = scene
+            .chat
+            .as_ref()
+            .into_iter()
+            .flat_map(|chat| &chat.groups)
+            .flat_map(|group| &group.bubbles)
+            .find(|node| node.bubble.body.contains(body))
+            .map(|node| node.bubble.key);
+        assert!(key.is_some(), "{body:?} is a bubble");
+        let up = Look {
+            cursor: key,
+            ..look
+        };
+        let above: Vec<String> = screen::lines(&scene, &up, COLS, ROWS)
+            .iter()
+            .map(row_text)
+            .collect();
+        assert!(!has(words), "{words:?} fits the last screen too: {rows:#?}");
+        assert!(
+            above.iter().any(|r| r.contains(words)),
+            "{words:?} is not on the screen at its cursor: {above:#?}"
+        );
     }
     let note = rows
         .iter()

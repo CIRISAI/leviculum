@@ -6,7 +6,7 @@
 //! the join the board's executor performs ([`loquax::home::ask::Ask::join`]).
 //!
 //! What the screen shows is [`Pairing::lines`]: the code typed so far in
-//! groups of five, wrapped to the panel's 53 cells, and one line saying
+//! groups of five, wrapped to the panel's 32 cells less the margin, and one line saying
 //! how far it came or which character cannot stand where it stands.
 
 use alloc::format;
@@ -23,8 +23,9 @@ use crate::field::Field;
 /// list shows.
 pub const DEVICE_NAME: &str = "M9";
 
-/// Cells on one line of the panel.
-const WIDTH: usize = 53;
+/// Cells a code line may take: the panel's, less the margin cell the
+/// screen puts before it. Five groups of five: 29.
+const WIDTH: usize = crate::screen::COLS - 1;
 
 /// The code being typed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -112,7 +113,7 @@ pub fn screen(
         None => String::from(" Link this M9 to your mailbox"),
     };
     let mut out = alloc::vec![text(&title, chrome), text("", plain)];
-    out.push(text(" Type the code your mailbox shows:", plain));
+    out.push(text(" Type your mailbox's code:", plain));
     let mut lines = pairing.lines();
     let verdict = lines.pop().unwrap_or_default();
     for line in lines {
@@ -123,7 +124,7 @@ pub fn screen(
     while out.len() + 1 < rows {
         out.push(text("", plain));
     }
-    out.push(text(" Enter links this device   Esc leaves", chrome));
+    out.push(text(" Enter links   Esc leaves", chrome));
     out.truncate(rows);
     out
 }
@@ -132,8 +133,8 @@ pub fn screen(
 fn verdict(typing: &Typing) -> String {
     match typing {
         Typing::Short { typed } => format!("{typed} of {TYPED_LEN} typed"),
-        Typing::Stray { at } => format!("character {} cannot stand there", at + 1),
-        Typing::Complete(Ok(_)) => String::from("complete: Enter links this device"),
+        Typing::Stray { at } => format!("character {} is out of place", at + 1),
+        Typing::Complete(Ok(_)) => String::from("complete: Enter links"),
         Typing::Complete(Err(error)) => format!("{error}"),
     }
 }
@@ -167,7 +168,7 @@ mod tests {
         assert_eq!(pairing.typing(), Typing::Short { typed: 12 });
         pairing.key(&event(M9Key::Char('9')));
         assert_eq!(pairing.typing(), Typing::Stray { at: 12 });
-        assert_eq!(pairing.lines()[1], "character 13 cannot stand there");
+        assert_eq!(pairing.lines()[1], "character 13 is out of place");
         assert_eq!(pairing.key(&event(M9Key::Enter)), None);
         pairing.key(&event(M9Key::Backspace));
         typed(&mut pairing, &text[12..]);
@@ -176,7 +177,7 @@ mod tests {
         assert!(lines.iter().all(|line| line.chars().count() <= WIDTH));
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("complete: Enter links this device")
+            Some("complete: Enter links")
         );
         // Control: one character changed is the checksum's typo, no join.
         let mut wrong = text.clone();
