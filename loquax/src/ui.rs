@@ -145,6 +145,7 @@ pub mod history;
 pub mod hit;
 pub mod info;
 pub mod intent;
+pub mod inventory;
 pub mod layout;
 pub mod liveness;
 pub mod map;

@@ -490,6 +490,154 @@ and the chat programs side by side, per pane), the mouse, the chat layout
 in text mode and the slices after 1002, is
 [keys, mouse and layout](loquax-keys-and-layout.md) (2026-10-26).
 
+### Built 2026-11-06, the profile is one scene
+
+Lew, 2026-11-06: a tap on the avatar at the top left opened "Your
+profile" on the phone and did nothing in the window, though the
+programs share their code and the UI is a thin layer over it. The
+profile is now a scene of the core (`loquax/src/ui/profile.rs`,
+`ProfileScreen`): the avatar, the name the announce carries, the address
+in groups of four, the contact code's QR as the core's bitmap
+(`QrNode`, encoded verbatim by `loquax::home::qr`), where the mailbox is
+and how it is reached (the rung's header word of
+[reachability](loquax-reachability.md), or "Fetched N of M" while a pull
+runs, or unreachable), the devices of this identity, and the one action
+"Share my address". The reader's avatar in the bar (`Lead::Me`) carries
+`Intent::Profile`, so a renderer that draws the avatar knows what a tap
+on it does:
+
+- the phone: the avatar opens `ProfileActivity`, which tells the core
+  (`Core.profileShown`, decoded to `Intent::Profile` and Back) and draws
+  the scene's words (`Profile::words`, from the catalogue); the name's
+  field, the share sheet, the scanner, the code sheets and Advanced stay
+  the phone's own;
+- the window: a click on the avatar, and the settings' "Your profile",
+  open the scene's layer; "Share my address" puts the code on the
+  clipboard;
+- the terminal: `P` in the list or the conversation, a click on the
+  list's title (the reader's own name), and the palette's `my code`
+  open it as a detail view; `s` there copies the code, Esc closes it;
+- the M9: the house key will open it (1440's role table), but the M9's
+  keyboard names no house key yet (`NAMED_SPECIALS` is empty until the
+  reviewer's key walk), so the cell below says missing.
+
+Goldens: `loquax/tests/golden/gui-profile-light.png`,
+`loquax/tests/fixtures/tui_profile.frames`,
+`loquax/tests/golden/scene-profile.json` and the phone's answer
+`loquax-android/tests/golden/profile-words.json`.
+
+### The intent inventory
+
+Every user action as the intent it raises, and per target whether it is
+built, missing, or not applicable with the reason. The table is
+`loquax/src/ui/inventory.rs`; its tests refuse an intent without a row,
+a built cell whose key, palette command or token in its file is not
+there, and this section when it differs from the table
+(`LOQUAX_WRITE_INVENTORY=1 cargo test -p loquax --lib inventory` writes
+it). A missing cell is the next order.
+
+<!-- intent-inventory:begin (loquax/src/ui/inventory.rs) -->
+| intent | what the user does | phone | window | terminal | M9 |
+|---|---|---|---|---|---|
+| `Tab` | a tab of the bar (Chats, Map, Browse, Rooms) | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no key switches the tab |
+| `Browse` | a verb of the hosted browser in the Browse tab | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: the M9 has no Browse tab |
+| `Back` | back: the bar's arrow, Esc, the M9's back key, leaving the profile | built (`session.rs`) | built (`gui.rs`) | built (key) | built (`keys.rs`) |
+| `OpenChat` | a tap or click on a conversation's row | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | built (`keys.rs`) |
+| `CloseChat` | leave the open chat for the list | built (`session.rs`) | built (`gui.rs`) | n/a: the list stands beside the chat; Back moves the keys to it | n/a: Back moves the keys to the list |
+| `ShowMap` | the map: its tab, the palette's map | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no key opens the map |
+| `OpenMapAt` | a row's map pin, the chat bar's map: the peer on the map | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | **missing**: no key shows the peer on the map |
+| `Activate` | a tap or click on a scene node | n/a: each View's click is its own listener | built (`gui.rs`) | built (`tui.rs`) | n/a: no pointer |
+| `Menu` | a long press or right click on a row or a bubble: its verbs | built (`ChatActivity.java`) | built (`chat.rs`) | n/a: a row's verbs are the palette's | **missing**: no key opens a row's verbs |
+| `Dismiss` | a sheet or menu closed by a tap outside it | n/a: the system's back closes a dialog | built (`gui.rs`) | n/a: Esc is Back | n/a: the back key is Back |
+| `Focus` | focus the list, the messages or compose | n/a: a touch screen has no key for it | n/a: the pointer does it | built (palette) | built (`keys.rs`) |
+| `NextPane` | Tab: the next pane | n/a: a touch screen has no key for it | n/a: the pointer does it | built (key) | n/a: one pane at a time |
+| `PreviousPane` | Shift-Tab: the previous pane | n/a: a touch screen has no key for it | n/a: the pointer does it | built (key) | n/a: one pane at a time |
+| `Palette` | `:` opens the command palette | n/a: a touch screen has no key for it | **missing**: the window has no command palette | built (key) | **missing**: no key opens the palette |
+| `Help` | `?`: the keys' help | n/a: a touch screen has no key for it | built (`gui.rs`) | built (palette) | **missing**: no key opens the help |
+| `Quit` | quit | n/a: Android ends apps | n/a: the window's own close | built (palette) | n/a: the power key |
+| `QuitHint` | Ctrl-c outside compose: say what quits | n/a: a touch screen has no key for it | n/a: the window's own close | built (key) | n/a: the power key |
+| `Redraw` | redraw the screen | n/a: the platform redraws | n/a: the platform redraws | built (palette) | n/a: the board redraws |
+| `Send` | Send: the compose bar's button, Enter | built (`session.rs`) | built (`gui.rs`) | built (palette) | built (`keys.rs`) |
+| `Edit` | a key handed to the text being edited | n/a: the platform's text field does it | n/a: the platform's text field does it | built (key) | built (`keys.rs`) |
+| `Newline` | Alt-Enter: a new line in compose | n/a: the platform's text field does it | n/a: the platform's text field does it | built (key) | **missing**: no key breaks the line |
+| `ClearDraft` | Ctrl-u: clear compose | n/a: the platform's text field does it | n/a: the platform's text field does it | built (key) | **missing**: no key clears compose |
+| `Draft` | what the text field holds, kept as the draft | built (`session.rs`) | built (`gui.rs`) | n/a: compose is the model's own buffer | n/a: compose is the model's own buffer |
+| `Insert` | an emoji picked into compose | built (`session.rs`) | built (`gui.rs`) | **missing**: no emoji picker | **missing**: no emoji picker |
+| `Emoji` | the compose bar's emoji button: the picker | built (`ChatActivity.java`) | built (`gui.rs`) | **missing**: no emoji picker | **missing**: no emoji picker |
+| `React` | a reaction on a bubble | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key reacts |
+| `Reply` | Reply on a bubble | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key replies |
+| `CancelReply` | the reply bar's cross | built (`ChatActivity.java`) | built (`gui.rs`) | **missing**: no way out of a reply but sending or clearing | **missing**: no key replies |
+| `Forward` | Forward on a bubble, then a chat | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key forwards |
+| `SendAgain` | the red mark of a message not sent | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key sends again |
+| `ViewPhoto` | a tap on a bubble's photo: the photo whole | built (`ChatActivity.java`) | built (`gui.rs`) | **missing**: no photo viewer | n/a: too large for the radio |
+| `SendPhoto` | the plus sheet's Photo: a picture picked and sent | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: too large for the radio |
+| `PhotoSize` | the settings' photo size | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: too large for the radio |
+| `Attach` | the compose bar's plus: the attachment sheet | built (`session.rs`) | built (`gui.rs`) | n/a: the palette names each attachment | n/a: too large for the radio |
+| `Locate` | the compose bar's position button: the position sheet | built (`session.rs`) | built (`gui.rs`) | n/a: the palette names each position verb | **missing**: no key opens the position sheet |
+| `Camera` | the compose bar's camera | built (`ChatActivity.java`) | n/a: no camera | n/a: no camera | n/a: no camera |
+| `StagePhoto` | the camera's photo staged in the bar | built (`session.rs`) | n/a: no camera | n/a: no camera | n/a: no camera |
+| `Unstage` | the staged photo's cross | built (`session.rs`) | n/a: no camera | n/a: no camera | n/a: no camera |
+| `CloseSheet` | a sheet of the compose bar closed | built (`session.rs`) | built (`gui.rs`) | n/a: the terminal opens no sheet | n/a: the M9 opens no compose sheet |
+| `ShareFix` | the position sheet's "Send my position now" | built (`session.rs`) | **missing**: the window's sheet has no "Send my position now" | built (palette) | **missing**: no key shares the position |
+| `StartShare` | a share row of the position sheet: 15 min, 1 h, 8 h, until stopped | built (`session.rs`) | **missing**: the window's sheet has no share rows | **missing**: the palette shares once, never for a while | **missing**: no key shares the position |
+| `StopShare` | a running share's Stop: the chat's chip, Settings, the notification | built (`session.rs`) | **missing**: the window draws no share chip | built (palette) | **missing**: no key shares the position |
+| `LocationOn` | the position sheet without a fix: turn location on | built (`Locator.java`) | n/a: no position receiver | n/a: no position receiver | **missing**: the M9's GNSS is not wired to the sheet |
+| `EnterPosition` | the position sheet's entry on a shell without a receiver | n/a: the phone has a receiver | built (`gui.rs`) | built (palette) | **missing**: no key enters a position |
+| `FixAtMapCentre` | the position sheet's "map centre" row | n/a: the phone has a receiver | built (`gui.rs`) | **missing**: no "map centre" in the palette | **missing**: no key enters a position |
+| `OwnFix` | the platform's own fix, or none | built (`session.rs`) | n/a: no position receiver | n/a: no position receiver | **missing**: the M9's GNSS is not wired to the model |
+| `SendFile` | the plus sheet's File: a file picked and sent | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: too large for the radio |
+| `OpenFile` | a tap on a bubble's file: saved and opened | built (`session.rs`) | built (`gui.rs`) | **missing**: no way to save a file from a bubble | n/a: too large for the radio |
+| `SendVoice` | the microphone held and released: a voice message | built (`session.rs`) | built (`gui.rs`) | built (`keys.rs`) | n/a: too large for the radio |
+| `Recording` | a button of the recording bar: lock, pause, listen, send, discard | built (`session.rs`) | built (`gui.rs`) | built (`keys.rs`) | n/a: too large for the radio |
+| `PlayVoice` | a voice message's play button | built (`session.rs`) | built (`gui.rs`) | **missing**: no key plays a voice message | n/a: too large for the radio |
+| `PauseVoice` | a playing voice message's pause button | built (`session.rs`) | built (`gui.rs`) | **missing**: no key plays a voice message | n/a: too large for the radio |
+| `Delete` | Delete on a bubble, asked, then confirmed | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key deletes a message |
+| `Copy` | Copy on a bubble or a selection | built (`ChatActivity.java`) | built (`gui.rs`) | built (key) | n/a: no clipboard |
+| `Share` | a position shared from the map | built (`session.rs`) | **missing**: the window's map shares no position | n/a: the palette's position verbs share | **missing**: no key shares the position |
+| `Pin` | a row's Pin | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `Mute` | a row's Mute | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `Archive` | a row's Archive | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `Block` | a contact's Block | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `Verify` | a contact's Verify | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `MarkUnread` | a row's Mark unread | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `Rename` | a contact's Rename | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `Forget` | a row's Delete chat, asked, then confirmed | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
+| `AddContact` | a friend's code pasted or scanned: the contact | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no way to add a contact |
+| `Group` | New group, Join, the member sheet, Leave, Remove | built (`session.rs`) | built (`gui.rs`) | built (palette) | built (`group.rs`) |
+| `NewConversation` | the bar's pencil: a new chat | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no way to start a chat |
+| `Profile` | a tap or click on the reader's avatar, `P`, `my code` | built (`session.rs`) | built (`gui.rs`) | built (key) | **missing**: the house key opens it (1440's role table); the M9's keys name no house key yet |
+| `ShareCode` | the profile's "Share my address" | built (`ProfileActivity.java`) | built (`gui.rs`) | built (`ui.rs`) | n/a: no clipboard or share sheet |
+| `Name` | the name recipients see | built (`session.rs`) | **missing**: the profile shows the name, nothing sets it | **missing**: the profile shows the name, nothing sets it | **missing**: the name is the pairing's |
+| `Scroll` | the list's cursor up and down | n/a: the list scrolls itself | built (`gui.rs`) | built (key) | built (`keys.rs`) |
+| `ScrollMessages` | the messages' cursor from compose | n/a: the chat scrolls itself | n/a: the chat scrolls itself | built (key) | n/a: Back leaves compose for the bubbles |
+| `NextConversation` | the next conversation | n/a: a touch screen has no key for it | n/a: the pointer does it | built (palette) | n/a: up and down move the list's cursor |
+| `PreviousConversation` | the previous conversation | n/a: a touch screen has no key for it | n/a: the pointer does it | built (palette) | n/a: up and down move the list's cursor |
+| `NextUnread` | the next conversation with unread messages | n/a: a touch screen has no key for it | n/a: the pointer does it | built (palette) | **missing**: no key jumps to the unread |
+| `PreviousUnread` | the previous conversation with unread messages | n/a: a touch screen has no key for it | n/a: the pointer does it | built (palette) | **missing**: no key jumps to the unread |
+| `Search` | the bar's magnifier, `/` | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no key searches |
+| `CloseSearch` | Esc in the search | n/a: the system's back | **missing**: the window's search field has no close | built (key) | **missing**: no key searches |
+| `OpenResult` | Enter on a search result | n/a: a result is a row; a tap opens it | n/a: a result is a row; a click opens it | built (key) | **missing**: no key searches |
+| `Match` | the next or previous match | n/a: the phone lists the results | n/a: the window lists the results | built (key) | **missing**: no key searches |
+| `OpenMessage` | Enter on a bubble: a position on the map, else its detail | n/a: a tap on the bubble is its own | n/a: a click on the bubble is its own | built (key) | **missing**: no key opens a message |
+| `Details` | a bubble's Info | built (`ChatActivity.java`) | **missing**: the bubble's menu has no Info | built (palette) | **missing**: no key opens a message |
+| `ShowBlocked` | the blocked contacts | built (`ContactActivity.java`) | **missing**: the window lists no blocked contacts | built (palette) | **missing**: no list of the blocked |
+| `ShowArchived` | the archived chats | built (`ConversationsActivity.java`) | **missing**: the window lists no archived chats | built (palette) | **missing**: no list of the archived |
+| `Map` | zoom, pan, fit, step between pins, the map's drawing | n/a: pinch and pan are the map View's | built (`gui.rs`) | built (key) | **missing**: no key moves the map |
+| `SelectPin` | a tap or click on a pin: its card | built (`MapView.java`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no key steps between pins |
+| `LoadMapArea` | load the map's area here | n/a: the map loads what it shows | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
+| `MapDrawing` | how the map is drawn | n/a: the phone's map draws one way | **missing**: the window offers no drawing | built (palette) | n/a: the board draws one way |
+| `Pull` | fetch messages now | built (`session.rs`) | **missing**: the window has no fetch button | built (palette) | n/a: the board pulls on its own |
+| `Front` | the app came to the front or left it | built (`session.rs`) | built (`gui.rs`) | n/a: a terminal is in front while it runs | n/a: the board's screen is always in front |
+| `Network` | the platform's network changed | built (`session.rs`) | n/a: the daemon follows the network | n/a: the daemon follows the network | n/a: the board's radio is its network |
+| `Viewport` | these bubbles are on screen: what was read | built (`session.rs`) | **missing**: the window marks the open chat read whole | n/a: the open conversation is read | n/a: the open conversation is read |
+| `Theme` | light or dark | n/a: follows the phone | built (`gui.rs`) | built (palette) | n/a: the panel draws dark |
+| `SendOnEnter` | whether Enter sends | n/a: the platform's text field does it | **missing**: the window has no switch for Enter | built (palette) | n/a: Enter sends |
+| `Mouse` | the mouse captured or the terminal's own selection | n/a: no pointer | n/a: the window's pointer is its own | built (palette) | n/a: no pointer |
+| `Import` | import from another messenger | **missing**: the phone imports nothing | **missing**: the window imports nothing | built (palette) | n/a: the board takes its history from the home |
+| `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no settings on the M9 |
+| `DeleteAllRegions` | the Maps page's Delete all | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
+<!-- intent-inventory:end -->
+
 ## 2. Decision: what honesty about delivery looks like
 
 Most chat UIs lie by simplification: one check for sent, two for delivered,
