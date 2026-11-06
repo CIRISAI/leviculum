@@ -2771,8 +2771,8 @@ map-bench-baseline REGION:
 # (`real-*`, 1456), each in real time through iced's user interface as
 # its loop runs on X11, the frames presented as the software renderer's
 # compositor presents them (damage, no read back), at 900x560, 1280x1190,
-# 1276x2099 and 1920x1080, headless, and at 1276x2099 again with the
-# frame meter's overlay on (`+fps`). One WINDOW_BENCH line a size and
+# 1276x2099, 1527x2099 and 1920x1080, headless, and at both tall sizes
+# again with the frame meter's overlay on (`+fps`). One WINDOW_BENCH line a size and
 # gesture. As map-bench: the bench of BASE (default: the commit that last
 # wrote loquax/tests/window_bench.baseline) built in a worktree under
 # target/, and this tree's, in turn for ROUNDS rounds, the medians

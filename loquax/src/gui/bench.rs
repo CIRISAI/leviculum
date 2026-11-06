@@ -26,14 +26,21 @@ use iced::advanced::Layout;
 use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
 use std::sync::mpsc;
 
-/// The window sizes: the one the goldens use, Lew's two (2026-11-06,
+/// The window sizes: the one the goldens use, Lew's three (2026-11-06,
 /// the second his window on the tall screen where it ran at 6 to 7
-/// frames a second, 1456), a full HD screen.
-const SIZES: [(u32, u32); 4] = [(900, 560), (1280, 1190), (1276, 2099), (1920, 1080)];
+/// frames a second, 1456, the third the same screen's window a little
+/// wider, where the CPU track's bar is set, 1442), a full HD screen.
+const SIZES: [(u32, u32); 5] = [
+    (900, 560),
+    (1280, 1190),
+    (1276, 2099),
+    (1527, 2099),
+    (1920, 1080),
+];
 
-/// The size the gestures run at a second time with the frame meter's
-/// overlay on (`--fps`, 1456): Lew's tall window, where he read it.
-const OVERLAY_SIZE: (u32, u32) = (1276, 2099);
+/// The sizes the gestures run at a second time with the frame meter's
+/// overlay on (`--fps`, 1456): Lew's tall windows, where he read it.
+const OVERLAY_SIZES: [(u32, u32); 2] = [(1276, 2099), (1527, 2099)];
 
 /// When the gesture begins, after the first frames settled the window.
 const SETTLE: Duration = Duration::from_millis(400);
@@ -524,7 +531,11 @@ fn window_bench() {
     let runs = SIZES
         .iter()
         .flat_map(|&size| Case::ALL.map(|case| (size, case, false)))
-        .chain(Case::ALL.map(|case| (OVERLAY_SIZE, case, true)));
+        .chain(
+            OVERLAY_SIZES
+                .iter()
+                .flat_map(|&size| Case::ALL.map(|case| (size, case, true))),
+        );
     for ((w, h), case, overlay) in runs {
         let line = measure(case, w, h, overlay).line();
         println!("{line}");
