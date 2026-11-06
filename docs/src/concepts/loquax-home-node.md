@@ -118,8 +118,10 @@ Link requests on `loquax.home`, msgpack on the wire:
 
 ```text
 /join  [token: bin16, name: str]   -> [status]
-/sync  [cursor: uint]              -> [status, first: uint, more: bool,
-                                       [[seq: uint, kind: uint, at: int, packed: bin], ...]]
+/sync  [cursor: uint, (page: uint, (fold: str))]
+                                   -> [status, first: uint, more: bool,
+                                       [[seq: uint, kind: uint, at: int, packed: bin], ...],
+                                       (left: uint)]
 /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
         [[key: int, value: bin], ...]] -> [status, id: bin32]
 /mark  [flag: uint, [id: bin32, ...]] -> [status]
@@ -226,6 +228,18 @@ first, up to 64 KiB of messages (one larger entry still goes, alone), and
 got, over the same link. An answer too large for one packet goes as a
 response resource. `first` is the oldest sequence the archive still holds,
 so a client whose cursor fell behind an eviction says so in its log.
+
+The page bound (1363) and `left` (1415) are a narrow client's: it asks
+pages of at most that many bytes and reads how many entries still wait.
+The fold (1439) is a device's capability word, what it keeps of the
+archive (`wire::Fold`, `loquax/src/home/wire.rs`). A board says `board`
+and is served only the kinds `board::fold` reads (a message received or
+sent, a mark, a name), none over 16 KiB, and `left` counts only those,
+so its "Fetched N of M" is the M it will get: an archive whose first
+796 entries are imported history reaches a board's first names on its
+first page. The phone and the desktop say no word and keep the whole
+archive; a home from before 1439 reads the first two elements and
+serves everything, and an unknown word folds nothing away.
 
 - **Fetching never deletes.** Only `/mark` changes state, and it does so
   by appending an entry, not by removing one (see "Read and sent state on

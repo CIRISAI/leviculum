@@ -618,7 +618,7 @@ yet. Both end in the same join.
   (`loquax/src/home/code.rs:226`) shows it in fives, so the eye keeps its
   place against the code it copies.
 - **The join without the waiting** (`Join` then, `Ask` since 1363,
-  `loquax/src/home/ask.rs:278`): the seam this page asked for, cut as the
+  `loquax/src/home/ask.rs:288`): the seam this page asked for, cut as the
   store's. The path ladder (`PathLadder`, `loquax/src/home/ask.rs:68`;
   requests at 0, 7, 21, 49 and 105 s, then a minute apart), the per-hop
   link budget of rule 3 (`establishment_ms`,
@@ -626,7 +626,7 @@ yet. Both end in the same join.
   (`join_outcome`, `loquax/src/home/ask.rs:128`) are `no_std` and shared:
   the desktop's `open` takes the ladder and the budget from there, and
   `HomeError` lives there. The join is a set of `Step`s
-  (`loquax/src/home/ask.rs:234`), request a path, connect, identify, send
+  (`loquax/src/home/ask.rs:244`), request a path, connect, identify, send
   `/join`, done, which the platform performs and reports back; a report
   out of turn ends the join instead of being read as the home's word.
 
@@ -751,15 +751,15 @@ links, the record in flash, the census line at boot) waits for the
 image of slice four to run.
 
 **The client moved down.** `home::ask` is now the whole ask, not only
-the join: `Ask` (`loquax/src/home/ask.rs:278`) over a `Verb`
-(`loquax/src/home/ask.rs:155`), `/join`, `/sync` page by page, `/send`,
+the join: `Ask` (`loquax/src/home/ask.rs:288`) over a `Verb`
+(`loquax/src/home/ask.rs:165`), `/join`, `/sync` page by page, `/send`,
 `/mark` and `/group`, with an `Outcome`
-(`loquax/src/home/ask.rs:203`). The platform performs the `Step`s
-(`loquax/src/home/ask.rs:234`) as before; two are new. `Page` hands out
+(`loquax/src/home/ask.rs:213`). The platform performs the `Step`s
+(`loquax/src/home/ask.rs:244`) as before; two are new. `Page` hands out
 one page of a pull and the ask keeps none of it, so a pull's memory is
 one page however long the archive. `Close` says an answer was lost: the
 same request goes again on a fresh link, at most `ATTEMPTS`
-(`loquax/src/home/ask.rs:151`) times, for every verb but `/join`, whose
+(`loquax/src/home/ask.rs:161`) times, for every verb but `/join`, whose
 token is single-use. The host's executor is `client::run_ask`
 (`loquax/src/home/client.rs:59`), over `leviculum_std`; the desktop's
 and the phone's `join`, `pull` and `mark` now run the same ask through
@@ -787,10 +787,10 @@ advertisement, its parts and a proof. The home's own page bound is
 64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:321`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
 that a home from before reads past. The board asks `LORA_PAGE_BYTES`
-(`loquax/src/home/ask.rs:146`), 412, the longest answer that still fits
+(`loquax/src/home/ask.rs:146`), 412 B, the longest answer that still fits
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
-says `more` (`fit_page`, `loquax/src/home/wire.rs:308`; the server's
+says `more` (`fit_page`, `loquax/src/home/wire.rs:408`; the server's
 `sync`, `loquax/src/home/server.rs:1156`). A message larger than a page
 still comes alone, as a resource.
 
@@ -1004,7 +1004,7 @@ ceilings, so the image's stack need stays the open chat's. The image
 grows by 17,248 B to 944,768 B (`just build-m9`).
 
 **The verbs, asked of a home.** `Verb::Group` of the ask
-(`GroupVerb`, `loquax/src/home/ask.rs:182`) now carries all five a
+(`GroupVerb`, `loquax/src/home/ask.rs:192`) now carries all five a
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
@@ -1147,7 +1147,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4461`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4481`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1156,7 +1156,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:825`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:834`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1233,10 +1233,11 @@ region 197,972 B of it.
 - **Getting a region onto the board.** The phone loads its regions by
   HTTP range requests (`loquax::mapload`); the board has no IP. No
   `Ask` verb carries a region today: the five are join, pull, send, mark
-  and the group verbs (`Verb`, `loquax/src/home/ask.rs:155`). The shape
+  and the group verbs (`Verb`, `loquax/src/home/ask.rs:165`). The shape
   that fits is a sixth, a region asked of the home in LoRa pages the way
   `Pull` pages the archive (`LORA_PAGE_BYTES`, 412 B,
-  `loquax/src/home/ask.rs:146`), the home cutting it with the autoload
+  `loquax/src/home/ask.rs:146`, the link MDU less the response frame),
+  the home cutting it with the autoload
   it already runs. **The budget line that is red today:** the 2 km set
   is 1,991 such pages; at SF8 and 125 kHz a 431 B packet is on the air
   about 1.16 s, so 38 minutes of airtime before requests and proofs, and
@@ -1309,7 +1310,7 @@ sends as the home's identity. This pass is the first of two; typing the
 code on the board and the bench walk are 1415.
 
 **The node in the image.** `thinknode_m9` now carries a `leviculum-core`
-node (`Handheld`, `leviculum-esp/src/handheld.rs:86`): its identity in a
+node (`Handheld`, `leviculum-esp/src/handheld.rs:88`): its identity in a
 flash sector of its own, saved on the first boot and loaded on every
 later one, said as `[IDENTITY] identity=<hash> ... source=<flash|generated>
 stored=<yes|no>`; one interface, the host's serial line
@@ -1348,7 +1349,7 @@ the cache those routines switch off.
 
 **The client's board half.** `loquax::home::board` (`no_std`):
 
-- **The executor** (`Executor`, `loquax/src/home/board.rs:85`) performs
+- **The executor** (`Executor`, `loquax/src/home/board.rs:156`) performs
   an `Ask`'s steps over a `NodeCore` and the events the node raises:
   path requests, `connect`, `identify_link`, `send_request`, the
   response or its timeout, a closed link. The board's loop hands it the
@@ -1356,11 +1357,11 @@ the cache those routines switch off.
   `TickOutput`. A link that closes with a request in flight is a lost
   answer, so the ask opens a fresh link and asks again from the last
   entry it took (`ATTEMPTS` = 3).
-- **The session** (`Session`, `loquax/src/home/board.rs:321`): an ask
+- **The session** (`Session`, `loquax/src/home/board.rs:435`): an ask
   that does not get through waits 30 s before the next, doubling up to
   15 min; one that gets through resets it, and a pull goes every 5 min
   while no wake says sooner. What it shows is the phone's sentence
-  (`notice`, `loquax/src/home/board.rs:367`): "Your mailbox is not
+  (`notice`, `loquax/src/home/board.rs:481`): "Your mailbox is not
   connected" for no path, no link, no answer or a refusal.
 - **The batch** (`Batch`, `loquax/src/home/board.rs:52`): the page is
   the LoRa page while the board's session census keeps `SESSION_PEAK`,
@@ -1368,11 +1369,11 @@ the cache those routines switch off.
   `loquax-m9/src/census.rs:334`); the board runs the census at boot and
   picks its batch from what it measured. An answer longer than the
   board takes asks the same page smaller on the same link
-  (`Ask::refit`, `loquax/src/home/ask.rs:434`) down to 64 B; a single
+  (`Ask::refit`, `loquax/src/home/ask.rs:469`) down to 64 B; a single
   message that fits no page ends the pull with an error, never a panic
   and never a skipped message. The answer ceiling is the largest message
   the board takes in, 256 KiB on the PSRAM heap, not the session's room.
-- **The record** (`ClientRecord`, `loquax/src/home/record.rs:72`), the
+- **The record** (`ClientRecord`, `loquax/src/home/record.rs:73`), the
   board's form of the desktop's three files: the device identity's
   private key, the home's public key, the admission (pending with its
   token, or admitted), the sync cursor and the device name, 196 bytes
@@ -1424,14 +1425,14 @@ fixture. Written: `lnflash --home <code> --port <tty>`
 as text with or without its rendezvous list. The M9 has no transport
 CDC, so the session opens the port it is named, which resets the board,
 and asks for the capability report until the boot is through (60 s at
-most). Both end in `Handheld::take_code` (`leviculum-esp/src/handheld.rs:189`):
+most). Both end in `Handheld::take_code` (`leviculum-esp/src/handheld.rs:191`):
 a new device identity, the pending record in flash before the ack, the
 client that joins with it. A text that is no code is refused
 `REFUSE_VALUE`, a record flash did not take `REFUSE_PERSIST`.
 
 **The join, the pull, the screen.** The client of 1414 now hands every
 pulled page to the board's loop, which folds it into the model the
-screen draws (`board::fold`, `loquax/src/home/board.rs:521`; the
+screen draws (`board::fold`, `loquax/src/home/board.rs:635`; the
 board's `take_in` without an engine: a message the home took in, one of
 the home's devices sent, a mark, a name). A board that is a device of a
 home draws that model from boot: its chats list and its chats come from
@@ -1439,11 +1440,11 @@ the archive, and a line typed in a chat is the home's `/send`, queued
 ahead of the next pull. The board checks no signature (it holds no
 sender's identity), so received messages show unverified. The top bar
 says the home at its right end (`board::Word`,
-`loquax/src/home/board.rs:409`): "Joining your mailbox", "Fetched N of
+`loquax/src/home/board.rs:523`): "Joining your mailbox", "Fetched N of
 M", "Mailbox unreachable", "You. Your mailbox is connected.", and for a
 refused code "The mailbox did not take this code. Make a new one on the
 computer." M is the home's: a paged `/sync` answer now carries how many
-entries wait after it (`Page::left`, `loquax/src/home/wire.rs:155`), a
+entries wait after it (`Page::left`, `loquax/src/home/wire.rs:161`), a
 fifth element only a client that asked a page bound gets, so every
 client from before reads the four it read. The home cuts the page
 counting with the longest such number, so the count never pushes an
@@ -1454,7 +1455,7 @@ was red first: the core says `LinkStale` about ten seconds after the
 line went, but the request's timeout is the whole ask's budget, so the
 pull waited out its 120 s with 4 of 24 entries. The executor now takes
 a stale link with a request in flight as a lost answer and asks again
-on a fresh link from the cursor (`loquax/src/home/board.rs:171`); the
+on a fresh link from the cursor (`loquax/src/home/board.rs:265`); the
 cell went green, 24 of 24, none twice, 13.9 s. On LoRa a link goes
 stale much later than on the host's line, so the recovery there takes
 that much longer.
@@ -1481,7 +1482,12 @@ lnflash's frame on the real UART.
 
 **The walk, for the reviewer's window.** Lew's home is the mailbox the
 phone pulls from; the bench line is lnsd on schneckenschreck, the
-rendezvous, the home behind it.
+rendezvous, the home behind it. lnsd's serial interface to the M9 needs
+`interface_mode = gateway`: in the default full mode a path request
+from the board for the home is not discovered onwards
+(`leviculum-core/src/transport.rs:12735`, only access point, gateway
+and roaming re-originate), and the join ends in `NoPath`. The M9 sets
+its own end to Gateway already (`leviculum-esp/src/handheld.rs:175`).
 
 1. Build and flash: `just build-m9`, then `just flash-m9
    /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0` (it carries the
@@ -1501,11 +1507,14 @@ rendezvous, the home behind it.
    admitted device=... name="M9"`, and the panel's top bar says
    "Joining your mailbox" until then.
 4. The pull: `[HOME] page entries=<k> last=<seq> bytes=<b> more=<m>
-   taken=<n> of=<M>` per page, the top bar "Fetched n of M", the home
-   `HOME sync device=... left=<M-n>`, then `[HOME] pulled entries=M
-   pages=<p> cursor=<c> saved=yes reach=connected
-   next_in_ms=300000`. With a page of 412 B a 150-byte message is two
-   to a page, so p is about M/2 for short texts.
+   taken=<n> of=<M> link=serial asked=11520` per page, the top bar
+   "Fetched n of M", the home `HOME sync device=... left=<M-n>
+   fold=board`, then `[HOME] pulled entries=M pages=<p> cursor=<c>
+   saved=yes reach=connected next_in_ms=300000`. M counts only what the
+   board shows (1439): on Lew's archive the 796 imported entries are not
+   in it, and the first page starts at the first name, seq 797. A page
+   of 11 520 B carries about 70 short texts, so p is about M/70; over
+   LoRa the same board asks `link=radio asked=412`, two texts a page.
 5. The phone and the board show the same conversations: the chats list
    on the panel against the phone's, by name and last line.
 6. A line from the board: open a chat, `i`, type, Enter; `[HOME] sent
@@ -1523,6 +1532,62 @@ rendezvous, the home behind it.
    home's daemon stopped the top bar says "Mailbox unreachable" and the
    line `[HOME] failed ... reach=unreachable failures=<n>
    next_in_ms=<30000, 60000, ...>`.
+
+### The board pulls what it shows, in pages its link carries (1439)
+
+The reviewer's window of 2026-11-06 (image `9de91477`) joined Lew's
+home and ended with an empty chat list at "Fetched 30", for two
+measured reasons: the archive's first 796 of 5103 entries are imported
+history (kind 9), which `board::fold` drops, and a LoRa page of 412 B
+carries two entries, so the first name at seq 797 was some 400 pages
+away over a serial line that carries a page in milliseconds.
+
+**The home serves a board what it folds.** Every paged `/sync` of the
+board carries a third element, the capability word `board`
+(`wire::Fold`, `loquax/src/home/wire.rs`; `ClientRecord::pull` says it,
+`loquax/src/home/record.rs`). The home then serves only the kinds
+`board::fold` reads, a message received or sent, a mark, a name
+(`wire::BOARD_KINDS`), none longer than 16 KiB (`BOARD_ENTRY_MAX`, a
+photo the board neither shows nor holds), and counts only those in
+`left`, so "Fetched N of M" is honest. The filter is the query's
+(`Store::archive_since_folded`, `loquax/src/store.rs`), so the imported
+head costs no page. The phone and the desktop say no word and keep the
+whole archive; a home from before reads two elements and serves
+everything, as before.
+
+**The page follows the link.** The board's executor fits a pull's page
+once its first link is up (`Executor::fitted`, `LinkClass`,
+`loquax/src/home/board.rs`), from the link's negotiated MTU and the
+next hop's bitrate when it reports one:
+
+| link | how it is known | page the M9 asks |
+|---|---|---|
+| radio | MTU under 564 (LoRa's 500, an RNode's 508, no MTU said), or a next hop under 100 kbit/s | one response packet, 412 B at MTU 500, never more than the census's page |
+| serial to a host's daemon | MTU 564, the KISS/serial HW_MTU (link MDU 495) | a second of 115200 baud: 11 520 B |
+| wide (TCP, UDP, local) | MTU 1024 and up | the device's answer ceiling up to the home's page: 64 KiB |
+
+A next hop that reports its rate sizes the serial and wide page to a
+second of it, never under one packet. The census still bounds the
+radio page as 1363 measured; the answer ceiling, 256 KiB on the M9's
+PSRAM, bounds the others. The board's line says the fit on every page,
+`link=serial asked=11520`.
+
+**Tests.** `a_board_is_served_what_it_folds_and_the_phone_everything`
+(`loquax/src/home/server.rs`): 800 imported entries, then 100 texts, a
+delivery state and a photo over the bound; the board walks the 100 in
+serial pages with `left` exact on every page, the phone all 902.
+`a_fitted_pull_asks_the_page_its_link_carries`
+(`loquax/src/home/board/tests.rs`): the board's core node against a
+fake home, over a link of MTU 564 one page of 11 520 B and over MTU 500
+fifteen LoRa pages for the same 30 texts. `the_page_follows_the_link_class`
+and `the_board_word_keeps_every_kind_fold_reads` hold the table and the
+word against `board::fold`.
+
+**Zero-config.** Its serial step (step 5 of
+[Zero configuration](zero-config.md)) is not built: no auto-attach
+sets any mode for a serial board yet. When it lands, a serial LNode
+or M9 it attaches gets `interface_mode = gateway`, as the bench's lnsd
+needs by hand today.
 
 ### Tracks on the M9 (1385, not built)
 
