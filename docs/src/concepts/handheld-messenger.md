@@ -572,42 +572,30 @@ board: the controller's I2C reads, the send over the mesh, the flow over
 `leviculum-core`'s links. Nothing was flashed or read off the board in
 this slice.
 
-- **What the board has told us of the keyboard, and what not.** The
-  controller ACKs at 0x6D on our V1.1 unit, the wiki says it reads a 5 x
-  10 matrix, its INT is a 15 ms pulse that does not come for every key
-  ([The ThinkNode M9](thinknode-m9.md), "Keyboard", "Two hardware
-  revisions" and "The keypad"). Its register map, which cell is which
-  key, and whether it debounces, repeats or holds a layer itself are
-  unread, and no foreign header stands in for them. So the driver starts
-  at a scan of the matrix and the board's half is a decoder from the
-  controller's answer to that scan, read in slice four.
-- **The scan frame** (`Scan`, `loquax-m9/src/keyboard.rs:63`): 50 bits,
-  bit `row * 10 + column`, carried as 7 bytes least significant first
-  (`Scan::from_frame`, `loquax-m9/src/keyboard.rs:83`); the six bits past
-  the matrix are dropped. The firmware prints one line a poll over the
-  debug CDC, `KB <ms> <14 hex digits>`, and `parse_recording`
-  (`loquax-m9/src/keyboard.rs:310`) reads a capture as it was taken, the
-  firmware's other lines skipped. An example from the walk below:
-  `KB 190 00800000000000` is cell (1, 5) alone, byte 1 bit 7, at 190 ms. The board's layout table and its
-  first real fixture come from one such capture with each key pressed
-  once.
-- **The driver** (`Keyboard::poll`, `loquax-m9/src/keyboard.rs:207`):
-  polled every 10 ms while the panel is lit (`POLL_MS`, under the 15 ms
-  INT pulse; whether the polls see every press is a board measurement),
-  a cell changes state after two alike polls, each cell on its own, so a
-  second key down while the first is held is seen. A `Cap`
-  (`loquax-m9/src/keyboard.rs:108`) carries a key's plain, shifted and
-  symbol character; Shift and Sym held with a key apply to it, tapped
-  alone they apply to the next key only, so one thumb types a capital or
-  a `!`. Characters, Backspace and the arrows repeat after 500 ms every
-  80 ms; Enter and Back never do. What comes out is the key events the
-  table of slices one and two resolves; the M9 still binds nothing of its
-  own.
-- **The walk**: `tests/keyboard/walk.txt` under `loquax-m9`, a recording
-  in that format over a test layout, synthetic until the board records
-  its own; through the driver, the key table and the model it opens the
-  pinned chat, types "Hi!" with a tapped Shift, a one-poll bounce and a
-  tapped Sym, and sends it (`a_recorded_walk_of_scan_frames_types_and_sends`).
+- **What the board has told us of the keyboard.** This slice first
+  built a driver over a 5 x 10 matrix scan, with debounce, latched Shift
+  and Sym and its own repeat, because the controller's protocol was
+  unread. The bench capture of 2026-11-04 read it, and it is no matrix:
+  one key code per press, ASCII for the characters, layers resolved in
+  the controller, no key-up ([The ThinkNode M9](thinknode-m9.md), "The
+  keyboard controller, measured"). 1427 replaced the matrix driver with
+  the measured one; the scan frame, the `KB` line and the test layout are
+  gone.
+- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:58`) keeps no
+  state: a non-zero code is one press, printable ASCII a character,
+  `0x0d` Enter, `0x08` Backspace, a code of `NAMED_SPECIALS`
+  (`loquax-m9/src/keyboard.rs:43`) its named key, any other
+  `special_0x..`, which makes no key event until the walk names it.
+  Repeat is the controller's, if it has any: a code read again is a
+  press again. What comes out is the key events the table of slices one
+  and two resolves; the M9 still binds nothing of its own.
+- **The walk**: `tests/keyboard/walk.txt` under `loquax-m9`, controller
+  answers in the board's `KBRAW` format made only of codes the capture
+  measured; through the read, the driver, the key table and the model it
+  opens the pinned chat, types "hi&0" and sends it
+  (`a_recorded_walk_of_key_codes_types_and_sends`). The capture itself
+  replays to the names of its first 60 presses
+  (`the_bench_capture_replays_to_its_key_names`).
 
 **The pairing: decided, typed on the keys first, written by lnflash
 second.** The page's three options weighed against its own facts: the
@@ -698,15 +686,14 @@ draws is the scene the terminal, the window and the phone already draw.
   `m9-fw-chats.png` and `m9-fw-chat.png`, walked to with the board's keys
   (`Screen::model`, `loquax-m9/src/fixture.rs:633`).
 - **The keyboard:** the controller's answer is read as the community port
-  reads it, register 0x01 of 0x6D, eight bytes a poll, and decoded by a
-  table (`PROVISIONAL`, `loquax-m9/src/kbraw.rs:71`): a bitmap table or a
-  code table, either mapping onto the 5 x 10 matrix. Until a capture
-  reads the controller the board takes the answer as the matrix bit for
-  bit and types with slice three's test layout. Every answer goes out raw
-  before it is decoded, `KBRAW <ms> <hex>`, then the scan as slice three's
-  recording line, `KB <ms> <14 hex>`, one pair a 10 ms poll; `parse_raw`
-  (`loquax-m9/src/kbraw.rs:135`) replays a capture through any other table
-  on the host, so the right table is found without a flash per guess.
+  reads it, register 0x01 of 0x6D, eight bytes a poll. Every answer goes
+  out raw, `KBRAW <ms> <hex>`, one a 10 ms poll, and `parse_raw`
+  (`loquax-m9/src/kbraw.rs:85`) replays a capture on the host. Slice four
+  first decoded the answer as a matrix bitmap; the capture that line made
+  possible read the protocol (one code per press, 1427), and the board
+  now reads it so (`MEASURED`, `loquax-m9/src/kbraw.rs:37`; `read`,
+  `loquax-m9/src/kbraw.rs:57`) and prints `KEY <ms> code=0x6b name=k`
+  after each press's `KBRAW` line.
 - **The dump:** `FRAME_DUMP`, envelope type 0x18 (`TYPE_FRAME_DUMP`,
   `leviculum-core/src/envelope.rs:404`), registered as 0x17 was in 1301.
   Empty, it dumps what is shown; one byte walks a fresh fixture model to a
@@ -751,7 +738,7 @@ The boot lines, in order: `[FW_BUILD]`, `[BOARD] id=M9 ... heap=<psram>`,
 `[HEAP] region=psram`, `[STACK] bytes=`, `[DISP] ST7789 320x240
 madctl=0xb0 spi_mhz=40 state=up`, `[KB] addr=0x6d found=...`, `[CENSUS]`
 for the renderer and for each screen, `[DISP] flush rows=0..239`, then
-`KBRAW` and `KB` every 10 ms and the banner pair every 5 s. Not yet done
+`KBRAW` every 10 ms with a `KEY` line after each press and the banner pair every 5 s. Not yet done
 of slice four: everything the board says. Whether the frame on the panel
 reads the right way round, whether the dump equals the golden, what the
 board's census measures, and what the controller's answer is.
@@ -858,11 +845,11 @@ was, on a link of its own"); it is the first lever, before any change
 to the page.
 
 **Pairing, from the keys to `HOME admitted`.** The same test types the
-code the phone shows on the board's keys. The scan frames go through
-the driver (`Keyboard`, debounce two polls of 10 ms) on the provisional
-layout, with digits on a tapped Sym. The key events go into the pairing
+code the phone shows on the board's keys. The controller's answers, one
+ASCII code per press as the board measured (1427), go through the read
+and the driver (`MEASURED`, `Key::of`). The key events go into the pairing
 screen (`Pairing`, `loquax-m9/src/pair.rs:31`). After 20 characters, a
-`9` (Sym on `o`, not base32) reads "character 21 cannot stand there".
+`9` (not base32) reads "character 21 cannot stand there".
 Backspace takes it back, the remaining 120 characters follow, and Enter
 gives the `HomeCode` the phone showed. The join (`Pairing::join`,
 `loquax-m9/src/pair.rs:64`) then runs over the mesh. The home logs
