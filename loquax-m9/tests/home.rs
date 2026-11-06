@@ -114,7 +114,7 @@ fn the_pairing_screen_shows_the_code_the_verdict_and_the_join() {
         "{lines:#?}"
     );
     assert!(lines[3].starts_with(" lqxh1 "), "{:?}", lines[3]);
-    assert!(lines[ROWS - 1].contains("Esc leaves"));
+    assert!(lines[ROWS - 1].contains("Back leaves"));
     for c in text.chars().skip(23) {
         pairing.key(&event(M9Key::Char(c)));
     }

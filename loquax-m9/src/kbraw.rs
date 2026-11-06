@@ -124,19 +124,19 @@ mod tests {
     /// The first 60 presses of the bench capture, through the measured
     /// protocol and the driver, name the keys Lew pressed: the top letter
     /// row, the home row backwards, the bottom row, then the keys that
-    /// are no character, by their provisional roles (1440,
-    /// [`crate::keyboard::SPECIALS`]) until the walk proves them.
+    /// are no character, by the roles the walk of 2026-11-06 measured
+    /// (1459, [`crate::keyboard::SPECIALS`]); `0x90` is no key it pressed.
     #[test]
     fn the_bench_capture_replays_to_its_key_names() {
         let names = names(CAPTURE);
-        let want = "q w e new_message r t y ring_down u enter i o p back \
+        let want = "q w e new_message r t y ring_right u enter i o p pin \
                     i u y t g f d s z x c v b n m m j h g t \
                     chats new_message home \
-                    map map map map \
-                    ring_right ring_right ring_down ring_left ring_up \
-                    map pin back map e d \
-                    new_message home new_message space ring_centre \
-                    new_message map map";
+                    back back back back \
+                    ring_down ring_down ring_right ring_left ring_up \
+                    back map pin back e d \
+                    new_message home new_message space special_0x90 \
+                    new_message back back";
         assert_eq!(names.join(" "), want);
         assert_eq!(names.len(), 60);
     }

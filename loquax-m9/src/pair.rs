@@ -124,7 +124,7 @@ pub fn screen(
     while out.len() + 1 < rows {
         out.push(text("", plain));
     }
-    out.push(text(" Enter links   Esc leaves", chrome));
+    out.push(text(" Enter links   Back leaves", chrome));
     out.truncate(rows);
     out
 }

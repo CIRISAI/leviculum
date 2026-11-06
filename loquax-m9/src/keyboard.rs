@@ -25,13 +25,15 @@
 //! two speech bubbles; a house above a square speech bubble; the ring with
 //! four directions and a centre press; a back arrow above a position pin;
 //! a map key. Each has a [`Role`], the one a WhatsApp and Google Maps user
-//! expects ([`SPECIALS`]). Which code is which key is not proven yet: the
-//! bench saw `0xb4`..`0xb7` come as a group, so they are the ring in the
-//! CardKB order (left, up, down, right), `0x81`..`0x86` the six symbol keys
-//! in layout order, and `0x90`, never pressed, the ring's centre. The
-//! reviewer's walk presses them in the fixed order bubbles, house, square
-//! bubble, back, pin, map, then ring left, up, down, right, centre, reads
-//! the `KEY` lines, and the table is corrected from that. A code nothing
+//! expects ([`SPECIALS`]). Which code is which key is measured (1459,
+//! the reviewer's walk of 2026-11-06 20:17, pressed in the order
+//! bubbles, house, square bubble, back, pin, map, ring left, up, down,
+//! right, centre): `0x81` the bubbles, `0x82` the house, `0x83` the square
+//! bubble, `0x84` the pin, `0x85` the map, `0x86` the back arrow; the ring
+//! `0xb4` left, `0xb5` up, `0xb6` right, `0xb7` down. The ring's centre
+//! sends `0x0d`, ASCII CR, which is Enter already (21:03:13, `KEY
+//! code=0x0d name=enter`). `0x90`, seen once on 2026-11-04, is no key the
+//! walk pressed and stays unnamed. A code nothing
 //! names is [`Key::Special`], printed `special_0x91`, and makes no event.
 
 use alloc::string::String;
@@ -71,12 +73,12 @@ pub enum Role {
     Pin,
     /// The map key: the map tab.
     Map,
-    /// The ring: move the selection, switch or page, select.
+    /// The ring: move the selection, switch or page. Its centre sends
+    /// Enter (`0x0d`) and needs no role.
     RingLeft,
     RingUp,
     RingDown,
     RingRight,
-    RingCentre,
 }
 
 impl Role {
@@ -93,13 +95,11 @@ impl Role {
             Self::RingUp => "ring_up",
             Self::RingDown => "ring_down",
             Self::RingRight => "ring_right",
-            Self::RingCentre => "ring_centre",
         }
     }
 
     /// The key it is to the shared key table, when it is one: the ring's
-    /// arrows and centre (Enter: select, open, in the compose line send),
-    /// and Back.
+    /// arrows and Back.
     pub fn key(self) -> Option<M9Key> {
         Some(match self {
             Self::Back => M9Key::Back,
@@ -107,7 +107,6 @@ impl Role {
             Self::RingUp => M9Key::Up,
             Self::RingDown => M9Key::Down,
             Self::RingRight => M9Key::Right,
-            Self::RingCentre => M9Key::Enter,
             Self::Chats | Self::Home | Self::NewMessage | Self::Pin | Self::Map => return None,
         })
     }
@@ -124,21 +123,19 @@ impl Role {
     }
 }
 
-/// The codes that are no character, and their roles: provisional, by the
-/// most plausible layout, until the reviewer's walk proves them
-/// (module docs).
-pub const SPECIALS: [(u8, Role); 11] = [
+/// The codes that are no character, and their roles, as the reviewer's
+/// walk of 2026-11-06 measured them (module docs).
+pub const SPECIALS: [(u8, Role); 10] = [
     (0x81, Role::Chats),
     (0x82, Role::Home),
     (0x83, Role::NewMessage),
-    (0x84, Role::Back),
-    (0x85, Role::Pin),
-    (0x86, Role::Map),
+    (0x84, Role::Pin),
+    (0x85, Role::Map),
+    (0x86, Role::Back),
     (0xb4, Role::RingLeft),
     (0xb5, Role::RingUp),
-    (0xb6, Role::RingDown),
-    (0xb7, Role::RingRight),
-    (0x90, Role::RingCentre),
+    (0xb6, Role::RingRight),
+    (0xb7, Role::RingDown),
 ];
 
 /// What one code is.
@@ -258,11 +255,12 @@ mod tests {
         assert_eq!(Key::of(0x00), None, "an idle read is no key");
     }
 
-    /// The provisional table (1440): every code the capture saw that is
-    /// no character has a role, in the walk's order, and a code nothing
-    /// names stays a special that makes no event.
+    /// The measured table (1459): every control the walk pressed has its
+    /// role, in the walk's order; the ring's centre is Enter; a code
+    /// nothing names, `0x90` among them, stays a special that makes no
+    /// event.
     #[test]
-    fn the_specials_have_their_provisional_roles() {
+    fn the_specials_have_their_measured_roles() {
         let walk: Vec<(u8, &str)> = SPECIALS
             .iter()
             .map(|(code, role)| (*code, role.name()))
@@ -273,32 +271,31 @@ mod tests {
                 (0x81, "chats"),
                 (0x82, "home"),
                 (0x83, "new_message"),
-                (0x84, "back"),
-                (0x85, "pin"),
-                (0x86, "map"),
+                (0x84, "pin"),
+                (0x85, "map"),
+                (0x86, "back"),
                 (0xb4, "ring_left"),
                 (0xb5, "ring_up"),
-                (0xb6, "ring_down"),
-                (0xb7, "ring_right"),
-                (0x90, "ring_centre"),
+                (0xb6, "ring_right"),
+                (0xb7, "ring_down"),
             ]
         );
         let code_of = |key: KeyEvent| key.code;
         let ring = |code: u8| Key::of(code).and_then(Key::event).map(code_of);
         assert_eq!(ring(0xb4), Some(KeyCode::Left));
         assert_eq!(ring(0xb5), Some(KeyCode::Up));
-        assert_eq!(ring(0xb6), Some(KeyCode::Down));
-        assert_eq!(ring(0xb7), Some(KeyCode::Right));
-        assert_eq!(ring(0x90), Some(KeyCode::Enter));
-        assert_eq!(ring(0x84), Some(KeyCode::Esc));
+        assert_eq!(ring(0xb6), Some(KeyCode::Right));
+        assert_eq!(ring(0xb7), Some(KeyCode::Down));
+        assert_eq!(ring(0x0d), Some(KeyCode::Enter), "the centre");
+        assert_eq!(ring(0x86), Some(KeyCode::Esc));
         let command = |code: u8| Key::of(code).and_then(Key::command);
         assert_eq!(command(0x81), Some(Command::FocusConversations));
         assert_eq!(command(0x82), Some(Command::FocusConversations));
         assert_eq!(command(0x83), Some(Command::FocusCompose));
-        assert_eq!(command(0x86), Some(Command::Map));
-        let pin = Key::of(0x85).expect("a key");
+        assert_eq!(command(0x85), Some(Command::Map));
+        let pin = Key::of(0x84).expect("a key");
         assert_eq!((pin.event(), pin.command()), (None, None));
-        for code in [0x91, 0x80, 0xff] {
+        for code in [0x90, 0x91, 0x80, 0xff] {
             let key = Key::of(code).expect("a non-zero code is a key");
             assert_eq!(key, Key::Special(code));
             assert_eq!((key.event(), key.command()), (None, None));
@@ -329,22 +326,22 @@ mod tests {
         let mut model = crate::fixture::model();
         assert_eq!(model.focus, Pane::Conversations);
         let at = model.selected;
-        press(&mut model, &mut row, 0xb6);
+        press(&mut model, &mut row, 0xb7);
         assert_ne!(model.selected, at, "ring down moves the list's cursor");
         press(&mut model, &mut row, 0xb5);
         assert_eq!(model.selected, at, "ring up moves it back");
-        press(&mut model, &mut row, 0x90);
+        press(&mut model, &mut row, 0x0d);
         assert_eq!(model.focus, Pane::Messages, "the centre opens the chat");
-        press(&mut model, &mut row, 0x84);
+        press(&mut model, &mut row, 0x86);
         assert_eq!(model.focus, Pane::Conversations, "back leaves it");
-        press(&mut model, &mut row, 0x90);
+        press(&mut model, &mut row, 0x0d);
         press(&mut model, &mut row, 0x81);
         assert_eq!(model.focus, Pane::Conversations, "the bubbles: the list");
         press(&mut model, &mut row, 0x83);
         assert_eq!(model.focus, Pane::Compose, "the square bubble: compose");
         press(&mut model, &mut row, 0x82);
         assert_eq!(model.focus, Pane::Conversations, "the house: the list");
-        press(&mut model, &mut row, 0x86);
+        press(&mut model, &mut row, 0x85);
         assert!(crate::map::shown(&model), "the map key: the map");
         press(&mut model, &mut row, 0x81);
         assert!(!crate::map::shown(&model), "the bubbles close the map");
@@ -358,7 +355,9 @@ mod tests {
         assert_eq!(line(0x20), "KEY 9308251 code=0x20 name=space");
         assert_eq!(line(0x0d), "KEY 9308251 code=0x0d name=enter");
         assert_eq!(line(0x08), "KEY 9308251 code=0x08 name=backspace");
-        assert_eq!(line(0xb7), "KEY 9308251 code=0xb7 name=ring_right");
+        assert_eq!(line(0xb7), "KEY 9308251 code=0xb7 name=ring_down");
+        assert_eq!(line(0xb6), "KEY 9308251 code=0xb6 name=ring_right");
+        assert_eq!(line(0x90), "KEY 9308251 code=0x90 name=special_0x90");
         assert_eq!(line(0x81), "KEY 9308251 code=0x81 name=chats");
         assert_eq!(line(0x91), "KEY 9308251 code=0x91 name=special_0x91");
     }
