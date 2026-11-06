@@ -40,7 +40,7 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:472`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:478`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:253`, `loquax/Cargo.toml:257`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:701`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:723`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -581,10 +581,10 @@ this slice.
   keyboard controller, measured"). 1427 replaced the matrix driver with
   the measured one; the scan frame, the `KB` line and the test layout are
   gone.
-- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:159`) keeps no
+- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:156`) keeps no
   state: a non-zero code is one press, printable ASCII a character,
   `0x0d` Enter, `0x08` Backspace, a code of `SPECIALS`
-  (`loquax-m9/src/keyboard.rs:130`) its control's role, any other
+  (`loquax-m9/src/keyboard.rs:128`) its control's role, any other
   `special_0x..`, which makes no key event. A role is a key of the
   shared table (the ring and Back) or a palette command run as a GUI's
   menu runs one (the chats list, the compose line, the map;
@@ -687,7 +687,7 @@ draws is the scene the terminal, the window and the phone already draw.
   is a store on disk with signed messages, which the board has neither of
   yet, so the board's two screens have goldens of their own,
   `m9-fw-chats.png` and `m9-fw-chat.png`, walked to with the board's keys
-  (`Screen::model`, `loquax-m9/src/fixture.rs:633`).
+  (`Screen::model`, `loquax-m9/src/fixture.rs:635`).
 - **The keyboard:** the controller's answer is read as the community port
   reads it, register 0x01 of 0x6D, eight bytes a poll. Every answer goes
   out raw, `KBRAW <ms> <hex>`, one a 10 ms poll, and `parse_raw`
@@ -785,9 +785,9 @@ well as into the renderer, and both must be refused for thumbv7em.
 **The page fits a packet.** A link on LoRa keeps the default MTU, 500
 bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
-resource (`leviculum-core/src/node/mod.rs:1811`), which is an
+resource (`leviculum-core/src/node/mod.rs:1827`), which is an
 advertisement, its parts and a proof. The home's own page bound is
-64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:321`). So
+64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:330`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
 that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 (`loquax/src/home/ask.rs:146`), 412 B, the longest answer that still fits
@@ -954,12 +954,12 @@ group's row in the list has its member count as the avatar from the
 scene; a group with no line yet says "Invitation" or "3 members" where
 the last line would be. Every word goes through `narrow`.
 
-**The fixture's groups** (`group_model`, `loquax-m9/src/fixture.rs:464`):
+**The fixture's groups** (`group_model`, `loquax-m9/src/fixture.rs:466`):
 Jürgen's "Familie", the reader in it and Ünal gone; the reader's own
 "Kletterhalle", Ivan still invited; Jürgen's "Chor", the reader invited.
 `FRAME_DUMP` names nine screens now, one byte each in `SCREENS`
-(`loquax-m9/src/fixture.rs:509`), walked with the board's keys through
-`press` (`Screen::walk`, `loquax-m9/src/fixture.rs:623`):
+(`loquax-m9/src/fixture.rs:511`), walked with the board's keys through
+`press` (`Screen::walk`, `loquax-m9/src/fixture.rs:625`):
 
 | byte | screen | the walk | dump |
 |---:|---|---|---:|
@@ -985,7 +985,7 @@ fresh draw after every key (`a_group_redraw_is_the_frame_a_fresh_draw_gives`).
 
 **The census** (`loquax-android/tests/m9_fixture_census.rs`, 64-bit
 host, debug build), every screen of `SCREENS` with the M9's cursor, held
-to `Screen::budget` (`loquax-m9/src/fixture.rs:535`). The group's
+to `Screen::budget` (`loquax-m9/src/fixture.rs:537`). The group's
 screens have a budget of their own (`SHEET`,
 `loquax-m9/src/census.rs:186`), about double the largest of them; the
 board prints the same lines at boot:
@@ -1011,12 +1011,12 @@ grows by 17,248 B to 944,768 B (`just build-m9`).
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
-message to the group (`group_state`, `loquax/src/ui/groups.rs:1444`) and
+message to the group (`group_state`, `loquax/src/ui/groups.rs:1446`) and
 the home sends as any message (`/send`). `ask_of`
 (`loquax-m9/src/group.rs:293`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
 The harness test (`the_boards_group_keys_make_join_add_leave_and_delete_on_real_homes`,
-`loquax-android/tests/m9_client.rs:770`) runs it against two real homes
+`loquax-android/tests/m9_client.rs:771`) runs it against two real homes
 on a transport node, each verb a walk of the board's keys:
 
 - as the admin, on its own home: `n`, Anna ticked, Enter, "Seilschaft",
@@ -1150,7 +1150,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4499`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4531`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1159,7 +1159,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:840`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:862`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1266,7 +1266,7 @@ All targets:
   our pin on the map where it is newer than our last share; otherwise
   unchanged.
 - **Android:** the phone's own fix (`Intent::OwnFix`,
-  `loquax-android/src/session.rs:1311`) is our pin the same way;
+  `loquax-android/src/session.rs:1329`) is our pin the same way;
   otherwise unchanged.
 - **The home:** unchanged; it carries no region yet (above).
 

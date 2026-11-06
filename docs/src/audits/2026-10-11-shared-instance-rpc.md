@@ -164,7 +164,7 @@ read the answers:
   `shared_instance_name`, `leviculum-std/src/interfaces/inventory.rs:99`;
   against `reference/Reticulum/RNS/Utilities/rnstatus.py:393-401` and
   `:429-438`). The live client count decrements on disconnect
-  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4367`),
+  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4382`),
   so the `Serving : N programs` line (clients − 1,
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's
@@ -264,7 +264,7 @@ empty and nothing transmits at the next drain.
 
 *Fixed in 2352c749.* The arm calls `drop_announce_queues`
 (`leviculum-core/src/transport.rs:10223`, reached through
-`NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:3053`),
+`NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:3137`),
 which empties every interface's cap queue, leaves the holdoff clocks as
 they are, and logs `ANN_QUEUE_DROPPED iface= count=` per interface that
 held any, as the reference logs "Dropped N announces on <interface>". The

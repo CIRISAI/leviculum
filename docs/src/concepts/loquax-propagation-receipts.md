@@ -136,10 +136,10 @@ fields[0xFC] = map {
 
 - **Bit 2 on every send**: `groups::client_caps`
   (`loquax/src/ui/groups.rs:72`), which `mark_sends` puts on every
-  message (`loquax/src/ui.rs:1899-1903`); not switchable.
+  message (`loquax/src/ui.rs:1927-1931`); not switchable.
 - **The arrival**: the router hands a collected message on as
   `DeliveryMethod::Propagated`; the engine says so after the message
-  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:589`).
+  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:590`).
 - **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:122`):
   propagated, bit 2 in the message's own mark, no receipt of either kind,
   no group copy.
@@ -352,7 +352,7 @@ other key in either map (`lev_status::announced_version`).
   reached `collected`, `delivered` or a receipt is never asked again.
   Built as `pn_status::Asker` (`loquax/src/pn_status.rs`): a node is
   asked only after its announce said `{"lev": {"status": _}}`
-  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1908`);
+  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1910`);
   the ids come from the upload's proof (`RouterEvent::PropagationUploaded`
   → `OutboxEvent::Uploaded`); at most 64 ids a request, oldest first;
   `collected`, `delivered`, `expired` and `evicted` close an id, `held`
