@@ -20,7 +20,7 @@ sudo usermod -aG dialout $USER
 
 ## Build and flash
 
-Build the firmware with `cargo build --release`. Flash with `just flash` (from the repo root), which wraps `cargo run --release --bin t114`.
+Build the firmware with `cargo build --release`. Flash with `just flash` (from the repo root), which runs `scripts/nrf-flash.sh t114 bsp-t114`: it builds at the fixed path of `scripts/nrf-rustflags.sh`, so a clone of the same commit builds the same bytes, prints the image's sha256, and hands the ELF to `tools/uf2-runner.sh`.
 
 `just flash` flashes **every attached T114** sequentially. This is deliberate: if only one were flashed, developers would forget to update the other(s) and later run multi-node tests against mixed firmware versions, producing misleading results. The runner walks all matching devices in turn, copies the UF2, and prints a per-device summary at the end.
 
@@ -33,7 +33,7 @@ just flash-one /dev/leviculum-transport
 just flash-one /dev/ttyACM3
 ```
 
-Both forms expand to `LEVICULUM_FLASH_ONLY=<port> cargo run --release --bin t114`.
+Both forms expand to `LEVICULUM_FLASH_ONLY=<port> bash scripts/nrf-flash.sh t114 bsp-t114`.
 
 **When you still need a physical double-tap:** the firmware on a specific T114 has crashed or never reached USB init (panic before the handler is installed, stack overflow, hardware fault). The runner detects this per device via the UF2-drive-polling timeout and prompts for that specific T114 only. Other T114s in the batch continue to flash touch-free.
 

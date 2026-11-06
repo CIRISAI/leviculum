@@ -259,7 +259,9 @@ debug info does not bloat what lands on the device.
 
 The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
-therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:2157-2158`)
+hand the board's binary and features to `scripts/nrf-flash.sh`, which
+runs cargo in `leviculum-nrf` through `scripts/nrf-rustflags.sh`.
+(`Justfile:2159-2162`)
 
 A plain build (no flash) is:
 
@@ -269,14 +271,22 @@ cargo build --release
 
 (`leviculum-nrf/README.md:23`)
 
-Flashing wraps `cargo run`: the runner builds the release binary, then
-copies the resulting UF2 onto each board's UF2 bootloader drive. The
-UF2 conversion and copy happen inside the `cargo run` step — a bare
-`cargo build` produces only the ELF.
+Flashing goes through `scripts/nrf-flash.sh`: it builds the release
+binary at the fixed build path of `scripts/nrf-rustflags.sh`, in a
+private mount namespace, so a clone of the same commit builds the same
+bytes; it prints the image as `NRF_IMAGE bin= sha256= bytes=`, so a
+reviewer's own build of the commit can be compared before the board
+takes it; then it hands the ELF to `leviculum-nrf/tools/uf2-runner.sh`,
+outside that namespace, which converts it to UF2 and copies it onto each
+board's UF2 bootloader drive. A bare `cargo build` produces only the ELF.
+A host without unprivileged user namespaces builds in place, and the
+build says that image is not the reproducible one.
 
 > Build the firmware with `cargo build --release`. Flash with `just
-> flash` (from the repo root), which wraps `cargo run --release --bin
-> t114`.
+> flash` (from the repo root), which runs `scripts/nrf-flash.sh t114
+> bsp-t114`: it builds at the fixed path of `scripts/nrf-rustflags.sh`,
+> so a clone of the same commit builds the same bytes, prints the
+> image's sha256, and hands the ELF to `tools/uf2-runner.sh`.
 > (`leviculum-nrf/README.md:23`)
 
 ### Touch-free vs. manual double-tap
@@ -299,12 +309,12 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2184-2186`, `Justfile:2248-2257`. See
+automatically. (`Justfile:2187-2189`, `Justfile:2251-2260`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
 
-Each recipe below is quoted from the `Justfile`. The cargo invocation is
+Each recipe below is quoted from the `Justfile`. The build invocation is
 **derived from source — requires the physical device** to actually write
 firmware (it builds the same on any host, but only does something useful
 with a board attached).
@@ -316,10 +326,10 @@ deliberate: if only one were flashed, a later multi-node test could run
 against mixed firmware versions. Use this as your default for T114s.
 
 ```sh
-cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
+bash scripts/nrf-flash.sh t114 bsp-t114
 ```
 
-(`Justfile:2159-2161`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:2163-2165`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -334,10 +344,10 @@ just flash-one /dev/ttyACM3
 Expands to:
 
 ```sh
-cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> cargo run --release --bin t114 --features bsp-t114
+LEVICULUM_FLASH_ONLY=<PORT> bash scripts/nrf-flash.sh t114 bsp-t114
 ```
 
-(`Justfile:2168-2173`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:2171-2176`; usage forms `leviculum-nrf/README.md:31-36`)
 
 ### `just flash-rak4631` — every RAK4631 (bare module)
 
@@ -345,12 +355,12 @@ Flashes every attached RAK4631 / WisMesh Pocket V2 with the bare-module
 build (no baseboard peripherals).
 
 ```sh
-cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
+LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  cargo run --release --bin rak4631 --features bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631
 ```
 
-(`Justfile:2187-2189`)
+(`Justfile:2190-2192`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -364,12 +374,12 @@ just flash-rak4631-one /dev/leviculum-rak-transport
 Expands to:
 
 ```sh
-cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
+LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  cargo run --release --bin rak4631 --features bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631
 ```
 
-(`Justfile:2191-2195`)
+(`Justfile:2194-2198`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
@@ -378,12 +388,12 @@ battery). `--features rak-baseboard` aggregates the three baseboard
 features. Use this for a complete WisMesh Pocket V2.
 
 ```sh
-cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
+LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2197-2203`; `rak-baseboard` aggregate
+(`Justfile:2200-2206`; `rak-baseboard` aggregate
 `leviculum-nrf/Cargo.toml:453`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
@@ -406,7 +416,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2248-2257`)
+(`Justfile:2251-2260`)
 
 ### SenseCAP T1000-E: serial DFU
 
