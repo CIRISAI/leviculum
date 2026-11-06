@@ -95,7 +95,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            refresh();
+            // Drawn again only when the answer moved (1455).
+            Map<String, Object> answer = ask();
+            if (!Quiet.same(shownAnswer, answer)) {
+                refresh(answer);
+            }
             ticker.postDelayed(this, 30_000);
         }
     };
@@ -696,8 +700,19 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         Ui.showLine(status, text, true);
     }
 
+    /** The answer the list on screen shows (1455). */
+    private Map<String, Object> shownAnswer;
+
+    private Map<String, Object> ask() {
+        return archivedView ? Core.archived(null) : Core.conversations(null);
+    }
+
     private void refresh() {
-        Map<String, Object> answer = archivedView ? Core.archived(null) : Core.conversations(null);
+        refresh(ask());
+    }
+
+    private void refresh(Map<String, Object> answer) {
+        shownAnswer = answer;
         if (answer.containsKey("error")) {
             line(Core.str(answer, "error"));
             return;

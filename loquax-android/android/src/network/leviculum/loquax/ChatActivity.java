@@ -214,7 +214,11 @@ public class ChatActivity extends Activity implements Events.Listener {
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            refresh();
+            // Drawn again only when the answer moved (1455).
+            Map<String, Object> answer = Core.messages(peer);
+            if (!Quiet.same(header, answer)) {
+                refresh(answer);
+            }
             ticker.postDelayed(this, 30_000);
         }
     };
@@ -2275,7 +2279,10 @@ public class ChatActivity extends Activity implements Events.Listener {
     }
 
     private void refresh() {
-        Map<String, Object> answer = Core.messages(peer);
+        refresh(Core.messages(peer));
+    }
+
+    private void refresh(Map<String, Object> answer) {
         if (answer.containsKey("error")) {
             line(Core.str(answer, "error"));
             return;

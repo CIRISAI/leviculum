@@ -162,3 +162,44 @@ fn the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran() {
     );
     assert!(out.contains("checks passed"), "{out}");
 }
+
+/// When nothing changes, nothing is drawn (1455): `Quiet.java`, the rules
+/// the phone's screens ask before drawing again, run on the host with
+/// `tests/java/QuietTest.java`. The map's live ring pulses for its first
+/// cycles and then asks no frame; the 30-second tick of the chat list
+/// draws nothing while the library's answer stays the same. The controls
+/// in the Java: the pulse's seconds, the endless pulse before 1455, a row
+/// whose age moved.
+#[test]
+fn the_phone_draws_nothing_while_nothing_changes() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("quiet-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/Quiet.java"))
+        .arg(manifest.join("tests/java/QuietTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.QuietTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}

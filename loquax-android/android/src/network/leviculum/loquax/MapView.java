@@ -200,6 +200,8 @@ final class MapView extends View {
     private boolean fitWindowPressed;
     /** The last frame's marks (1200), in its view's pixels. */
     private List<Map<String, Object>> marks = Collections.emptyList();
+    /** When the last frame's marks came, uptime ms: a live ring pulses from then (1455). */
+    private long marksAt;
     /** The last frame's view size and deepest zoom. */
     private int viewW;
     private int viewH;
@@ -747,8 +749,12 @@ final class MapView extends View {
         float edge = 2 * density;
         long now = Ui.nowSecs();
         boolean pulsing = false;
-        double phase = (SystemClock.uptimeMillis() % PULSE_MS) * 2.0 * Math.PI / PULSE_MS;
-        int pulse = (int) (255 * (0.6 + 0.4 * Math.cos(phase)));
+        // A few cycles after the frame came, then the ring stands at full
+        // strength and asks no frame (1455).
+        long uptime = SystemClock.uptimeMillis();
+        boolean pulses = Quiet.pulsing(marksAt, uptime, PULSE_MS);
+        double phase = (uptime % PULSE_MS) * 2.0 * Math.PI / PULSE_MS;
+        int pulse = pulses ? (int) (255 * (0.6 + 0.4 * Math.cos(phase))) : 255;
         for (Map<String, Object> mark : marks) {
             float cx = offX + scale * Core.num(mark, "x");
             float cy = offY + scale * Core.num(mark, "y");
@@ -794,7 +800,7 @@ final class MapView extends View {
                 live.setColor(ringColour);
                 if ("live".equals(liveness)) {
                     live.setAlpha(pulse);
-                    pulsing = true;
+                    pulsing = pulses;
                 }
                 canvas.drawCircle(cx, cy, side / 2f - width / 2f, live);
             }
@@ -973,6 +979,7 @@ final class MapView extends View {
                     y = Core.num(shown, "y");
                     zoomMilli = Core.num(shown, "zoom_milli");
                     marks = Core.list(shown, "marks");
+                    marksAt = SystemClock.uptimeMillis();
                     ownX = shown.get("own_x") instanceof Number ? Core.num(shown, "own_x") : null;
                     ownY = shown.get("own_y") instanceof Number ? Core.num(shown, "own_y") : null;
                     viewW = w;
