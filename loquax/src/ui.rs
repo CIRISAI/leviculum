@@ -778,6 +778,15 @@ pub struct UiModel<B> {
     /// reads and deletes here is marked for the home's other devices, and a
     /// send is followed by a pull.
     pub home_client: bool,
+    /// The messages arriving now are the home's history, not live mail
+    /// (1429): a client whose first pull has not yet settled (its cursor is
+    /// still 0) is being handed the archive, the new device after `loquax
+    /// mailbox join` or a phone the mailbox moved to. Nobody read those
+    /// here, so none is marked read, even in the open conversation; their
+    /// read state is the archive's, the read marks the other devices sent,
+    /// which come in the same pull behind them. The shell sets it from the
+    /// cursor at start and clears it once a pull settled.
+    pub history: bool,
     /// The list is a screen of its own, as on a phone: a message arriving
     /// while no conversation is open leaves it closed and unread, where the
     /// terminal, which shows the list beside the conversation, opens it.
@@ -965,6 +974,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             changed_peers: BTreeSet::new(),
             forgotten: Vec::new(),
             home_client: false,
+            history: false,
             list_apart: false,
             marks: Vec::new(),
             petnames: Vec::new(),
@@ -4309,7 +4319,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
                 return effects;
             }
-            if open && model.home_client {
+            // History (1429) is not read by arriving: the open conversation
+            // takes it as a closed one would, unread until the archive's
+            // marks or the reader say otherwise.
+            let history = model.history;
+            if open && model.home_client && !history {
                 // Read where it arrived, so read on the home's other devices.
                 model.mark_out(crate::home::wire::MarkFlag::Read, vec![message_id]);
             }
@@ -4319,22 +4333,28 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             // no toast and brings no archived conversation back. Its row
             // and the peer's liveness say what it changed.
             if report {
-                if !open {
+                if !open || history {
                     model.changed_peers.insert(peer);
                     model.conversations[index].unread += 1;
-                } else if follow {
+                }
+                if open && follow {
                     model.message_cursor = model.conversations[index].messages.len() - 1;
                 }
                 return effects;
             }
             // Muted: counted, raised nowhere; archived and not muted: back
             // in the list (1146).
-            let raise = model.arrived(index);
-            if !open {
+            // History raises no toast either: thousands of old messages
+            // are no news.
+            let raise = model.arrived(index) && !history;
+            if !open || history {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
                 conversation.unread += 1;
                 conversation.mark_new();
+                if open && follow {
+                    model.message_cursor = conversation.messages.len() - 1;
+                }
             } else if follow {
                 let conversation = &mut model.conversations[index];
                 // A reader at the newest message stays at the newest.
@@ -7802,6 +7822,101 @@ pub(crate) mod tests {
                 ),
                 false => assert!(marks.is_empty()),
             }
+        }
+    }
+
+    /// The ids of every read mark in `marks`, in order.
+    fn read_ids(marks: &[crate::home::wire::Mark]) -> Vec<[u8; 32]> {
+        use crate::home::wire::MarkFlag;
+        marks
+            .iter()
+            .inspect(|mark| assert_eq!(mark.flag, MarkFlag::Read))
+            .flat_map(|mark| mark.ids.iter().copied())
+            .collect()
+    }
+
+    /// A new device's first pull marks nothing read (1429): a device that
+    /// joined a home with an archive of messages across three conversations
+    /// pulls from cursor 0. On the terminal the first arriving conversation
+    /// opens itself, on the phone the reader opens one while the pull runs;
+    /// neither reads the history arriving into it. The read state comes
+    /// from the archive's marks, which another device sent. Once the pull
+    /// settled, a message the reader opens and one arriving in the open
+    /// conversation are read, and only those.
+    #[test]
+    fn a_new_devices_first_pull_marks_nothing_read() {
+        use crate::home::wire::{Mark, MarkFlag};
+        const PER: u8 = 30;
+        let peers: [[u8; 16]; 3] = [[0xa1; 16], [0xb2; 16], [0xc3; 16]];
+        let id = |p: usize, n: u8| {
+            let mut id = [0u8; 32];
+            id[0] = 0xa0 + p as u8;
+            id[1] = n;
+            id
+        };
+        for phone in [false, true] {
+            let mut model = UiModel::<Field>::new(&[]);
+            model.home_client = true;
+            model.list_apart = phone;
+            // What both shells set for a client whose cursor is still 0.
+            model.history = true;
+            for n in 0..PER {
+                for (p, peer) in peers.iter().enumerate() {
+                    engine(&mut model, received_from(*peer, id(p, n), "history"));
+                }
+                // The phone's reader opens the first conversation early on:
+                // what it shows then is read, what the pull brings into it
+                // afterwards is not.
+                if phone && n == 4 {
+                    update(&mut model, UiEvent::Open { peer: peers[0] });
+                    assert_eq!(read_ids(&model.take_marks()).len(), 5, "phone={phone}");
+                }
+            }
+            // Another device read the second conversation up to its 20th.
+            engine(
+                &mut model,
+                OutboxEvent::HomeMarked {
+                    mark: Mark {
+                        flag: MarkFlag::Read,
+                        ids: vec![id(1, 19)],
+                    },
+                },
+            );
+            assert!(
+                model.take_marks().is_empty(),
+                "phone={phone}: the history pull marked read"
+            );
+            assert!(
+                !model
+                    .toasts
+                    .iter()
+                    .any(|t| t.text.starts_with("message from")),
+                "phone={phone}: history is no news"
+            );
+            let unread = |model: &UiModel<Field>, p: usize| {
+                let c = model.conversations.iter().find(|c| c.peer == peers[p]);
+                c.expect("listed").unread
+            };
+            let open_unread = match phone {
+                true => usize::from(PER) - 5,
+                false => usize::from(PER),
+            };
+            assert_eq!(unread(&model, 0), open_unread, "phone={phone}");
+            assert_eq!(unread(&model, 1), 10, "phone={phone}: the archive's marks");
+            assert_eq!(unread(&model, 2), usize::from(PER), "phone={phone}");
+            assert_eq!(model.conversations[model.selected].peer, peers[0]);
+            // The pull settled: live mail from here on.
+            model.history = false;
+            let live = [0x77; 32];
+            engine(&mut model, received_from(peers[0], live, "live"));
+            assert_eq!(read_ids(&model.take_marks()), [live], "phone={phone}");
+            // The reader opens the third conversation: its unread, and only
+            // those, are read.
+            update(&mut model, UiEvent::Open { peer: peers[2] });
+            let read = read_ids(&model.take_marks());
+            assert_eq!(read.len(), usize::from(PER), "phone={phone}");
+            assert!(read.iter().all(|r| r[0] == 0xa2), "phone={phone}");
+            assert_eq!(unread(&model, 1), 10, "phone={phone}: unopened stays");
         }
     }
 

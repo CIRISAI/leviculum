@@ -787,6 +787,15 @@ pub fn load_cursor(home: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether the next pull is the home's history, not live mail (1429): no
+/// pull has settled here yet, so it starts at cursor 0 and brings the whole
+/// archive, on a device that just joined or a phone the mailbox moved to.
+/// The screen marks none of it read by arriving
+/// ([`crate::ui::UiModel::history`]).
+pub fn history_owed(home: &std::path::Path) -> bool {
+    load_cursor(home) == 0
+}
+
 /// Move the cursor: only once what was pulled up to it is kept where the
 /// caller keeps it ([`Pull::cursor`]).
 pub fn save_cursor(home: &std::path::Path, cursor: u64) -> Result<(), String> {
@@ -1125,6 +1134,19 @@ mod tests {
         assert_eq!(pull.cursor, Some(7));
         assert_eq!((pull.messages(), pull.states()), (0, 0));
         assert_eq!(*outbox.commands.borrow(), [Command::Fence { token: 7 }]);
+    }
+
+    /// History is owed until a pull settled (1429): a home with no cursor
+    /// file, or one at 0, is a device that never pulled; any saved cursor
+    /// past 0 means live mail from here on.
+    #[test]
+    fn history_is_owed_until_a_pull_settled() {
+        let home = tempfile::tempdir().expect("home");
+        assert!(history_owed(home.path()));
+        save_cursor(home.path(), 0).expect("cursor");
+        assert!(history_owed(home.path()));
+        save_cursor(home.path(), 3611).expect("cursor");
+        assert!(!history_owed(home.path()));
     }
 
     /// The pull hands everything on in order, fenced, and names the cursor

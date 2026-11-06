@@ -1067,6 +1067,10 @@ impl Shell {
         // poll that handed the runner its fence; only now may the cursor
         // pass it.
         runner::settle_pull(&self.context.home, end.cursor);
+        // Once a pull settled, what arrives is live mail (1429).
+        if end.cursor.is_some() {
+            self.model.history = false;
+        }
         if end.imported > 0 {
             self.show_imported(end.imported);
         }
@@ -1472,6 +1476,9 @@ pub(crate) async fn start(
         loquax::names::load_contacts(&home).map_err(|error| crate::usage(error.to_string()))?;
     let mut model = Model::new(&options.to);
     model.home_client = client.is_some();
+    // A client that never settled a pull is about to be handed the home's
+    // history (1429): none of it is read by arriving.
+    model.history = model.home_client && loquax::home::client::history_owed(&home);
     model.own_code = own_code(&own_key);
     model.names = loquax::names::Names::new(contacts);
     let (restored, names, last_key, positions, unverified, track_fixes, pn_asks) = history;

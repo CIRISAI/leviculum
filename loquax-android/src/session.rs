@@ -1795,6 +1795,10 @@ impl Inner {
         let mut model = known(home, &store)?;
         model.lang = lang;
         model.home_client = true;
+        // A phone that never settled a pull, a new one or one the mailbox
+        // moved to, is about to be handed the home's history (1429): none
+        // of it is read by arriving.
+        model.history = loquax::home::client::history_owed(home);
         model.list_apart = true;
         // The phone hosts lnomad as its Browse tab (1337), behind the
         // config's `browse_tab` until the fetch through the phone's own
@@ -2500,6 +2504,10 @@ impl Inner {
     fn pulled(&mut self, end: runner::PullEnd) {
         self.pulling = false;
         runner::settle_pull(&self.home, end.cursor);
+        // Once a pull settled, what arrives is live mail (1429).
+        if end.cursor.is_some() {
+            self.model.history = false;
+        }
         if end.imported > 0 {
             self.persist();
             match runner::show_imported(&mut self.model, &self.store) {
