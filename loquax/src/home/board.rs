@@ -675,6 +675,7 @@ pub fn fold(entry: &wire::Entry, address: &[u8; 16]) -> Option<OutboxEvent> {
                 body: message.content,
                 fields: message.fields,
                 verified: false,
+                sent_at: message.timestamp as i64,
             })
         }
         super::KIND_SENT => {

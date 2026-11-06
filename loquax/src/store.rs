@@ -26,9 +26,11 @@
 //!   are one more, so a peer keeps its name across a restart.
 //! - **`fields` is filled, `title` and `timestamp` stay empty for now**:
 //!   the engine's `Received` event carries the fields, which the store keeps
-//!   whole as one raw msgpack map; it does not carry the sender's time, and
-//!   the screen drops the title. The columns are there so filling them is no
-//!   migration.
+//!   whole as one raw msgpack map, and the screen drops the title. The
+//!   column `received_at` holds the time a message shows, which since 1445
+//!   is when its writer wrote it (the event's `sent_at`, a group copy's
+//!   writer's); when this device took it is the first line of its ledger.
+//!   The columns are there so filling them is no migration.
 //! - **Positions are a table** (`positions`, schema 2): every position a
 //!   telemetry field carried, keyed by who measured and the fix time, so the
 //!   same fix arriving directly and again in a collector's stream is one row

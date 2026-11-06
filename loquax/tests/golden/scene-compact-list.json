@@ -1160,77 +1160,6 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Ratte Größe 🐀 ·4a36, ja"
-          },
-          "resource": "row_4a36d5c95d1b136a64a68848ba3bfc17",
-          "role": "row",
-          "selected": false
-        },
-        "activate": {
-          "enabled": true,
-          "intent": "OpenChat { peer: [74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23] }",
-          "label_key": "scene_open"
-        },
-        "at": 1748487400,
-        "avatar": {
-          "bg": "b0503a",
-          "fg": "ffffff",
-          "initials": "R🐀",
-          "ring": null
-        },
-        "draft": null,
-        "id": "row_4a36d5c95d1b136a64a68848ba3bfc17",
-        "kind": "text",
-        "last": "ja",
-        "live": null,
-        "liveness": {
-          "cadence_s": null,
-          "last_fix_at": 1748474800,
-          "state": "stale"
-        },
-        "mark": "sending",
-        "menu": [
-          {
-            "enabled": true,
-            "intent": "MarkUnread { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
-            "label_key": "mark_unread"
-          },
-          {
-            "enabled": true,
-            "intent": "Pin { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
-            "label_key": "pin"
-          },
-          {
-            "enabled": true,
-            "intent": "Mute { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), secs: -1 }",
-            "label_key": "mute"
-          },
-          {
-            "enabled": true,
-            "intent": "Archive { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
-            "label_key": "archive"
-          },
-          {
-            "enabled": true,
-            "intent": "Forget { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), everywhere: false, confirmed: false }",
-            "label_key": "scene_forget"
-          }
-        ],
-        "muted": false,
-        "name": "Ratte Größe 🐀 ·4a36",
-        "ours": true,
-        "pinned": false,
-        "position": null,
-        "reaction": null,
-        "selected": false,
-        "sharing": false,
-        "unread": 0,
-        "updates": 0
-      },
-      {
-        "a11y": {
-          "enabled": true,
-          "label": {
             "raw": "Nomadin Ünal ·bffb, Grüße aus Köln, die Straße ist nass"
           },
           "resource": "row_bffba8cb35f47523ae1ec907077bd572",
@@ -1289,6 +1218,77 @@
         ],
         "muted": false,
         "name": "Nomadin Ünal ·bffb",
+        "ours": true,
+        "pinned": false,
+        "position": null,
+        "reaction": null,
+        "selected": false,
+        "sharing": false,
+        "unread": 0,
+        "updates": 0
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Ratte Größe 🐀 ·4a36, ja"
+          },
+          "resource": "row_4a36d5c95d1b136a64a68848ba3bfc17",
+          "role": "row",
+          "selected": false
+        },
+        "activate": {
+          "enabled": true,
+          "intent": "OpenChat { peer: [74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23] }",
+          "label_key": "scene_open"
+        },
+        "at": 1748487400,
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "R🐀",
+          "ring": null
+        },
+        "draft": null,
+        "id": "row_4a36d5c95d1b136a64a68848ba3bfc17",
+        "kind": "text",
+        "last": "ja",
+        "live": null,
+        "liveness": {
+          "cadence_s": null,
+          "last_fix_at": 1748474800,
+          "state": "stale"
+        },
+        "mark": "sending",
+        "menu": [
+          {
+            "enabled": true,
+            "intent": "MarkUnread { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
+            "label_key": "mark_unread"
+          },
+          {
+            "enabled": true,
+            "intent": "Pin { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
+            "label_key": "pin"
+          },
+          {
+            "enabled": true,
+            "intent": "Mute { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), secs: -1 }",
+            "label_key": "mute"
+          },
+          {
+            "enabled": true,
+            "intent": "Archive { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), on: On }",
+            "label_key": "archive"
+          },
+          {
+            "enabled": true,
+            "intent": "Forget { peer: Peer([74, 54, 213, 201, 93, 27, 19, 106, 100, 166, 136, 72, 186, 59, 252, 23]), everywhere: false, confirmed: false }",
+            "label_key": "scene_forget"
+          }
+        ],
+        "muted": false,
+        "name": "Ratte Größe 🐀 ·4a36",
         "ours": true,
         "pinned": false,
         "position": null,

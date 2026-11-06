@@ -2475,6 +2475,7 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     // never (1209); the next report updates that row.
     let report = |id: u8, lat: i32| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [id; 32],
             source: peer,
             title: Vec::new(),
@@ -2539,6 +2540,7 @@ fn a_position_report_is_a_state_not_a_message() {
     let toasts = model.toasts.len();
     let received = |id: u8, body: &str, fields: Vec<_>| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [id; 32],
             source: peer,
             title: Vec::new(),
@@ -2748,6 +2750,7 @@ fn a_fresh_position_puts_the_map_pin_on_the_list_row() {
     update(
         &mut model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [0xc4; 32],
             source: peer,
             title: Vec::new(),
@@ -2882,6 +2885,7 @@ fn the_phone_reads_grouping_days_and_search_from_the_scene() {
     update(
         &mut model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [0xc1; 32],
             source: peer,
             title: Vec::new(),
@@ -2937,6 +2941,7 @@ fn the_friends_sheet_lists_positions_newest_first_with_the_day_marked() {
     );
     let report = |n: u8, peer: [u8; 16], at: i64, lat: i32| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [n; 32],
             source: peer,
             title: Vec::new(),
@@ -3054,6 +3059,7 @@ fn a_shared_position_reaches_the_privacy_list_and_a_bad_fix_is_refused() {
     update(
         &mut model,
         UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+            sent_at: 0,
             message_id: [7; 32],
             source: bob,
             title: Vec::new(),
@@ -4351,6 +4357,7 @@ fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
     let effects = update(
         &mut model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [0xe1; 32],
             source: peer,
             title: Vec::new(),
@@ -4446,6 +4453,7 @@ fn a_propagation_receipt_shows_its_own_words_on_the_phone_and_survives_the_store
     update(
         &mut model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [0xe7; 32],
             source: peer,
             title: Vec::new(),
@@ -5668,6 +5676,7 @@ fn media_without_words_has_an_empty_body() {
     let mut model = UiModel::<Line>::new(&[anna]);
     let carrying = |n: u8, body: &str, fields| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [n; 32],
             source: anna,
             title: Vec::new(),
@@ -6399,6 +6408,7 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),

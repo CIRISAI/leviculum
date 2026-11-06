@@ -384,6 +384,7 @@ fn arrive(model: &mut UiModel<Field>, from: [u8; 16], id: u8, body: &str, lev: L
     update(
         model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [id; 32],
             source: from,
             title: Vec::new(),

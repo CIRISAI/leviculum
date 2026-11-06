@@ -199,6 +199,7 @@ fn the_group_screens_are_the_golden_scenes() {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),

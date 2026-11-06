@@ -291,6 +291,12 @@ pub enum OutboxEvent {
         fields: Vec<Field>,
         /// Whether the signature verified against a known source identity.
         verified: bool,
+        /// The message's LXMF timestamp in unix seconds: when its writer
+        /// wrote it by the writer's clock (a group copy's is the home's
+        /// acceptance, its writer's own rides the `lev` pair). The bubble
+        /// shows this, not when this device fetched it (1445); 0 when not
+        /// known.
+        sent_at: i64,
     },
     /// The message just [`OutboxEvent::Received`] came through the
     /// propagation network: the router handed it on as

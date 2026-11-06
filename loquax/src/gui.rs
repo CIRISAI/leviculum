@@ -3401,6 +3401,7 @@ mod tests {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -4197,6 +4198,7 @@ mod tests {
             update(
                 &mut model,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: id,
                     source: ANNA,
                     title: Vec::new(),
@@ -4293,6 +4295,7 @@ mod tests {
                 update(
                     &mut model,
                     UiEvent::Engine(OutboxEvent::Received {
+                        sent_at: 0,
                         message_id: hers,
                         source: ANNA,
                         title: Vec::new(),
@@ -4569,6 +4572,7 @@ mod tests {
             update(
                 model,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [id; 32],
                     source: ANNA,
                     title: Vec::new(),
@@ -4641,6 +4645,7 @@ mod tests {
             update(
                 model,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [id; 32],
                     source: from,
                     title: Vec::new(),

@@ -581,6 +581,7 @@ impl Engine {
                     message_id: message.message_id,
                     source: message.source_hash,
                     verified,
+                    sent_at: message.timestamp as i64,
                     title: message.title,
                     body: message.content,
                     fields: message.fields,
@@ -888,6 +889,7 @@ impl Engine {
             message_id,
             source,
             verified,
+            sent_at: message.timestamp as i64,
             title: message.title,
             body: message.content,
             fields: message.fields,
@@ -2718,6 +2720,7 @@ mod tests {
         let _ = engine.on_tick(&mut core, now_ms);
         let events = drain(&mut engine);
         assert!(events.contains(&OutboxEvent::Received {
+            sent_at: 1_800_000_000,
             message_id: message.message_id,
             source,
             title: Vec::new(),

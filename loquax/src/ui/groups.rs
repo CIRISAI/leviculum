@@ -591,6 +591,7 @@ impl<B> UiModel<B> {
                 let index = self.conversation(invite.group);
                 let activity = self.bump();
                 self.conversations[index].activity = activity;
+                self.conversations[index].touched = self.now.map(|now| now.unix_secs);
             }
         }
         if let Some(members) = &lev.members {
@@ -1395,6 +1396,7 @@ impl<B: Default> UiModel<B> {
         let index = self.conversation(address);
         let activity = self.bump();
         self.conversations[index].activity = activity;
+        self.conversations[index].touched = self.now.map(|now| now.unix_secs);
         self.select(index);
         Vec::new()
     }
@@ -1529,6 +1531,7 @@ mod tests {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -2975,6 +2978,7 @@ mod tests {
         update(
             &mut model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [22; 32],
                 source: GROUP,
                 title: Vec::new(),

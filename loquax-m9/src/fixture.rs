@@ -431,11 +431,13 @@ fn groups() -> Vec<Restored> {
                 Standing::Invited => Vec::new(),
                 _ => {
                     // Newer than every conversation of the list: 1,000
-                    // past any activity it counts.
+                    // past any activity it counts, and written last, the
+                    // later group the later (the list orders by the time
+                    // written, 1445).
                     let mut line = message(0, i, i + 1, 1_000 + i as u64);
                     line.outbound = false;
                     line.delivery = None;
-                    line.at = Some(at(60 * (i as i64 + 1)));
+                    line.at = Some(at(60 * (2 - i as i64)));
                     line.body = String::from(GROUP_LINES[i]);
                     line.size = line.body.len();
                     vec![line]

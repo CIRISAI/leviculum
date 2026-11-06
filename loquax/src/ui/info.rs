@@ -62,12 +62,18 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
         true => InfoRow::new(StrId::InfoTo, Text::Raw(who.clone())),
         false => InfoRow::new(StrId::InfoFrom, Text::Raw(who.clone())),
     });
+    // Sent is when it was written, ours or theirs; Received is when this
+    // device took it, the first line of its ledger (1445): a history pulled
+    // at once shows its writers' days and says when it came here.
     if let Some(at) = message.at {
-        let label = match message.outbound {
-            true => StrId::InfoSent,
-            false => StrId::InfoReceived,
-        };
-        rows.push(InfoRow::new(label, when(&at, model.now.as_ref())));
+        rows.push(InfoRow::new(StrId::InfoSent, when(&at, model.now.as_ref())));
+    }
+    let taken = message.ledger.first().and_then(|entry| entry.at);
+    if let (false, Some(at)) = (message.outbound, taken) {
+        rows.push(InfoRow::new(
+            StrId::InfoReceived,
+            when(&at, model.now.as_ref()),
+        ));
     }
     match (message.delivery, message.signature) {
         (Some(state), _) => {

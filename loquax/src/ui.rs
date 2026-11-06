@@ -436,6 +436,11 @@ pub struct Conversation {
     /// The model's activity count at the last message, for the list's order:
     /// most recent first, a conversation without messages by its place.
     pub activity: u64,
+    /// When something that is no message moved it up the list (a group's
+    /// invitation or its making, unix seconds by our clock): the list's
+    /// time for a conversation that has no message yet, in this run
+    /// ([`Conversation::last_written`]).
+    pub touched: Option<i64>,
     /// What the conversation says between its messages: the peer's name
     /// changes, each once.
     pub notes: Vec<Note>,
@@ -461,6 +466,22 @@ pub struct Note {
 }
 
 impl Conversation {
+    /// When its newest message was written, for the list's order (1445): a
+    /// position report or a group's state moves the list nowhere, unless
+    /// the conversation has nothing else; a group's invitation or making
+    /// counts by when it came ([`Conversation::touched`]). `None` while
+    /// nothing has a time.
+    pub fn last_written(&self) -> Option<i64> {
+        let newest = |moves: bool| {
+            self.messages
+                .iter()
+                .filter(|m| !moves || !(m.is_report() || m.is_group_state()))
+                .filter_map(|m| m.at.map(|at| at.unix_secs))
+                .max()
+        };
+        newest(true).or_else(|| newest(false)).max(self.touched)
+    }
+
     fn new(peer: [u8; 16]) -> Self {
         Self {
             peer,
@@ -468,6 +489,7 @@ impl Conversation {
             unread: 0,
             new_rule: None,
             activity: 0,
+            touched: None,
             notes: Vec::new(),
             pinned: false,
             flags: history::Flags::default(),
@@ -1287,8 +1309,10 @@ impl<B> UiModel<B> {
     }
 
     /// The conversations in the list's order: the pinned first, then the
-    /// rest, each by their last message, most recent first; those without
-    /// one after, in the order they came. Only those the list shows
+    /// rest, each by when their newest message was written, most recent
+    /// first ([`Conversation::last_written`], 1445: a history pulled at
+    /// once keeps its order), then by when it came here; those without one
+    /// after, in the order they came. Only those the list shows
     /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
     pub fn order(&self) -> Vec<usize> {
         // The blocked view lists the blocked, archived or not.
@@ -1300,7 +1324,11 @@ impl<B> UiModel<B> {
             .collect();
         order.sort_by_key(|&i| {
             let c = &self.conversations[i];
-            (core::cmp::Reverse(c.pinned), core::cmp::Reverse(c.activity))
+            (
+                core::cmp::Reverse(c.pinned),
+                core::cmp::Reverse(c.last_written()),
+                core::cmp::Reverse(c.activity),
+            )
         });
         order
     }
@@ -4238,6 +4266,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             body,
             fields,
             verified,
+            sent_at,
             ..
         } => {
             let lev = leviculum_lxmf::lev::Lev::from_fields(&fields);
@@ -4268,7 +4297,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
             model.learn_group(source, false, &fields);
             let state = groups::is_state(&String::from_utf8_lossy(&body), &fields);
+            // When this device took it, for its ledger and the Info sheet's
+            // "Received"; the bubble shows when its writer wrote it (1445).
             let at = model.now;
+            let shown = written_time(at, sent_at, lev.as_ref());
             let activity = model.bump();
             let conversation = &mut model.conversations[index];
             let first = conversation.messages.is_empty();
@@ -4284,7 +4316,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 },
                 leg: None,
                 unproven: false,
-                at,
+                at: shown,
                 ledger: vec![LedgerEntry::new(
                     at,
                     match verified {
@@ -4881,6 +4913,31 @@ pub const STALLED_NOTE: &str = "sending stopped without an answer, trying again"
 /// bubble this device has for it says sent, and a device without one gets
 /// it. A bubble further along (waiting at a propagation node, delivered) stays: a pull
 /// asked again after a crash brings the sent entry a second time.
+/// The time a received message shows (1445): when its writer wrote it,
+/// not when this device took it, so a history a new device pulls at once
+/// keeps its days. A group copy's own timestamp is the home's acceptance,
+/// the group's order (`crate::home::group`), so its writer's time comes
+/// from the copy's `lev` pair. A time from the future (a writer's clock
+/// ahead of ours) shows as now, and one not known (0) as now too; `None`
+/// before the shell said the time.
+fn written_time(
+    now: Option<WallTime>,
+    sent_at: i64,
+    lev: Option<&leviculum_lxmf::lev::Lev>,
+) -> Option<WallTime> {
+    let written = lev
+        .and_then(|lev| lev.group_copy)
+        .and_then(|copy| i64::try_from(copy.sent_ms / 1000).ok())
+        .unwrap_or(sent_at);
+    now.map(|now| WallTime {
+        unix_secs: match written > 0 {
+            true => written.min(now.unix_secs),
+            false => now.unix_secs,
+        },
+        ..now
+    })
+}
+
 fn home_sent<B>(
     model: &mut UiModel<B>,
     message_id: [u8; 32],
@@ -6220,6 +6277,7 @@ pub(crate) mod tests {
         lev: &leviculum_lxmf::lev::Lev,
     ) -> OutboxEvent {
         OutboxEvent::Received {
+            sent_at: 0,
             message_id: id,
             source,
             title: Vec::new(),
@@ -6823,6 +6881,7 @@ pub(crate) mod tests {
             let event = match mark {
                 true => with_lev(PEER, [0x40 + i; 32], &format!("line {i}"), &lev),
                 false => OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [0x40 + i; 32],
                     source: PEER,
                     title: Vec::new(),
@@ -7291,6 +7350,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [0x31; 32],
                 source: PEER,
                 title: Vec::new(),
@@ -7817,6 +7877,7 @@ pub(crate) mod tests {
     fn a_received_message_opens_its_conversation_and_counts_unread() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         let received = OutboxEvent::Received {
+            sent_at: 0,
             message_id: ID,
             source: OTHER,
             title: Vec::new(),
@@ -7839,6 +7900,7 @@ pub(crate) mod tests {
 
     fn received_from(source: [u8; 16], id: [u8; 32], body: &str) -> OutboxEvent {
         OutboxEvent::Received {
+            sent_at: 0,
             message_id: id,
             source,
             title: Vec::new(),
@@ -8310,6 +8372,7 @@ pub(crate) mod tests {
     fn a_reader_at_the_newest_message_follows_a_new_one() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         let from_peer = |id: [u8; 32]| OutboxEvent::Received {
+            sent_at: 0,
             message_id: id,
             source: PEER,
             title: Vec::new(),
@@ -8755,6 +8818,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -8815,6 +8879,7 @@ pub(crate) mod tests {
         engine(
             model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -9222,6 +9287,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -9248,6 +9314,7 @@ pub(crate) mod tests {
             engine(
                 &mut model,
                 OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: id,
                     source: PEER,
                     title: Vec::new(),
@@ -10465,6 +10532,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -11001,6 +11069,7 @@ pub(crate) mod tests {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -13257,6 +13326,7 @@ pub(crate) mod tests {
         engine(
             model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: id,
                 source: PEER,
                 title: Vec::new(),
@@ -13271,6 +13341,7 @@ pub(crate) mod tests {
         engine(
             model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: id,
                 source: PEER,
                 title: Vec::new(),
@@ -13513,6 +13584,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -13553,6 +13625,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -13564,6 +13637,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -13625,6 +13699,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -13636,6 +13711,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -13697,6 +13773,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -13741,6 +13818,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -13860,19 +13938,21 @@ pub(crate) mod tests {
         let de = said(strings::Lang::De);
         let name = model.names.label(&PEER);
         assert_eq!(de[0], ("Von".to_string(), name.clone()));
+        // Written and taken at once here: both rows say so (1445).
+        assert_eq!(de[1], ("Gesendet".to_string(), "Heute · 14:00".to_string()));
         assert_eq!(
-            de[1],
+            de[2],
             ("Empfangen".to_string(), "Heute · 14:00".to_string())
         );
         assert_eq!(
-            de[2],
+            de[3],
             (
                 "Absender".to_string(),
                 "Durch die Signatur bestätigt".to_string()
             )
         );
-        assert_eq!(de[3], ("Größe".to_string(), "0,1 KB".to_string()));
-        assert_eq!(de.len(), 4, "{de:?}");
+        assert_eq!(de[4], ("Größe".to_string(), "0,1 KB".to_string()));
+        assert_eq!(de.len(), 5, "{de:?}");
         let hex = to_hex(&ID);
         assert!(
             de.iter()
@@ -13886,7 +13966,7 @@ pub(crate) mod tests {
         );
         let en = said(strings::Lang::En);
         assert_eq!(en[0], ("From".to_string(), name));
-        assert_eq!(en[3], ("Size".to_string(), "0.1 KB".to_string()));
+        assert_eq!(en[4], ("Size".to_string(), "0.1 KB".to_string()));
         assert!(info::message_info(&model, PEER, 999).is_none());
     }
 
@@ -14134,5 +14214,274 @@ pub(crate) mod tests {
         let peer = crate::home::lxmf_address(&key).expect("an address");
         update(&mut model, UiEvent::CodeRead(code));
         assert_eq!(model.conversations[model.selected].peer, peer);
+    }
+
+    /// A pulled message keeps the time its writer wrote it (1445, UI walk 1
+    /// finding 2). A mailbox holds three days of a direct history and a
+    /// group's, a new device joins and pulls it all at once on the third
+    /// day at 17:53, through the client engine as `take_in` hands it on,
+    /// into the screen and its store. Every message shows its writer's
+    /// time, a group copy its writer's (the `lev` pair), not the home's
+    /// acceptance; each chat runs in that order with its day lines; the
+    /// list is in order of each chat's newest message, though the oldest
+    /// chat's message was pulled last; the Info sheet says when it was
+    /// written and when this device fetched it; and the store gives the
+    /// same back after a restart.
+    #[test]
+    fn a_pulled_history_keeps_its_writers_times_in_the_chats_the_list_and_the_store() {
+        use crate::engine::{delivery_address, Engine};
+        use crate::outbox::Command;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::{DestinationHash, Identity};
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        use leviculum_lxmf::DeliveryMethod;
+        use leviculum_std::driver::{StdClock, StdStorage};
+
+        const DAY: i64 = 86_400;
+        const H: i64 = 3_600;
+        const M: i64 = 60;
+        let d0: i64 = 20_833 * DAY;
+        let pulled_at = d0 + 2 * DAY + 17 * H + 53 * M;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let us = leviculum_std::generate_identity();
+        let address = delivery_address(&us).expect("our address");
+        let mut engine = Engine::client(address);
+        let mut core = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir.path().join("core")).expect("storage"),
+        );
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = delivery_address(&identity).expect("address");
+            (identity, address)
+        };
+        let (alice, alice_at) = person();
+        let (dave, dave_at) = person();
+        let (group, group_at) = person();
+        let (bob, bob_at) = person();
+        let (carol, carol_at) = person();
+        for (identity, at) in [(&alice, alice_at), (&dave, dave_at), (&group, group_at)] {
+            core.remember_identity(DestinationHash::new(at), identity.clone());
+        }
+        let message = |to: [u8; 16], from: &Identity, at: i64, body: &str, fields| {
+            leviculum_lxmf::Message::create(
+                to,
+                delivery_address(from).expect("source"),
+                from,
+                at as f64,
+                Vec::new(),
+                body.as_bytes().to_vec(),
+                fields,
+                DeliveryMethod::Direct,
+            )
+            .expect("message")
+        };
+        // The home's copy of what `writer` wrote at `written`, accepted at
+        // `accepted`: the copy's own timestamp is the acceptance.
+        let copy = |writer: [u8; 16], written: i64, accepted: i64, body: &str| {
+            let mut fields = Vec::new();
+            Lev {
+                group_copy: Some(GroupCopy {
+                    sender: writer,
+                    sent_ms: written as u64 * 1000,
+                    epoch: 1,
+                }),
+                ..Lev::default()
+            }
+            .put_into(&mut fields);
+            message(address, &group, accepted, body, fields)
+        };
+        let _ = (&bob, &carol);
+        // The archive in its order, as the pull brings it: (entry, writer's
+        // time). Dave's came to the home late and is the last entry.
+        enum Entry {
+            In(leviculum_lxmf::Message),
+            Sent(leviculum_lxmf::Message),
+        }
+        let entries = [
+            (
+                Entry::In(message(address, &alice, d0 + 9 * H, "question", Vec::new())),
+                d0 + 9 * H,
+            ),
+            (
+                Entry::Sent(message(
+                    alice_at,
+                    &us,
+                    d0 + 9 * H + 48 * M,
+                    "answer",
+                    Vec::new(),
+                )),
+                d0 + 9 * H + 48 * M,
+            ),
+            (
+                Entry::In(copy(bob_at, d0 + 12 * H, d0 + 12 * H + 5, "bob: hi all")),
+                d0 + 12 * H,
+            ),
+            (
+                Entry::Sent(message(
+                    group_at,
+                    &us,
+                    d0 + DAY + 8 * H,
+                    "morning",
+                    Vec::new(),
+                )),
+                d0 + DAY + 8 * H,
+            ),
+            (
+                Entry::In(message(
+                    address,
+                    &alice,
+                    d0 + DAY + 10 * H,
+                    "monday",
+                    Vec::new(),
+                )),
+                d0 + DAY + 10 * H,
+            ),
+            // Written before midnight, accepted after: the writer's day.
+            (
+                Entry::In(copy(
+                    carol_at,
+                    d0 + DAY + 23 * H + 50 * M,
+                    d0 + 2 * DAY + 10 * M,
+                    "carol: late",
+                )),
+                d0 + DAY + 23 * H + 50 * M,
+            ),
+            (
+                Entry::In(message(
+                    address,
+                    &alice,
+                    d0 + 2 * DAY + 8 * H,
+                    "today",
+                    Vec::new(),
+                )),
+                d0 + 2 * DAY + 8 * H,
+            ),
+            (
+                Entry::In(message(address, &dave, d0 + 7 * H, "old news", Vec::new())),
+                d0 + 7 * H,
+            ),
+        ];
+        let mut written = std::collections::HashMap::new();
+        for (entry, at) in &entries {
+            let (command, id) = match entry {
+                Entry::In(m) => (Command::Ingest { packed: m.pack() }, m.message_id),
+                Entry::Sent(m) => (Command::HomeSent { packed: m.pack() }, m.message_id),
+            };
+            written.insert(id, *at);
+            engine.submit(command);
+        }
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events: Vec<OutboxEvent> = core::iter::from_fn(|| engine.next_event()).collect();
+
+        let clock = WallTime {
+            unix_secs: pulled_at,
+            offset_secs: 0,
+        };
+        let mut model = UiModel::<Field>::new(&[]);
+        model.home_client = true;
+        model.history = true;
+        update(&mut model, UiEvent::Clock(clock));
+        for event in events {
+            update(&mut model, UiEvent::Engine(event));
+        }
+        model.history = false;
+
+        // Read the screen: every message's time, each chat's order and day
+        // lines, the list's order.
+        let check = |model: &UiModel<Field>, when: &str| {
+            let mut seen = 0;
+            for conversation in &model.conversations {
+                let times: Vec<i64> = conversation
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let id = m.id.expect("an id");
+                        let shown = m.at.expect("a time").unix_secs;
+                        assert_eq!(
+                            shown, written[&id],
+                            "{when}: {:?} shows {shown}, written {} (pulled at {pulled_at})",
+                            m.body, written[&id]
+                        );
+                        seen += 1;
+                        shown
+                    })
+                    .collect();
+                assert!(
+                    times.windows(2).all(|w| w[0] <= w[1]),
+                    "{when}: not in writer order: {times:?}"
+                );
+            }
+            assert_eq!(seen, entries.len(), "{when}");
+            let peers: Vec<[u8; 16]> = model
+                .order()
+                .into_iter()
+                .map(|i| model.conversations[i].peer)
+                .collect();
+            assert_eq!(
+                peers,
+                [alice_at, group_at, dave_at],
+                "{when}: the list is not by each chat's newest message"
+            );
+            let g = model
+                .conversations
+                .iter()
+                .position(|c| c.peer == group_at)
+                .expect("the group's chat");
+            let days: Vec<bool> = chat::placements(&chat::bubbles(model, g))
+                .iter()
+                .map(|p| p.day)
+                .collect();
+            assert_eq!(days, [true, true, false], "{when}: the group's day lines");
+        };
+        check(&model, "pulled");
+
+        // The Info sheet of Alice's last: written then, fetched now.
+        let today = written
+            .iter()
+            .find(|(_, at)| **at == d0 + 2 * DAY + 8 * H)
+            .map(|(id, _)| *id)
+            .expect("today's id");
+        let alice_chat = model
+            .conversations
+            .iter()
+            .find(|c| c.peer == alice_at)
+            .expect("alice's chat");
+        let key = alice_chat
+            .messages
+            .iter()
+            .find(|m| m.id == Some(today))
+            .expect("today's message")
+            .activity;
+        let sheet = info::message_info(&model, alice_at, key).expect("its Info");
+        let row = |label: strings::StrId| {
+            sheet
+                .rows
+                .iter()
+                .find(|r| r.label == strings::Text::key(label))
+                .map(|r| format!("{:?}", r.value))
+        };
+        let sent = row(strings::StrId::InfoSent).expect("a Sent row");
+        let received = row(strings::StrId::InfoReceived).expect("a Received row");
+        assert!(sent.contains("\"08:00\""), "Sent: {sent}");
+        assert!(received.contains("\"17:53\""), "Received: {received}");
+
+        // The store keeps it across a restart.
+        #[cfg(feature = "history")]
+        {
+            let path = dir.path().join("history.sqlite3");
+            let mut store = crate::store::Store::open(&path, address).expect("store");
+            store.write(&model.take_writes()).expect("written");
+            drop(store);
+            let store = crate::store::Store::open(&path, address).expect("store again");
+            let mut restarted = UiModel::<Field>::new(&[]);
+            restarted.home_client = true;
+            update(&mut restarted, UiEvent::Clock(clock));
+            restarted.restore(store.restore().expect("restored"));
+            check(&restarted, "restarted");
+        }
     }
 }

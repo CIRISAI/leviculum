@@ -745,6 +745,7 @@ async fn pull_into_model(
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: message.message_id,
                 source: message.source_hash,
                 title: message.title,

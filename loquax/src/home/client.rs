@@ -1157,6 +1157,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         save_cursor(home.path(), 3).expect("cursor");
         let received = OutboxEvent::Received {
+            sent_at: 0,
             message_id: [1; 32],
             source: [2; 16],
             title: Vec::new(),

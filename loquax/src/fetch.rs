@@ -381,6 +381,7 @@ mod tests {
 
     fn received(id: [u8; 32], body: &[u8]) -> OutboxEvent {
         OutboxEvent::Received {
+            sent_at: 0,
             message_id: id,
             source: SRC,
             title: b"t".to_vec(),
@@ -825,6 +826,7 @@ mod tests {
                 stamp_cost: None,
             },
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID_A,
                 source: SRC,
                 title: Vec::new(),

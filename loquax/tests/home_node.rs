@@ -2763,6 +2763,7 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         loquax::ui::update(
             &mut model,
             loquax::ui::UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+                sent_at: 0,
                 message_id: annas.message_id,
                 source: annas.source_hash,
                 title: Vec::new(),

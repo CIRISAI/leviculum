@@ -1065,6 +1065,7 @@ fn a_tap_on_a_text_with_a_position_opens_the_map_at_it() {
         update(
             &mut model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: peer,
                 title: Vec::new(),

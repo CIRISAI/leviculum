@@ -3180,6 +3180,7 @@ mod tests {
             update(
                 m,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [n; 32],
                     source: from,
                     title: Vec::new(),
@@ -3360,6 +3361,7 @@ mod tests {
             update(
                 m,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [id; 32],
                     source: alice,
                     title: Vec::new(),
@@ -3466,6 +3468,7 @@ mod tests {
             update(
                 m,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [id; 32],
                     source: alice,
                     title: Vec::new(),
@@ -3565,6 +3568,7 @@ mod tests {
             update(
                 &mut model,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [0x7b; 32],
                     source: [0xb7; 16],
                     title: Vec::new(),
@@ -3643,6 +3647,7 @@ mod tests {
             update(
                 &mut model,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [0x77; 32],
                     source: [0xb7; 16],
                     title: Vec::new(),
@@ -3707,6 +3712,7 @@ mod tests {
         let direct = [0xd1; 32];
         let from_alice = |id: [u8; 32], body: &str| {
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: id,
                 source: alice,
                 title: Vec::new(),
