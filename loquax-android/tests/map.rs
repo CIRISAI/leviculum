@@ -311,27 +311,38 @@ fn the_phone_draws_the_buildings_as_the_window_does() {
         bare.path().join("maps/firenze.lmr"),
     )
     .expect("the region");
-    // The frame once its names faded in (1205): the renderer's clock
-    // held, then held a second further.
-    let settled = |ask: &MapRequest| {
+    // The frame once its names faded in (1205): the renderer's clock held
+    // at `at_ms` for every frame, then five seconds further. Never the
+    // running clock: a renderer serves all four views, and a name new to
+    // a later one fades in from the clock of its first frame, which on
+    // the running clock is however long the views before it took. Held
+    // back below that, the name was still nothing at "five seconds
+    // later" on a host slow enough, 2502 pixels of the z17 names on the
+    // forge (1405). A renderer's first frame shows its names at once, so
+    // the clock it is made with does not matter.
+    let settled = |ask: &MapRequest, at_ms: u64| {
         let dir = Path::new(&ask.dir);
-        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
-        loquax_android::map::tune_clock(dir, Some(0));
-        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
-        loquax_android::map::tune_clock(dir, Some(5_000));
-        let settled = frame(&loquax_android::map::render(ask, Some(Vec::new()), now()));
+        let draw = || loquax_android::map::render(ask, Some(Vec::new()), now());
+        loquax_android::map::tune_clock(dir, Some(at_ms));
+        let _ = draw();
+        loquax_android::map::tune_clock(dir, Some(at_ms));
+        let _ = draw();
+        loquax_android::map::tune_clock(dir, Some(at_ms + 5_000));
+        let settled = frame(&draw());
         loquax_android::map::tune_clock(dir, None);
         settled
     };
+    let mut at_ms = 0;
     for zoom in [16u8, 17] {
         for (dark, t) in [(false, "light"), (true, "dark")] {
             let ask = |dir: &Path| MapRequest {
                 zoom: Some(zoom),
                 ..request(dir, dark)
             };
-            let (shown, rgba) = settled(&ask(home.path()));
+            at_ms += 10_000;
+            let (shown, rgba) = settled(&ask(home.path()), at_ms);
             assert_eq!((shown.w, shown.h), (W, H));
-            let (_, without) = settled(&ask(bare.path()));
+            let (_, without) = settled(&ask(bare.path()), at_ms);
             let share = same_share(&rgba, &without);
             assert!(
                 share < 95,
@@ -348,15 +359,13 @@ fn the_phone_draws_the_buildings_as_the_window_does() {
             let info = reader.next_frame(&mut want).expect("frame");
             want.truncate(info.buffer_size());
             let rgb: Vec<u8> = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
-            let differ = want
-                .chunks(3)
-                .zip(rgb.chunks(3))
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(
-                differ, 0,
-                "z{zoom} {t}: the phone is not the window's picture"
-            );
+            if want != rgb {
+                let name = format!("phone-buildings-{t}-z{zoom}.png");
+                panic!(
+                    "z{zoom} {t}: the phone is not the window's picture; {}",
+                    tell_the_difference(&name, &want, &rgb, W, H)
+                );
+            }
         }
     }
 }
@@ -796,6 +805,46 @@ fn same_as(name: &str, rgba: &[u8], w: u32, h: u32) {
             keep().display()
         );
     }
+}
+
+/// What differs between the RGB picture `want` and `got`, `w` x `h`: the
+/// count, the box around it and the count per band of 32 rows, with `got`
+/// kept under the target's temp dir as `name`, so a run on another host
+/// (the forge, whose container goes with its picture) shows which pixels.
+fn tell_the_difference(name: &str, want: &[u8], got: &[u8], w: u32, h: u32) -> String {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("loquax-android-golden");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let kept = dir.join(name);
+    let mut out = Vec::new();
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgb);
+    e.set_depth(png::BitDepth::Eight);
+    let mut writer = e.write_header().expect("header");
+    writer.write_image_data(got).expect("data");
+    writer.finish().expect("finish");
+    std::fs::write(&kept, out).expect("write");
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    let mut bands = vec![0usize; h.div_ceil(32) as usize];
+    let mut differ = 0;
+    for (i, (a, b)) in want.chunks(3).zip(got.chunks(3)).enumerate() {
+        if a != b {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            bands[(y / 32) as usize] += 1;
+            differ += 1;
+        }
+    }
+    let bands: Vec<String> = bands
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .map(|(i, n)| format!("rows {}..{}: {n}", i * 32, i * 32 + 32))
+        .collect();
+    format!(
+        "{differ} pixels differ in x {x0}..={x1}, y {y0}..={y1} ({}); this run's is {}",
+        bands.join(", "),
+        kept.display()
+    )
 }
 
 /// The smallest shift by which every pixel column of `rgba`, `w` wide,

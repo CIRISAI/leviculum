@@ -433,9 +433,9 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. }
                 | OutboxEvent::Unsent { .. }
+                | OutboxEvent::KeyMissing { .. }
                 | OutboxEvent::Fenced { .. }
                 | OutboxEvent::Packed { .. }
-                | OutboxEvent::KeyWanted { .. }
                 | OutboxEvent::HomeSent { .. }
                 | OutboxEvent::HomeMarked { .. }
                 | OutboxEvent::HomeStalled { .. }

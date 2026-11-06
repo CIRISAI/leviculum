@@ -685,7 +685,8 @@ impl LxmfRouter {
 
     /// Send the held proofs of `message_id`: the integration kept it. An ID
     /// with no proof held (a message from a propagation node, one proven at
-    /// once, one already released) sends nothing.
+    /// once, one already released) sends nothing, nor does one whose link
+    /// closed meanwhile, and the other held proofs stay held (1412).
     pub fn release_proofs<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
@@ -703,7 +704,7 @@ impl LxmfRouter {
         let mut kept = VecDeque::with_capacity(self.held_proofs.len());
         for (id, proof) in core::mem::take(&mut self.held_proofs) {
             if id == *message_id {
-                output.core.merge(LxmfNode::prove(node, &proof)?);
+                output.core.merge(prove_or_drop(node, &proof, Some(&id)));
             } else {
                 kept.push_back((id, proof));
             }
@@ -720,8 +721,7 @@ impl LxmfRouter {
         proof: InboundProof,
         accepted: Option<[u8; 32]>,
         core: &mut TickOutput,
-    ) -> Result<(), RouterError>
-    where
+    ) where
         R: CryptoRngCore,
         C: Clock,
         S: Storage,
@@ -738,9 +738,9 @@ impl LxmfRouter {
                 }
                 self.held_proofs.push_back((message_id, proof));
             }
-            None => core.merge(LxmfNode::prove(node, &proof)?),
+            // At once, or dropped when it cannot go: no fault of ours (1412).
+            None => core.merge(prove_or_drop(node, &proof, None)),
         }
-        Ok(())
     }
 
     /// Attach the propagation-mailbox client transport.
@@ -1485,7 +1485,7 @@ impl LxmfRouter {
                 if let Some(proof) = self.pending_link_proof.take_if(
                     |proof| matches!(proof, InboundProof::Link { link_id: l, .. } if l == link_id),
                 ) {
-                    self.settle_proof(node, proof, accepted, &mut output.core)?;
+                    self.settle_proof(node, proof, accepted, &mut output.core);
                 }
             }
             _ => {}
@@ -1494,13 +1494,13 @@ impl LxmfRouter {
             match proof {
                 InboundProof::Packet { .. } => {
                     let accepted = self.last_packet.take();
-                    self.settle_proof(node, proof, accepted, &mut output.core)?;
+                    self.settle_proof(node, proof, accepted, &mut output.core);
                 }
                 InboundProof::Link { .. } => {
                     // A request whose data never came is proven, as it was
                     // before proofs were held.
                     if let Some(stale) = self.pending_link_proof.replace(proof) {
-                        self.settle_proof(node, stale, None, &mut output.core)?;
+                        self.settle_proof(node, stale, None, &mut output.core);
                     }
                 }
             }
@@ -2862,6 +2862,36 @@ fn verification_from(value: u64) -> Result<Verification, RouterError> {
         1 => Ok(Verification::Valid),
         2 => Ok(Verification::Invalid),
         _ => Err(RouterError::CorruptSnapshot),
+    }
+}
+
+/// Send one proof, or drop it when it cannot go: its link closed while the
+/// message waited to be kept, or its destination is gone. The sender
+/// retries as for any message that drew no proof, and a duplicate of a kept
+/// message is proven at once. Until 1412 one such proof made
+/// [`LxmfRouter::release_proofs`] fail after it had drained every other held
+/// proof, and a home under a one-message-a-second sender (miauhaus,
+/// 2026-11-04) logged its engine as broken.
+fn prove_or_drop<R, C, S>(
+    node: &mut NodeCore<R, C, S>,
+    proof: &InboundProof,
+    _message_id: Option<&[u8; 32]>,
+) -> TickOutput
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    match LxmfNode::prove(node, proof) {
+        Ok(output) => output,
+        Err(_) => {
+            crate::tracing::debug!(
+                "LXMF_PROOF_UNSENT message={} link={}",
+                crate::tracing::Short(_message_id.map_or(&[][..], |id| &id[..])),
+                matches!(proof, InboundProof::Link { .. })
+            );
+            TickOutput::default()
+        }
     }
 }
 

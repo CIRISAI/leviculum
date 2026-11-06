@@ -527,6 +527,34 @@ impl Store {
         )
     }
 
+    /// How many copies of every group this home hosts are sent alone and
+    /// not proven: what the restart's [`Store::group_copies_open`] hands
+    /// the groups' outboxes, counted for the `HOME up` line (1406: it
+    /// counted the home's own outbox alone, 9 where 27 went out).
+    pub fn group_copies_open_count(&self) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM group_fanout \
+                 WHERE identity = ?1 AND state = 0 AND digest IS NULL",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))
+    }
+
+    /// The row of `copy` names `to` from now on: the copy made again under
+    /// a rule that changed its bytes, so its id (1406). Its proof and
+    /// everything else find the row under the new id.
+    pub fn group_copy_renamed(&mut self, copy: &[u8; 32], to: &[u8; 32]) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE group_fanout SET copy = ?3 WHERE identity = ?1 AND copy = ?2",
+                params![&self.identity[..], &copy[..], &to[..]],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
+    }
+
     /// Every copy of `group` held for a digest, the oldest first: by the
     /// acceptance time, and within one second in the order the copies were
     /// booked, which is the order the lines were accepted in.
@@ -1090,5 +1118,20 @@ mod tests {
             .map(|c| c.original)
             .collect();
         assert_eq!(open, [[8; 32], [2; 32]]);
+        assert_eq!(store.group_copies_open_count().expect("count"), 2);
+        // A proven copy is open no more; a renamed one keeps its place.
+        store.group_copy_proven(&[0x28; 32], 200).expect("proven");
+        assert_eq!(store.group_copies_open_count().expect("count"), 1);
+        store
+            .group_copy_renamed(&[0x22; 32], &[0x33; 32])
+            .expect("renamed");
+        let open = store.group_copies_open(&GROUP).expect("open");
+        assert_eq!(
+            open.iter()
+                .map(|c| (c.original, c.copy))
+                .collect::<Vec<_>>(),
+            [([2; 32], [0x33; 32])]
+        );
+        assert!(store.group_copy(&[0x22; 32]).expect("old").is_none());
     }
 }

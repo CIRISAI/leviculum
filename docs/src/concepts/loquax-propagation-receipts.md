@@ -139,7 +139,7 @@ fields[0xFC] = map {
   message (`loquax/src/ui.rs:1874-1878`); not switchable.
 - **The arrival**: the router hands a collected message on as
   `DeliveryMethod::Propagated`; the engine says so after the message
-  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:599`).
+  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:589`).
 - **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:122`):
   propagated, bit 2 in the message's own mark, no receipt of either kind,
   no group copy.
@@ -151,7 +151,7 @@ fields[0xFC] = map {
   message to that sender. Read wins: an id seen while read receipts go to
   that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:290`).
 - **On a home node**: the archive step of the daemon's pump
-  (`loquax/src/home/daemon.rs:728`) gathers one pump's arrivals per
+  (`loquax/src/home/daemon.rs:736`) gathers one pump's arrivals per
   sender, `owes_arrival` (`loquax/src/home/server.rs:662`) applies the
   rule to the packed message, and `propagation_receipts`
   (`loquax/src/home/server.rs:733`) signs each alone into the outbox,
@@ -352,7 +352,7 @@ other key in either map (`lev_status::announced_version`).
   reached `collected`, `delivered` or a receipt is never asked again.
   Built as `pn_status::Asker` (`loquax/src/pn_status.rs`): a node is
   asked only after its announce said `{"lev": {"status": _}}`
-  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1945`);
+  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1908`);
   the ids come from the upload's proof (`RouterEvent::PropagationUploaded`
   → `OutboxEvent::Uploaded`); at most 64 ids a request, oldest first;
   `collected`, `delivered`, `expired` and `evicted` close an id, `held`

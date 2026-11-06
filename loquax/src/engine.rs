@@ -95,11 +95,6 @@ pub use shell::{
 /// the driver's 1 s idle cadence.
 const POLL_INTERVAL_MS: u64 = 200;
 
-/// How often a propagated message that waits for its recipient's key says
-/// so again ([`OutboxEvent::KeyWanted`]): five minutes, so a home that
-/// waits an hour leaves twelve lines, not one per router retry.
-pub const KEY_WAIT_SAY_MS: u64 = 5 * 60 * 1000;
-
 /// Why a client's engine sends nothing itself: a client holds no LXMF
 /// identity, and its messages go through the home node's `/send`
 /// (`docs/src/concepts/loquax-home-node.md`), which the shell asks, not the
@@ -336,10 +331,6 @@ pub struct Engine {
     /// `HOME_ANNOUNCE` (1305). A hosted group's engine hands out packed too,
     /// but announces the group, not the home.
     says_home: bool,
-    /// Propagated messages whose recipient's key this node does not hold,
-    /// with the recipient and when to say so next (1305). See
-    /// [`OutboxEvent::KeyWanted`].
-    key_wanted: BTreeMap<[u8; 32], ([u8; 16], u64)>,
     /// The recipients of packed messages this run sent, each with the random
     /// hash of the last announce heard from it. See [`Engine::replayed`].
     recipients: BTreeMap<[u8; 16], Option<[u8; RANDOM_HASHBYTES]>>,
@@ -373,7 +364,6 @@ impl Engine {
             hands_out_packed: false,
             undecryptable: 0,
             says_home: false,
-            key_wanted: BTreeMap::new(),
             recipients: BTreeMap::new(),
             replayed: None,
         }
@@ -799,12 +789,11 @@ impl Engine {
         // the router only asks for a path it lacks, and a client of a shared
         // instance has the path without the key.
         let destination = DestinationHash::new(message.destination_hash);
-        if message.method == DeliveryMethod::Direct
-            && core
-                .storage()
-                .get_identity(destination.as_bytes())
-                .is_none()
-        {
+        let keyless = core
+            .storage()
+            .get_identity(destination.as_bytes())
+            .is_none();
+        if keyless {
             tracing::info!(
                 "ENGINE no key for {}: asking its path",
                 crate::address::to_hex(&message.destination_hash)
@@ -820,24 +809,28 @@ impl Engine {
                 out,
             );
         }
-        // A propagated leg to a recipient whose key this node does not hold
-        // cannot be encrypted for the node; the router asks the path and
-        // waits, and without this it waits in silence (1305).
-        if message.method == DeliveryMethod::Propagated
-            && core
-                .storage()
-                .get_identity(destination.as_bytes())
-                .is_none()
-        {
-            self.key_wanted
-                .insert(message_id, (message.destination_hash, 0));
-        }
         if message.method == DeliveryMethod::Propagated
             && ready.router.outbound_propagation_node().is_none()
         {
             self.emit(OutboxEvent::Unsent {
                 message_id,
                 detail: "no propagation node is selected".to_string(),
+            });
+            return;
+        }
+        // A propagated leg cannot be encrypted for the node without the key.
+        // The router holds such a message, asks the path every
+        // `PATH_REQUEST_WAIT_MS` and charges no attempt
+        // (`leviculum-lxmf/src/router/propagation_runtime.rs`, the
+        // `Err(RouterError::Node(_))` arm after `ensure_prepared_upload`), so
+        // the leg never ended: on the field mailbox every such leg waited out
+        // the home's stall bound, 779 s, every hour for seven days (1406). It
+        // is not queued now, and said so; the next leg finds the key once
+        // the recipient's announce answered the path request above.
+        if message.method == DeliveryMethod::Propagated && keyless {
+            self.emit(OutboxEvent::KeyMissing {
+                message_id,
+                destination: message.destination_hash,
             });
             return;
         }
@@ -1513,36 +1506,6 @@ impl Engine {
         );
     }
 
-    /// Say each propagated message still waiting for its recipient's key,
-    /// at once and then every [`KEY_WAIT_SAY_MS`]; forget one whose key came
-    /// or that the router let go of.
-    fn poll_key_wanted<R: CryptoRngCore, C: CoreClock, S: Storage>(
-        &mut self,
-        ready: &Ready,
-        core: &NodeCore<R, C, S>,
-        now_ms: u64,
-    ) {
-        let mut due = Vec::new();
-        self.key_wanted.retain(|message_id, (destination, next)| {
-            if core.storage().get_identity(destination).is_some()
-                || ready.router.outbound().get(message_id).is_none()
-            {
-                return false;
-            }
-            if now_ms >= *next {
-                *next = now_ms.saturating_add(KEY_WAIT_SAY_MS);
-                due.push((*message_id, *destination));
-            }
-            true
-        });
-        for (message_id, destination) in due {
-            self.emit(OutboxEvent::KeyWanted {
-                message_id,
-                destination,
-            });
-        }
-    }
-
     /// Hold one received message until its sender's key is known.
     fn hold(&mut self, message_id: [u8; 32], source: [u8; 16], packed: Vec<u8>) {
         let unheard = self.unheard.entry(source).or_insert_with(|| Unheard {
@@ -2014,7 +1977,6 @@ impl Engine {
         self.poll_resolves(&mut ready, core, now_ms, &mut out);
         self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
         self.poll_unheard(&mut ready, core, now_ms, &mut out);
-        self.poll_key_wanted(&ready, core, now_ms);
         match ready.router.tick(core) {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emit(OutboxEvent::Broken {
@@ -3679,11 +3641,15 @@ mod tests {
         );
     }
 
-    /// 1305: a propagated leg to a recipient whose key this node does not
-    /// hold says so at once and then every `KEY_WAIT_SAY_MS`, not on every
-    /// tick; a direct leg to the same recipient says nothing of the kind.
+    /// 1406, the field mailbox on 2026-11-04: a propagated leg to a
+    /// recipient whose key this node does not hold cannot be encrypted for
+    /// the node, and the router held it without a word until the home's
+    /// stall bound gave it up after 779 s, every hour for seven days. It is
+    /// said at once as a missing key, and the recipient's path is asked, as
+    /// a direct leg asks it; nothing waits in the router.
+    /// Control: the same message with the key known is queued.
     #[test]
-    fn a_propagated_leg_without_the_recipients_key_says_it_waits() {
+    fn a_propagated_leg_without_the_recipients_key_fails_at_once_and_asks_its_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
         let mut engine = engine();
@@ -3695,41 +3661,54 @@ mod tests {
         });
         let _ = engine.on_tick(&mut core, now_ms);
         drain(&mut engine);
-        let wanted = |events: &[OutboxEvent], id: [u8; 32]| {
-            events
-                .iter()
-                .filter(|e| {
-                    matches!(e, OutboxEvent::KeyWanted { message_id, destination }
-                        if *message_id == id && *destination == [0x42; 16])
-                })
-                .count()
+        let asks_path = |out: &TickOutput, destination: [u8; 16]| {
+            out.actions.iter().any(|action| match action {
+                leviculum_core::Action::SendPacket { data, .. }
+                | leviculum_core::Action::Broadcast { data, .. } => {
+                    data.windows(16).any(|window| window == destination)
+                }
+            })
         };
-
-        let (direct, direct_id) = packed_message([0x42; 16]);
-        engine.submit(Command::SendPacked {
-            packed: direct,
-            via: Via::Link,
-        });
-        let _ = engine.on_tick(&mut core, now_ms);
-        let events = drain(&mut engine);
-        assert_eq!(wanted(&events, direct_id), 0, "{events:?}");
 
         let (packed, id) = packed_message([0x42; 16]);
         engine.submit(Command::SendPacked {
             packed,
             via: Via::Propagated,
         });
-        let _ = engine.on_tick(&mut core, now_ms);
+        let out = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(
+            !events.contains(&OutboxEvent::Queued { message_id: id }),
+            "a leg without the key was queued: {events:?}"
+        );
+        assert!(
+            events.contains(&OutboxEvent::KeyMissing {
+                message_id: id,
+                destination: [0x42; 16],
+            }),
+            "{events:?}"
+        );
+        assert!(asks_path(&out, [0x42; 16]), "no path request: {out:?}");
+
+        // Control: with the recipient's key held, the leg is queued.
+        let recipient = leviculum_std::generate_identity();
+        let known = delivery_address(&recipient).expect("address");
+        core.remember_identity(
+            DestinationHash::new(known),
+            Identity::from_public_key_bytes(&recipient.public_key_bytes()).expect("public key"),
+        );
+        let (packed, id) = packed_message(known);
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Propagated,
+        });
+        let out = engine.on_tick(&mut core, now_ms);
         let events = drain(&mut engine);
         assert!(
             events.contains(&OutboxEvent::Queued { message_id: id }),
-            "the propagated leg was not queued: {events:?}"
+            "the leg with the key was not queued: {events:?}"
         );
-        assert_eq!(wanted(&events, id), 1, "said at once: {events:?}");
-        let _ = engine.on_tick(&mut core, now_ms + KEY_WAIT_SAY_MS - 1);
-        assert_eq!(wanted(&drain(&mut engine), id), 0, "not on every tick");
-        let _ = engine.on_tick(&mut core, now_ms + KEY_WAIT_SAY_MS);
-        assert_eq!(wanted(&drain(&mut engine), id), 1, "and again later");
+        assert!(!asks_path(&out, known), "a path asked with the key held");
     }
 
     /// A client's engine names a bubble after the id the home node gave it,
