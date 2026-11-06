@@ -40,20 +40,24 @@ pub mod serial_iface;
 pub mod sx1262;
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::RefCell;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+use critical_section::Mutex;
 
 use embedded_alloc::LlffHeap as Heap;
 use esp_hal::{
     clock::CpuClock,
     peripherals::{Peripherals, USB_DEVICE},
     time::{Duration, Instant},
-    uart::Uart,
+    uart::{Config as UartConfig, RxConfig, RxError, Uart, UartInterrupt, UartRx, UartTx},
     usb::usb_serial_jtag::UsbSerialJtag,
     Blocking,
 };
 
 use boards::BoardConfig;
+use leviculum_serial_mux::rx::{RxCounts, RxKeep};
 
 /// The build identity this image carries, as ONE contiguous string
 /// literal.
@@ -346,41 +350,156 @@ impl<'d> UsbLog<'d> {
 /// leaves with its XON and XOFF bytes escaped (`escape_flow`) and the
 /// capability report states `serial_mux=1`, so lnsd escapes its own and
 /// strips none of ours. The board sends no flow bytes itself: esp-hal 1.2
-/// keeps `SwFlowControl` in its config and never programs it. Instead
-/// nothing the host sends waits in the 128-byte receive FIFO while the
-/// board writes: every write drains the FIFO into [`RX_KEEP`] bytes of
-/// memory between FIFO-sized pieces, so a frame that arrives during a
-/// 5.7 s frame dump is read when the dump is done, not lost.
+/// keeps `SwFlowControl` in its config and never programs it.
+///
+/// What the host sends is taken off the 128-byte receive FIFO by an
+/// interrupt (1440) whenever the FIFO holds more than
+/// [`RX_FIFO_THRESHOLD`] bytes, into [`RX_KEEP`] bytes of memory the loop
+/// reads from ([`UartLog::read_ready`]). Before 1440 the FIFO was emptied
+/// only when the loop wrote or read the line, and a turn of the loop that
+/// spent more than the FIFO's 11 ms on one frame (an announce checked)
+/// overflowed it under the next one: esp-hal resets an overflowed FIFO and
+/// says `FifoOverflowed`, which was thrown away, and the bench of
+/// 2026-11-06 lost three `/sync` answers so
+/// (`leviculum_serial_mux::rx`, whose host model pins it). Every loss is
+/// now counted and said as a `[UART]` line ([`UartLog::say_rx_counts`]).
 pub struct UartLog<'d> {
-    uart: Uart<'d, Blocking>,
-    /// What the host sent while the board was writing.
-    rx: alloc::collections::VecDeque<u8>,
-    /// Bytes lost because `rx` was full.
-    rx_lost: u32,
+    tx: UartTx<'d, Blocking>,
+    /// Frames the board's HDLC reader dropped, as the loop reports them.
+    deframe_drop: u32,
+    /// The longest the loop went between two reads since the last
+    /// `[UART]` line, and when it last read.
+    gap_max_ms: u64,
+    last_read_ms: Option<u64>,
+    /// The counts the last `[UART]` line said.
+    said: Option<RxCounts>,
 }
 
-/// The most host bytes kept while the board writes: a dump's 5.7 s at
-/// 115200 baud is at most 66 KB from a host that never stops, far more
-/// than any host sends; 8 KiB is fourteen full frames.
+/// The most host bytes kept while the loop is busy: 8 KiB is fourteen
+/// full frames, 0.7 s of a host that never stops, far more than the
+/// loop's longest turn (a 5.7 s frame dump writes, and every write reads).
 pub const RX_KEEP: usize = 8 * 1024;
 
-/// How much is written between two reads of the receive FIFO: less than
-/// the FIFO's 128 bytes arrive in the time this many leave.
-const TX_PIECE: usize = 96;
+/// The receive FIFO level above which the interrupt empties it: half the
+/// FIFO, so the interrupt may wait 64 bytes, 5.5 ms of the line at
+/// 115200 baud, behind a critical section before a byte is lost.
+pub const RX_FIFO_THRESHOLD: u16 = 64;
+
+/// The receive half of the log's UART, the interrupt's once
+/// [`UartLog::new`] handed it over.
+static RX_PORT: Mutex<RefCell<Option<UartRx<'static, Blocking>>>> = Mutex::new(RefCell::new(None));
+/// What the host sent and the loop has not read.
+static RX_BYTES: Mutex<RefCell<RxKeep<RX_KEEP>>> = Mutex::new(RefCell::new(RxKeep::new()));
+/// FIFO overflows seen, and bytes the UART flagged.
+static RX_OVERRUNS: AtomicU32 = AtomicU32::new(0);
+static RX_ERRORS: AtomicU32 = AtomicU32::new(0);
+
+/// Empty the receive FIFO into the keep, counting an overflow (esp-hal
+/// has already reset the FIFO and dropped its bytes) and a flagged byte.
+/// The read after an error clears the FIFO-full flag, so the interrupt
+/// does not come straight back; four reads bound it.
+fn pull_rx(rx: &mut UartRx<'static, Blocking>, keep: &mut RxKeep<RX_KEEP>) {
+    let mut buf = [0u8; 128];
+    for _ in 0..4 {
+        match rx.read_buffered(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => keep.push(&buf[..n]),
+            Err(RxError::FifoOverflowed) => {
+                RX_OVERRUNS.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                RX_ERRORS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// The UART0 interrupt: the FIFO passed [`RX_FIFO_THRESHOLD`].
+#[esp_hal::handler]
+fn uart0_rx() {
+    critical_section::with(|cs| {
+        if let Some(rx) = RX_PORT.borrow_ref_mut(cs).as_mut() {
+            pull_rx(rx, &mut RX_BYTES.borrow_ref_mut(cs));
+        }
+    });
+}
+
+/// The config the log's UART runs with at `baud`: the FIFO-full
+/// interrupt at [`RX_FIFO_THRESHOLD`].
+pub fn uart_log_config(baud: u32) -> UartConfig {
+    UartConfig::default()
+        .with_baudrate(baud)
+        .with_rx(RxConfig::default().with_fifo_full_threshold(RX_FIFO_THRESHOLD))
+}
+
+impl UartLog<'static> {
+    /// Log over `uart`, configured with [`uart_log_config`] and pinned:
+    /// its receive half goes to the interrupt, which runs from here on.
+    pub fn new(mut uart: Uart<'static, Blocking>) -> Self {
+        uart.set_interrupt_handler(uart0_rx);
+        // Listened to and handed over with interrupts off, so the
+        // interrupt never finds a full FIFO and no port to empty it.
+        let tx = critical_section::with(|cs| {
+            uart.listen(UartInterrupt::RxFifoFull);
+            let (rx, tx) = uart.split();
+            RX_PORT.borrow_ref_mut(cs).replace(rx);
+            tx
+        });
+        Self::tx(tx)
+    }
+}
 
 impl<'d> UartLog<'d> {
-    /// Log over `uart`, already configured and pinned.
-    pub fn new(uart: Uart<'d, Blocking>) -> Self {
+    /// A log that only writes, for a panic: no interrupt, nothing read.
+    pub fn tx_only(uart: Uart<'d, Blocking>) -> Self {
+        let (_rx, tx) = uart.split();
+        Self::tx(tx)
+    }
+
+    fn tx(tx: UartTx<'d, Blocking>) -> Self {
         Self {
-            uart,
-            rx: alloc::collections::VecDeque::new(),
-            rx_lost: 0,
+            tx,
+            deframe_drop: 0,
+            gap_max_ms: 0,
+            last_read_ms: None,
+            said: None,
         }
     }
 
     /// Host bytes lost because the board's keep was full.
     pub fn rx_lost(&self) -> u32 {
-        self.rx_lost
+        critical_section::with(|cs| RX_BYTES.borrow_ref(cs).lost())
+    }
+
+    /// The loop's HDLC reader dropped a frame (empty or oversized).
+    pub fn deframe_dropped(&mut self) {
+        self.deframe_drop = self.deframe_drop.saturating_add(1);
+    }
+
+    /// Every loss on the receive side so far, and the loop's longest gap
+    /// since the last `[UART]` line.
+    pub fn rx_counts(&self) -> RxCounts {
+        RxCounts {
+            rx_lost: self.rx_lost(),
+            overrun: RX_OVERRUNS.load(Ordering::Relaxed),
+            deframe_drop: self.deframe_drop,
+            rx_err: RX_ERRORS.load(Ordering::Relaxed),
+            loop_gap_max_ms: u32::try_from(self.gap_max_ms).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// Say `[UART] rx_lost=N overrun=N deframe_drop=N rx_err=N
+    /// loop_gap_max_ms=N` when a loss count changed since the last one, or
+    /// always when `always` (the banner's turn); the gap starts again.
+    pub fn say_rx_counts(&mut self, always: bool) {
+        let counts = self.rx_counts();
+        let changed = self.said.is_none_or(|said| counts.losses_differ(&said));
+        if !(always || changed) {
+            return;
+        }
+        self.said = Some(counts);
+        self.gap_max_ms = 0;
+        self.line("[UART] ", format_args!("{counts}"));
     }
 
     /// One line, shaped by [`leviculum_log_line::format_line`] as
@@ -429,47 +548,33 @@ impl<'d> UartLog<'d> {
     }
 
     /// All of `bytes`: esp-hal's `write` places what fits in the FIFO and
-    /// says how much. The receive FIFO is drained between pieces. A TX
-    /// error drops the rest of the write, never the boot.
+    /// says how much. A TX error drops the rest of the write, never the
+    /// boot. The receive side is the interrupt's and needs nothing here.
     fn write_all(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
-            self.drain_rx();
-            let piece = bytes.len().min(TX_PIECE);
-            match self.uart.write(&bytes[..piece]) {
+            match self.tx.write(bytes) {
                 Ok(n) => bytes = &bytes[n..],
                 Err(_) => return,
-            }
-        }
-        self.drain_rx();
-    }
-
-    /// Move what the receive FIFO holds into the keep.
-    fn drain_rx(&mut self) {
-        let mut buf = [0u8; 128];
-        loop {
-            let n = self.uart.read_buffered(&mut buf).unwrap_or(0);
-            if n == 0 {
-                return;
-            }
-            for &byte in &buf[..n] {
-                if self.rx.len() >= RX_KEEP {
-                    self.rx_lost = self.rx_lost.saturating_add(1);
-                } else {
-                    self.rx.push_back(byte);
-                }
             }
         }
     }
 
     /// The bytes the host sent that have arrived, without waiting: how many
-    /// went into `buf`, the kept ones first.
+    /// went into `buf`, the kept ones first, then what the FIFO holds
+    /// under the interrupt's threshold.
     pub fn read_ready(&mut self, buf: &mut [u8]) -> usize {
-        self.drain_rx();
-        let n = buf.len().min(self.rx.len());
-        for (slot, byte) in buf.iter_mut().zip(self.rx.drain(..n)) {
-            *slot = byte;
+        let now = uptime_ms();
+        if let Some(last) = self.last_read_ms {
+            self.gap_max_ms = self.gap_max_ms.max(now.saturating_sub(last));
         }
-        n
+        self.last_read_ms = Some(now);
+        critical_section::with(|cs| {
+            let mut keep = RX_BYTES.borrow_ref_mut(cs);
+            if let Some(rx) = RX_PORT.borrow_ref_mut(cs).as_mut() {
+                pull_rx(rx, &mut keep);
+            }
+            keep.pop_into(buf)
+        })
     }
 
     /// `[FW_BUILD]` and `[BOARD]`, as [`UsbLog::identify`] says them, for a
@@ -524,7 +629,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // way left to say why.
         let uart0 = unsafe { esp_hal::peripherals::UART0::steal() };
         if let Ok(uart) = Uart::new(uart0, esp_hal::uart::Config::default().with_baudrate(baud)) {
-            UartLog::new(uart).line("[PANIC] ", format_args!("{info}"));
+            UartLog::tx_only(uart).line("[PANIC] ", format_args!("{info}"));
         }
     }
     loop {

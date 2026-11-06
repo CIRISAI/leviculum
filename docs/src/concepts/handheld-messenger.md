@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:154`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:158`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -664,7 +664,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:176`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:180`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -672,7 +672,7 @@ draws is the scene the terminal, the window and the phone already draw.
   goes through mousefood into `loquax-m9`'s frame, which keeps the band
   of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:73`), and the
   board sends only that band through the row window (`flush`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:196`): the full frame's 30.8 ms
+  `leviculum-esp/src/bin/thinknode_m9.rs:198`): the full frame's 30.8 ms
   is the first draw's cost, a moved cursor sends two entries. The
   redraw test drives one renderer through four keys and must equal a
   fresh draw, its band flushed into a second frame
@@ -1325,14 +1325,22 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:423`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:542`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
-every write drains the 128-byte receive FIFO into 8 KiB of memory between
-96-byte pieces (`drain_rx`, `leviculum-esp/src/lib.rs:447`), so a frame
-that arrives during a 5.7 s dump is read afterwards and not lost. What
+an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
+whenever it holds more than 64 bytes (`uart0_rx`,
+`leviculum-esp/src/lib.rs:419`, since 1440), so a frame that arrives
+during a 5.7 s dump or while the loop checks an announce is read
+afterwards and not lost. Until 1440 the FIFO was emptied only when the
+loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
+overflow, esp-hal reset it, and the bench of 2026-11-06 lost three
+`/sync` answers behind backbone announces
+(`leviculum-nrf/serial-mux/src/rx.rs` models both drivers). Every loss is
+said as `[UART] rx_lost= overrun= deframe_drop= rx_err=
+loop_gap_max_ms=`, on change and with each banner. What
 the bench pays: the keyboard lines are about 6 KB/s of the 11.5 KB/s the
 line carries at 115200 baud, so the node has the rest, which is more
 than a LoRa interface carries and less than a TCP one.

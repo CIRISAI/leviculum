@@ -1259,6 +1259,7 @@ dependencies = [
 name = "leviculum-esp"
 version = "0.1.4"
 dependencies = [
+ "critical-section",
  "embedded-alloc",
  "embedded-hal-async",
  "esp-bootloader-esp-idf",

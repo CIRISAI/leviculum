@@ -53,6 +53,9 @@ esp-storage = { version = "0.10.0", features = ["esp32s3"] }
 # the node (1414): the flow-byte escape for every frame, and the
 # serial interface's HW_MTU. `no_std`, no dependencies but the core.
 leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
+# The lock the UART's receive interrupt and the loop share its keep under
+# (1440); esp-hal provides the implementation. The version esp-hal uses.
+critical-section = "1.2"
 # `CryptoRngCore`, named in the node's type; esp-hal's `Trng` implements it
 # through `unstable`. The version the core resolves to.
 rand_core = { version = "0.6", default-features = false }

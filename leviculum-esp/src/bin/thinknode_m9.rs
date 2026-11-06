@@ -60,6 +60,8 @@
 //! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> t=<ms>
+//!                           on every loss and with every banner (1440)
 //! KBRAW <ms> <hex>          one per poll, every 10 ms
 //! KEY <ms> code=0x6b name=k after a KBRAW line that carries a press (1427)
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
@@ -94,7 +96,7 @@ use esp_hal::{
         Mode,
     },
     time::Rate,
-    uart::{Config as UartConfig, Uart},
+    uart::Uart,
     Blocking,
 };
 use leviculum_core::envelope::{self, EnvelopeError};
@@ -355,7 +357,7 @@ fn main() -> ! {
     // The log first: every later failure says itself here.
     let tx: m9::UartTx = p.GPIO43;
     let rx: m9::UartRx = p.GPIO44;
-    let Ok(uart) = Uart::new(p.UART0, UartConfig::default().with_baudrate(m9::UART_BAUD)) else {
+    let Ok(uart) = Uart::new(p.UART0, leviculum_esp::uart_log_config(m9::UART_BAUD)) else {
         loop {
             core::hint::spin_loop();
         }
@@ -654,6 +656,7 @@ fn main() -> ! {
         if now >= next_banner {
             next_banner = now + BANNER_INTERVAL_MS;
             log.identify(m9::LOG_PREFIX, m9::BOARD_NAME, bytes);
+            log.say_rx_counts(true);
         }
 
         // The host: control frames between the lines.
@@ -661,10 +664,14 @@ fn main() -> ! {
         let n = log.read_ready(&mut incoming);
         let mut requests = Vec::new();
         for result in deframer.process(&incoming[..n]) {
-            if let DeframeResult::Frame(data) = result {
-                requests.push(data);
+            match result {
+                DeframeResult::Frame(data) => requests.push(data),
+                DeframeResult::TooShort | DeframeResult::Oversized => log.deframe_dropped(),
+                DeframeResult::NeedMore => {}
             }
         }
+        // Every loss on the line said when it happens (1440).
+        log.say_rx_counts(false);
         for data in requests {
             if matches!(
                 envelope::decode_frame(&data),
