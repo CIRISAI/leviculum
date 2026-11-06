@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! /join  [token: bin16, name: str]           -> [status]
-//! /sync  [cursor: uint, (page: uint)]         -> [status, first: uint, more: bool,
+//! /sync  [cursor: uint, (page: uint, (fold: str))]
+//!                                             -> [status, first: uint, more: bool,
 //!                                                 [[seq: uint, kind: uint, at: int, packed: bin], ...]]
 //! /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
 //!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
@@ -54,6 +55,11 @@
 //! the default MTU and never a resource. The home cuts the page to it, at
 //! least one entry, and says `more`; a home from before reads the cursor
 //! alone and answers its own page.
+//!
+//! Its third element is optional too (1439): the device's capability word,
+//! what it folds ([`Fold`]). A board says `board` and is served only the
+//! entries `board::fold` keeps, with `left` counting only those; a home
+//! from before reads the first two and serves everything.
 //!
 //! The status is the first element of every answer, so a refusal decodes
 //! the same way whatever was asked. `first` is the oldest sequence the
@@ -300,6 +306,100 @@ pub fn read_sync_paged(data: &[u8]) -> Result<(u64, Option<u64>), Malformed> {
         _ => Some(msgpack::read_uint(data, &mut p)?),
     };
     Ok((cursor, page))
+}
+
+/// What a device folds, said as the third element of its `/sync` (1439):
+/// the home serves it only the entries it keeps and counts only those in
+/// `left`, so "Fetched N of M" is M entries this device will get. A
+/// client that says nothing, or a word this home does not know, gets the
+/// whole archive, as every client from before 1439 does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fold {
+    /// Every entry: the phone and the desktop keep the whole archive.
+    All,
+    /// What `board::fold` keeps: a message received or sent, a mark, a
+    /// name; nothing imported, no state the board draws no bubble for,
+    /// and no entry over [`BOARD_ENTRY_MAX`], which is a photo or a file
+    /// the board neither shows nor holds.
+    Board,
+}
+
+/// The kinds a [`Fold::Board`] device keeps: the ones `board::fold` reads
+/// (`loquax/src/home/board.rs`).
+pub const BOARD_KINDS: [u8; 4] = [
+    super::KIND_RECEIVED,
+    super::KIND_SENT,
+    super::KIND_MARK,
+    super::KIND_NAME,
+];
+
+/// The longest entry a [`Fold::Board`] device is served, in packed bytes:
+/// a text with its signature, fields and a small picture fits; a photo
+/// the board has no screen for does not.
+pub const BOARD_ENTRY_MAX: usize = 16 * 1024;
+
+/// The capability word of [`Fold::Board`] on the wire.
+pub const FOLD_BOARD: &str = "board";
+
+impl Fold {
+    /// The word on the wire, `None` for [`Fold::All`], which says nothing.
+    pub fn word(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Board => Some(FOLD_BOARD),
+        }
+    }
+
+    /// The fold a word names; an unknown word folds nothing away.
+    pub fn from_word(word: &str) -> Self {
+        match word {
+            FOLD_BOARD => Self::Board,
+            _ => Self::All,
+        }
+    }
+
+    /// Whether a device that folds so is served an entry of `kind` whose
+    /// packed bytes are `len` long.
+    pub fn keeps(self, kind: u8, len: usize) -> bool {
+        match self {
+            Self::All => true,
+            Self::Board => BOARD_KINDS.contains(&kind) && len <= BOARD_ENTRY_MAX,
+        }
+    }
+}
+
+/// A `/sync` as a device that folds asks it (1439): the cursor, the page
+/// bound, and the capability word when the fold has one.
+pub fn sync_request_folded(cursor: u64, page_bytes: u64, fold: Fold) -> Vec<u8> {
+    let Some(word) = fold.word() else {
+        return sync_request_paged(cursor, page_bytes);
+    };
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 3);
+    msgpack::uint(&mut out, cursor);
+    msgpack::uint(&mut out, page_bytes);
+    msgpack::string(&mut out, word);
+    out
+}
+
+/// A `/sync` as the home reads it from 1439 on: the cursor, the page bound
+/// when asked, and the device's fold, [`Fold::All`] when it said none.
+pub fn read_sync_asked(data: &[u8]) -> Result<(u64, Option<u64>, Fold), Malformed> {
+    let mut p = 0;
+    let len = msgpack::array_len(data, &mut p)?;
+    if len < 1 {
+        return Err(Malformed);
+    }
+    let cursor = msgpack::read_uint(data, &mut p)?;
+    let page = match len {
+        1 => None,
+        _ => Some(msgpack::read_uint(data, &mut p)?),
+    };
+    let fold = match len {
+        0..=2 => Fold::All,
+        _ => Fold::from_word(msgpack::read_str(data, &mut p)?),
+    };
+    Ok((cursor, page, fold))
 }
 
 /// Cut `page` from its end until its answer takes at most `bytes`, one

@@ -1841,13 +1841,26 @@ impl Store {
         cursor: u64,
         max_bytes: usize,
     ) -> Result<crate::home::wire::Page, StoreError> {
+        self.archive_since_folded(cursor, max_bytes, crate::home::wire::Fold::All)
+    }
+
+    /// [`Self::archive_since`] for a device that folds (1439): only the
+    /// entries `fold` keeps, skipped in the query, so a board past an
+    /// archive's imported head gets its first page of names at once.
+    pub fn archive_since_folded(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+        fold: crate::home::wire::Fold,
+    ) -> Result<crate::home::wire::Page, StoreError> {
         let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+            .prepare(&format!(
+                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2{} \
                  ORDER BY seq",
-            )
+                fold_clause(fold)
+            ))
             .map_err(|e| self.failed(e))?;
         let mut rows = statement
             .query(params![&self.identity[..], cursor])
@@ -1890,11 +1903,24 @@ impl Store {
     /// How many archive entries come after `seq` (1415): what a paged
     /// `/sync` answer says still waits.
     pub fn archive_count_after(&self, seq: u64) -> Result<u64, StoreError> {
+        self.archive_count_after_folded(seq, crate::home::wire::Fold::All)
+    }
+
+    /// How many entries a device that folds as `fold` still gets after
+    /// `seq` (1439): `left` as that device will see it arrive.
+    pub fn archive_count_after_folded(
+        &self,
+        seq: u64,
+        fold: crate::home::wire::Fold,
+    ) -> Result<u64, StoreError> {
         let seq = i64::try_from(seq).unwrap_or(i64::MAX);
         let count: i64 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM archive WHERE identity = ?1 AND seq > ?2",
+                &format!(
+                    "SELECT COUNT(*) FROM archive WHERE identity = ?1 AND seq > ?2{}",
+                    fold_clause(fold)
+                ),
                 params![&self.identity[..], seq],
                 |row| row.get(0),
             )
@@ -2935,6 +2961,23 @@ fn append_in(
         total -= size;
     }
     Ok(Some(seq as u64))
+}
+
+/// The archive query's condition for a device that folds as `fold`
+/// (1439), built from the wire's own constants so the home serves exactly
+/// what `Fold::keeps` says; empty for a device that keeps everything.
+fn fold_clause(fold: crate::home::wire::Fold) -> String {
+    use crate::home::wire::{Fold, BOARD_ENTRY_MAX, BOARD_KINDS};
+    match fold {
+        Fold::All => String::new(),
+        Fold::Board => {
+            let kinds: Vec<String> = BOARD_KINDS.iter().map(u8::to_string).collect();
+            format!(
+                " AND kind IN ({}) AND length(packed) <= {BOARD_ENTRY_MAX}",
+                kinds.join(",")
+            )
+        }
+    }
 }
 
 fn failed(path: &Path, error: impl fmt::Display) -> StoreError {

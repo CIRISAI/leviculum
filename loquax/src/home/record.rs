@@ -33,6 +33,7 @@ use leviculum_core::Identity;
 
 use super::ask::{Ask, HomeError, Verb};
 use super::code::HomeCode;
+use super::wire::Fold;
 
 /// The record's length in flash.
 pub const RECORD_LEN: usize = 196;
@@ -140,7 +141,9 @@ impl ClientRecord {
             cursor: self.cursor,
             page_bytes: Some(page_bytes),
         };
-        Some(Ask::new(&self.home, verb, now_ms, budget_ms))
+        // The record is the board's (1415): it folds as the board does,
+        // so the home serves it only what `board::fold` keeps (1439).
+        Some(Ask::new(&self.home, verb, now_ms, budget_ms).map(|ask| ask.folding(Fold::Board)))
     }
 
     /// The bytes that go to flash.

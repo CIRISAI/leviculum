@@ -27,7 +27,7 @@ use leviculum_core::traits::{Clock, Interface, InterfaceError};
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::{Identity, InterfaceId, MemoryStorage, TickOutput};
 use loquax::home::ask::{Ask, HomeError, Outcome};
-use loquax::home::board::{Executor, Report};
+use loquax::home::board::{Batch, Executor, LinkClass, Report};
 use loquax::home::wire;
 use rand_core::OsRng;
 
@@ -172,6 +172,25 @@ impl Board {
     /// passes; the pages it brought.
     pub fn run(&mut self, device: &Identity, ask: Ask, max_answer: usize, budget: Duration) -> Ran {
         let mut exec = Executor::new(ask, max_answer);
+        self.perform(device, &mut exec, budget)
+    }
+
+    /// Perform `ask` as the M9's loop does from 1439 on, its page fitted
+    /// to the link it gets (`Executor::fitted`); what it brought, and the
+    /// link class and page the fit chose.
+    pub fn run_fitted(
+        &mut self,
+        device: &Identity,
+        ask: Ask,
+        batch: Batch,
+        budget: Duration,
+    ) -> (Ran, Option<(LinkClass, u64)>) {
+        let mut exec = Executor::fitted(ask, batch);
+        let ran = self.perform(device, &mut exec, budget);
+        (ran, exec.fit())
+    }
+
+    fn perform(&mut self, device: &Identity, exec: &mut Executor, budget: Duration) -> Ran {
         let mut pages = Vec::new();
         let until = Instant::now() + budget;
         let mut buf = [0u8; 4096];

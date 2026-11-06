@@ -143,7 +143,17 @@ pub const LORA_LINK_MDU: usize = 431;
 /// response frame's own array header and the request id's `bin8` (1 + 18
 /// bytes). One packet is at most two LoRa frames; a resource is an
 /// advertisement, its parts and a proof.
-pub const LORA_PAGE_BYTES: usize = LORA_LINK_MDU - 1 - 18;
+pub const LORA_PAGE_BYTES: usize = LORA_LINK_MDU - RESPONSE_OVERHEAD;
+
+/// The link MDU on a serial line's link, MTU 564 (`board::SERIAL_LINK_MTU`):
+/// `Link::mdu`'s rule (`compute_link_mdu`, `leviculum-core/src/link/mod.rs`)
+/// at that MTU, 564 less IFAC, header and token (1 + 19 + 48) is 496, cut
+/// to whole AES blocks, less one.
+pub const SERIAL_LINK_MDU: usize = 495;
+
+/// What a response packet takes of a link's MDU besides the answer: the
+/// response frame's array header and the request id's `bin8`.
+pub const RESPONSE_OVERHEAD: usize = 1 + 18;
 
 /// How often a request whose answer was lost is asked, on a fresh link
 /// each time, when asking twice changes nothing (as `client`'s
@@ -286,6 +296,9 @@ pub struct Ask {
     first: u64,
     entries: usize,
     pages: usize,
+    /// What the device folds, said with every `/sync` of a paged pull
+    /// (1439).
+    fold: wire::Fold,
 }
 
 impl Ask {
@@ -311,7 +324,29 @@ impl Ask {
             first: 0,
             entries: 0,
             pages: 0,
+            fold: wire::Fold::All,
         })
+    }
+
+    /// The same ask from a device that folds as `fold` (1439): a paged
+    /// pull says it, and the home serves only what the device keeps.
+    pub fn folding(mut self, fold: wire::Fold) -> Self {
+        self.fold = fold;
+        self
+    }
+
+    /// Size a pull's pages to the link it got (1439,
+    /// `board::LinkClass::page_bytes`): set before the first `/sync`, so
+    /// unlike [`Self::refit`] it may grow the page. Anything but a paged
+    /// pull is left as it is.
+    pub fn fit_link(&mut self, page_bytes: u64) {
+        if let Verb::Pull {
+            page_bytes: Some(asked),
+            ..
+        } = &mut self.verb
+        {
+            *asked = page_bytes;
+        }
     }
 
     /// A join of `code` as the device called `name`.
@@ -474,7 +509,10 @@ impl Ask {
             Verb::Pull {
                 cursor,
                 page_bytes: Some(page),
-            } => (super::SYNC_PATH, wire::sync_request_paged(*cursor, *page)),
+            } => (
+                super::SYNC_PATH,
+                wire::sync_request_folded(*cursor, *page, self.fold),
+            ),
             Verb::Pull {
                 cursor,
                 page_bytes: None,

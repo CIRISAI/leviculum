@@ -80,6 +80,77 @@ impl Batch {
     }
 }
 
+/// The link MTU a serial line negotiates: the HW_MTU every Leviculum and
+/// Python serial or KISS interface declares
+/// (`leviculum_serial_mux::SERIAL_HW_MTU`, `RNS/Interfaces/SerialInterface.py`).
+/// A link that negotiated less crossed a radio (an RNode's 508) or no
+/// hop said its MTU at all (the default 500).
+pub const SERIAL_LINK_MTU: u32 = 564;
+
+/// From this negotiated MTU on, every hop of the link is a wide medium:
+/// UDP's 1064, AutoInterface's 1196, TCP's and a local client's 262144.
+pub const WIDE_LINK_MTU: u32 = 1024;
+
+/// A next hop that reports a bitrate under this is a radio (LoRa's
+/// fastest setting is 62.5 kbit/s), whatever MTU the link negotiated.
+pub const RADIO_BPS: u32 = 100_000;
+
+/// The rate a serial line runs at when its interface reports none: the
+/// M9's and every LNode's 115200 baud.
+pub const SERIAL_LINE_BPS: u32 = 115_200;
+
+/// A serial or wide link's page: what its line carries in this long, so
+/// a page is a resource of many packets that still takes about a second.
+pub const PAGE_MS: u64 = 1_000;
+
+/// The kind of link a pull runs over, from what the link negotiated and
+/// what the next hop reports (1439): a radio keeps one packet a page, a
+/// serial line and a wide link get a page their rate carries in
+/// [`PAGE_MS`], up to what the device takes in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkClass {
+    /// LoRa somewhere on the way, or a link whose hops said no MTU.
+    Radio,
+    /// A serial line to a host's daemon, the M9's and an LNode's.
+    Serial,
+    /// TCP, UDP, a local client: no airtime cost anywhere.
+    Wide,
+}
+
+impl LinkClass {
+    /// The class of a link that negotiated `mtu`, its next hop reporting
+    /// `next_hop_bps` when it reports one.
+    pub fn of(mtu: u32, next_hop_bps: Option<u32>) -> Self {
+        match (mtu, next_hop_bps) {
+            (_, Some(bps)) if bps < RADIO_BPS => Self::Radio,
+            (mtu, _) if mtu < SERIAL_LINK_MTU => Self::Radio,
+            (mtu, _) if mtu < WIDE_LINK_MTU => Self::Serial,
+            _ => Self::Wide,
+        }
+    }
+
+    /// The `/sync` page a device in `batch` asks on this link, whose MDU
+    /// is `mdu`, its next hop at `next_hop_bps` when it says: a radio's
+    /// is one response packet and never more than the census allows
+    /// (`batch.page_bytes`, the LoRa page or less); a serial line's and a
+    /// wide link's is what the rate carries in [`PAGE_MS`], at least one
+    /// packet, at most the answer the device takes in and the home's own
+    /// page ([`super::SYNC_PAGE_BYTES`]). A wide link without a rate gets
+    /// that most.
+    pub fn page_bytes(self, mdu: usize, next_hop_bps: Option<u32>, batch: Batch) -> u64 {
+        let packet = mdu.saturating_sub(ask::RESPONSE_OVERHEAD) as u64;
+        let most = (batch.max_answer.min(super::SYNC_PAGE_BYTES) as u64).max(MIN_PAGE_BYTES);
+        let carried = |bps: u32| u64::from(bps) / 10 * PAGE_MS / 1_000;
+        let page = match (self, next_hop_bps) {
+            (Self::Radio, _) => return packet.min(batch.page_bytes).max(MIN_PAGE_BYTES),
+            (_, Some(bps)) => carried(bps),
+            (Self::Serial, None) => carried(SERIAL_LINE_BPS),
+            (Self::Wide, None) => most,
+        };
+        page.max(packet).min(most)
+    }
+}
+
 /// One [`Ask`] performed over a core node.
 #[derive(Debug)]
 pub struct Executor {
@@ -92,6 +163,11 @@ pub struct Executor {
     request: Option<[u8; 16]>,
     max_answer: usize,
     reported: bool,
+    /// The batch a pull's page is fitted from once its first link is up
+    /// (1439); `None` keeps the page the ask was made with.
+    fit: Option<Batch>,
+    /// The class and page the fit chose, once it did.
+    fitted: Option<(LinkClass, u64)>,
 }
 
 impl Executor {
@@ -105,7 +181,23 @@ impl Executor {
             request: None,
             max_answer,
             reported: false,
+            fit: None,
+            fitted: None,
         }
+    }
+
+    /// Perform `ask` in `batch`, a pull's page fitted to the link its first
+    /// link comes up on (1439, [`LinkClass::page_bytes`]).
+    pub fn fitted(ask: Ask, batch: Batch) -> Self {
+        Self {
+            fit: Some(batch),
+            ..Self::new(ask, batch.max_answer)
+        }
+    }
+
+    /// The link class and page the fit chose, once the first link was up.
+    pub fn fit(&self) -> Option<(LinkClass, u64)> {
+        self.fitted
     }
 
     /// The ask being performed.
@@ -144,6 +236,8 @@ impl Executor {
         let step = match event {
             NodeEvent::LinkEstablished { link_id, .. } if ours(link_id) && self.linking => {
                 self.linking = false;
+                let link_id = *link_id;
+                self.fit_link(node, &link_id);
                 self.ask.linked(Ok(()))
             }
             NodeEvent::LinkClosed {
@@ -197,6 +291,26 @@ impl Executor {
             _ => return Report::Idle,
         };
         self.drive(node, device, now_ms, step, out)
+    }
+
+    /// Fit a pull's page to the link that came up, once per ask: a link
+    /// asked again after a break keeps the page, and with it any refit.
+    fn fit_link<R: CryptoRngCore, C: Clock, S: Storage>(
+        &mut self,
+        node: &NodeCore<R, C, S>,
+        link_id: &LinkId,
+    ) {
+        let (Some(batch), Some(link)) = (self.fit.take(), node.link(link_id)) else {
+            return;
+        };
+        if self.ask.page_bytes().is_none() {
+            return;
+        }
+        let bps = node.next_hop_interface_bitrate(self.destination.as_bytes());
+        let class = LinkClass::of(link.negotiated_mtu(), bps);
+        let page = class.page_bytes(link.mdu(), bps, batch);
+        self.ask.fit_link(page);
+        self.fitted = Some((class, page));
     }
 
     fn path<R: CryptoRngCore, C: Clock, S: Storage>(&self, node: &NodeCore<R, C, S>) -> Option<u8> {

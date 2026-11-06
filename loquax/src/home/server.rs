@@ -1154,7 +1154,7 @@ fn moved(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> A
 }
 
 fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
-    let Ok((cursor, asked)) = wire::read_sync_paged(data) else {
+    let Ok((cursor, asked, fold)) = wire::read_sync_asked(data) else {
         return wire::status_answer(Status::Malformed);
     };
     if let Some(refused) = refuse_unless_admitted(store, &device, "sync") {
@@ -1167,7 +1167,9 @@ fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
             asked.min(super::SYNC_PAGE_BYTES)
         })
     });
-    match store.archive_since(cursor, bound) {
+    // A device that says what it folds (1439) is served only that, and
+    // `left` counts only that.
+    match store.archive_since_folded(cursor, bound, fold) {
         Ok(mut page) => {
             if asked.is_some() {
                 // A client that asks a bound reads how many wait (1415);
@@ -1176,7 +1178,7 @@ fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
                 page.left = Some(wire::LEFT_UNCOUNTED);
                 wire::fit_page(&mut page, bound);
                 let after = page.entries.last().map_or(cursor, |entry| entry.seq);
-                match store.archive_count_after(after) {
+                match store.archive_count_after_folded(after, fold) {
                     Ok(left) => page.left = Some(left),
                     Err(error) => {
                         tracing::warn!("HOME sync: {error}");
@@ -1185,11 +1187,12 @@ fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
                 }
             }
             tracing::info!(
-                "HOME sync device={} cursor={cursor} entries={} more={} left={}",
+                "HOME sync device={} cursor={cursor} entries={} more={} left={} fold={}",
                 crate::address::to_hex(&device),
                 page.entries.len(),
                 page.more,
-                page.left.map_or(-1, |left| left as i64)
+                page.left.map_or(-1, |left| left as i64),
+                fold.word().unwrap_or("all")
             );
             wire::sync_answer(&page)
         }
@@ -2310,6 +2313,88 @@ mod tests {
             [big]
         );
         assert!(len > bound && !page.more);
+    }
+
+    /// 1439: a home whose archive opens with 800 imported entries, then
+    /// 100 a board shows, a delivery state and a photo it shows neither of.
+    /// A board that says `board` walks only the 100, in pages of a serial
+    /// line, each page saying honestly how many of them still wait; the
+    /// phone, which says nothing, gets every entry as before. Control: the
+    /// board's word dropped, the same walk brings the imported head first.
+    #[test]
+    fn a_board_is_served_what_it_folds_and_the_phone_everything() {
+        use crate::home::board::{Batch, LinkClass};
+        use crate::home::{KIND_DELIVERED, KIND_IMPORTED};
+        let (_dir, mut store) = store();
+        admitted(&mut store);
+        let mut put = |kind: u8, n: u32, len: usize| {
+            let mut id = [kind; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            store
+                .archive_append(kind, &id, &alloc::vec![7; len], 50, u64::MAX)
+                .expect("append")
+                .expect("new")
+        };
+        for n in 0..800 {
+            put(KIND_IMPORTED, n, 150);
+        }
+        let real: Vec<u64> = (0..100).map(|n| put(KIND_RECEIVED, n, 150)).collect();
+        put(KIND_DELIVERED, 0, 40);
+        put(KIND_RECEIVED, 1_000, wire::BOARD_ENTRY_MAX + 1);
+        let board = Batch {
+            page_bytes: crate::home::ask::LORA_PAGE_BYTES as u64,
+            max_answer: 256 * 1024,
+        };
+        let serial = LinkClass::Serial.page_bytes(crate::home::ask::SERIAL_LINK_MDU, None, board);
+        assert_eq!(serial, 11_520, "a second of 115200 baud");
+        // Each walk: the sequences, and per page how many it brought and
+        // how many it said still wait.
+        let walk = |store: &mut Store, fold: wire::Fold| {
+            let (mut cursor, mut walked, mut pages) = (0, Vec::new(), Vec::new());
+            loop {
+                let data = wire::sync_request_folded(cursor, serial, fold);
+                let answer = answer(store, &home(), SYNC_PATH, &data, Some(LAPTOP), 100.0);
+                let page = read_sync_answer(&answer.bytes)
+                    .expect("answer")
+                    .expect("page");
+                // One entry over the page comes alone, as before.
+                assert!(answer.bytes.len() <= serial as usize || page.entries.len() == 1);
+                walked.extend(page.entries.iter().map(|e| e.seq));
+                pages.push((page.entries.len() as u64, page.left));
+                let Some(last) = page.entries.last() else {
+                    break;
+                };
+                cursor = last.seq;
+                if !page.more {
+                    break;
+                }
+            }
+            (walked, pages)
+        };
+        let honest = |pages: &[(u64, Option<u64>)], all: u64| {
+            let mut taken = 0;
+            for &(n, left) in pages {
+                taken += n;
+                assert_eq!(left, Some(all - taken), "{pages:?}");
+            }
+            assert_eq!(taken, all);
+        };
+        let (walked, pages) = walk(&mut store, wire::Fold::Board);
+        assert_eq!(walked, real, "the board gets the hundred, in order");
+        honest(&pages, 100);
+        assert!(pages.len() <= 3, "a serial page carries dozens: {pages:?}");
+        // The phone says no word and gets all 902, the photo and the state
+        // too, every page counting all of them.
+        let (phone, pages) = walk(&mut store, wire::Fold::All);
+        assert_eq!(phone.len(), 902);
+        honest(&pages, 902);
+        // Control: without the word the walk opens with the imported head.
+        assert!(phone[..800].iter().all(|seq| !real.contains(seq)));
+        let store_left = store
+            .archive_count_after_folded(0, wire::Fold::Board)
+            .expect("count");
+        assert_eq!(store_left, 100);
+        assert_eq!(store.archive_count_after(0).expect("count"), 902);
     }
 
     #[test]

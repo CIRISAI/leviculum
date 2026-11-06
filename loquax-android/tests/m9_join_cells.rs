@@ -1,5 +1,7 @@
 //! The cells of 1415: the M9 joining its home and pulling the archive,
-//! happy and unhappy, staged on the host where the behaviour is shared.
+//! happy and unhappy, staged on the host where the behaviour is shared;
+//! and 1439's: the board pulls only what it folds, in pages its link
+//! carries.
 //!
 //! A board cannot run on the host, and a host lnsd with the firmware's
 //! client half does not exist, so each cell drives the client the board
@@ -20,11 +22,11 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::Identity;
 use loquax::home::ask::{HomeError, Outcome, LORA_PAGE_BYTES};
-use loquax::home::board::{Batch, Progress, Session, Word};
+use loquax::home::board::{Batch, LinkClass, Progress, Session, Word};
 use loquax::home::code::HomeCode;
 use loquax::home::record::{Admission, ClientRecord};
 use loquax::home::wire::{self, Status};
-use loquax::home::KIND_RECEIVED;
+use loquax::home::{KIND_DELIVERED, KIND_IMPORTED, KIND_RECEIVED};
 use loquax::ui::strings::Lang;
 use rand_core::OsRng;
 
@@ -55,6 +57,20 @@ const BATCH: Batch = Batch {
 /// each, and the second device's and the expired token beside the
 /// phone's.
 async fn mailbox(relay: &Relay, entries: usize) -> Mailbox {
+    mailbox_with(relay, |store, now| {
+        for n in 0..entries {
+            let id: [u8; 32] = std::array::from_fn(|i| (n as u8) ^ i as u8);
+            store
+                .archive_append(KIND_RECEIVED, &id, &[n as u8; 150], now, 1 << 20)
+                .expect("append")
+                .expect("new");
+        }
+    })
+    .await
+}
+
+/// A mailbox with the three tokens and the archive `fill` writes.
+async fn mailbox_with(relay: &Relay, fill: impl FnOnce(&mut loquax::store::Store, i64)) -> Mailbox {
     let dir = tempfile::tempdir().expect("mailbox dir");
     let identity =
         loquax::identity::load_or_create(&dir.path().join("identity")).expect("identity");
@@ -66,13 +82,7 @@ async fn mailbox(relay: &Relay, entries: usize) -> Mailbox {
         store
             .issue_token(&EXPIRED, "late", now - 2 * 3600)
             .expect("token");
-        for n in 0..entries {
-            let id: [u8; 32] = std::array::from_fn(|i| (n as u8) ^ i as u8);
-            store
-                .archive_append(KIND_RECEIVED, &id, &[n as u8; 150], now, 1 << 20)
-                .expect("append")
-                .expect("new");
-        }
+        fill(&mut store, now);
     }
     Mailbox::start_in(dir, vec![entry(relay.peer)], true).await
 }
@@ -423,5 +433,100 @@ async fn m9_cell_second_device_joins_mid_pull() {
     assert!(archive.len() >= 40, "{}", archive.len());
     assert_eq!(seqs_one, archive);
     assert_eq!(seqs_two, archive);
+    mailbox.stop().await;
+}
+
+/// 1439, happy and unhappy in one archive: an imported head of 60
+/// entries, then 24 texts, a delivery state and a photo over the board's
+/// bound. The board's fitted pull over the serial line's MTU asks a second
+/// of the line, says `board`, and takes exactly the 24 texts in one page,
+/// "Fetched 24 of 24" from that page on: the head, the state and the
+/// photo never cross. Control: the same board pulling unfitted asks the
+/// LoRa page and needs a dozen pages for the same 24.
+#[tokio::test(flavor = "multi_thread")]
+async fn m9_cell_board_pulls_what_it_folds_in_pages_of_its_link() {
+    logs();
+    let relay = Relay::start(&[]).await;
+    let mailbox = mailbox_with(&relay, |store, now| {
+        let mut put = |kind: u8, n: u32, len: usize| {
+            let mut id = [kind; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            store
+                .archive_append(kind, &id, &vec![n as u8; len], now, 1 << 24)
+                .expect("append")
+                .expect("new")
+        };
+        for n in 0..60 {
+            put(KIND_IMPORTED, n, 150);
+        }
+        for n in 0..24 {
+            put(KIND_RECEIVED, n, 150);
+        }
+        put(KIND_DELIVERED, 0, 40);
+        put(KIND_RECEIVED, 1_000, wire::BOARD_ENTRY_MAX + 1);
+    })
+    .await;
+    let code = code(&mailbox, PHONE);
+    let peer = relay.peer;
+    let m9 = Batch {
+        page_bytes: LORA_PAGE_BYTES as u64,
+        max_answer: 256 * 1024,
+    };
+    let (fitted, fit, fitted_ms, lora) = tokio::task::spawn_blocking(move || {
+        let mut board = Board::connect(peer);
+        let (device, mut record) = pending(&code);
+        let (joined, _) = join(&mut board, &device, &record, Duration::from_secs(60));
+        assert_eq!(joined, Some(Ok(Outcome::Joined)));
+        record.admission = Admission::Admitted;
+        let ask = record
+            .pull(m9.page_bytes, board.now(), 120_000)
+            .expect("admitted")
+            .expect("ask");
+        let start = Instant::now();
+        let (fitted, fit) = board.run_fitted(&device, ask, m9, Duration::from_secs(125));
+        let fitted_ms = start.elapsed().as_millis();
+        // The control: the same record, unfitted, from its first cursor.
+        let lora = pull(&mut board, &device, &record);
+        (fitted, fit, fitted_ms, lora)
+    })
+    .await
+    .expect("board");
+    let (pulled, pages) = fitted;
+    let (seqs, shown) = counted(&pages);
+    let last = shown.last().copied().unwrap_or_default();
+    let said = pulled
+        .as_ref()
+        .map(|pulled| word(pulled, true, Some(last)).text().resolve(Lang::En));
+    let (lora_pulled, lora_pages) = lora;
+    let (lora_seqs, _) = counted(&lora_pages);
+    println!(
+        "[CELL] m9_board_folds fit={fit:?} taken={} of={:?} pages={} first_seq={:?} pull_ms={fitted_ms} word={said:?} lora_pages={} lora_taken={}",
+        last.taken,
+        last.of,
+        pages.len(),
+        seqs.first(),
+        lora_pages.len(),
+        lora_seqs.len(),
+    );
+    assert_eq!(fit, Some((LinkClass::Serial, 11_520)));
+    assert!(
+        matches!(pulled, Some(Ok(Outcome::Pulled { entries: 24, .. }))),
+        "{pulled:?}"
+    );
+    // The head is seq 1..=60, the texts 61..=84, the state 85, the photo 86.
+    assert_eq!(seqs, (61..=84).collect::<Vec<u64>>());
+    assert!(shown.iter().all(|p| p.of == Some(24)), "{shown:?}");
+    assert_eq!(pages.len(), 1, "24 texts are one serial page");
+    assert_eq!(said.as_deref(), Some("Fetched 24 of 24"));
+    assert!(matches!(
+        lora_pulled,
+        Some(Ok(Outcome::Pulled { entries: 24, .. }))
+    ));
+    assert_eq!(lora_seqs, seqs);
+    assert!(
+        lora_pages.len() >= 12,
+        "two texts a LoRa page: {}",
+        lora_pages.len()
+    );
     mailbox.stop().await;
 }

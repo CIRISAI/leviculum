@@ -31,7 +31,9 @@ use leviculum_core::traits::Interface;
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::{EmbeddedStorage, Identity, InterfaceMode, TickOutput};
 use loquax::home::ask::{Ask, HomeError, Outcome, Verb};
-use loquax::home::board::{self, Batch, Executor, Progress, Reach, Report, Session, Word};
+use loquax::home::board::{
+    self, Batch, Executor, LinkClass, Progress, Reach, Report, Session, Word,
+};
 use loquax::home::record::{Admission, ClientRecord};
 use loquax::home::wire::{Entry, Submission};
 use rand_core::CryptoRngCore;
@@ -386,10 +388,19 @@ impl Handheld {
                 client.record.cursor = client.record.cursor.max(last);
                 let bytes: usize = page.entries.iter().map(|entry| entry.packed.len()).sum();
                 let progress = client.progress.unwrap_or_default();
+                // The link the page came over and the page the board asked
+                // on it (1439): one packet on a radio, a second of the line
+                // on serial.
+                let (link, asked) = match client.exec.as_ref().and_then(Executor::fit) {
+                    Some((LinkClass::Radio, page)) => ("radio", page),
+                    Some((LinkClass::Serial, page)) => ("serial", page),
+                    Some((LinkClass::Wide, page)) => ("wide", page),
+                    None => ("unfitted", client.batch.page_bytes),
+                };
                 log.line(
                     "[HOME] ",
                     format_args!(
-                        "page entries={} last={last} bytes={bytes} more={} taken={} of={}",
+                        "page entries={} last={last} bytes={bytes} more={} taken={} of={} link={link} asked={asked}",
                         page.entries.len(),
                         page.more,
                         progress.taken,
@@ -431,7 +442,9 @@ impl Client {
                     self.progress = matches!(self.record.admission, Admission::Admitted)
                         .then(Progress::default);
                 }
-                self.exec = Some(Executor::new(ask, self.batch.max_answer));
+                // A pull's page follows the link it gets (1439); a join's
+                // and a send's answers are one packet whatever the link.
+                self.exec = Some(Executor::fitted(ask, self.batch));
             }
             Some(Err(error)) => {
                 log.line("[HOME] ", format_args!("ask=refused error={error}"));

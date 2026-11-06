@@ -36,14 +36,14 @@ impl Clock for TestClock {
 
 type Node = NodeCore<OsRng, TestClock, MemoryStorage>;
 
-fn node(clock: &TestClock, identity: Option<Identity>) -> Node {
+fn node(clock: &TestClock, identity: Option<Identity>, hw_mtu: u32) -> Node {
     let mut builder = NodeCoreBuilder::new();
     if let Some(identity) = identity {
         builder = builder.identity(identity);
     }
     let mut node = builder.build(OsRng, clock.clone(), MemoryStorage::with_defaults());
     node.set_interface_name(0, std::string::String::from("wire"));
-    node.set_interface_hw_mtu(0, 564);
+    node.set_interface_hw_mtu(0, hw_mtu);
     node
 }
 
@@ -62,6 +62,8 @@ struct Home {
     /// The page each answered `/sync` asked, and its cursor.
     asked: Vec<Option<u64>>,
     cursors: Vec<u64>,
+    /// What each `/sync` said the device folds.
+    folds: Vec<wire::Fold>,
 }
 
 impl Home {
@@ -87,9 +89,12 @@ impl Home {
                 if !self.admitted.contains(&device) {
                     return wire::status_answer(Status::NotAdmitted);
                 }
-                let Ok((cursor, asked)) = wire::read_sync_paged(data) else {
+                let Ok((cursor, asked, fold)) = wire::read_sync_asked(data) else {
                     return wire::status_answer(Status::Malformed);
                 };
+                self.folds.push(fold);
+                // As the home does (1439): only what the device folds.
+                let keeps = |entry: &&wire::Entry| fold.keeps(entry.kind, entry.packed.len());
                 self.asked.push(asked);
                 self.cursors.push(cursor);
                 let mut page = wire::Page {
@@ -97,6 +102,7 @@ impl Home {
                         .archive
                         .iter()
                         .filter(|entry| entry.seq > cursor)
+                        .filter(keeps)
                         .cloned()
                         .collect(),
                     more: false,
@@ -109,7 +115,11 @@ impl Home {
                     page.left = Some(wire::LEFT_UNCOUNTED);
                     wire::fit_page(&mut page, asked as usize);
                     let after = page.entries.last().map_or(cursor, |entry| entry.seq);
-                    let left = self.archive.iter().filter(|entry| entry.seq > after);
+                    let left = self
+                        .archive
+                        .iter()
+                        .filter(|entry| entry.seq > after)
+                        .filter(keeps);
                     page.left = Some(left.count() as u64);
                 }
                 wire::sync_answer(&page)
@@ -118,6 +128,9 @@ impl Home {
         }
     }
 }
+
+/// How a bench's ask ended, `None` when it ran out of time.
+type Pulled = Option<Result<Outcome, HomeError>>;
 
 /// Both nodes, the clock, and what the board has taken in.
 struct Bench {
@@ -144,10 +157,16 @@ fn entry(seq: u64, len: usize) -> wire::Entry {
 
 impl Bench {
     fn new(archive: Vec<wire::Entry>) -> Self {
+        Self::on(archive, 564)
+    }
+
+    /// A bench whose two ends declare `hw_mtu`: 564 a serial line, 500
+    /// what a LoRa path keeps.
+    fn on(archive: Vec<wire::Entry>, hw_mtu: u32) -> Self {
         let clock = TestClock(Arc::new(AtomicU64::new(1_000_000)));
         let home_identity = Identity::generate(&mut OsRng);
         let public_key = home_identity.public_key_bytes();
-        let mut home_node = node(&clock, None);
+        let mut home_node = node(&clock, None, hw_mtu);
         let mut destination = crate::home::destination(home_identity).expect("home destination");
         destination.set_accepts_links(true);
         destination.set_proof_strategy(ProofStrategy::All);
@@ -158,7 +177,7 @@ impl Bench {
         }
         let token = [0x5A; 16];
         Self {
-            board: node(&clock, None),
+            board: node(&clock, None, hw_mtu),
             clock,
             device: Identity::generate(&mut OsRng),
             home: Home {
@@ -171,6 +190,7 @@ impl Bench {
                 syncs: 0,
                 asked: Vec::new(),
                 cursors: Vec::new(),
+                folds: Vec::new(),
             },
             code: HomeCode { public_key, token },
             pages: Vec::new(),
@@ -330,6 +350,23 @@ impl Bench {
         let mut exec = Executor::new(ask, batch.max_answer);
         let until = self.now() + 120_000;
         self.run(&mut exec, until, 100)
+    }
+
+    /// A pull whose page the executor fits to the link (1439), as the
+    /// M9's; the class and page it chose.
+    fn pull_fitted(
+        &mut self,
+        record: &ClientRecord,
+        batch: Batch,
+    ) -> (Pulled, Option<(LinkClass, u64)>) {
+        let ask = record
+            .pull(batch.page_bytes, self.now(), 120_000)
+            .expect("admitted")
+            .expect("ask");
+        let mut exec = Executor::fitted(ask, batch);
+        let until = self.now() + 120_000;
+        let pulled = self.run(&mut exec, until, 100);
+        (pulled, exec.fit())
     }
 
     fn seqs(&self) -> Vec<u64> {
@@ -773,5 +810,163 @@ fn entries_fold_into_what_the_model_takes() {
     assert_eq!(
         fold(&at(crate::home::KIND_DELIVERED, std::vec![7; 32]), &address),
         None
+    );
+}
+
+/// 1439: the page per link class. A radio keeps one response packet and
+/// the census's page; a serial line without a rate gets a second of
+/// 115200 baud; a wide link the device's answer up to the home's page;
+/// a reported rate decides the radio and sizes the rest.
+#[test]
+fn the_page_follows_the_link_class() {
+    use crate::home::ask::{LORA_LINK_MDU, SERIAL_LINK_MDU};
+    let m9 = Batch {
+        page_bytes: LORA_PAGE_BYTES as u64,
+        max_answer: 256 * 1024,
+    };
+    assert_eq!(LinkClass::of(500, None), LinkClass::Radio);
+    assert_eq!(
+        LinkClass::of(508, None),
+        LinkClass::Radio,
+        "an RNode's HW_MTU"
+    );
+    assert_eq!(LinkClass::of(564, None), LinkClass::Serial);
+    assert_eq!(LinkClass::of(1064, None), LinkClass::Wide, "UDP");
+    assert_eq!(LinkClass::of(262_144, None), LinkClass::Wide, "TCP");
+    assert_eq!(LinkClass::of(262_144, Some(3_125)), LinkClass::Radio, "SF8");
+    assert_eq!(LinkClass::of(564, Some(115_200)), LinkClass::Serial);
+    // LoRa: one packet, the LoRa page, 412.
+    let lora = LinkClass::Radio.page_bytes(LORA_LINK_MDU, Some(3_125), m9);
+    assert_eq!(lora, 412);
+    // A census that found less room keeps its smaller page on a radio.
+    let tight = Batch {
+        page_bytes: 206,
+        ..m9
+    };
+    assert_eq!(LinkClass::Radio.page_bytes(LORA_LINK_MDU, None, tight), 206);
+    // Serial to the host's daemon: a second of the line, 11 520 B.
+    let serial = LinkClass::Serial.page_bytes(SERIAL_LINK_MDU, None, m9);
+    assert_eq!(serial, 11_520);
+    assert_eq!(
+        LinkClass::Serial.page_bytes(SERIAL_LINK_MDU, Some(921_600), m9),
+        92_160.min(crate::home::SYNC_PAGE_BYTES as u64)
+    );
+    // TCP: the home's page, or less when the device takes less.
+    assert_eq!(
+        LinkClass::Wide.page_bytes(262_063, None, m9),
+        crate::home::SYNC_PAGE_BYTES as u64
+    );
+    let small = Batch {
+        max_answer: 4096,
+        ..m9
+    };
+    assert_eq!(LinkClass::Wide.page_bytes(262_063, None, small), 4096);
+    // A slow line still gets one packet at least.
+    assert_eq!(
+        LinkClass::Serial.page_bytes(SERIAL_LINK_MDU, Some(1_200), m9),
+        (SERIAL_LINK_MDU - crate::home::ask::RESPONSE_OVERHEAD) as u64
+    );
+}
+
+/// 1439: the executor fits a pull's page to the link it got. Over a
+/// serial line's MTU the board asks a second of the line and the archive
+/// comes in a handful of resources; over a link of the default MTU the
+/// LoRa page of one packet. Each `/sync` says the board's word, and the
+/// imported head and the delivery states never cross. Control: the same
+/// archive pulled unfitted over the serial line asks the LoRa page.
+#[test]
+fn a_fitted_pull_asks_the_page_its_link_carries() {
+    use crate::home::{KIND_DELIVERED, KIND_IMPORTED};
+    let archive = || {
+        let mut archive: Vec<_> = (1..=40)
+            .map(|seq| wire::Entry {
+                kind: KIND_IMPORTED,
+                ..entry(seq, 150)
+            })
+            .collect();
+        archive.extend((41..=70).map(|seq| entry(seq, 150)));
+        archive.push(wire::Entry {
+            kind: KIND_DELIVERED,
+            ..entry(71, 40)
+        });
+        archive
+    };
+    let m9 = Batch {
+        page_bytes: LORA_PAGE_BYTES as u64,
+        max_answer: 256 * 1024,
+    };
+    let mut bench = Bench::on(archive(), 564);
+    let record = bench.join();
+    let (pulled, fit) = bench.pull_fitted(&record, m9);
+    assert!(
+        matches!(pulled, Some(Ok(Outcome::Pulled { entries: 30, .. }))),
+        "{pulled:?}"
+    );
+    assert_eq!(fit, Some((LinkClass::Serial, 11_520)));
+    assert_eq!(bench.seqs(), (41..=70).collect::<Vec<_>>());
+    assert!(bench.home.asked.iter().all(|asked| *asked == Some(11_520)));
+    assert_eq!(bench.home.asked.len(), 1, "thirty texts are one page");
+    assert!(bench
+        .home
+        .folds
+        .iter()
+        .all(|fold| *fold == wire::Fold::Board));
+
+    let mut bench = Bench::on(archive(), 500);
+    let record = bench.join();
+    let (pulled, fit) = bench.pull_fitted(&record, m9);
+    assert!(matches!(
+        pulled,
+        Some(Ok(Outcome::Pulled { entries: 30, .. }))
+    ));
+    assert_eq!(fit, Some((LinkClass::Radio, LORA_PAGE_BYTES as u64)));
+    assert_eq!(bench.home.asked.len(), 15, "two texts a LoRa page");
+
+    let mut bench = Bench::on(archive(), 564);
+    let record = bench.join();
+    let pulled = bench.pull(&record, m9);
+    assert!(matches!(
+        pulled,
+        Some(Ok(Outcome::Pulled { entries: 30, .. }))
+    ));
+    assert_eq!(bench.home.asked.len(), 15, "unfitted: the LoRa page");
+}
+
+/// 1439: the board's word names exactly the kinds `fold` reads; an entry
+/// of any other kind folds to nothing, so the home skips nothing the
+/// board would show.
+#[test]
+fn the_board_word_keeps_every_kind_fold_reads() {
+    let address = [0x42; 16];
+    for kind in 0..=u8::MAX {
+        if wire::Fold::Board.keeps(kind, 0) {
+            continue;
+        }
+        let entry = wire::Entry {
+            seq: 1,
+            kind,
+            at: 0,
+            packed: std::vec![0; 64],
+        };
+        assert_eq!(fold(&entry, &address), None, "kind {kind}");
+    }
+    for kind in wire::BOARD_KINDS {
+        assert!(wire::Fold::Board.keeps(kind, wire::BOARD_ENTRY_MAX));
+        assert!(!wire::Fold::Board.keeps(kind, wire::BOARD_ENTRY_MAX + 1));
+    }
+    assert_eq!(wire::Fold::from_word("board"), wire::Fold::Board);
+    assert_eq!(wire::Fold::from_word("toaster"), wire::Fold::All);
+    let data = wire::sync_request_folded(5, 412, wire::Fold::Board);
+    assert_eq!(
+        wire::read_sync_asked(&data),
+        Ok((5, Some(412), wire::Fold::Board))
+    );
+    // A home from before reads the first two and serves everything.
+    assert_eq!(wire::read_sync_paged(&data), Ok((5, Some(412))));
+    let plain = wire::sync_request_folded(5, 412, wire::Fold::All);
+    assert_eq!(plain, wire::sync_request_paged(5, 412));
+    assert_eq!(
+        wire::read_sync_asked(&wire::sync_request(5)),
+        Ok((5, None, wire::Fold::All))
     );
 }
