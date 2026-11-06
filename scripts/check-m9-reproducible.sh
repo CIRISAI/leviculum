@@ -16,11 +16,12 @@
 #
 #   M9_REPRO sha_tree=<sha256> sha_clone=<sha256> verdict=<same|DIFFERENT>
 #
-# Red when either build fails, when the bytes differ, when an image names a
-# host path, or when the tree has tracked changes (the clone would build a
-# different commit, and the embedded dirty flag alone differs). Without the
-# esp toolchain it says SKIP, as build-m9-image.sh does, unless
-# M9_IMAGE_REQUIRE_ESP=1.
+# Red when either build fails, when the bytes differ, or when an image names
+# a host path. A tree with tracked changes is not HEAD (its embedded dirty
+# flag alone differs), so then both builds are clones of HEAD at two paths.
+# Without the esp toolchain it says SKIP, as build-m9-image.sh does, unless
+# M9_IMAGE_REQUIRE_ESP=1; without unprivileged user namespaces too, because
+# build-m9-image.sh then cannot build at its fixed path.
 #
 # The clone and its target directory (about 0.9 GB) go under
 # ${XDG_CACHE_HOME:-$HOME/.cache}/leviculum-m9-repro, never /tmp (a small
@@ -111,10 +112,11 @@ fi
 
 selftest || exit 1
 
-if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
-    git -C "$ROOT" status --short --untracked-files=no
-    echo "$TAG FAIL the tree has tracked changes; the clone of HEAD would build a different image. Commit first."
-    exit 1
+# build-m9-image.sh builds in place without one, and that image is not the
+# reproducible one by design; red here would only restate it.
+if ! unshare --user --map-root-user --mount true 2>/dev/null; then
+    echo "$TAG SKIP no unprivileged user namespace on this host; build-m9-image.sh cannot build at its fixed path"
+    exit 0
 fi
 
 # shellcheck source=scripts/cargo-target-dir.sh
@@ -126,31 +128,46 @@ mkdir -p "$base" || exit 1
 work="$(mktemp -d "$base/run.XXXXXX")" || exit 1
 trap 'rm -rf "$work"' EXIT
 
-echo "$TAG build 1 of 2: this tree ($ROOT)"
-if ! bash "$ROOT/scripts/build-m9-image.sh" >"$work/tree.log" 2>&1; then
-    cat "$work/tree.log"
-    echo "$TAG FAIL the image did not build in this tree"
-    exit 1
+# clone_build <dir> <name>: clone HEAD into <dir>, build there, copy the image
+# to $work/<name>.bin. Its own target directory: a CARGO_TARGET_DIR shared
+# with the tree build would hand the clone the tree's artefacts.
+clone_build() {
+    local dir="$1" name="$2"
+    if ! { git clone -q --no-checkout "$ROOT" "$dir" && git -C "$dir" checkout -q --detach "$head"; }; then
+        echo "$TAG FAIL could not clone $ROOT at $head"
+        return 1
+    fi
+    if ! env -u CARGO_TARGET_DIR bash "$dir/scripts/build-m9-image.sh" >"$work/$name.log" 2>&1; then
+        cat "$work/$name.log"
+        echo "$TAG FAIL the image did not build in $dir"
+        return 1
+    fi
+    cp "$dir/leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9.bin" "$work/$name.bin"
+}
+
+# A tree with tracked changes is not HEAD, and its embedded dirty flag alone
+# would differ; then the first build is a second clone, at a longer path.
+if [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
+    first="$ROOT"
+    echo "$TAG build 1 of 2: this tree ($ROOT)"
+    if ! bash "$ROOT/scripts/build-m9-image.sh" >"$work/tree.log" 2>&1; then
+        cat "$work/tree.log"
+        echo "$TAG FAIL the image did not build in this tree"
+        exit 1
+    fi
+    tree_target="$(cargo_target_dir "$ROOT/leviculum-esp")" || exit 1
+    cp "$tree_target/xtensa-esp32s3-none-elf/release/thinknode_m9.bin" "$work/tree.bin" || exit 1
+else
+    first="$work/first/another-clone-of-${head:0:12}"
+    echo "$TAG the tree has tracked changes, so build 1 of 2 is a clone of $head too ($first)"
+    clone_build "$first" tree || exit 1
 fi
-tree_target="$(cargo_target_dir "$ROOT/leviculum-esp")" || exit 1
-cp "$tree_target/xtensa-esp32s3-none-elf/release/thinknode_m9.bin" "$work/tree.bin" || exit 1
 
 clone="$work/clone-of-${head:0:12}"
 echo "$TAG build 2 of 2: a clone of $head ($clone)"
-if ! { git clone -q --no-checkout "$ROOT" "$clone" && git -C "$clone" checkout -q --detach "$head"; }; then
-    echo "$TAG FAIL could not clone $ROOT at $head"
-    exit 1
-fi
-# Its own target directory: a CARGO_TARGET_DIR shared with the tree build
-# would hand the clone the tree's artefacts.
-if ! env -u CARGO_TARGET_DIR bash "$clone/scripts/build-m9-image.sh" >"$work/clone.log" 2>&1; then
-    cat "$work/clone.log"
-    echo "$TAG FAIL the image did not build in the clone"
-    exit 1
-fi
-cp "$clone/leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9.bin" "$work/clone.bin" || exit 1
+clone_build "$clone" clone || exit 1
 
-verdict "$work/tree.bin" "$work/clone.bin" "$ROOT/" "$clone/" "$HOME/" /mnt/leviculum/
+verdict "$work/tree.bin" "$work/clone.bin" "$first/" "$clone/" "$HOME/" /mnt/leviculum/
 rc=$?
 echo "$TAG $(($(date +%s) - start)) s for both builds"
 exit "$rc"
