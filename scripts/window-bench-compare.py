@@ -5,8 +5,10 @@ of BASE and of this tree, the medians of each size and gesture compared.
 A WINDOW_BENCH line is `size= case= fps= frame_ms_mean= p95= ...`. Held is
 `frame_ms_mean`, as `just map-bench` holds its columns: this tree's median
 more than 5 % and more than 0.1 ms above BASE's is a regression, and the
-exit is 1. A gesture that drew no frame (the mouse's drag on the chat at
-the wide sizes, which iced does not scroll) holds nothing.
+exit is 1. A gesture that drew fewer than 30 frames on either side holds
+nothing: the mouse's drag on the chat, which iced does not scroll, draws
+none at the wide sizes and three at 900x560, whose mean moved 3.6 % in an
+A/A run of the same binary.
 
 Usage: window-bench-compare.py --base FILE... --this FILE...
 """
@@ -16,6 +18,7 @@ import sys
 
 SHARE = 0.05
 FLOOR_MS = 0.1
+MIN_FRAMES = 30
 
 
 def read(paths):
@@ -55,14 +58,15 @@ def main(argv):
             continue
         was = median(then, "frame_ms_mean")
         change = (ms - was) / was * 100 if was > 0 else 0.0
-        held = was > 0 and ms > was * (1 + SHARE) and ms - was > FLOOR_MS
+        enough = min(median(now, "frames"), median(then, "frames")) >= MIN_FRAMES
+        held = enough and ms > was * (1 + SHARE) and ms - was > FLOOR_MS
         if held:
             regressions.append(f"{key[0]} {key[1]}: {was:.2f} -> {ms:.2f} ms ({change:+.1f} %)")
         print(
             f"| {key[0]} | {key[1]} | {median(then, 'fps'):.0f} | {median(now, 'fps'):.0f} "
             f"| {was:.2f} | {ms:.2f} | {median(then, 'p95'):.2f} | {median(now, 'p95'):.2f} "
             f"| {median(now, 'present'):.2f} | {median(now, 'damage'):.2f} "
-            f"| {change:+.1f} %{' REGRESSION' if held else ''} |"
+            f"| {change:+.1f} %{' REGRESSION' if held else ''}{'' if enough else ' (not held)'} |"
         )
     if regressions:
         print("\nwindow-bench: frame time regressions (more than 5 % and 0.1 ms):")

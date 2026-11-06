@@ -2772,7 +2772,8 @@ map-bench-baseline REGION:
 # gesture. As map-bench: the bench of BASE (default: the commit that last
 # wrote loquax/tests/window_bench.baseline) built in a worktree under
 # target/, and this tree's, in turn for ROUNDS rounds, the medians
-# compared; a frame_ms_mean more than 5 % and 0.1 ms slower fails. The
+# compared; a frame_ms_mean more than 5 % and 0.1 ms slower fails (a
+# gesture of fewer than 30 frames is reported, not held). The
 # table lands in target/window-bench/table.md. A measuring tool, never in
 # `guards`: two release builds, about 45 s a round and side.
 [doc('Measure the window frames at three sizes, A/B against the baseline (#474)')]
