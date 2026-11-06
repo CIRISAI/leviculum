@@ -13,7 +13,7 @@ loquax -- LXMF messenger for Reticulum, in a window or the terminal
 **loquax import** [**--dry-run**] [**--key** | *path*] [**--ratchets** *file*]
 **loquax export** *dir*
 **loquax tui** [**--to** *address*]... [*options*]
-**loquax gui** [**--exit-after-first-frame**] [*options*]
+**loquax gui** [**--exit-after-first-frame**] [**--fps**] [*options*]
 **loquax mailbox setup** [**--store** `system`|`account`] [**--reach** `rendezvous`|`fixed`] [**--address** *host*:*port*] [**--phone-port** *port*] [**--name** *name*] [**--yes**]
 **loquax mailbox run** [*options*]
 **loquax mailbox enable** | **disable**
@@ -82,6 +82,9 @@ The packages for amd64 and arm64 carry both frontends in one binary; the armhf p
 
 **--exit-after-first-frame**
 :   **gui** only: open the window, draw its first frame and exit 0, without attaching to a daemon; the check that the window starts on this display, which the packaging runs under `xvfb-run`.
+
+**--fps**
+:   **gui** only: measure the window's frames. Its top right corner shows the frames presented in the last second, a frame's mean and 95th percentile time, and the frame's parts: the update, the view built, laid out and drawn, and the software renderer's rasterise and present; and the size in screen pixels. While the window draws more than one frame a second, `$LNMSG_HOME/gui.log` gets a line a second: `WINDOW_FRAME fps=58 ms=9.80 p95=14.20 max=16.10 update=0.40 draw=2.10 present=7.30 size=1280x1190`, times in milliseconds. **LOQUAX_FPS**`=1` does the same.
 
 **--to** *address*
 :   **tui** only, repeatable: a correspondent to list from the start, for writing first to someone the history (see HISTORY) does not hold yet.
@@ -320,6 +323,9 @@ Without capture the terminal's own selection works as before: drag to select, an
 
 **LOQUAX_INPUT_LOG**
 :   Set and not `0`: **tui** writes each event the terminal sends to `$LNMSG_HOME/tui.log` as it came, before Loquax reads anything into it, one `INPUT` line each after an `INPUT log=on` line at start: `INPUT kind=mouse event=scroll_left button=none col=12 row=7 mods=none` (`event` one of `down`, `up`, `drag`, `moved`, `scroll_up`, `scroll_down`, `scroll_left`, `scroll_right`), `INPUT kind=key code=char:h mods=alt state=press` (a printable character as itself, any other as `U+`*hex*), `INPUT kind=resize width=80 height=24`, `INPUT kind=paste len=12` (the length in bytes, never the text) and `INPUT kind=focus gained=true`. It is for finding out what a terminal sends for a gesture, a swipe on a phone for instance; the keys typed are in it, so leave it off otherwise.
+
+**LOQUAX_FPS**
+:   `1`: **gui** measures its frames, as **--fps**.
 
 **LOQUAX_RECORDER**
 :   The command line that records a voice message in **tui** and **gui**, split at white space: a program that writes raw mono 16-bit little-endian PCM at 16 kHz to its standard output until it is stopped, for instance `arecord -q -D hw:1 -t raw -f S16_LE -r 16000 -c 1`. Unset, the first found on `PATH` of `pw-record --rate 16000 --channels 1 --format s16 -`, `parecord --raw --format=s16le --rate=16000 --channels=1` and `arecord -q -t raw -f S16_LE -r 16000 -c 1`.

@@ -381,6 +381,13 @@ pub fn probe() -> ExitCode {
     }
 }
 
+/// Measure the window's frames (`--fps` or `LOQUAX_FPS=1`, 1441): the
+/// numbers in its top right corner, and a `WINDOW_FRAME` line a second in
+/// the log while it draws.
+pub fn measure_frames() {
+    leviculum_ui_iced::fps::enable(|line| tracing::info!(target: "loquax::window", "{line}"));
+}
+
 /// Open the window and run it until it is closed, or, as the packaging
 /// probe, until its first frame is drawn. Without the shell's half the
 /// window is the empty one [`App::boot`] makes.
@@ -1666,9 +1673,11 @@ impl App {
                 .map(|(_, text)| iced::clipboard::write(text.clone())),
             _ => None,
         };
+        let start = Instant::now();
         let task = self.update_inner(message);
         self.browse_sync();
         self.rooms_sync();
+        leviculum_ui_iced::fps::update(start, start.elapsed());
         match copy {
             Some(copy) => Task::batch([copy, task]),
             None => task,
@@ -1946,6 +1955,10 @@ impl App {
             }
             Message::Window(window::Event::Resized(size)) => {
                 self.window = size;
+                leviculum_ui_iced::fps::set_size(
+                    (size.width * self.scale).round() as u32,
+                    (size.height * self.scale).round() as u32,
+                );
                 self.rescene();
                 return false;
             }
@@ -2363,7 +2376,17 @@ impl App {
         }
     }
 
+    /// The window, and the frame meter's numbers over it while it
+    /// measures (`--fps`, 1441).
     fn view(&self) -> Element<'_, Message> {
+        let window = self.window_view();
+        match leviculum_ui_iced::fps::enabled() {
+            true => stack![window, leviculum_ui_iced::fps::overlay()].into(),
+            false => window,
+        }
+    }
+
+    fn window_view(&self) -> Element<'_, Message> {
         if let Some(viewer) = &self.viewer {
             return viewer.view();
         }
