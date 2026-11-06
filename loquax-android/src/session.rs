@@ -63,6 +63,21 @@ pub const IDLE_PUMP: Duration = watch::LOOK;
 /// The longest the pump sleeps while a position share runs (1273): its
 /// shortest gap, so a report and the end are at most that late.
 pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_S as u64);
+/// The longest one pump turn folds the engine's events under the
+/// session's lock (1446). Every event folded is a store commit with its
+/// fsyncs, and the first pull of a big mailbox brings thousands: before
+/// 1446 one turn folded all of them, 12.8 s on the host for 4000 entries,
+/// while `ConversationsActivity.onResume` waited on the lock from the UI
+/// thread and Android said the app was not responding.
+pub const SLICE: Duration = Duration::from_millis(50);
+/// How many events the pump takes from the engine between two looks at
+/// the clock: each costs a commit, a few milliseconds on a phone's flash.
+pub const CHUNK: usize = 8;
+/// How long the pump lets go of the lock between two slices of a backlog:
+/// long enough for a screen woken from its wait on the lock to take it,
+/// short against [`SLICE`], so the history still comes at nine tenths of
+/// the speed.
+pub const BACKLOG_PUMP: Duration = Duration::from_millis(5);
 /// How long a send runner waits for its bubble to be named.
 const SETTLE: Duration = Duration::from_secs(5);
 /// How often the TCP interface is looked at while the pump runs fast.
@@ -187,6 +202,9 @@ struct Inner {
     origin: std::time::Instant,
     /// Something the screen shows changed since the last `changed`.
     dirty: bool,
+    /// The last pump turn stopped at [`SLICE`] with events still waiting
+    /// in the engine's queue (1446).
+    backlog: bool,
     gone: bool,
     /// Whether the TCP interface to the home node was up at the last look,
     /// none before the first, and when that look was.
@@ -1922,6 +1940,7 @@ impl Inner {
             runtime,
             origin: std::time::Instant::now(),
             dirty: true,
+            backlog: false,
             gone: false,
             link: None,
             // The first pump looks, and says what it saw.
@@ -2033,44 +2052,62 @@ impl Inner {
         }
     }
 
+    /// Fold the engine's events the fan-out took into the screen and the
+    /// store.
+    fn fold(&mut self, events: Vec<OutboxEvent>) {
+        for event in events {
+            if runner::already_held(&self.store, &event) {
+                continue;
+            }
+            runner::keep_signature(&mut self.store, &event);
+            let named = match &event {
+                OutboxEvent::Announced {
+                    destination,
+                    name: Some(_),
+                    ..
+                } => Some(*destination),
+                _ => None,
+            };
+            self.apply(UiEvent::Engine(event));
+            if let Some(peer) = named {
+                runner::keep_name(&mut self.store, &self.model.names, self.model.address, peer);
+            }
+        }
+    }
+
     fn pump(&mut self) -> bool {
         if self.gone {
             return false;
         }
         self.costs.window.pumps += 1;
-        match self.fanout.pump(&mut self.attached.outbox) {
-            Ok(events) => {
-                for event in events {
-                    if runner::already_held(&self.store, &event) {
-                        continue;
-                    }
-                    runner::keep_signature(&mut self.store, &event);
-                    let named = match &event {
-                        OutboxEvent::Announced {
-                            destination,
-                            name: Some(_),
-                            ..
-                        } => Some(*destination),
-                        _ => None,
-                    };
-                    self.apply(UiEvent::Engine(event));
-                    if let Some(peer) = named {
-                        runner::keep_name(
-                            &mut self.store,
-                            &self.model.names,
-                            self.model.address,
-                            peer,
-                        );
-                    }
+        // The engine's events a slice at a time (1446): each one folded is
+        // a store commit, and a first pull of a big mailbox brings
+        // thousands. The pump holds the session's lock for its whole turn,
+        // and the screens wait on that lock from the UI thread, so the turn
+        // stops after [`SLICE`] and the next one comes after
+        // [`BACKLOG_PUMP`], in which a waiting screen takes the lock.
+        let began = std::time::Instant::now();
+        self.backlog = false;
+        loop {
+            let events = match self.fanout.pump_at_most(&mut self.attached.outbox, CHUNK) {
+                Ok(events) => events,
+                Err(gone) => {
+                    self.gone = true;
+                    let _ = self.events.send(Event::Stopped {
+                        v: VERSION,
+                        detail: gone.to_string(),
+                    });
+                    return false;
                 }
+            };
+            let full = events.len() == CHUNK;
+            self.fold(events);
+            if !full {
+                break;
             }
-            Err(gone) => {
-                self.gone = true;
-                let _ = self.events.send(Event::Stopped {
-                    v: VERSION,
-                    detail: gone.to_string(),
-                });
-                return false;
+            if began.elapsed() >= SLICE {
+                self.backlog = true;
+                break;
             }
         }
         while let Ok(finished) = self.finished_rx.try_recv() {
@@ -2108,6 +2145,11 @@ impl Inner {
     /// while anything is going on, else until the pull schedule's next
     /// pull, at most [`IDLE_PUMP`].
     fn next_pump(&self) -> Duration {
+        // Events still wait in the engine's queue (1446): the next slice
+        // soon, after a screen waiting on the lock had its turn.
+        if self.backlog {
+            return BACKLOG_PUMP;
+        }
         let busy = self.front
             || !self.watching
             || self.sending

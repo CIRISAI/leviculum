@@ -59,13 +59,29 @@ impl Fanout {
     /// there: each is copied to every live tap and returned for the screen.
     /// A tap whose runner has finished is dropped here.
     pub fn pump(&mut self, outbox: &mut impl Outbox) -> Result<Vec<OutboxEvent>, OutboxGone> {
+        self.pump_at_most(outbox, usize::MAX)
+    }
+
+    /// [`Fanout::pump`], taking at most `max` events; the rest wait in the
+    /// engine's queue for the next call. The taps see an event only once
+    /// the screen has it, so a runner that waits for its fence never sees
+    /// it before the screen does (1446: the phone folds a big first pull a
+    /// slice at a time and lets go of its lock between slices).
+    pub fn pump_at_most(
+        &mut self,
+        outbox: &mut impl Outbox,
+        max: usize,
+    ) -> Result<Vec<OutboxEvent>, OutboxGone> {
         // The fan-out holds a sender itself, so the queue is never
         // disconnected: an error is the empty queue.
         while let Ok(command) = self.commands_rx.try_recv() {
             outbox.submit(command)?;
         }
         let mut events = Vec::new();
-        while let Some(event) = outbox.try_next_event()? {
+        while events.len() < max {
+            let Some(event) = outbox.try_next_event()? else {
+                break;
+            };
             if matches!(event, OutboxEvent::Ready { .. }) {
                 self.ready = Some(event.clone());
             }
@@ -149,6 +165,30 @@ mod tests {
                 destination: ADDRESS
             }]
         );
+    }
+
+    /// 1446: a slice takes at most its count; the rest stay in the
+    /// engine's queue, and a tap holds only what the screen took, so a
+    /// fence the runner waits for reaches it no earlier than the screen.
+    #[test]
+    fn a_slice_takes_at_most_its_count_and_a_tap_no_more_than_the_screen() {
+        let queued = |n: u8| OutboxEvent::Queued {
+            message_id: [n; 32],
+        };
+        let mut engine = FakeOutbox::new((0..5).map(queued).collect());
+        let mut fanout = Fanout::default();
+        let mut tap = fanout.tap();
+        let first = fanout.pump_at_most(&mut engine, 2).expect("pump");
+        assert_eq!(first, [queued(0), queued(1)]);
+        let mut seen = Vec::new();
+        while let Some(event) = tap.try_next_event().expect("live") {
+            seen.push(event);
+        }
+        assert_eq!(seen, first, "the tap holds what the screen took, no more");
+        let rest = fanout.pump_at_most(&mut engine, 0).expect("pump");
+        assert!(rest.is_empty(), "a slice of none takes none");
+        let rest = fanout.pump(&mut engine).expect("pump");
+        assert_eq!(rest, [queued(2), queued(3), queued(4)]);
     }
 
     #[test]

@@ -1713,6 +1713,20 @@ impl HomeNode {
         python: Option<u16>,
         pn: Option<(u8, u64)>,
     ) -> Self {
+        Self::start_capped(listener, instance, rns, home, python, pn, ugly_store::CAP).await
+    }
+
+    /// [`HomeNode::start_full`] with an archive of `cap` bytes: the big
+    /// mailbox of 1446 does not fit the facade tests' 1 MiB.
+    async fn start_capped(
+        listener: std::net::TcpListener,
+        instance: &str,
+        rns: &Path,
+        home: &Path,
+        python: Option<u16>,
+        pn: Option<(u8, u64)>,
+        cap: u64,
+    ) -> Self {
         let mut builder = ReticulumNodeBuilder::new()
             .enable_transport(true)
             .share_instance(true)
@@ -1758,7 +1772,7 @@ impl HomeNode {
                 storage_dir: daemon_storage,
                 identity,
                 display_name: b"home".to_vec(),
-                archive_cap_bytes: 1 << 20,
+                archive_cap_bytes: cap,
                 token_ttl_secs: 3600,
                 policy: loquax::home::policy(&loquax::config::Config::default()),
                 preferred_pn: pn_setup.map(|(hash, _)| hash),
@@ -2139,6 +2153,140 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
     .expect("the session");
     node.kill().await;
 }
+
+/// The phone never freezes after joining (1446). UI walk 1 on the Pixel 3a
+/// XL: right after the join, `ConversationsActivity.onResume` called
+/// `Core.close()` on the UI thread, and that call waited on the session's
+/// lock while the pump held it to fold the first pull of a full mailbox,
+/// one store commit per message: Android said "Loquax reagiert nicht".
+/// Here a mailbox of [`BIG_CONVERSATIONS`] conversations, thousands of
+/// entries, as Lew's holds, on disk (the store's fsyncs are what the
+/// pump's turn waits on; a tmpfs would hide them). The phone joins; while
+/// the first pull runs, a probe does what `onResume` does through the
+/// facade (close, front, the list) every 50 ms, as the UI thread would,
+/// and measures each block. The longest must stay under [`UI_BAR`], our
+/// own bar well below Android's 5 s. The history must arrive whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
+    let _facade = facade_turn().await;
+    let instance = instance();
+    let scratch = env!("CARGO_TARGET_TMPDIR");
+    let rns = tempfile::tempdir_in(scratch).expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir_in(scratch).expect("home node dir");
+    let code = admit(home.path());
+    let filled = ugly_store::fill_archive_of(home.path(), BIG_CONVERSATIONS, BIG_CAP);
+    assert_eq!(
+        filled.messages,
+        BIG_CONVERSATIONS * ugly_store::PER_CONVERSATION
+    );
+    let node = HomeNode::start_capped(
+        listener,
+        &instance,
+        rns.path(),
+        home.path(),
+        None,
+        None,
+        BIG_CAP,
+    )
+    .await;
+
+    let phone = tempfile::tempdir_in(scratch).expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let joined = std::time::Instant::now();
+        let answer = started(&loquax_android::start(&schema::encode(&first)));
+        assert!(answer.ok, "{answer:?}");
+        eprintln!("BIGPULL join: {} ms", joined.elapsed().as_millis());
+
+        // The UI thread's onResume, every 50 ms, while the pull runs.
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probing = std::sync::Arc::clone(&done);
+        let probe = std::thread::spawn(move || {
+            let close = schema::encode(&Request::Close);
+            let front = schema::encode(&Request::Front { front: true });
+            let list = schema::encode(&schema::Query::Conversations { search: None });
+            let mut blocks = Vec::new();
+            while !probing.load(std::sync::atomic::Ordering::Relaxed) {
+                let began = std::time::Instant::now();
+                let _ = loquax_android::command(&close);
+                let _ = loquax_android::command(&front);
+                let _ = loquax_android::query(&list);
+                blocks.push(began.elapsed());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            blocks
+        });
+
+        // The history whole: every conversation but the archived and the
+        // blocked one listed, each of them with every bubble.
+        let pulled = std::time::Instant::now();
+        let listed = BIG_CONVERSATIONS - 2;
+        let deadline = std::time::Instant::now() + Duration::from_secs(BIG_PULL_SECS);
+        let mut whole = false;
+        while std::time::Instant::now() < deadline {
+            let _ = loquax_android::next_event(Duration::from_millis(200));
+            let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
+                &schema::encode(&schema::Query::Conversations { search: None }),
+            ))
+            .expect("the list");
+            if list.conversations.len() < listed {
+                continue;
+            }
+            whole = (0..BIG_CONVERSATIONS)
+                .filter(|i| *i != ugly_store::BLOCKED)
+                .all(|i| {
+                    let messages: schema::Messages = rmp_serde::from_slice(&loquax_android::query(
+                        &schema::encode(&schema::Query::Messages {
+                            peer: ugly_store::peer_hex(i),
+                        }),
+                    ))
+                    .expect("the messages");
+                    messages.messages.len() == ugly_store::PER_CONVERSATION - ugly_store::REACTIONS
+                });
+            if whole {
+                break;
+            }
+        }
+        let took = pulled.elapsed();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let blocks = probe.join().expect("the probe");
+        let longest = blocks.iter().max().copied().unwrap_or_default();
+        eprintln!(
+            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms",
+            took.as_millis(),
+            blocks.len(),
+            longest.as_millis()
+        );
+        loquax_android::stop();
+        assert!(whole, "the history not whole in {BIG_PULL_SECS} s");
+        assert!(
+            longest < UI_BAR,
+            "onResume blocked {} ms during the first pull (bar {} ms)",
+            longest.as_millis(),
+            UI_BAR.as_millis()
+        );
+    })
+    .await
+    .expect("the session");
+    node.kill().await;
+}
+
+/// The big mailbox of 1446: 100 conversations of 40, 4000 entries.
+const BIG_CONVERSATIONS: usize = 100;
+/// Its archive cap: room for all of it.
+const BIG_CAP: u64 = 64 << 20;
+/// How long its first pull may take on the host.
+const BIG_PULL_SECS: u64 = 240;
+/// The UI thread's longest block we accept: 1 s, well under Android's
+/// 5 s input limit.
+const UI_BAR: Duration = Duration::from_secs(1);
 
 /// The mailbox on the phone (1152): the first start that chooses it needs no
 /// code and no server, the phone's node dials its entry server (here a stock

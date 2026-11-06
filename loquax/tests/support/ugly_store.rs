@@ -401,11 +401,27 @@ pub struct Filled {
 /// Fill the archive of the home node in `home` (its `identity` file made
 /// if missing), as the mailbox holds a year of use and two imports.
 pub fn fill_archive(home: &Path) -> Filled {
+    fill_archive_of(home, CONVERSATIONS, CAP)
+}
+
+/// The most conversations [`fill_archive_of`] can draw: a peer's key byte
+/// is `0x40 + i`.
+pub const MAX_CONVERSATIONS: usize = 0x100 - 0x40;
+
+/// [`fill_archive`] with `conversations` conversations of
+/// [`PER_CONVERSATION`] rows each, those past the twenty live, without a
+/// state, named as [`announced`] says, under an archive cap of `cap` bytes: a mailbox as
+/// big as Lew's, thousands of entries, for the first pull of 1446.
+pub fn fill_archive_of(home: &Path, conversations: usize, cap: u64) -> Filled {
+    assert!(
+        conversations <= MAX_CONVERSATIONS,
+        "{conversations} conversations"
+    );
     let own = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
     let me = loquax::engine::delivery_address(&own).expect("address");
     let mut store = Store::open_in(home, me).expect("the home store");
     let mut filled = Filled::default();
-    for i in 0..CONVERSATIONS {
+    for i in 0..conversations {
         let peer = peer(i);
         let rows = rows(&own, i);
         if i == RATSPEAK || i == NOMADNET {
@@ -416,7 +432,7 @@ pub fn fill_archive(home: &Path) -> Filled {
                     (row.id, row.at, entry)
                 })
                 .collect();
-            let added = store.archive_imported(&entries, CAP).expect("archive");
+            let added = store.archive_imported(&entries, cap).expect("archive");
             assert_eq!(added, rows.len());
             filled.imported += added;
             filled.messages += added;
@@ -429,7 +445,7 @@ pub fn fill_archive(home: &Path) -> Filled {
                 false => loquax::home::KIND_RECEIVED,
             };
             store
-                .archive_append(kind, &row.id, packed, row.at, CAP)
+                .archive_append(kind, &row.id, packed, row.at, cap)
                 .expect("append")
                 .expect("new");
             filled.messages += 1;
@@ -441,7 +457,7 @@ pub fn fill_archive(home: &Path) -> Filled {
             };
             if let Some(kind) = state {
                 store
-                    .archive_append(kind, &row.id, &row.id, row.at + 30, CAP)
+                    .archive_append(kind, &row.id, &row.id, row.at + 30, cap)
                     .expect("a state");
             }
         }
@@ -458,30 +474,30 @@ pub fn fill_archive(home: &Path) -> Filled {
                     &rows[0].id,
                     &wire::mark_request(&mark),
                     at,
-                    CAP,
+                    cap,
                 )
                 .expect("a mark");
         }
     }
     let at = BASE + 86_400;
-    for i in 0..CONVERSATIONS {
+    for i in 0..conversations {
         if let Some(name) = announced(i) {
-            store.archive_name(peer(i), &name, at, CAP).expect("a name");
+            store.archive_name(peer(i), &name, at, cap).expect("a name");
         }
         if let Some(state) = peer_state(i) {
             store
-                .archive_peer_state(peer(i), &wire::peer_state_entry(&peer(i), &state), at, CAP)
+                .archive_peer_state(peer(i), &wire::peer_state_entry(&peer(i), &state), at, cap)
                 .expect("a peer state");
         }
     }
-    let peers: Vec<([u8; 16], &str)> = (0..CONVERSATIONS)
+    let peers: Vec<([u8; 16], &str)> = (0..conversations)
         .filter_map(|i| petname(i).map(|name| (peer(i), name)))
         .collect();
     let named = loquax::home::server::archive_petnames(
         &mut store,
         peers.iter().map(|(peer, name)| (peer, *name)),
         at,
-        CAP,
+        cap,
     )
     .expect("the petnames");
     assert_eq!(named, peers.len());
