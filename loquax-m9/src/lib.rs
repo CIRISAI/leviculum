@@ -18,12 +18,13 @@
 //! - [`render`]: the lines through ratatui into any `DrawTarget` of
 //!   `Rgb565`, with mousefood as the backend.
 //! - [`frame`]: the panel's frame on the heap, what the host draws into.
-//! - [`keyboard`]: the matrix's scan frames to key events: debounce,
-//!   the Shift and Sym layers, repeat (slice three, 1359).
+//! - [`keyboard`]: the controller's key codes to key events, and the
+//!   `KEY` line that names each press (slice three, 1359; the measured
+//!   protocol, 1427).
 //! - [`keys`]: which M9 key is which key event, the list's rows and the
 //!   chat's.
 //! - [`kbraw`]: the keyboard controller's I2C answer, logged raw and read
-//!   into a scan by a table (slice four, 1361).
+//!   as idle or one key code (slice four, 1361; measured, 1427).
 //! - [`dump`]: the frame as text lines over the debug link, and read back,
 //!   for the rig to compare with the goldens (slice four).
 //! - [`fixture`]: the model the board shows before it has a network.

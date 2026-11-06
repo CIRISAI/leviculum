@@ -47,7 +47,7 @@
 //! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
 //! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
 //! [DISP] ST7789 320x240 madctl=0xb0 spi_mhz=40 state=up t=<ms>
-//! [KB] addr=0x6d found=yes ... protocol=provisional reg=0x01 len=8 t=<ms>
+//! [KB] addr=0x6d found=yes ... protocol=codes reg=0x01 len=8 poll_ms=10 t=<ms>
 //! [CENSUS] renderer held=<n> budget=220000 verdict=ok t=<ms>
 //! [CENSUS] screen=chats scene_held=... verdict=ok t=<ms>
 //! [CENSUS] screen=chat scene_held=... verdict=ok t=<ms>
@@ -61,7 +61,8 @@
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
 //! KBRAW <ms> <hex>          one per poll, every 10 ms
-//! KB <ms> <14 hex>          one per poll, the scan the table made of it
+//! KEY <ms> code=0x6b name=k after a KBRAW line that carries a press (1427)
+//! [KB] answer=mixed t=<ms>  after one whose bytes disagree
 //! ```
 //!
 //! and the banner pair every five seconds. A `FRAME_DUMP` control frame
@@ -108,8 +109,8 @@ use loquax_m9::census::{self, Probe, Step};
 use loquax_m9::field::Field;
 use loquax_m9::fixture::{self, Screen};
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
-use loquax_m9::kbraw::{self, Protocol, MAX_ANSWER};
-use loquax_m9::keyboard::{Keyboard, POLL_MS};
+use loquax_m9::kbraw::{self, Protocol, Read, MAX_ANSWER};
+use loquax_m9::keyboard::{self, Key, POLL_MS};
 use loquax_m9::map::{self, Map};
 use loquax_m9::pair::{self, Pairing};
 use loquax_m9::render::Renderer;
@@ -126,8 +127,10 @@ const BANNER_INTERVAL_MS: u64 = 5_000;
 /// (`handheld-messenger.md`, "Memory budgets, measured").
 const HEAP_MIN: usize = 1_100_000 + (1 << 20);
 
-/// The keyboard controller's protocol until a capture reads it.
-const KB: Protocol = kbraw::PROVISIONAL;
+/// The keyboard controller's protocol, as the bench capture of 2026-11-04
+/// read it: one key code per press (`thinknode-m9.md`, "The keyboard
+/// controller, measured").
+const KB: Protocol = kbraw::MEASURED;
 
 /// The ST7789 opcodes this image sends (Sitronix ST7789V datasheet, 9.1).
 const SWRESET: u8 = 0x01;
@@ -502,7 +505,7 @@ fn main() -> ! {
         log.line(
             "[KB] ",
             format_args!(
-                "addr={:#04x} found={} v10_addr={:#04x} v10_found={} protocol=provisional reg={:#04x} len={} poll_ms={POLL_MS}",
+                "addr={:#04x} found={} v10_addr={:#04x} v10_found={} protocol=codes reg={:#04x} len={} poll_ms={POLL_MS}",
                 KB.address,
                 if v11 { "yes" } else { "no" },
                 m9::KB_ADDR_V10,
@@ -512,8 +515,6 @@ fn main() -> ! {
             ),
         );
     }
-    let layout = kbraw::provisional_layout();
-    let mut keyboard = Keyboard::new(&layout);
 
     // The renderer over the panel's frame, made once.
     let mut frame = Frame::new();
@@ -778,10 +779,17 @@ fn main() -> ! {
                     log.line("[KB] ", format_args!("read=ok again"));
                 }
                 log.raw(&kbraw::raw_line(ms, &answer[..KB.len]));
-                let scan = KB.scan(&answer[..KB.len]);
-                log.raw(&kbraw::scan_line(ms, scan));
                 let mut events = Vec::new();
-                keyboard.poll(ms, scan, &mut |event| events.push(event));
+                match KB.read(&answer[..KB.len]) {
+                    Read::Idle => {}
+                    Read::Mixed => log.line("[KB] ", format_args!("answer=mixed")),
+                    Read::Code(code) => {
+                        if let Some(key) = Key::of(code) {
+                            log.raw(&keyboard::key_line(ms, code, key));
+                            events.extend(key.event());
+                        }
+                    }
+                }
                 if !events.is_empty() {
                     for event in events {
                         if let Some(pairing) = shown.pairing.as_mut() {

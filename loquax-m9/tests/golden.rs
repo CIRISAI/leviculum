@@ -35,7 +35,8 @@ use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel, NONE_OPEN};
 use loquax::when::WallTime;
 use loquax_m9::field::Field;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
-use loquax_m9::keyboard::{self, Keyboard, Layout};
+use loquax_m9::kbraw::{self, Read, MEASURED};
+use loquax_m9::keyboard::Key;
 use loquax_m9::keys::{event, M9Key};
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ENTRY_ROWS, ROWS};
@@ -328,29 +329,22 @@ fn typing_with_the_keys_sends_from_the_compose_line() {
     );
 }
 
-/// The layout `tests/keyboard/walk.txt` was written over, not the board's:
-/// the provisional one the board types with until its own is read.
-fn walk_layout() -> Layout {
-    loquax_m9::kbraw::provisional_layout()
-}
-
-/// Slice three (1359): a recording of scan frames, through the keyboard
-/// driver, the key table and the model, opens the chat, types "Hi!" with a
-/// tapped Shift, a bounce and a tapped Sym, and sends it. The recording is
-/// synthetic until the board records its own in the same format.
+/// Slice three (1359), on the protocol the board measured (1427): a walk
+/// of controller answers, through the measured read, the driver, the key
+/// table and the model, opens the chat, types "hi&0" and sends it. Every
+/// code in it is one the bench capture saw.
 #[test]
-fn a_recorded_walk_of_scan_frames_types_and_sends() {
+fn a_recorded_walk_of_key_codes_types_and_sends() {
     let home = tempfile::tempdir().expect("home");
     let mut model = on_the_list(home.path());
-    let layout = walk_layout();
-    let mut keys = Keyboard::new(&layout);
     let recording = include_str!("keyboard/walk.txt");
     let mut effects = Vec::new();
-    for poll in keyboard::parse_recording(recording) {
-        let (ms, scan) = poll.expect("a recorded poll");
-        let mut events = Vec::new();
-        keys.poll(ms, scan, &mut |e| events.push(e));
-        for e in events {
+    for answer in kbraw::parse_raw(recording) {
+        let (_, bytes) = answer.expect("a recorded answer");
+        let Read::Code(code) = MEASURED.read(&bytes) else {
+            continue;
+        };
+        if let Some(e) = Key::of(code).and_then(Key::event) {
             effects.extend(update(&mut model, UiEvent::Key(e)));
         }
     }
@@ -358,9 +352,9 @@ fn a_recorded_walk_of_scan_frames_types_and_sends() {
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            UiEffect::Send { to, body, .. } if *to == peer && body == "Hi!"
+            UiEffect::Send { to, body, .. } if *to == peer && body == "hi&0"
         )),
-        "the walk sends Hi!: {effects:?}"
+        "the walk sends hi&0: {effects:?}"
     );
 }
 
