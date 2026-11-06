@@ -826,7 +826,7 @@ toast whose expiry is a pure function and therefore unit-testable without
 real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
 `lnomad/src/tui.rs:2554`),
 the `TerminalGuard` RAII plus panic hook that restores the terminal before
-the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:96-138`), and OSC 52 for the
+the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:97-139`), and OSC 52 for the
 clipboard so copy works over SSH with no X11 dependency (`osc52`,
 `leviculum-ui/src/clipboard.rs:14-42`, shared with `loquax` since 1036).
 

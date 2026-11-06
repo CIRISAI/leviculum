@@ -673,7 +673,7 @@ draws is the scene the terminal, the window and the phone already draw.
   goes on the air: the LR1110's chip select is parked high.
 - **The panel:** ST7789 over SPI2 at 40 MHz with DMA, landscape. A draw
   goes through mousefood into `loquax-m9`'s frame, which keeps the band
-  of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:73`), and the
+  of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:85`), and the
   board sends only that band through the row window (`flush`,
   `leviculum-esp/src/bin/thinknode_m9.rs:199`): the full frame's 30.8 ms
   is the first draw's cost, a moved cursor sends two entries. The

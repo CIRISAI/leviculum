@@ -875,7 +875,7 @@ concrete moves:
 mouse", says how.*
 
 `lnomad` enables mouse capture unconditionally with no toggle
-(`leviculum-ui-ratatui/src/terminal.rs:73-85`, the capture it takes by
+(`leviculum-ui-ratatui/src/terminal.rs:74-86`, the capture it takes by
 `CrosstermTerminal::new`) and handles neither drag nor selection
 (`lnomad/src/app/event.rs:201`). In a browser that costs you the terminal's own
 copy-paste; in a messenger, where copying message text is a constant, it is
