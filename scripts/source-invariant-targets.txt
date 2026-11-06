@@ -254,6 +254,7 @@ skip  loquax-android   m9_board_client            # the M9's core-node executor 
 skip  loquax-android   m9_join_cells              # the cells of the M9 joining its home (1415): the board's client over the M9's line against an in-process mailbox and transport node, a good, a wrong and an expired code, no home, a cut line, a second device; subject is the code
 skip  loquax-android   map                        # a golden render of the map screen's frames; subject is the code
 skip  loquax-android   rooms                      # the Rooms tab's verbs and answer through the facade in Java's bytes, and its golden (1384); subject is the code
+skip  loquax-android   profile                    # the profile's words through the facade in Java's bytes, and its golden (1443); subject is the code
 skip  loquax-android   rooms_hub                  # the phone's session, its mailbox, a transport and a fake hub over loopback TCP (1384); subject is the hub link
 skip  loquax-android   schema_props               # property tests of the facade schema's codec; subject is the code
 skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
