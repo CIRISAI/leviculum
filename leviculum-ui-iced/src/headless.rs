@@ -112,6 +112,72 @@ impl Offscreen {
         let _ = self.renderer.screenshot(size, 1.0, background);
         (laid, start.elapsed() - laid)
     }
+
+    /// `element` laid out once and, for each of `events`, updated with it,
+    /// the pointer at `at`, and drawn, as a window redraws a screen whose
+    /// view did not change (a scrollable scrolled, an easing on its way):
+    /// per event, the time the update and the drawing took and the time
+    /// the rasterising took; the pixels of the last frame, RGB; and the
+    /// messages the widgets published.
+    #[allow(clippy::too_many_arguments)]
+    pub fn redraws<M>(
+        &mut self,
+        mut element: Element<'_, M>,
+        events: &[Event],
+        at: Point,
+        theme: &Theme,
+        text: Color,
+        background: Color,
+    ) -> (
+        Vec<(std::time::Duration, std::time::Duration)>,
+        Vec<u8>,
+        Vec<M>,
+    ) {
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, self.size);
+        let mut node = element
+            .as_widget_mut()
+            .layout(&mut tree, &self.renderer, &limits);
+        let viewport = Rectangle::with_size(self.size);
+        let size = iced::Size::new(self.size.width as u32, self.size.height as u32);
+        let mut times = Vec::new();
+        let mut messages = Vec::new();
+        let mut last = Vec::new();
+        for event in events {
+            let start = std::time::Instant::now();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                event,
+                Layout::new(&node),
+                mouse::Cursor::Available(at),
+                &self.renderer,
+                &mut clipboard::Null,
+                &mut shell,
+                &viewport,
+            );
+            if shell.is_layout_invalid() {
+                node = element
+                    .as_widget_mut()
+                    .layout(&mut tree, &self.renderer, &limits);
+            }
+            self.renderer.reset(viewport);
+            element.as_widget().draw(
+                &tree,
+                &mut self.renderer,
+                theme,
+                &renderer::Style { text_color: text },
+                Layout::new(&node),
+                mouse::Cursor::Available(at),
+                &viewport,
+            );
+            let drawn = start.elapsed();
+            last = self.renderer.screenshot(size, 1.0, background);
+            times.push((drawn, start.elapsed() - drawn));
+        }
+        let rgb = last.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        (times, rgb, messages)
+    }
 }
 
 /// A left click at `at` on `element` laid out on `w` by `h`: the pointer

@@ -2628,7 +2628,7 @@ impl App {
             });
         let list: Element<'_, Message> = match self.seen.pins.is_empty() {
             true => text("no positions yet").size(14).into(),
-            false => scrollable(list).into(),
+            false => chat::soft(scrollable(list)),
         };
         let credit = self
             .shown
@@ -4001,6 +4001,89 @@ mod tests {
         assert_eq!(px(&dark, ground.0, ground.1), [0x17, 0x18, 0x1b]);
         map::tests::same_as("gui-chat-light.png", &light, w, h);
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
+    }
+
+    /// A long conversation scrolls softly without building the view
+    /// (1431): Anna's chat with 3000 more messages, a wheel's notch over
+    /// the messages and the screen's frames after it scroll the list on
+    /// every frame, eased, and publish no message, so iced redraws the
+    /// screen it has and builds no view per frame: the frame costs the
+    /// rows in sight. The numbers it prints are the report's: the view
+    /// built and laid out once (what a message arriving costs), and a
+    /// frame of the scroll.
+    #[test]
+    fn a_long_chat_scrolls_without_building_the_view() {
+        let (w, h) = (900u32, 560u32);
+        let mut model = chat_model();
+        for i in 0..3000u32 {
+            let mut id = [7u8; 32];
+            id[..4].copy_from_slice(&i.to_be_bytes());
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: id,
+                    source: ANNA,
+                    title: Vec::new(),
+                    body: format!("Message {i}, a line about the market and the apples.")
+                        .into_bytes(),
+                    fields: Vec::new(),
+                    verified: true,
+                }),
+            );
+        }
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let bubbles: usize = app
+            .scene
+            .chat
+            .as_ref()
+            .map_or(0, |c| c.groups.iter().map(|g| g.bubbles.len()).sum());
+        assert!(bubbles > 3000, "{bubbles} bubbles");
+        let (text, ground) = (
+            chat::colour(app.tokens().text),
+            chat::colour(app.tokens().background),
+        );
+        let mut screen =
+            leviculum_ui_iced::headless::Offscreen::new(w, h).expect("the software renderer");
+        let mut built = Vec::new();
+        for _ in 0..3 {
+            let viewed = Instant::now();
+            let view = app.view();
+            let viewed = viewed.elapsed().as_secs_f64() * 1e3;
+            let (laid, raster) = screen.frame(view, &app.theme(), text, ground);
+            built.push((viewed, laid.as_secs_f64() * 1e3, raster.as_secs_f64() * 1e3));
+        }
+        let start = Instant::now();
+        let over = Point::new(w as f32 - 200.0, h as f32 / 2.0);
+        let mut events = vec![iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+        })];
+        for i in 1..=10u64 {
+            events.push(iced::Event::Window(window::Event::RedrawRequested(
+                start + Duration::from_millis(16 * i),
+            )));
+        }
+        let (_, before, _) =
+            screen.redraws(app.view(), &events[..1], over, &app.theme(), text, ground);
+        let (times, after, published) =
+            screen.redraws(app.view(), &events, over, &app.theme(), text, ground);
+        assert!(published.is_empty(), "a scroll frame publishes nothing");
+        assert_ne!(before, after, "the notch scrolled the messages");
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        for (viewed, laid, raster) in &built {
+            println!("LONG_CHAT {bubbles} bubbles: view built {viewed:.2} ms, laid out {laid:.2} ms, rasterised {raster:.2} ms");
+        }
+        let frames: Vec<String> = times[1..]
+            .iter()
+            .map(|(d, r)| format!("{:.2}+{:.2}", ms(*d), ms(*r)))
+            .collect();
+        println!(
+            "LONG_CHAT scroll frames (update and draw + rasterise, ms): {}",
+            frames.join(" ")
+        );
     }
 
     /// The window with the desktop's chooser (1341): the round button is
