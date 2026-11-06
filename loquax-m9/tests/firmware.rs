@@ -70,6 +70,45 @@ fn the_boards_screens_through_the_dump_are_the_golden_frames() {
     );
 }
 
+/// The twelfth golden (1440): the pairing a board without a client record
+/// opens on, "Link this M9 to your mailbox", nothing typed, drawn as the
+/// board draws it and dumped at its own screen byte.
+#[test]
+fn the_pairing_screen_through_the_dump_is_its_golden() {
+    use loquax_m9::pair::{self, Pairing};
+    let model = loquax_m9::fixture::model();
+    let look = Look {
+        row: 0,
+        home: None,
+        ..Look::of(&model)
+    };
+    let lines = pair::screen(&Pairing::new(), None, &look, 32, 15);
+    let words: Vec<String> = lines
+        .iter()
+        .map(|line| line.cells.iter().map(|cell| cell.ch).collect())
+        .collect();
+    assert!(
+        words[0].contains("Link this M9 to your mailbox"),
+        "{words:?}"
+    );
+    assert!(
+        words.iter().any(|w| w.contains("0 of 140 typed")),
+        "{words:?}"
+    );
+    let mut frame = Frame::new();
+    let mut renderer = Renderer::new(&mut frame).expect("renderer");
+    pair::draw(&mut renderer, &Pairing::new(), None, &look).expect("draw");
+    drop(renderer);
+    let (_, bytes) = through_dump(&frame);
+    println!("{}: dump {bytes} B", pair::DUMP_NAME);
+    check(&format!("m9-fw-{}.png", pair::DUMP_NAME), &frame);
+    // Its byte follows the fixture's screens and names none of them.
+    assert_eq!(usize::from(pair::DUMP_BYTE), SCREENS.len());
+    assert_eq!(Screen::of(pair::DUMP_BYTE), None);
+    // The positive control: the pairing is not the list it covers.
+    assert_ne!(frame.pixels(), drawn(&model).pixels());
+}
+
 #[test]
 fn a_screen_byte_names_the_screen_and_nothing_else() {
     for screen in SCREENS {

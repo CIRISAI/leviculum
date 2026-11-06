@@ -70,7 +70,8 @@
 //! and the banner pair every five seconds. A `FRAME_DUMP` control frame
 //! (`7e a4 a5 18 00 00 7e`, or `7e a4 a5 18 00 01 <screen> 7e`) is acked
 //! and answered with the `PBM` dump of `loquax_m9::dump`; `<screen>` is a
-//! byte of `fixture::SCREENS`, 0 to 10.
+//! byte of `fixture::SCREENS`, 0 to 10, or `pair::DUMP_BYTE`, 11, the
+//! pairing screen (1440).
 //!
 //! The pin handles are moved out of `Peripherals` through the board
 //! module's type aliases, as `heltec_v4.rs` does: a compile-time check that
@@ -321,9 +322,7 @@ fn redraw(
         ..screen::Look::of(model)
     };
     let drawn = match &shown.pairing {
-        Some(pairing) => {
-            renderer.text(|cols, rows| pair::screen(pairing, shown.word, &look, cols, rows))
-        }
+        Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
         None => renderer.show(model, &look, map),
     };
     if drawn.is_err() {
@@ -932,16 +931,25 @@ fn control(
                 envelope::TYPE_FRAME_DUMP,
                 envelope::REFUSE_MALFORMED,
             )),
-            Some(Some(byte)) if Screen::of(byte).is_none() => log.frame(&envelope::encode_refusal(
-                envelope::TYPE_FRAME_DUMP,
-                envelope::REFUSE_VALUE,
-            )),
+            Some(Some(byte)) if Screen::of(byte).is_none() && byte != pair::DUMP_BYTE => log.frame(
+                &envelope::encode_refusal(envelope::TYPE_FRAME_DUMP, envelope::REFUSE_VALUE),
+            ),
             Some(screen) => {
                 log.frame(&envelope::encode_ack(envelope::TYPE_FRAME_DUMP));
                 if let Some(shown) = screen.and_then(Screen::of) {
                     (*model, *row) = shown.walk();
                     redraw(renderer, map, panel, model, *row, &Shown::default(), log);
                     log.line("[DUMP] ", format_args!("screen={}", shown.name()));
+                }
+                // The pairing a board without a record opens on (1440),
+                // over the model as it is.
+                if screen == Some(pair::DUMP_BYTE) {
+                    let fresh = Shown {
+                        pairing: Some(Pairing::new()),
+                        word: None,
+                    };
+                    redraw(renderer, map, panel, model, 0, &fresh, log);
+                    log.line("[DUMP] ", format_args!("screen={}", pair::DUMP_NAME));
                 }
                 let frame = renderer.panel();
                 dump::encode(WIDTH, HEIGHT, |x, y| frame.pixel(x, y), &mut |line| {

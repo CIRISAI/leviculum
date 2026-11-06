@@ -675,7 +675,7 @@ draws is the scene the terminal, the window and the phone already draw.
   goes through mousefood into `loquax-m9`'s frame, which keeps the band
   of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:73`), and the
   board sends only that band through the row window (`flush`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:198`): the full frame's 30.8 ms
+  `leviculum-esp/src/bin/thinknode_m9.rs:199`): the full frame's 30.8 ms
   is the first draw's cost, a moved cursor sends two entries. The
   redraw test drives one renderer through four keys and must equal a
   fresh draw, its band flushed into a second frame
@@ -1430,7 +1430,10 @@ flashed in the pass.
 the pairing screen (`pair::screen`, `loquax-m9/src/pair.rs:95`), the
 code in fives as it is typed on the keys with the verdict under it;
 Enter on a whole code that checks takes it, Back leaves for the
-fixture. Written: `lnflash --home <code> --port <tty>`
+fixture. Its golden, the twelfth beside the fixture's eleven, is
+`m9-fw-pairing.png` (1440): nothing typed, no home, and the board dumps
+it at `FRAME_DUMP` screen byte 11 (`pair::DUMP_BYTE`), so the rig
+compares the panel with the same file. Written: `lnflash --home <code> --port <tty>`
 (`lnflash/src/home.rs:36`) sends it as one control frame,
 `TYPE_HOME_CODE` (0x19, `leviculum-core/src/envelope.rs:416`), the code
 as text with or without its rendezvous list. The M9 has no transport

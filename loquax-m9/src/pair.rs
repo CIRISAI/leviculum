@@ -129,6 +129,28 @@ pub fn screen(
     out
 }
 
+/// The `FRAME_DUMP` screen byte of the pairing screen (1440): the byte
+/// after the fixture's screens ([`crate::fixture::SCREENS`]). The pairing
+/// is no screen of the model but a text drawn over it, so it is not one
+/// of them: the census and the walks have nothing to measure in it. The
+/// board dumps it fresh, nothing typed, no home: the screen a board
+/// without a client record opens on, golden `m9-fw-pairing.png`.
+pub const DUMP_BYTE: u8 = crate::fixture::SCREENS.len() as u8;
+
+/// Its name in the board's `[DUMP]` line and the golden's file name.
+pub const DUMP_NAME: &str = "pairing";
+
+/// Draw `pairing` as the board draws it, over `look`, with the home's
+/// word in the title once a code was taken.
+pub fn draw(
+    renderer: &mut crate::render::Renderer<'_, crate::frame::Frame>,
+    pairing: &Pairing,
+    home: Option<loquax::home::board::Word>,
+    look: &crate::screen::Look,
+) -> Result<(), crate::render::DrawError> {
+    renderer.text(|cols, rows| screen(pairing, home, look, cols, rows))
+}
+
 /// One line on how far the code came.
 fn verdict(typing: &Typing) -> String {
     match typing {
