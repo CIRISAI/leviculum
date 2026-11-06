@@ -220,3 +220,22 @@ fn a_frame_that_waited_behind_a_gap_is_dropped_not_delivered_late() {
         } if *age_ms > 200
     )));
 }
+
+/// A frame over the Channel limit is `TooLarge`, plain or timed, and the link
+/// stays up: a size error must not read as a dead link.
+#[test]
+fn an_oversized_send_is_too_large_not_a_failed_link() {
+    let mut pair = Pair::new();
+    let huge = std::vec![0u8; 100_000];
+    assert_eq!(
+        pair.a.send_on_link(&pair.link, &huge).unwrap_err(),
+        crate::node::SendError::TooLarge
+    );
+    assert_eq!(
+        pair.a
+            .send_on_link_timed(&pair.link, &huge, 200)
+            .unwrap_err(),
+        crate::node::SendError::TooLarge
+    );
+    assert_eq!(pair.a.active_link_count(), 1);
+}
