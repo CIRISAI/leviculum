@@ -1730,8 +1730,13 @@ async fn answer(
         .await
     {
         Err(leviculum_std::Error::Request(RequestError::PayloadTooLarge)) => {
-            node.send_response_resource(&request.link_id, &request.request_id, bytes)
-                .await
+            node.send_response_resource_with(
+                &request.link_id,
+                &request.request_id,
+                bytes,
+                super::ANSWERS_COMPRESSED,
+            )
+            .await
         }
         other => other,
     };

@@ -530,3 +530,132 @@ async fn m9_cell_board_pulls_what_it_folds_in_pages_of_its_link() {
     );
     mailbox.stop().await;
 }
+
+/// A mailbox whose archive holds a short text, then one text longer than
+/// a link packet (1459, the M9's stall of 2026-11-06: the entry after its
+/// cursor 77 did not fit one packet). Repeated bytes, which bz2 squeezes
+/// to a fraction: a home that compressed its answers would send this one
+/// compressed.
+async fn long_entry_mailbox(relay: &Relay) -> Mailbox {
+    mailbox_with(relay, |store, now| {
+        for (n, len) in [(0u8, 150), (1, 900)] {
+            store
+                .archive_append(KIND_RECEIVED, &[n; 32], &vec![n; len], now, 1 << 20)
+                .expect("append")
+                .expect("new");
+        }
+    })
+    .await
+}
+
+/// Join, then pull fitted from cursor 1, as the M9 with the long entry
+/// after its cursor; the pull, its fit and how long it took.
+fn pull_after_short(board: &mut Board, code: &HomeCode) -> (Ran, Option<(LinkClass, u64)>, u128) {
+    let m9 = Batch {
+        page_bytes: LORA_PAGE_BYTES as u64,
+        max_answer: 256 * 1024,
+    };
+    let (device, mut record) = pending(code);
+    let (joined, _) = join(board, &device, &record, Duration::from_secs(60));
+    assert_eq!(joined, Some(Ok(Outcome::Joined)));
+    record.admission = Admission::Admitted;
+    record.cursor = 1;
+    let ask = record
+        .pull(m9.page_bytes, board.now(), 120_000)
+        .expect("admitted")
+        .expect("ask");
+    let start = Instant::now();
+    let (ran, fit) = board.run_fitted(&device, ask, m9, Duration::from_secs(125));
+    (ran, fit, start.elapsed().as_millis())
+}
+
+/// 1459, happy: the entry after the board's cursor is longer than a link
+/// packet, so the mailbox answers the serial page as a resource. The
+/// board, which links no decompressor, takes it: the entry once, no
+/// cancel on the line, one page.
+#[tokio::test(flavor = "multi_thread")]
+async fn m9_cell_long_entry_comes_as_a_resource() {
+    logs();
+    let relay = Relay::start(&[]).await;
+    let mailbox = long_entry_mailbox(&relay).await;
+    let code = code(&mailbox, PHONE);
+    let peer = relay.peer;
+    let (ran, fit, pull_ms, parts, refusals) = tokio::task::spawn_blocking(move || {
+        let mut board = Board::connect(peer);
+        let (ran, fit, pull_ms) = pull_after_short(&mut board, &code);
+        (ran, fit, pull_ms, board.parts, board.refusals)
+    })
+    .await
+    .expect("board");
+    let (pulled, pages) = ran;
+    let (seqs, _) = counted(&pages);
+    println!(
+        "[CELL] m9_long_entry fit={fit:?} pulled={pulled:?} seqs={seqs:?} pages={} parts={parts} refusals={refusals} pull_ms={pull_ms}",
+        pages.len()
+    );
+    assert_eq!(fit, Some((LinkClass::Serial, 11_520)));
+    assert!(
+        matches!(
+            pulled,
+            Some(Ok(Outcome::Pulled {
+                cursor: 2,
+                entries: 1,
+                ..
+            }))
+        ),
+        "{pulled:?}"
+    );
+    assert_eq!(seqs, vec![2]);
+    assert!(parts >= 2, "the answer came in parts: {parts}");
+    assert_eq!(refusals, 0, "the board cancelled its own answer");
+    mailbox.stop().await;
+}
+
+/// 1459, unhappy: the board's line loses the first parts of the resource
+/// that answers its `/sync`, as the M9's UART lost frames under traffic
+/// (1440). The board asks the missing parts again on the same link, the
+/// entry comes once, and the pull ends within the request bound of 1440,
+/// not at the end of its 120 s budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn m9_cell_long_entry_parts_lost_mid_way() {
+    logs();
+    let relay = Relay::start(&[]).await;
+    let mailbox = long_entry_mailbox(&relay).await;
+    let code = code(&mailbox, PHONE);
+    let peer = relay.peer;
+    let (ran, fit, pull_ms, lost, refusals, rtt) = tokio::task::spawn_blocking(move || {
+        let mut board = Board::connect(peer);
+        board.lose_parts = 2;
+        let (ran, fit, pull_ms) = pull_after_short(&mut board, &code);
+        let rtt = leviculum_core::constants::CHANNEL_DEFAULT_RTT_MS;
+        (ran, fit, pull_ms, board.parts_lost, board.refusals, rtt)
+    })
+    .await
+    .expect("board");
+    let (pulled, pages) = ran;
+    let (seqs, _) = counted(&pages);
+    let bound = leviculum_core::node::request::request_timeout_ms(rtt);
+    println!(
+        "[CELL] m9_long_entry_parts_lost fit={fit:?} pulled={pulled:?} seqs={seqs:?} lost={lost} refusals={refusals} pull_ms={pull_ms} bound_ms={bound}"
+    );
+    assert_eq!(fit, Some((LinkClass::Serial, 11_520)));
+    assert_eq!(lost, 2, "the line lost two parts");
+    assert!(
+        matches!(
+            pulled,
+            Some(Ok(Outcome::Pulled {
+                cursor: 2,
+                entries: 1,
+                ..
+            }))
+        ),
+        "{pulled:?}"
+    );
+    assert_eq!(seqs, vec![2], "the entry once");
+    assert_eq!(refusals, 0);
+    assert!(
+        pull_ms < u128::from(bound),
+        "took {pull_ms} ms, the bound is {bound} ms"
+    );
+    mailbox.stop().await;
+}

@@ -126,6 +126,15 @@ pub const APP_NAME: &str = "loquax";
 /// See [`APP_NAME`].
 pub const ASPECT: &str = "home";
 
+/// Whether the home compresses an answer that travels as a resource.
+/// Never: a board client (the M9, an LNode) links no bz2 decompressor and
+/// refuses a compressed resource with an RCL the moment it is advertised,
+/// so a page past one packet never reached it (1459, the M9 on the bench
+/// of 2026-11-06: 17 asks, 17 advertisements, 17 cancels). Every client
+/// takes an uncompressed one. The cost is the serial page's airtime at
+/// most: a radio page is one packet and never a resource.
+pub const ANSWERS_COMPRESSED: bool = false;
+
 /// The admission request: token and device name in, a status out.
 pub const JOIN_PATH: &str = "/join";
 /// The pull: the client's cursor in, the archive entries after it out.

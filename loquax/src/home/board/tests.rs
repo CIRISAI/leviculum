@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::vec::Vec;
 
 use leviculum_core::node::{NodeCore, NodeCoreBuilder, NodeEvent, RequestPolicy};
+use leviculum_core::packet::{Packet, PacketContext};
 use leviculum_core::traits::Clock;
 use leviculum_core::{Action, Identity, InterfaceId, LinkId, MemoryStorage, ProofStrategy};
 use rand_core::OsRng;
@@ -36,8 +37,11 @@ impl Clock for TestClock {
 
 type Node = NodeCore<OsRng, TestClock, MemoryStorage>;
 
-fn node(clock: &TestClock, identity: Option<Identity>, hw_mtu: u32) -> Node {
-    let mut builder = NodeCoreBuilder::new();
+/// A node on the bench wire. `decompresses: false` is the board's: no
+/// board build links the bz2 decompressor, so its core refuses a
+/// compressed resource at once (1459).
+fn node(clock: &TestClock, identity: Option<Identity>, hw_mtu: u32, decompresses: bool) -> Node {
+    let mut builder = NodeCoreBuilder::new().decompresses(decompresses);
     if let Some(identity) = identity {
         builder = builder.identity(identity);
     }
@@ -147,6 +151,18 @@ struct Bench {
     /// Packets in flight each way.
     to_home: Vec<Vec<u8>>,
     to_board: Vec<Vec<u8>>,
+    /// Resource cancels (RCL) the board sent its home (1459).
+    cancels: usize,
+    /// The `/sync`, counted from 1, whose resource answer the home
+    /// cancels once its first part is on the line, once (1459).
+    cancel_at: Option<usize>,
+    /// The link the home last answered on.
+    answered_on: Option<LinkId>,
+}
+
+/// The context of a packet on the bench wire.
+fn context(packet: &[u8]) -> Option<PacketContext> {
+    Packet::unpack(packet).ok().map(|packet| packet.context)
 }
 
 fn entry(seq: u64, len: usize) -> wire::Entry {
@@ -169,7 +185,7 @@ impl Bench {
         let clock = TestClock(Arc::new(AtomicU64::new(1_000_000)));
         let home_identity = Identity::generate(&mut OsRng);
         let public_key = home_identity.public_key_bytes();
-        let mut home_node = node(&clock, None, hw_mtu);
+        let mut home_node = node(&clock, None, hw_mtu, true);
         let mut destination = crate::home::destination(home_identity).expect("home destination");
         destination.set_accepts_links(true);
         destination.set_proof_strategy(ProofStrategy::All);
@@ -180,7 +196,7 @@ impl Bench {
         }
         let token = [0x5A; 16];
         Self {
-            board: node(&clock, None, hw_mtu),
+            board: node(&clock, None, hw_mtu, false),
             clock,
             device: Identity::generate(&mut OsRng),
             home: Home {
@@ -200,6 +216,9 @@ impl Bench {
             pages: Vec::new(),
             to_home: Vec::new(),
             to_board: Vec::new(),
+            cancels: 0,
+            cancel_at: None,
+            answered_on: None,
         }
     }
 
@@ -245,6 +264,7 @@ impl Bench {
             if lost {
                 self.home.lose_at = None;
             }
+            self.answered_on = Some(link_id);
             let answer = self.home.answer(&link_id, &path, &data);
             let sent = if self.home.node.response_fits_packet(&link_id, answer.len()) {
                 self.home
@@ -254,7 +274,12 @@ impl Bench {
             } else {
                 self.home
                     .node
-                    .send_response_resource(&link_id, &request_id, &answer)
+                    .send_response_resource_with(
+                        &link_id,
+                        &request_id,
+                        &answer,
+                        crate::home::ANSWERS_COMPRESSED,
+                    )
                     .expect("resource response")
                     .1
             };
@@ -301,12 +326,34 @@ impl Bench {
                     break;
                 }
                 for packet in core::mem::take(&mut self.to_home) {
+                    if context(&packet) == Some(PacketContext::ResourceRcl) {
+                        self.cancels += 1;
+                    }
                     let out = self.home.node.handle_packet(InterfaceId(0), &packet);
                     self.home_output(out);
                 }
+                let mut cut = false;
                 for packet in core::mem::take(&mut self.to_board) {
+                    let part = context(&packet) == Some(PacketContext::Resource);
+                    if cut && part {
+                        // Parts the home cut before it cancelled: the
+                        // line never carries them.
+                        continue;
+                    }
                     let out = self.board.handle_packet(InterfaceId(0), &packet);
                     reports.extend(self.board_output(exec, out));
+                    if part && self.cancel_at == Some(self.home.syncs) {
+                        if let Some(link) = self.answered_on {
+                            self.cancel_at = None;
+                            cut = true;
+                            let cancelled = self
+                                .home
+                                .node
+                                .cancel_outgoing_resource(&link)
+                                .expect("an answer under way");
+                            self.to_board.extend(Self::sends(&cancelled));
+                        }
+                    }
                 }
             }
             for report in reports {
@@ -1047,5 +1094,98 @@ fn the_board_word_keeps_every_kind_fold_reads() {
     assert_eq!(
         wire::read_sync_asked(&wire::sync_request(5)),
         Ok((5, None, wire::Fold::All))
+    );
+}
+
+/// 1459 mvr, the M9 on the bench of 2026-11-06: the entry after the
+/// board's cursor does not fit a link packet, so the home answers the
+/// serial page as a resource. No board build links the bz2 decompressor
+/// and the core refuses a compressed advertisement with an RCL at once
+/// (`leviculum-core/src/node/link_management.rs`, the `compressed`
+/// refusal); a home that compresses its answers never gets one to the
+/// board, which asks again and again (17 REQUEST, 17 RESOURCE_ADV, 17
+/// RESOURCE_RCL on the rig). The home answers uncompressed
+/// (`home::ANSWERS_COMPRESSED`): one ask, no cancel, the entry in.
+#[test]
+fn a_page_past_one_packet_reaches_a_board_without_a_decompressor() {
+    let m9 = Batch {
+        page_bytes: LORA_PAGE_BYTES as u64,
+        max_answer: 256 * 1024,
+    };
+    // One repeated byte compresses to a fraction: the home's bz2 would
+    // win. Over the serial line the page is a second of the line; over a
+    // radio it is one packet, 412 B, and the long entry still comes
+    // alone, as a resource.
+    for (hw_mtu, class, page) in [
+        (564, LinkClass::Serial, 11_520),
+        (500, LinkClass::Radio, LORA_PAGE_BYTES as u64),
+    ] {
+        let archive = std::vec![entry(1, 150), entry(2, 900)];
+        let mut bench = Bench::on(archive, hw_mtu);
+        let mut record = bench.join();
+        record.cursor = 1;
+        let (pulled, fit) = bench.pull_fitted(&record, m9);
+        assert_eq!(fit, Some((class, page)));
+        assert!(
+            matches!(
+                pulled,
+                Some(Ok(Outcome::Pulled {
+                    cursor: 2,
+                    entries: 1,
+                    ..
+                }))
+            ),
+            "{class:?}: {pulled:?}"
+        );
+        assert_eq!(bench.seqs(), std::vec![2]);
+        assert_eq!(
+            bench.cancels, 0,
+            "{class:?}: the board cancelled its own answer"
+        );
+        assert_eq!(bench.home.syncs, 1, "{class:?}: one ask");
+    }
+}
+
+/// 1459, the unhappy half: the home cancels the resource that answers
+/// the board's `/sync` after its first part (an ICL). The transfer fails
+/// on the board, the same request goes again on the same link within the
+/// request's own bound (1440), and the page arrives once.
+#[test]
+fn a_resource_answer_cancelled_mid_way_is_asked_again_within_the_rtt_bound() {
+    let m9 = Batch {
+        page_bytes: LORA_PAGE_BYTES as u64,
+        max_answer: 256 * 1024,
+    };
+    let mut bench = Bench::on(std::vec![entry(1, 900)], 564);
+    let record = bench.join();
+    bench.cancel_at = Some(1);
+    let start = bench.now();
+    let (pulled, _) = bench.pull_fitted(&record, m9);
+    let took = bench.now() - start;
+    assert!(
+        matches!(
+            pulled,
+            Some(Ok(Outcome::Pulled {
+                cursor: 1,
+                entries: 1,
+                ..
+            }))
+        ),
+        "{pulled:?} after {took} ms, {} asks",
+        bench.home.syncs
+    );
+    assert_eq!(bench.seqs(), std::vec![1]);
+    assert_eq!(bench.cancel_at, None, "the home cancelled an answer");
+    assert_eq!(
+        bench.home.syncs, 2,
+        "the cancelled answer was asked again, once"
+    );
+    assert_eq!(bench.cancels, 0, "the board refused nothing");
+    let bound = leviculum_core::node::request::request_timeout_ms(
+        leviculum_core::constants::CHANNEL_DEFAULT_RTT_MS,
+    );
+    assert!(
+        took < bound + 5_000,
+        "took {took} ms, the bound is {bound} ms; the pull's budget is 120 s"
     );
 }

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::framing::hdlc::{self, DeframeResult, Deframer};
 use leviculum_core::node::{NodeCore, NodeCoreBuilder};
+use leviculum_core::packet::{Packet, PacketContext};
 use leviculum_core::traits::{Clock, Interface, InterfaceError};
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::{Identity, InterfaceId, MemoryStorage, TickOutput};
@@ -90,16 +91,32 @@ pub struct Board {
     /// The node's events after the first cut, by name and the board's
     /// time: what a cell that went wrong shows of the recovery.
     pub after_cut: Vec<(u64, String)>,
+    /// Resource parts from the line the board loses, the first ones,
+    /// as a UART that dropped them (1459).
+    pub lose_parts: usize,
+    /// Resource parts the board took off the line, and lost.
+    pub parts: usize,
+    pub parts_lost: usize,
+    /// Resource cancels (RCL) the board wrote.
+    pub refusals: usize,
+}
+
+/// The context of a frame on the line.
+fn context(frame: &[u8]) -> Option<PacketContext> {
+    Packet::unpack(frame).ok().map(|packet| packet.context)
 }
 
 impl Board {
     pub fn connect(addr: SocketAddr) -> Self {
         let clock = Uptime(Instant::now());
-        let mut node = NodeCoreBuilder::new().enable_transport(true).build_boxed(
-            OsRng,
-            clock.clone(),
-            MemoryStorage::with_defaults(),
-        );
+        // As the M9 builds its node (`leviculum-esp/src/handheld.rs`): the
+        // answer it takes in, and no decompressor, which no board build
+        // links; a compressed resource is refused at once (1459).
+        let mut node = NodeCoreBuilder::new()
+            .enable_transport(true)
+            .max_incoming_resource_size(256 * 1024)
+            .decompresses(false)
+            .build_boxed(OsRng, clock.clone(), MemoryStorage::with_defaults());
         node.set_interface_name(0, "serial".to_string());
         node.set_interface_hw_mtu(0, 564);
         node.set_interface_mode(0, leviculum_core::InterfaceMode::Gateway);
@@ -116,6 +133,10 @@ impl Board {
             cuts: 0,
             paged: None,
             after_cut: Vec::new(),
+            lose_parts: 0,
+            parts: 0,
+            parts_lost: 0,
+            refusals: 0,
         };
         let up = board.node.handle_interface_up(0);
         board.dispatch(up);
@@ -145,6 +166,9 @@ impl Board {
     /// the frame with its flow bytes escaped.
     fn flush(&mut self) {
         for packet in std::mem::take(&mut self.line.0) {
+            if context(&packet) == Some(PacketContext::ResourceRcl) {
+                self.refusals += 1;
+            }
             let line = format!("KBRAW {} 0000000000000000\r\n", self.now());
             self.stream.write_all(line.as_bytes()).expect("write");
             self.text_lines += 1;
@@ -201,6 +225,14 @@ impl Board {
                 Ok(n) => {
                     for result in self.deframer.process(&buf[..n]) {
                         if let DeframeResult::Frame(frame) = result {
+                            if context(&frame) == Some(PacketContext::Resource) {
+                                self.parts += 1;
+                                if self.lose_parts > 0 {
+                                    self.lose_parts -= 1;
+                                    self.parts_lost += 1;
+                                    continue;
+                                }
+                            }
                             outs.push(self.node.handle_packet(InterfaceId(0), &frame));
                         }
                     }
