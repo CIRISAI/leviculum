@@ -50,6 +50,7 @@
   - [Loquax on a phone as a full node](concepts/loquax-phone-node.md)
   - [Loquax: import and export](concepts/loquax-import.md)
   - [Loquax: one messenger on every target](concepts/loquax-targets.md)
+  - [Loquax: the presentation seam](concepts/loquax-presentation-seam.md)
 - [Public channels over LXMF](concepts/public-channels.md)
 - [Telemetry](concepts/telemetry.md)
 - [The ThinkNode M9](concepts/thinknode-m9.md)
