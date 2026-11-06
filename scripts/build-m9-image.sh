@@ -29,6 +29,22 @@
 # because esp-bootloader-esp-idf's build script stamps the application
 # descriptor with that time, else with the clock.
 #
+# The remap is not enough on its own. Cargo hashes the ABSOLUTE path of a
+# path dependency outside the building workspace into its `-C metadata`,
+# and leviculum-esp is a workspace of its own whose dependencies
+# (leviculum-core, loquax, ...) live beside it. That hash is the crate's
+# StableCrateId, so it lands in every mangled symbol, and LTO folds and
+# inlines differently on different names: on 2026-11-06 two clones of one
+# commit, both remapped, linked 1,217,088 and 1,213,952 B, with
+# `leviculum_core` as Csdsi... in one and Cs7459... in the other. So the
+# build runs in a private user and mount namespace (`unshare`, util-linux)
+# that binds the tree at one fixed path, $CANON, whatever its real path is.
+# The namespace's /mnt is a fresh tmpfs, so nothing on the host is touched
+# and concurrent builds do not meet. RUSTC_WRAPPER is emptied in there: an
+# sccache server started outside cannot see $CANON. A host that refuses
+# unprivileged user namespaces builds in place, says so, and its image is
+# not the reproducible one.
+#
 # The esp toolchain is optional per host (see `build-esp32` in the
 # Justfile): without ~/export-esp.sh this says SKIP, unless
 # M9_IMAGE_REQUIRE_ESP=1 makes that a failure.
@@ -42,6 +58,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ESP="$ROOT/leviculum-esp"
 TAG="[m9-image]"
+CANON=/mnt/leviculum
 FLOOR=8192
 STACK_NEED=184000
 
@@ -95,11 +112,32 @@ if [ ! -f "$HOME/export-esp.sh" ]; then
     exit 0
 fi
 
-selftest || exit 1
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$ROOT/scripts/cargo-target-dir.sh"
 # shellcheck source=scripts/nrf-rustflags.sh
 source "$ROOT/scripts/nrf-rustflags.sh"
+
+# build_here: build and package the image from the tree this script lies in,
+# with the remap for that path. In the namespace that tree is $CANON.
+build_here() {
+    local out
+    # shellcheck disable=SC1091
+    source "$HOME/export-esp.sh" >/dev/null || return 1
+    export PATH="$HOME/.cargo/bin:$PATH"
+    esp_rustflags_export || return 1
+    out="$(cargo_target_dir "$ESP")/xtensa-esp32s3-none-elf/release" || return 1
+    (cd "$ESP" && cargo build --release --locked --bin thinknode_m9) &&
+        espflash save-image --chip esp32s3 --flash-size 16mb \
+            "$out/thinknode_m9" "$out/thinknode_m9.bin"
+}
+
+# Internal: the second half of the namespace hop below.
+if [ "${1:-}" = "--build-here" ]; then
+    build_here
+    exit $?
+fi
+
+selftest || exit 1
 target="$(cargo_target_dir "$ESP")" || { echo "$TAG FAIL no target directory for $ESP"; exit 1; }
 OUT="$target/xtensa-esp32s3-none-elf/release"
 if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
@@ -113,11 +151,19 @@ else
 fi
 mkdir -p "$ROOT/target/tmp"
 log="$ROOT/target/tmp/m9-image.log"
-# shellcheck disable=SC1091
-if ! (source "$HOME/export-esp.sh" >/dev/null && export PATH="$HOME/.cargo/bin:$PATH" \
-        && esp_rustflags_export && cd "$ESP" && cargo build --release --locked --bin thinknode_m9 \
-        && espflash save-image --chip esp32s3 --flash-size 16mb \
-            "$OUT/thinknode_m9" "$OUT/thinknode_m9.bin") >"$log" 2>&1; then
+if unshare --user --map-root-user --mount true 2>/dev/null; then
+    # shellcheck disable=SC2016 # expanded by the inner shell
+    RUSTC_WRAPPER="" unshare --user --map-root-user --mount bash -c '
+        mount -t tmpfs m9-build "${2%/*}" && mkdir "$2" && mount --bind "$1" "$2" &&
+            cd "$2" && exec bash scripts/build-m9-image.sh --build-here' \
+        bash "$ROOT" "$CANON" >"$log" 2>&1
+    built=$?
+else
+    echo "$TAG note: no unprivileged user namespace here; built at $ROOT, not $CANON, so this image is not the reproducible one"
+    (build_here) >"$log" 2>&1
+    built=$?
+fi
+if [ "$built" -ne 0 ]; then
     tail -30 "$log"
     echo "$TAG FAIL the image did not build or package (the full log: $log)"
     exit 1
@@ -136,7 +182,7 @@ rc=0
 verdict "$used" "$partition" "${stack:-0}" || rc=1
 # The cheap half of check-m9-reproducible.sh, on every build: the shipped
 # image names no path of this host (the remap above, order 1458).
-for p in "$ROOT/" "$HOME/"; do
+for p in "$ROOT/" "$HOME/" "$CANON/"; do
     if grep -qaF -- "$p" "$OUT/thinknode_m9.bin"; then
         echo "$TAG FAIL the image names the host path $p ($(grep -caF -- "$p" "$OUT/thinknode_m9.bin") lines); the path remap did not reach it"
         rc=1

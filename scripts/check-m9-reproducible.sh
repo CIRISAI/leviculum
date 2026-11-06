@@ -8,8 +8,11 @@
 # `thinknode_m9.bin` by sha256. It also looks into both images for the two
 # tree paths and the home directory, so a leak is named even when it happens
 # to leak the same bytes twice. On 2026-11-06 the two builds differed by 88
-# absolute source paths and a build time; build-m9-image.sh now remaps the
-# paths (scripts/nrf-rustflags.sh) and pins SOURCE_DATE_EPOCH to the commit.
+# absolute source paths, a build time, and, once both were fixed, by cargo's
+# crate hashes of the path dependencies, which carry the tree's absolute
+# path. build-m9-image.sh now remaps the paths (scripts/nrf-rustflags.sh),
+# pins SOURCE_DATE_EPOCH to the commit and builds at one fixed path in a
+# private mount namespace; its header says why each is needed.
 #
 #   M9_REPRO sha_tree=<sha256> sha_clone=<sha256> verdict=<same|DIFFERENT>
 #
@@ -147,7 +150,7 @@ if ! env -u CARGO_TARGET_DIR bash "$clone/scripts/build-m9-image.sh" >"$work/clo
 fi
 cp "$clone/leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9.bin" "$work/clone.bin" || exit 1
 
-verdict "$work/tree.bin" "$work/clone.bin" "$ROOT/" "$clone/" "$HOME/"
+verdict "$work/tree.bin" "$work/clone.bin" "$ROOT/" "$clone/" "$HOME/" /mnt/leviculum/
 rc=$?
 echo "$TAG $(($(date +%s) - start)) s for both builds"
 exit "$rc"
