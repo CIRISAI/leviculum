@@ -379,6 +379,11 @@ pub fn probe() -> ExitCode {
     match tokio::task::block_in_place(|| window(None, true)) {
         Ok(()) => {
             println!("loquax: the window drew its first frame");
+            // With the frame meter on (1441): what iced's own loop timed,
+            // which says the meter hears a real window's frames.
+            if let Some(frames) = leviculum_ui_iced::fps::snapshot() {
+                println!("{}", frames.line());
+            }
             ExitCode::SUCCESS
         }
         Err(error) => crate::failure(error, "failed"),
@@ -1964,6 +1969,14 @@ impl App {
                     (size.height * self.scale).round() as u32,
                 );
                 self.rescene();
+                return false;
+            }
+            // The frame meter's size before any resize (1441).
+            Message::Window(window::Event::Opened { size, .. }) => {
+                leviculum_ui_iced::fps::set_size(
+                    (size.width * self.scale).round() as u32,
+                    (size.height * self.scale).round() as u32,
+                );
                 return false;
             }
             Message::Window(window::Event::Focused) => self.front(true),
