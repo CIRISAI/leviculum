@@ -136,7 +136,7 @@ fields[0xFC] = map {
 
 - **Bit 2 on every send**: `groups::client_caps`
   (`loquax/src/ui/groups.rs:72`), which `mark_sends` puts on every
-  message (`loquax/src/ui.rs:1884-1888`); not switchable.
+  message (`loquax/src/ui.rs:1899-1903`); not switchable.
 - **The arrival**: the router hands a collected message on as
   `DeliveryMethod::Propagated`; the engine says so after the message
   with `OutboxEvent::Propagated` (`loquax/src/engine.rs:589`).

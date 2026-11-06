@@ -139,11 +139,11 @@ shared styled text model of `leviculum-ui` since 984, is a vector of
 (`leviculum-ui/src/style.rs:95-116`): already wrapped, aligned and indented,
 one `RLine` per output row, every cell carrying its resolved style and its
 owning link index. That IR feeds either the scene's page, a window of
-runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:446`,
+runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:447`,
 since 1255), or `emit_ansi`
 (`lnomad/src/render.rs:230-236`) for `--print`. Scrolling is a slice, not a
 widget scroll, because the page is pre-wrapped
-(`lnomad/src/app/scene.rs:422-426`), and there is one scroll rule shared by
+(`lnomad/src/app/scene.rs:423-427`), and there is one scroll rule shared by
 every scrollable window (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`),
 which Loquax's help and detail view scroll by too.
 

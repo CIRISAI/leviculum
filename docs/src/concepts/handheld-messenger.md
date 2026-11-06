@@ -216,7 +216,7 @@ messenger core holds the same types a board will.
 Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
 place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
 it"; the frontend renders the scene the other three targets already
-render (`Scene`, `loquax/src/ui/scene.rs:980`), and this section records
+render (`Scene`, `loquax/src/ui/scene.rs:988`), and this section records
 what was measured for the plan, the budgets, and the slices. The host
 numbers below are 64-bit figures from a counting allocator, upper bounds
 for the 32-bit board (the 1337 pattern); the spike code ran under
@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:695`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:701`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -316,10 +316,10 @@ stays the separate renderer it is.
 ### The input model
 
 One table. The M9's keyboard feeds the same resolver the terminal uses:
-a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:1002`)
+a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:1009`)
 through the shared rows (`ROWS`, `loquax/src/keys.rs:221`, over
 `leviculum_ui::keymap`'s scroll rows), and the action becomes a scene
-intent (`Intent::from_action`, `loquax/src/ui/intent.rs:492`). Nothing
+intent (`Intent::from_action`, `loquax/src/ui/intent.rs:498`). Nothing
 M9-specific enters the model; what the platform layer owns is the I2C
 controller's scancodes to `KeyEvent`, including layers and repeat,
 which the first keyboard slice measures on the device. The one-button
@@ -896,8 +896,8 @@ host half. Nothing was flashed: the board half is the rig's.
 verbs, the yes/no question, "New group" with its friends, ticks and
 name, the invitation card with its Join. A phone taps a node and runs
 its `Action`. The terminal reaches these verbs through its palette only:
-the rows from `new group` (`loquax/src/keys.rs:873`) to `start again`
-(`loquax/src/keys.rs:905`) have no chord. The M9 has no palette. So its
+the rows from `new group` (`loquax/src/keys.rs:880`) to `start again`
+(`loquax/src/keys.rs:912`) have no chord. The M9 has no palette. So its
 group keys run the node's `Action` the way a tap does (`hit`,
 `loquax-m9/src/group.rs:136`), and nothing new enters the model. The
 cursor over the sheet's and the picker's rows is the M9's own, as a
@@ -1156,7 +1156,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:834`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:840`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1289,7 +1289,7 @@ the tab), so a `ROOMS_ROWS` table beside `LIST_ROWS` and `CHAT_ROWS` in
 erase and the character keys onto those events through `keys::event`,
 with a test that resolves each row as the list's and the chat's tests do,
 and one row in the list pane for the terminal's `R`
-(`loquax/src/keys.rs:603`) to bring the tab. Two things beyond the
+(`loquax/src/keys.rs:610`) to bring the tab. Two things beyond the
 screen decide whether it is worth building there: the hub link is `std`
 on tokio (`loquax/src/rooms_link.rs`, behind `std`), so the board drives
 `leviculum_rrc::Session` (`no_std` already) over a link of its own once

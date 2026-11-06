@@ -107,7 +107,7 @@ path's interface changes. Nothing medium-aware enters transport
   instance of their own.
 - **A phone that is its own mailbox's device** (1264's case): the
   screens' leaf dials the phone mailbox's node on a loopback port
-  (`loquax-android/src/mailbox.rs:544`). That is a socket, but it never
+  (`loquax-android/src/mailbox.rs:552`). That is a socket, but it never
   leaves the phone, and no network change touches it. It reads "local".
   An in-process channel instead of loopback TCP saves a socket, not a
   hop; it is a later cleanup, not part of the ladder.
