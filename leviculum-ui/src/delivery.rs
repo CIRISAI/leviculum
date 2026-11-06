@@ -6,15 +6,18 @@
 //! |---|---|---|---|
 //! | queued, stamping, in flight, sent without proof | `◷ ` or the spinner | `. ` or `* ` | grey |
 //! | in the mailbox | `✓ ` | `v ` | grey |
-//! | delivered (proof) | `✓✓` | `vv` | grey |
+//! | arrived (proof: the recipient's mailbox or device) | `✓ ` | `v ` | grey |
+//! | delivered (on the recipient's device, `lev` 0x07) | `✓✓` | `vv` | grey |
 //! | read | `✔✔` bold | `VV` | green |
 //! | rejected, failed | `! ` bold | `! ` | red |
 //!
 //! One table, so the conversation glyph, the detail view and anything else
 //! that shows delivery read the same row and cannot disagree. loquax is its
 //! first user; lnomad does not draw delivery. The rules the table encodes:
-//! a tick only for what someone else confirmed (the mailbox one, the
-//! recipient's device two), green only for read, and read is more than its
+//! a tick only for what someone else confirmed (the mailbox or the
+//! recipient's proof one, the recipient's device two: 1462, a proof is
+//! signed by the recipient's identity, which its mailbox holds too, so it
+//! cannot say "on the device"), green only for read, and read is more than its
 //! colour: a heavier glyph in bold, so a reader who cannot tell green from
 //! grey, or a monochrome terminal, still sees it. Unproven sent shares the
 //! clock with sending: nobody confirmed it, and the detail view says it in
@@ -39,7 +42,12 @@ pub enum DeliveryState {
     Sent,
     /// Left in a propagation node's mailbox (a propagated `Sent`).
     InMailbox,
-    /// Arrived: a delivery proof came back.
+    /// Arrived: the recipient's identity proved it. Its mailbox signs
+    /// with that identity as its devices do, so this says "it reached the
+    /// recipient's mailbox or device", never which (1462). One tick.
+    Arrived,
+    /// On the recipient's device: the device said so with its `lev`
+    /// receipt `0x07` (1462). Two ticks.
     Delivered,
     /// Read: the peer's signed read receipt named it. `at` is the reader's
     /// clock when it came on their screen, unix seconds, kept within the
@@ -55,7 +63,8 @@ pub enum DeliveryState {
 /// A colour family, resolved against the frontend's palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tone {
-    /// Grey, the secondary text's: on its way, in the mailbox, delivered.
+    /// Grey, the secondary text's: on its way, in the mailbox, arrived,
+    /// delivered.
     Gray,
     /// Green, the accent: read.
     Green,
@@ -112,7 +121,7 @@ impl DeliveryGlyph {
 }
 
 /// The table, one row per [`DeliveryState`], in the order of the ladder.
-pub const DELIVERY_GLYPHS: [DeliveryGlyph; 9] = [
+pub const DELIVERY_GLYPHS: [DeliveryGlyph; 10] = [
     row(
         DeliveryState::Queued,
         Mark::Glyph("◷ "),
@@ -143,6 +152,13 @@ pub const DELIVERY_GLYPHS: [DeliveryGlyph; 9] = [
     ),
     row(
         DeliveryState::InMailbox,
+        Mark::Glyph("✓ "),
+        "v ",
+        Tone::Gray,
+        false,
+    ),
+    row(
+        DeliveryState::Arrived,
         Mark::Glyph("✓ "),
         "v ",
         Tone::Gray,
@@ -202,10 +218,11 @@ pub fn glyph(state: DeliveryState) -> &'static DeliveryGlyph {
         DeliveryState::InFlight => &DELIVERY_GLYPHS[2],
         DeliveryState::Sent => &DELIVERY_GLYPHS[3],
         DeliveryState::InMailbox => &DELIVERY_GLYPHS[4],
-        DeliveryState::Delivered => &DELIVERY_GLYPHS[5],
-        DeliveryState::Read { .. } => &DELIVERY_GLYPHS[6],
-        DeliveryState::Rejected => &DELIVERY_GLYPHS[7],
-        DeliveryState::Failed => &DELIVERY_GLYPHS[8],
+        DeliveryState::Arrived => &DELIVERY_GLYPHS[5],
+        DeliveryState::Delivered => &DELIVERY_GLYPHS[6],
+        DeliveryState::Read { .. } => &DELIVERY_GLYPHS[7],
+        DeliveryState::Rejected => &DELIVERY_GLYPHS[8],
+        DeliveryState::Failed => &DELIVERY_GLYPHS[9],
     }
 }
 
@@ -242,6 +259,7 @@ mod tests {
                 (S::InFlight, "⠋ ", "* ", Tone::Gray, false),
                 (S::Sent, "◷ ", ". ", Tone::Gray, false),
                 (S::InMailbox, "✓ ", "v ", Tone::Gray, false),
+                (S::Arrived, "✓ ", "v ", Tone::Gray, false),
                 (S::Delivered, "✓✓", "vv", Tone::Gray, false),
                 (S::Read { at: 0 }, "✔✔", "VV", Tone::Green, true),
                 (S::Rejected, "! ", "! ", Tone::Red, true),
@@ -255,7 +273,10 @@ mod tests {
         for row in &DELIVERY_GLYPHS {
             let confirmed = matches!(
                 row.state,
-                DeliveryState::InMailbox | DeliveryState::Delivered | DeliveryState::Read { .. }
+                DeliveryState::InMailbox
+                    | DeliveryState::Arrived
+                    | DeliveryState::Delivered
+                    | DeliveryState::Read { .. }
             );
             let read = matches!(row.state, DeliveryState::Read { .. });
             let ticks = row
@@ -268,8 +289,10 @@ mod tests {
             // Read is told by more than its colour.
             assert_eq!(row.symbol(0, false).contains('✔'), read, "{:?}", row.state);
         }
-        // Two ticks only from the recipient's device.
+        // Two ticks only from the recipient's device: a proof is one
+        // (1462), the mailbox can sign it.
         assert_eq!(glyph(DeliveryState::InMailbox).symbol(0, false), "✓ ");
+        assert_eq!(glyph(DeliveryState::Arrived).symbol(0, false), "✓ ");
         assert_eq!(glyph(DeliveryState::Delivered).symbol(0, false), "✓✓");
     }
 
@@ -304,7 +327,10 @@ mod tests {
     #[test]
     fn the_ascii_fallback_is_the_documented_set() {
         let set: Vec<&str> = DELIVERY_GLYPHS.iter().map(|r| r.ascii).collect();
-        assert_eq!(set, [". ", "* ", "* ", ". ", "v ", "vv", "VV", "! ", "! "]);
+        assert_eq!(
+            set,
+            [". ", "* ", "* ", ". ", "v ", "v ", "vv", "VV", "! ", "! "]
+        );
         for row in &DELIVERY_GLYPHS {
             assert!(row.ascii.is_ascii(), "{:?}", row.state);
         }

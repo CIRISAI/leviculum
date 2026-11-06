@@ -105,10 +105,20 @@ pub enum MarkFlag {
     /// On a device's screen (1234): the home node owes their senders a
     /// read receipt, at the reader's clock `at`, unix seconds.
     Seen { at: u32 },
+    /// On a device (1462): the home node owes their senders a device
+    /// receipt (`lev` `0x07`) at the device's clock `at`, unix seconds,
+    /// when the message took it. The first device's mark wins.
+    Arrived { at: u32 },
 }
 
 /// The code of [`MarkFlag::Seen`].
 const SEEN_CODE: u64 = 2;
+
+/// The code of [`MarkFlag::Arrived`].
+const ARRIVED_CODE: u64 = 3;
+
+/// The bytes every arrived mark begins with, request or archive entry.
+pub const ARRIVED_MARK_PREFIX: [u8; 2] = [0x93, ARRIVED_CODE as u8];
 
 /// The bytes every seen mark begins with, request or archive entry: an
 /// array of three and the flag. The store finds the seen marks by them.
@@ -120,6 +130,7 @@ impl MarkFlag {
             Self::Read => 0,
             Self::Deleted => 1,
             Self::Seen { .. } => SEEN_CODE,
+            Self::Arrived { .. } => ARRIVED_CODE,
         }
     }
 
@@ -129,6 +140,7 @@ impl MarkFlag {
             Self::Read => "read",
             Self::Deleted => "deleted",
             Self::Seen { .. } => "seen",
+            Self::Arrived { .. } => "arrived",
         }
     }
 }
@@ -555,7 +567,7 @@ pub fn send_answer(id: &[u8; 32]) -> Vec<u8> {
 pub fn mark_request(mark: &Mark) -> Vec<u8> {
     let mut out = Vec::new();
     let seen_at = match mark.flag {
-        MarkFlag::Seen { at } => Some(at),
+        MarkFlag::Seen { at } | MarkFlag::Arrived { at } => Some(at),
         MarkFlag::Read | MarkFlag::Deleted => None,
     };
     msgpack::array(&mut out, if seen_at.is_some() { 3 } else { 2 });
@@ -578,7 +590,7 @@ pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     let len = msgpack::array_len(data, &mut p)?;
     let code = msgpack::read_uint(data, &mut p)?;
     match (code, len) {
-        (0 | 1, 2) | (SEEN_CODE, 3) => {}
+        (0 | 1, 2) | (SEEN_CODE | ARRIVED_CODE, 3) => {}
         _ => return Err(Malformed),
     }
     let count = msgpack::array_len(data, &mut p)?;
@@ -592,9 +604,13 @@ pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     let flag = match code {
         0 => MarkFlag::Read,
         1 => MarkFlag::Deleted,
-        _ => MarkFlag::Seen {
-            at: u32::try_from(msgpack::read_uint(data, &mut p)?).map_err(|_| Malformed)?,
-        },
+        _ => {
+            let at = u32::try_from(msgpack::read_uint(data, &mut p)?).map_err(|_| Malformed)?;
+            match code {
+                SEEN_CODE => MarkFlag::Seen { at },
+                _ => MarkFlag::Arrived { at },
+            }
+        }
     };
     Ok(Mark { flag, ids })
 }
@@ -1413,6 +1429,33 @@ mod tests {
         msgpack::bin(&mut read_with_time, &[1; 32]);
         msgpack::uint(&mut read_with_time, 5);
         assert_eq!(read_mark(&read_with_time), Err(Malformed));
+    }
+
+    /// 1462: an arrived mark carries the device's time, begins with its
+    /// own prefix, is no seen mark, and without its time it is malformed.
+    #[test]
+    fn an_arrived_mark_round_trips_with_its_time() {
+        let arrived = Mark {
+            flag: MarkFlag::Arrived { at: 1_800_000_000 },
+            ids: alloc::vec![[1; 32], [2; 32]],
+        };
+        let data = mark_request(&arrived);
+        assert!(data.starts_with(&ARRIVED_MARK_PREFIX));
+        assert!(!data.starts_with(&SEEN_MARK_PREFIX));
+        assert_eq!(read_mark(&data), Ok(arrived));
+        let mut timeless = Vec::new();
+        msgpack::array(&mut timeless, 2);
+        msgpack::uint(&mut timeless, ARRIVED_CODE);
+        msgpack::array(&mut timeless, 1);
+        msgpack::bin(&mut timeless, &[1; 32]);
+        assert_eq!(read_mark(&timeless), Err(Malformed));
+        let mut unknown = Vec::new();
+        msgpack::array(&mut unknown, 3);
+        msgpack::uint(&mut unknown, ARRIVED_CODE + 1);
+        msgpack::array(&mut unknown, 1);
+        msgpack::bin(&mut unknown, &[1; 32]);
+        msgpack::uint(&mut unknown, 5);
+        assert_eq!(read_mark(&unknown), Err(Malformed));
     }
 
     #[test]

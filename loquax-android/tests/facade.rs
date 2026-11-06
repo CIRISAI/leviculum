@@ -4544,13 +4544,13 @@ fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
     );
 }
 
-/// 1395, against the ugly store: a propagation receipt (0x07) from a peer
-/// turns the message of ours it names into two grey ticks on the phone's
-/// rows, `delivered`, adds no row, and the Info says "delivered via the
-/// propagation network" in the reader's language, not "on the device"; the
-/// words survive the store. Read receipts off do not hide it.
+/// 1395 and 1462, against the ugly store: a device receipt (0x07) from a
+/// peer turns the message of ours it names into two grey ticks on the
+/// phone's rows, `delivered`, adds no row, and the Info says "on the
+/// device" in the reader's language, with the time it came; the words
+/// survive the store. Read receipts off do not hide it.
 #[test]
-fn a_propagation_receipt_shows_its_own_words_on_the_phone_and_survives_the_store() {
+fn a_device_receipt_shows_two_ticks_on_the_phone_and_survives_the_store() {
     use leviculum_lxmf::lev::{Lev, PropagationReceipt};
     use leviculum_ui::delivery::DeliveryState;
     use loquax::outbox::OutboxEvent;
@@ -4630,13 +4630,25 @@ fn a_propagation_receipt_shows_its_own_words_on_the_phone_and_survives_the_store
             .map(|(_, value)| value)
             .expect("a status row")
     };
-    assert_eq!(
-        state_words(&model, Lang::En),
-        format!("Delivered via the propagation network at {at}")
-    );
+    let who = model.names.label(&peer);
+    assert_eq!(state_words(&model, Lang::En), format!("On {who}'s device"));
     assert_eq!(
         state_words(&model, Lang::De),
-        format!("Über das Propagation-Netz zugestellt um {at}")
+        format!("Auf dem Gerät von {who}")
+    );
+    let on_device = |model: &loquax::ui::UiModel<_>| {
+        loquax::ui::info::message_info(model, peer, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| row.resolve(Lang::En))
+            .find(|(label, _)| label == "On the device")
+            .map(|(_, value)| value)
+    };
+    assert!(
+        on_device(&model).is_some_and(|value| value.ends_with(&at)),
+        "{:?}",
+        on_device(&model)
     );
     store.write(&model.take_writes()).expect("written");
     drop(store);
@@ -4664,9 +4676,11 @@ fn a_propagation_receipt_shows_its_own_words_on_the_phone_and_survives_the_store
         .map(|row| row.resolve(Lang::En))
         .find(|(label, _)| label == "Status")
         .map(|(_, value)| value);
-    assert_eq!(
-        restored,
-        Some(format!("Delivered via the propagation network at {at}"))
+    assert_eq!(restored, Some(format!("On {who}'s device")));
+    assert!(
+        on_device(&again).is_some_and(|value| value.ends_with(&at)),
+        "{:?}",
+        on_device(&again)
     );
 }
 
@@ -4675,10 +4689,11 @@ fn a_propagation_receipt_shows_its_own_words_on_the_phone_and_survives_the_store
 /// `/lev/status`. The stock Python recipient comes up and collects, and
 /// sends no receipt of its own. The home's next sync round asks the node
 /// over a link it never identifies, archives the node's `collected`, and
-/// the phone's row moves from one tick to two grey ticks, its Info saying
-/// "Collected from the propagation network", which only the node's word
-/// gives (a proof would say "Arrived on …"). The phone, a client of its
-/// home, asks nothing itself.
+/// the phone's row moves from the mailbox's tick to the arrived rung (1462:
+/// still one tick, the recipient's identity collected it, which its own
+/// mailbox might have done), its Info saying "Collected from the
+/// propagation network", which only the node's word gives (a proof would
+/// say "Arrived"). The phone, a client of its home, asks nothing itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_collected_at_the_node_shows_collected_on_the_phone() {
     let recipient_peer = python_peer::PythonPeer::start();
@@ -4783,7 +4798,7 @@ async fn a_message_collected_at_the_node_shows_collected_on_the_phone() {
         (bubble.state.clone(), bubble.id.clone())
     };
     let (before, _) = row_state(&session);
-    assert_ne!(before, "delivered", "nobody collected it yet");
+    assert_eq!(before, "mailbox", "nobody collected it yet");
     let row_state = std::sync::Arc::new(row_state);
     let row_state_later = std::sync::Arc::clone(&row_state);
 
@@ -4825,7 +4840,7 @@ async fn a_message_collected_at_the_node_shows_collected_on_the_phone() {
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
         loop {
             let (state, id) = row_state_later(&session);
-            if state == "delivered" {
+            if state == "arrived" {
                 break (session, id);
             }
             assert!(

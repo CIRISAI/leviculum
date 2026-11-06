@@ -79,9 +79,9 @@
     <string name="state_sending">Sending</string>
     <string name="state_unconfirmed">Sent, not confirmed yet</string>
     <string name="state_mailbox">Waiting in the mailbox</string>
-    <string name="state_delivered">Delivered</string>
+    <string name="state_arrived">Arrived</string>
+    <string name="state_delivered">On the recipient\'s device</string>
     <string name="state_read">Read at %1$s</string>
-    <string name="state_delivered_via_pn">Delivered via the propagation network</string>
     <string name="state_collected">Collected from the propagation network</string>
     <string name="state_failed">Not sent. Double tap to send again</string>
     <string name="scene_send_again">Send again</string>
@@ -101,8 +101,10 @@
     <string name="info_preparing">Being prepared for sending</string>
     <string name="info_sending">Being sent now</string>
     <string name="info_mailbox">In the mailbox, delivered once %1$s is online</string>
-    <string name="info_delivered">Arrived on %1$s\'s device</string>
-    <string name="info_delivered_via_pn">Delivered via the propagation network at %1$s</string>
+    <string name="info_delivered">On %1$s\'s device</string>
+    <string name="info_arrived">Arrived</string>
+    <string name="info_on_device">On the device</string>
+    <string name="info_read_at">Read</string>
     <string name="info_collected">Collected from the propagation network at %1$s</string>
     <string name="info_not_collected">Not collected at the propagation node; perhaps delivered via another</string>
     <string name="info_refused">Not sent: it was refused. Double tap to send again</string>

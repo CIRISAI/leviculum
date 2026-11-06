@@ -79,9 +79,9 @@
     <string name="state_sending">Wird gesendet</string>
     <string name="state_unconfirmed">Gesendet, noch nicht bestätigt</string>
     <string name="state_mailbox">Wartet im Postfach</string>
-    <string name="state_delivered">Zugestellt</string>
+    <string name="state_arrived">Angekommen</string>
+    <string name="state_delivered">Auf dem Gerät</string>
     <string name="state_read">Gelesen um %1$s</string>
-    <string name="state_delivered_via_pn">Über das Propagation-Netz zugestellt</string>
     <string name="state_collected">Aus dem Propagation-Netz abgeholt</string>
     <string name="state_failed">Nicht gesendet. Doppeltippen, um es erneut zu senden</string>
     <string name="scene_send_again">Erneut senden</string>
@@ -101,8 +101,10 @@
     <string name="info_preparing">Wird zum Senden vorbereitet</string>
     <string name="info_sending">Wird gerade gesendet</string>
     <string name="info_mailbox">Im Postfach, wird zugestellt, sobald %1$s online ist</string>
-    <string name="info_delivered">Auf dem Gerät von %1$s angekommen</string>
-    <string name="info_delivered_via_pn">Über das Propagation-Netz zugestellt um %1$s</string>
+    <string name="info_delivered">Auf dem Gerät von %1$s</string>
+    <string name="info_arrived">Angekommen</string>
+    <string name="info_on_device">Auf dem Gerät</string>
+    <string name="info_read_at">Gelesen</string>
     <string name="info_collected">Um %1$s aus dem Propagation-Netz abgeholt</string>
     <string name="info_not_collected">Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt</string>
     <string name="info_refused">Nicht gesendet: es wurde abgelehnt. Doppeltippen, um es erneut zu senden</string>

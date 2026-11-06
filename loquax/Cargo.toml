@@ -422,6 +422,11 @@ required-features = ["history"]
 name = "mailbox_receipts"
 required-features = ["history"]
 
+# 1462: the ticks tell the truth, the device receipt through the mailbox.
+[[test]]
+name = "device_receipts"
+required-features = ["history"]
+
 # The home node end to end: `--daemon` and `home` are the terminal build's.
 [[test]]
 name = "home_node"

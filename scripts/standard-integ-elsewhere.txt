@@ -38,6 +38,7 @@ loquax/scene_golden loquax-tui cargo test -p loquax --features tui --bins --test
 loquax/mailbox_receipts loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts
 loquax/mailbox_setup loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup
 loquax/mailbox_mesh loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh
+loquax/device_receipts loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts
 # Run by `fast`, which `standard` depends on.
 leviculum-std/mvr mvr cargo test -p leviculum-std --test mvr
 leviculum-std/doc_citations citation-guard cargo test -p leviculum-std --test doc_citations

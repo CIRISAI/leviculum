@@ -906,6 +906,7 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
         // `pn` names the state as the screen does since 1153; `mailbox`
         // stays for the scripts written before.
         "pn" | "mailbox" => DeliveryState::InMailbox,
+        "arrived" => DeliveryState::Arrived,
         "delivered" => DeliveryState::Delivered,
         "rejected" => DeliveryState::Rejected,
         "failed" => DeliveryState::Failed,
@@ -3316,7 +3317,7 @@ mod tests {
         frames.push_str(&format!("--- cursor ---\n{}", screen(&model, 80, 24)));
         update(&mut model, UiEvent::Key(parse_key("enter").expect("key")));
         let detail = screen(&model, 80, 24);
-        assert!(detail.contains("delivered: proof received"), "{detail}");
+        assert!(detail.contains("arrived: proof received"), "{detail}");
         frames.push_str(&format!("--- detail ---\n{detail}"));
         let model = mockup(60, 20);
         frames.push_str(&format!(

@@ -13,13 +13,15 @@
 //! | `0x04` | `[bin16 group, bin64 public key, str name, str admin's name, uint epoch]` | an invitation to a group |
 //! | `0x05` | `[uint epoch, [[bin16 address, str name, uint flags], ...], uint standing]` | a group's membership; a member leaving sends itself alone, flagged [`MEMBER_LEFT`]; the third element is there only when the group [`GROUP_ENDED`] |
 //! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text, uint left_out?], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them; `left_out` only on a line that stands for what was not sent ([`LEFT_OUT_PHOTO`] and its siblings) |
-//! | `0x07` | `[uint32 received_at, [bin32 message id, ...]]` | a propagation receipt: these messages of yours, collected from the propagation network, are on my device |
+//! | `0x07` | `[uint32 received_at, [bin32 message id, ...]]` | a device receipt: these messages of yours are on my device (named a propagation receipt when it was built for collected post) |
 //!
-//! Capability bit 2 says "I acknowledge propagated post and want it
-//! acknowledged": a recipient answers such a sender's message with key
-//! `0x07` when it arrived by propagation (1393,
-//! `docs/src/concepts/loquax-propagation-receipts.md`). A direct delivery
-//! has its proof and gets none.
+//! Capability bit 2 says "I say when your post is on my device, and want
+//! mine said": a recipient's device answers such a sender's message with
+//! key `0x07` once it has it, however it came (1393 for propagated post,
+//! `docs/src/concepts/loquax-propagation-receipts.md`; 1462 for direct
+//! post too, `docs/src/concepts/loquax-read-receipts.md`, section 6). The
+//! transport proof is no such word: a mailbox signs it with the recipient's
+//! identity as soon as it archived the message.
 //!
 //! Capability bit 1 says "I understand groups": a group's home sends such a
 //! member its copies with key `0x02`. Every member, that one too, gets the
@@ -233,9 +235,10 @@ impl Receipt {
     }
 }
 
-/// "These messages of yours, which came through the propagation network,
-/// are on my device": the recipient's clock when the first of them
-/// arrived, unix seconds, and their full LXMF message ids. The shape of a
+/// "These messages of yours are on my device" (the type keeps the name it
+/// was built under, for post that came through the propagation network):
+/// the recipient's clock when the first of them arrived, unix seconds, and
+/// their full LXMF message ids. The shape of a
 /// [`Receipt`], under its own key, so a reader never takes arrival for
 /// reading.
 #[derive(Debug, Clone, PartialEq, Eq)]

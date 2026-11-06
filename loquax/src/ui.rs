@@ -3641,10 +3641,19 @@ fn leg_words(leg: Leg) -> &'static str {
     }
 }
 
+/// The ledger line of a proof (1462): the recipient's identity, its
+/// mailbox or its device, has it.
+pub const PROOF_LINE: &str = "arrived: proof received";
+
+/// The proof's ledger line before 1462, when a proof was shown as two
+/// ticks: a ledger kept from then still says it.
+pub const PROOF_LINE_BEFORE_1462: &str = "delivered: proof received";
+
 /// What a message's ledger says when it reaches a state.
 fn ledger_words(state: DeliveryState) -> &'static str {
     match state {
-        DeliveryState::Delivered => "delivered: proof received",
+        DeliveryState::Arrived => PROOF_LINE,
+        DeliveryState::Delivered => "on the recipient's device",
         DeliveryState::Rejected => "rejected by the peer",
         DeliveryState::Failed => "failed",
         other => state_words(other),
@@ -3659,7 +3668,8 @@ fn state_words(state: DeliveryState) -> &'static str {
         DeliveryState::InFlight => "in flight",
         DeliveryState::Sent => "sent, no proof yet",
         DeliveryState::InMailbox => "waiting at a propagation node",
-        DeliveryState::Delivered => "delivered",
+        DeliveryState::Arrived => "arrived",
+        DeliveryState::Delivered => "on the device",
         DeliveryState::Read { .. } => "read",
         DeliveryState::Rejected => "rejected",
         DeliveryState::Failed => "not sent",
@@ -3692,7 +3702,8 @@ fn detail_words(state: DeliveryState, who: &str, offset_secs: i32) -> String {
         DeliveryState::InFlight => "being sent now".into(),
         DeliveryState::Sent => "sent; nobody has confirmed it arrived yet".into(),
         DeliveryState::InMailbox => format!("in the mailbox, delivered once {who} is online"),
-        DeliveryState::Delivered => format!("delivered: it arrived on {who}'s device"),
+        DeliveryState::Arrived => format!("arrived: {who}'s mailbox or device has it"),
+        DeliveryState::Delivered => format!("on {who}'s device: it said so"),
         DeliveryState::Read { at } => {
             let at = WallTime {
                 unix_secs: i64::from(at),
@@ -4112,7 +4123,7 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
 /// | `Sending` | `InFlight` (spinner) |
 /// | `Sent` | `Sent` ◇ |
 /// | `AwaitingCollection` | `InMailbox` ⌂ |
-/// | `Delivered` | `Delivered` ✓ |
+/// | `Delivered` (a proof) | `Arrived` ✓ |
 /// | `Rejected` | `Rejected` ✗ |
 /// | `Failed`, `Cancelled` | `Failed` ✗ (dim) |
 ///
@@ -4124,7 +4135,9 @@ pub fn delivery_of(state: MessageState) -> DeliveryState {
         MessageState::Sending => DeliveryState::InFlight,
         MessageState::Sent => DeliveryState::Sent,
         MessageState::AwaitingCollection => DeliveryState::InMailbox,
-        MessageState::Delivered => DeliveryState::Delivered,
+        // A proof is the recipient's identity, which its mailbox holds
+        // too (1462): one tick. Two are the device's own word.
+        MessageState::Delivered => DeliveryState::Arrived,
         MessageState::Rejected => DeliveryState::Rejected,
         MessageState::Failed | MessageState::Cancelled => DeliveryState::Failed,
     }
@@ -4221,6 +4234,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
             }
             crate::home::wire::MarkFlag::Seen { .. } => model.home_seen(&mark.ids),
+            // Another device said these are on it (1462): this one owes
+            // its own word no more.
+            crate::home::wire::MarkFlag::Arrived { .. } => model.home_arrived(&mark.ids),
         },
         OutboxEvent::Left {
             message_id,
@@ -4258,7 +4274,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
         }
         OutboxEvent::Propagated { message_id, source } => {
-            return model.arrived_propagated(source, message_id);
+            return model.arrived_here(source, message_id);
         }
         OutboxEvent::Received {
             message_id,
@@ -4347,6 +4363,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             // A group's state (1307) is kept and stored, and asks for no
             // attention: no unread, no toast, no cursor. A group the
             // reader deleted leaves this device with it (pass four).
+            if !state {
+                // On this device now: its sender is told so (1462).
+                effects.extend(model.arrived_here(source, message_id));
+            }
             if state {
                 model.forget_deleted_groups();
                 return effects;
@@ -4850,7 +4870,7 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
         // copy is proven, and a late proof does not take them back.
         let group = groups.contains_key(&conversation.peer);
         let shown = match delivered {
-            DeliveryState::Delivered if group => DeliveryState::InMailbox,
+            DeliveryState::Arrived if group => DeliveryState::InMailbox,
             other => other,
         };
         for (m, message) in conversation.messages.iter_mut().enumerate() {
@@ -4864,18 +4884,23 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
                 // The runner may still carry it another way.
                 continue;
             }
-            // Read implies delivered (1230): a late proof leaves it.
-            if matches!(message.delivery, Some(DeliveryState::Read { .. })) {
+            // Read implies delivered (1230), and the device's own word
+            // (1462) says more than its identity's proof: a late proof
+            // leaves either.
+            if matches!(
+                message.delivery,
+                Some(DeliveryState::Read { .. } | DeliveryState::Delivered)
+            ) {
                 continue;
             }
             if message.unproven
-                && !matches!(shown, DeliveryState::Delivered | DeliveryState::Rejected)
-                && !(group && delivered == DeliveryState::Delivered)
+                && !matches!(shown, DeliveryState::Arrived | DeliveryState::Rejected)
+                && !(group && delivered == DeliveryState::Arrived)
             {
                 continue;
             }
             if message.delivery != Some(shown) {
-                let words = match group && delivered == DeliveryState::Delivered {
+                let words = match group && delivered == DeliveryState::Arrived {
                     true => "the group has it: proof received",
                     false => ledger_words(shown),
                 };
@@ -5080,7 +5105,10 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
         message.unproven = true;
         message.note(now, "sent over a link, no delivery proof yet");
         // A proof that came in the same breath as the runner's end stays.
-        if message.delivery != Some(DeliveryState::Delivered) {
+        if !matches!(
+            message.delivery,
+            Some(DeliveryState::Arrived | DeliveryState::Delivered | DeliveryState::Read { .. })
+        ) {
             message.delivery = Some(DeliveryState::Sent);
         }
     }
@@ -5482,10 +5510,7 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
             (Some(state), _) => {
                 let state = shown_delivery(state, model.home_client, model.reading.on);
                 let words = match (state, arrival::witness(message)) {
-                    (DeliveryState::Delivered, Some((arrival::Witness::Receipt, at))) => {
-                        format!("delivered via the propagation network{}", at_words(at))
-                    }
-                    (DeliveryState::Delivered, Some((arrival::Witness::Collected, at))) => {
+                    (DeliveryState::Arrived, Some((arrival::Witness::Collected, at))) => {
                         format!("collected from the propagation network{}", at_words(at))
                     }
                     (
@@ -5603,7 +5628,7 @@ fn no_read_words<B>(
     who: &str,
 ) -> Option<String> {
     let state = shown_delivery(message.delivery?, model.home_client, model.reading.on);
-    if !message.outbound || state != DeliveryState::Delivered {
+    if !message.outbound || !matches!(state, DeliveryState::Arrived | DeliveryState::Delivered) {
         return None;
     }
     match (model.reading.on, conversation.flags.receipts) {
@@ -6334,12 +6359,13 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// 1395, the rule: a message that came by propagation and carries bit 2
-    /// is acknowledged with 0x07 after the batch window, alone, with the
-    /// clock of its arrival, whatever the read-receipts switch says; one
-    /// that came direct, or without bit 2, is not; a second copy owes none.
+    /// 1395 and 1462, the rule: a message on this device that carries bit
+    /// 2 is acknowledged with 0x07 after the batch window, alone, with the
+    /// clock of its arrival, whatever the read-receipts switch says, and
+    /// however it came, by propagation or direct; one without bit 2 is not;
+    /// a second copy owes none.
     #[test]
-    fn a_propagated_message_with_bit_2_is_acknowledged_and_no_other() {
+    fn a_message_with_bit_2_is_acknowledged_however_it_came_and_no_other() {
         use leviculum_lxmf::lev::{CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS};
         let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
         wall(&mut model, RT);
@@ -6348,7 +6374,8 @@ pub(crate) mod tests {
         let all = CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS;
         propagated(&mut model, PEER, ID, all);
         propagated(&mut model, PEER, ID2, all);
-        // Direct: the same mark, no Propagated word, so no receipt.
+        // Direct: the same mark, no Propagated word; its proof says only
+        // that the identity has it, so it owes the device's word too.
         engine(
             &mut model,
             with_lev(PEER, [0x33; 32], "direct", &caps_lev(all)),
@@ -6360,7 +6387,7 @@ pub(crate) mod tests {
             [0x44; 32],
             CAP_READ_RECEIPTS | CAP_GROUPS,
         );
-        assert_eq!(model.arrivals.owed(&PEER), Some(&[ID, ID2][..]));
+        assert_eq!(model.arrivals.owed(&PEER), Some(&[ID, ID2, [0x33; 32]][..]));
         assert_eq!(model.arrivals.owed(&OTHER), None);
         let early = update(&mut model, UiEvent::Elapsed(receipts::BATCH_MS - 1));
         assert!(
@@ -6368,7 +6395,7 @@ pub(crate) mod tests {
             "inside the batch window"
         );
         let due = update(&mut model, UiEvent::Elapsed(receipts::BATCH_MS));
-        assert_eq!(arrival_receipts(&due), [(PEER, vec![ID, ID2])]);
+        assert_eq!(arrival_receipts(&due), [(PEER, vec![ID, ID2, [0x33; 32]])]);
         let lev = due
             .iter()
             .find_map(|effect| match effect {
@@ -6430,13 +6457,13 @@ pub(crate) mod tests {
         )));
     }
 
-    /// 1395, the mark: a 0x07 for our message is two grey ticks, the
-    /// delivered rung, with the propagation network's words in the Info, the
-    /// terminal's detail and for the screen reader; read receipts off do not
-    /// hide it; a later proof or 0x07 changes nothing; read still wins.
+    /// 1395 and 1462, the mark: a 0x07 for our message is two grey ticks,
+    /// the delivered rung, "on the device" in the Info, the terminal's
+    /// detail and for the screen reader; read receipts off do not hide it;
+    /// a later proof or 0x07 changes nothing; read still wins.
     #[test]
-    fn a_propagation_receipt_is_two_grey_ticks_with_its_own_words() {
-        use super::arrival::{Witness, VIA_RECEIPT};
+    fn a_device_receipt_is_two_grey_ticks_with_its_own_words() {
+        use super::arrival::{Witness, ON_DEVICE};
         use super::strings::{Lang, StrId};
         let mut model = UiModel::<Field>::new(&[PEER]);
         wall(&mut model, RT);
@@ -6466,7 +6493,7 @@ pub(crate) mod tests {
             super::arrival::witness(message).map(|(w, _)| w),
             Some(Witness::Receipt)
         );
-        assert!(message.ledger.iter().any(|e| e.what == VIA_RECEIPT));
+        assert!(message.ledger.iter().any(|e| e.what == ON_DEVICE));
         let key = message.activity;
         let info = info::message_info(&model, PEER, key).expect("its info");
         let state_row = |lang| {
@@ -6478,19 +6505,17 @@ pub(crate) mod tests {
                 })
                 .map(|(_, value)| value)
         };
+        let who = model.names.label(&PEER);
+        assert_eq!(state_row(Lang::En), Some(format!("On {who}'s device")));
         assert_eq!(
-            state_row(Lang::En).as_deref(),
-            Some("Delivered via the propagation network at 09:00")
-        );
-        assert_eq!(
-            state_row(Lang::De).as_deref(),
-            Some("Über das Propagation-Netz zugestellt um 09:00")
+            state_row(Lang::De),
+            Some(format!("Auf dem Gerät von {who}"))
         );
         let detail = detail_view(&model, 0, 0).expect("its detail").rows;
         assert!(
             detail
                 .iter()
-                .any(|row| row == "state  delivered via the propagation network 09:00"),
+                .any(|row| row == &format!("state  on {who}'s device: it said so")),
             "{detail:?}"
         );
         let bubble = chat::bubbles(&model, 0)
@@ -6501,10 +6526,11 @@ pub(crate) mod tests {
         assert_eq!(bubble.witness, Some(Witness::Receipt));
         assert_eq!(
             scene::mark_words(chat::Mark::Delivered, None, bubble.witness, None).resolve(Lang::En),
-            "Delivered via the propagation network"
+            "On the recipient's device"
         );
-        // A late proof keeps the words; read still moves it on.
+        // A late proof takes nothing back; read still moves it on.
         state(&mut model, ID, MessageState::Delivered);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
         assert_eq!(
             super::arrival::witness(&model.conversations[0].messages[0]).map(|(w, _)| w),
             Some(Witness::Receipt)
@@ -6520,10 +6546,11 @@ pub(crate) mod tests {
         ));
     }
 
-    /// 1395, the node's word: collected is two grey ticks with its own
+    /// 1395, the node's word: collected is the arrived rung (1462: one
+    /// tick, the recipient's mailbox may have collected it) with its own
     /// words; expired and evicted keep the one tick and say "not collected
     /// here", never lost; held and unknown change nothing; a proof before
-    /// keeps the device's words.
+    /// keeps the proof's words.
     #[test]
     fn what_the_node_answers_moves_the_marks_it_may() {
         use super::strings::{Lang, StrId};
@@ -6561,11 +6588,11 @@ pub(crate) mod tests {
         assert_eq!(
             states,
             [
-                Some(DeliveryState::Delivered),
+                Some(DeliveryState::Arrived),
                 Some(DeliveryState::InMailbox),
                 Some(DeliveryState::InMailbox),
                 Some(DeliveryState::InMailbox),
-                Some(DeliveryState::Delivered),
+                Some(DeliveryState::Arrived),
             ]
         );
         let words = |m: usize, lang| {
@@ -6594,10 +6621,8 @@ pub(crate) mod tests {
             words(1, Lang::De),
             "Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt"
         );
-        assert_eq!(
-            words(4, Lang::En),
-            "Arrived on ababababab's device".replace("ababababab", &model.names.label(&PEER))
-        );
+        assert_eq!(words(4, Lang::En), "Arrived");
+        assert_eq!(words(4, Lang::De), "Angekommen");
         assert_eq!(
             model.conversations[0].messages[2].ledger.len(),
             model.conversations[0].messages[3].ledger.len()
@@ -6708,7 +6733,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             model.conversations[0].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
         assert_eq!(
             update(&mut model, UiEvent::FetchDone(Ok(0))),
@@ -6765,7 +6790,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             model.conversations[0].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
         let mut own = UiModel::<Field>::new(&[PEER]);
         own.pn_asker.uploaded([0x9c; 16], [1; 32], [0x91; 32], 0);
@@ -7230,7 +7255,8 @@ pub(crate) mod tests {
         state(&mut model, ID, MessageState::Delivered);
         update(&mut model, UiEvent::SendDone(Ok(())));
         assert!(model.conversations[0].flags.receipts);
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        // A proof is one tick (1462).
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         model
     }
 
@@ -7292,16 +7318,16 @@ pub(crate) mod tests {
             ),
             "{effects:?}"
         );
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         let (mark, rows) = shown_last(&model);
-        assert_eq!(mark, Some(chat::Mark::Delivered));
+        assert_eq!(mark, Some(chat::Mark::Arrived));
         assert!(
             rows.iter().any(|r| r.starts_with("read receipts are off")),
             "{rows:?}"
         );
         // On again: the ignored receipt was not kept; the next one reads.
         update(&mut model, UiEvent::ReadReceipts(true));
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         engine(
             &mut model,
             with_lev(PEER, [0x34; 32], "", &receipt(1_800_000_020, &[ID])),
@@ -7324,10 +7350,7 @@ pub(crate) mod tests {
         ));
         let (mark, rows) = shown_last(&model);
         assert_eq!(mark, Some(chat::Mark::Delivered));
-        assert!(
-            rows.iter().any(|r| r.starts_with("state  delivered")),
-            "{rows:?}"
-        );
+        assert!(rows.iter().any(|r| r.starts_with("state  on ")), "{rows:?}");
         assert!(chat::list_rows(&model)[0].read_at.is_none());
         update(&mut model, UiEvent::ReadReceipts(true));
         assert_eq!(shown_last(&model).0, Some(chat::Mark::Read));
@@ -7341,7 +7364,7 @@ pub(crate) mod tests {
     fn a_peer_without_receipts_is_named_in_the_detail_view() {
         let mut model = delivered_to_a_marked_peer();
         let (mark, rows) = shown_last(&model);
-        assert_eq!(mark, Some(chat::Mark::Delivered));
+        assert_eq!(mark, Some(chat::Mark::Arrived));
         assert!(
             !rows.iter().any(|r| r.contains("read receipts")),
             "{rows:?}"
@@ -7504,7 +7527,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             model.conversations[1].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
         let stranger = [0x99; 16];
         let effects = update(
@@ -7515,7 +7538,7 @@ pub(crate) mod tests {
         assert!(model.conversations.iter().all(|c| c.peer != stranger));
         assert_eq!(
             model.conversations[1].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
     }
 
@@ -7527,7 +7550,7 @@ pub(crate) mod tests {
             .into_iter()
             .filter_map(|mark| match mark.flag {
                 MarkFlag::Seen { at } => Some((at, mark.ids)),
-                MarkFlag::Read | MarkFlag::Deleted => None,
+                MarkFlag::Read | MarkFlag::Deleted | MarkFlag::Arrived { .. } => None,
             })
             .collect()
     }
@@ -7703,10 +7726,10 @@ pub(crate) mod tests {
         assert!(model.sending.is_empty());
         // The proof arrives after the runner has finished.
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         // A state for some other id touches nothing.
         state(&mut model, ID2, MessageState::Failed);
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
     }
 
     #[test]
@@ -7824,7 +7847,7 @@ pub(crate) mod tests {
         engine(&mut late, OutboxEvent::Queued { message_id: ID });
         update(&mut late, UiEvent::SendUnproven(String::new()));
         state(&mut late, ID, MessageState::Delivered);
-        assert_eq!(last_delivery(&late), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&late), Some(DeliveryState::Arrived));
     }
 
     /// The row names the leg and its seconds while the send waits, and drops
@@ -7863,7 +7886,7 @@ pub(crate) mod tests {
             (Sending, DeliveryState::InFlight),
             (Sent, DeliveryState::Sent),
             (AwaitingCollection, DeliveryState::InMailbox),
-            (Delivered, DeliveryState::Delivered),
+            (Delivered, DeliveryState::Arrived),
             (Rejected, DeliveryState::Rejected),
             (Cancelled, DeliveryState::Failed),
             (Failed, DeliveryState::Failed),
@@ -8232,12 +8255,12 @@ pub(crate) mod tests {
         // Again: one bubble.
         engine(&mut model, home_sent(ID, OTHER));
         assert_eq!(model.conversations[1].messages.len(), 1);
-        // Delivered, then the sent entry again: stays delivered.
+        // Proven, then the sent entry again: stays proven.
         state(&mut model, ID, MessageState::Delivered);
         engine(&mut model, home_sent(ID, OTHER));
         assert_eq!(
             model.conversations[1].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
         // The device that sent it: its queued bubble says sent.
         sent(&mut model, "mine");
@@ -8764,9 +8787,9 @@ pub(crate) mod tests {
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
         assert_eq!(shown(&model), [layout::EARLIEST, "hi  ◷"]);
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(shown(&model)[1], "hi  ✓✓");
+        assert_eq!(shown(&model)[1], "hi  ✓");
         model.ascii = true;
-        assert_eq!(shown(&model)[1], "hi  vv");
+        assert_eq!(shown(&model)[1], "hi  v");
         assert_eq!(
             text(&view(&model).conversations[0]).trim_end(),
             "▌<abababab…>"
@@ -9188,7 +9211,7 @@ pub(crate) mod tests {
                 "peer   abababababababababababababababab",
                 &format!("id     {}", "11".repeat(32)),
                 "size   5 bytes",
-                "state  delivered: it arrived on <abababab…>'s device",
+                "state  arrived: <abababab…>'s mailbox or device has it",
                 // The peer never sent a message with the mark (1233).
                 "<abababab…> sends no read receipts",
                 "",
@@ -9197,7 +9220,7 @@ pub(crate) mod tests {
                 "14:02:00  trying direct",
                 "14:02:00  queued by the router as 11111111",
                 "14:03:00  in flight (direct)",
-                "14:03:00  delivered: proof received (direct)",
+                "14:03:00  arrived: proof received (direct)",
             ]
         );
         update(&mut model, key(KeyCode::Char('q')));
@@ -10755,7 +10778,7 @@ pub(crate) mod tests {
         let writes = model.take_writes();
         match &writes[..] {
             [StoreWrite::Message { message, .. }] => {
-                assert_eq!(message.delivery, Some(DeliveryState::Delivered));
+                assert_eq!(message.delivery, Some(DeliveryState::Arrived));
             }
             other => panic!("one message write, not {other:?}"),
         }

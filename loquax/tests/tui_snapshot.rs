@@ -153,7 +153,7 @@ type on two lines
 frame typed
 key enter
 frame queued
-until delivery delivered 30
+until delivery arrived 30
 frame delivered
 until received 1 30
 frame reply
@@ -174,7 +174,7 @@ key enter
 until leg direct 5
 sleep 2500
 frame waiting
-until delivery delivered 30
+until delivery arrived 30
 frame delivered
 key esc
 key q
@@ -738,11 +738,11 @@ key enter
 key i
 type yes, from ten. Shall I bring the T114 and the long antenna?
 key enter
-until delivery delivered 30
+until delivery arrived 30
 clock 2026-10-26 09:12
 type on my way
 key enter
-until delivery delivered 30
+until delivery arrived 30
 key esc
 key k
 key k
@@ -784,7 +784,7 @@ clock 2026-10-26 14:06
 key i
 type the tripod fits
 key enter
-until delivery delivered 30
+until delivery arrived 30
 tick 12
 frame replied
 key esc
@@ -986,7 +986,7 @@ async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
         assert!(frame(&frames, "newest").contains("if it fits in the bag"));
         let detail = frame(&frames, "detail");
         assert!(
-            detail.contains("delivered: proof received"),
+            detail.contains("arrived: proof received"),
             "{size}: {detail}"
         );
         assert!(detail.contains("from you to them ·"), "{size}: {detail}");
@@ -1485,7 +1485,7 @@ key enter
 key i
 type are you at the field site?
 key enter
-until delivery delivered 30
+until delivery arrived 30
 frame delivered
 until received 1 30
 key esc
@@ -1671,7 +1671,11 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         bob_frame.contains("are you at the field site?"),
         "{bob_frame}"
     );
-    assert!(bob_frame.contains(" ✓✓"), "the proof survived: {bob_frame}");
+    // A proof is one tick (1462), and it survives the restart.
+    assert!(
+        bob_frame.contains("field site?  12:00 ✓ "),
+        "the proof survived: {bob_frame}"
+    );
     assert!(bob_frame.contains("yes, from ten"), "{bob_frame}");
     assert!(frame(&second, "pinned").contains('┄'), "{second}");
     assert!(frame(&second, "asked").contains("y deletes"), "{second}");
@@ -2889,7 +2893,7 @@ type while the mailbox stalls
 key enter
 until leg direct 3
 frame sending
-until delivery delivered 30
+until delivery arrived 30
 frame delivered
 key esc
 key q

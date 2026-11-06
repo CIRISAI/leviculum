@@ -457,7 +457,7 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
 fn invited_words<B>(model: &UiModel<B>, info: &GroupInfo, member: &[u8; 16]) -> StrId {
     use leviculum_ui::delivery::DeliveryState as D;
     match model.invitation_delivery(&info.address, member) {
-        Some(D::Delivered | D::Read { .. }) => StrId::GroupStateInvited,
+        Some(D::Arrived | D::Delivered | D::Read { .. }) => StrId::GroupStateInvited,
         Some(D::InMailbox) => StrId::GroupStateWaiting,
         Some(D::Failed | D::Rejected) => StrId::GroupStateUndelivered,
         Some(D::Queued | D::Stamping | D::InFlight | D::Sent) => StrId::GroupStateDelivering,

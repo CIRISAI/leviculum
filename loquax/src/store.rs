@@ -1012,6 +1012,7 @@ impl Store {
                 })
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
                 .map_err(|e| self.failed(e))?;
+            crate::ui::arrival::before_1462(message);
         }
         let first = messages.first().map_or(before, |m| seq_of(m.activity));
         let earlier: i64 = self
@@ -1727,7 +1728,17 @@ impl Store {
     /// Whether a seen mark in the archive names the message `id` (1234):
     /// some device saw it already, and its read receipt went then.
     pub fn archive_seen(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
-        let prefix = crate::home::wire::SEEN_MARK_PREFIX;
+        self.archive_marked(&crate::home::wire::SEEN_MARK_PREFIX, id)
+    }
+
+    /// Whether an arrived mark in the archive names `id` (1462): a device
+    /// said it has it, so its sender's device receipt went.
+    pub fn archive_arrived(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        self.archive_marked(&crate::home::wire::ARRIVED_MARK_PREFIX, id)
+    }
+
+    /// Whether a mark beginning with `prefix` in the archive names `id`.
+    fn archive_marked(&self, prefix: &[u8; 2], id: &[u8; 32]) -> Result<bool, StoreError> {
         let found: Option<i64> = self
             .conn
             .query_row(
@@ -3451,6 +3462,7 @@ pub(crate) fn state_code(state: DeliveryState) -> i64 {
         DeliveryState::Rejected => 6,
         DeliveryState::Failed => 7,
         DeliveryState::Read { .. } => 8,
+        DeliveryState::Arrived => 9,
     }
 }
 
@@ -3484,6 +3496,7 @@ pub(crate) fn state_of(code: i64) -> Option<DeliveryState> {
         6 => DeliveryState::Rejected,
         7 => DeliveryState::Failed,
         8 => DeliveryState::Read { at: 0 },
+        9 => DeliveryState::Arrived,
         _ => return None,
     })
 }

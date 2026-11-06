@@ -439,3 +439,113 @@ fn the_profile_is_the_golden_scene() {
     update(&mut model, UiEvent::Profile { open: false });
     assert!(model.scene(LayoutClass::Compact).profile.is_none());
 }
+
+/// The ladder of `docs/src/concepts/loquax-read-receipts.md`, section 3,
+/// in one chat (1462): waiting, at the mailbox, arrived (the proof, one
+/// tick), on the device (the device's receipt `0x07`, two ticks), read and
+/// not sent, each a bubble of ours with its mark and its words. Every
+/// target draws what this scene says, so one golden pins the rule for all
+/// four.
+#[test]
+fn the_ladder_is_the_golden_scene() {
+    use leviculum_lxmf::lev::{Lev, PropagationReceipt, Receipt};
+    use leviculum_lxmf::router::MessageState;
+    use loquax::outbox::OutboxEvent;
+
+    let peer = ugly_store::peer(1);
+    let mut model = UiModel::<Line>::new(&[peer]);
+    update(&mut model, UiEvent::Clock(now()));
+    let event = |model: &mut UiModel<Line>, event: OutboxEvent| {
+        update(model, UiEvent::Engine(event));
+    };
+    let received = |model: &mut UiModel<Line>, n: u8, lev: Lev| {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
+                message_id: [0xe0 + n; 32],
+                source: peer,
+                title: Vec::new(),
+                body: Vec::new(),
+                fields: lev.fields().to_vec(),
+                verified: true,
+            }),
+        );
+    };
+    let rungs: [(&str, &[MessageState]); 6] = [
+        ("waiting", &[]),
+        ("at the mailbox", &[MessageState::AwaitingCollection]),
+        ("arrived, the proof", &[MessageState::Delivered]),
+        ("on the device", &[MessageState::Delivered]),
+        ("read", &[MessageState::Delivered]),
+        ("not sent", &[MessageState::Failed]),
+    ];
+    for (n, (body, states)) in rungs.iter().enumerate() {
+        let id = [0x10 + n as u8; 32];
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer,
+                body: body.to_string(),
+            },
+        );
+        event(&mut model, OutboxEvent::Queued { message_id: id });
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        for state in *states {
+            event(
+                &mut model,
+                OutboxEvent::State {
+                    message_id: id,
+                    state: *state,
+                },
+            );
+        }
+    }
+    let at = (now().unix_secs - 60) as u32;
+    received(
+        &mut model,
+        1,
+        Lev {
+            propagation_receipt: Some(PropagationReceipt {
+                received_at: at,
+                ids: vec![[0x13; 32], [0x14; 32]],
+            }),
+            ..Lev::default()
+        },
+    );
+    received(
+        &mut model,
+        2,
+        Lev::mark_with(Receipt {
+            read_at: at,
+            ids: vec![[0x14; 32]],
+        }),
+    );
+    model.selected = model
+        .conversations
+        .iter()
+        .position(|c| c.peer == peer)
+        .expect("the chat");
+    let scene = model.scene(LayoutClass::Compact);
+    let marks: Vec<String> = scene
+        .chat
+        .as_ref()
+        .expect("the chat")
+        .groups
+        .iter()
+        .flat_map(|g| &g.bubbles)
+        .filter_map(|b| b.mark.as_ref().map(|m| m.mark.word().to_string()))
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            "sending",
+            "mailbox",
+            "arrived",
+            "delivered",
+            "read",
+            "failed"
+        ]
+    );
+    check("scene-ladder.json", &scene);
+}

@@ -17,7 +17,7 @@
 │                        ││                    ── Today ──                     │
 │                        ││ lunch at noon?  12:01                              │
 │                        ││                                                    │
-│                        ││                     yes, the usual place  12:01 ✓✓ │
+│                        ││                     yes, the usual place  12:01 ✓  │
 │                        ││                                             👍   ❤️  │
 │                        │├● to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
@@ -42,7 +42,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                    ── Today ──                     │
 │                        ││▌lunch at noon?  12:01                              │
 │                        ││                                                    │
-│                        ││                     yes, the usual place  12:01 ✓✓ │
+│                        ││                     yes, the usual place  12:01 ✓  │
 │                        ││                                             👍   ❤️  │
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
@@ -67,7 +67,7 @@ Enter run │ Esc close
 │                        ││▌lunch at noon?  12:01                              │
 │                        ││ [👍 ]                                               │
 │                        ││                                                    │
-│                        ││                     yes, the usual place  12:01 ✓✓ │
+│                        ││                     yes, the usual place  12:01 ✓  │
 │                        ││                                             👍   ❤️  │
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │

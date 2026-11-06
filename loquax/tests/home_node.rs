@@ -2117,6 +2117,96 @@ async fn tui(mesh: &Mesh, client: &std::path::Path, to: &str, script: &str, node
     );
 }
 
+/// 1462, cell 5 against the real stock: a writer that is its own node
+/// sends to a stock Python LXMF recipient from the scripted terminal. The
+/// recipient proves it, as LXMF does, and never says more: the bubble shows
+/// one tick ("arrived"), and still one well past the device receipt's batch
+/// window, never two.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two() {
+    let peer = PythonPeer::start();
+    let python_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    peer.lxmf_announce();
+    let writer = tempfile::tempdir().expect("the writer's home");
+    let script_file = writer.path().join("stock.script");
+    let frames_file = writer.path().join("stock.frames");
+    // `sleep` pumps the engine in real time: twice the batch window of the
+    // device receipt, so one that came would be drawn.
+    std::fs::write(
+        &script_file,
+        "until ready 20\n\
+         key enter\n\
+         key i\n\
+         type an den Stock-Empfaenger\n\
+         key enter\n\
+         until delivery arrived 40\n\
+         sleep 10000\n\
+         frame after\n\
+         key esc\n\
+         key q\n",
+    )
+    .expect("the script");
+    let args: Vec<String> = vec![
+        "tui".into(),
+        "--instance".into(),
+        mesh.instance.clone(),
+        "--config".into(),
+        mesh.config_dir.path().display().to_string(),
+        "--to".into(),
+        python_address.clone(),
+        "--sync-interval".into(),
+        "15m".into(),
+        "--script".into(),
+        script_file.display().to_string(),
+        "--frames".into(),
+        frames_file.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let home = writer.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &home)
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax tui");
+        child.wait_with_output().expect("wait for loquax tui")
+    })
+    .await
+    .expect("the tui thread");
+    let frames = std::fs::read_to_string(&frames_file).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nframes:\n{frames}\ntui.log:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(writer.path().join("tui.log")).unwrap_or_default(),
+    );
+    assert!(
+        peer.received()
+            .iter()
+            .any(|m| m.get("content").and_then(|v| v.as_str())
+                == Some(hex::encode("an den Stock-Empfaenger").as_str())),
+        "Python never got it: {:?}",
+        peer.received()
+    );
+    let after = frames
+        .split(": after ---")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no frame after: {frames}"));
+    let bubble = after
+        .lines()
+        .find(|line| line.contains("Stock-Empfaenger") && line.contains('✓'))
+        .unwrap_or_else(|| panic!("the bubble with its mark: {after}"));
+    assert!(!bubble.contains("✓✓"), "two ticks from a proof: {bubble}");
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
 /// What a client's history holds of the conversation with `peer`.
 fn conversation(
     client: &std::path::Path,

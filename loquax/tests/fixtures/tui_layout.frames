@@ -3,7 +3,7 @@
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││              yes, from ten. Shall I bring the T114 │
 │                        ││              and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││              enough for the hill?  14:02 ✓✓        │
+│ <b7b7b7b7…>      12:40 ││              enough for the hill?  14:02 ✓         │
 │ the antenna is in the… ││                                                    │
 │                        ││ long one, the hill eats signal  14:03              │
 │                        ││                                                    │
@@ -36,7 +36,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││ did the board come back from the soak?  19:40                                    │
 │                                  ││                                                                                  │
-│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓✓ │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓  │
 │                                  ││                                                                                  │
 │                                  ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow? Dana says the north                          │
@@ -44,7 +44,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  ││ is.  13:58                                                                       │
 │                                  ││                                                                                  │
 │                                  ││                      yes, from ten. Shall I bring the T114 and the long antenna, │
-│                                  ││                      or is the stick enough for the hill?  14:02 ✓✓              │
+│                                  ││                      or is the stick enough for the hill?  14:02 ✓               │
 │                                  ││                                                                                  │
 │                                  ││ long one, the hill eats signal  14:03                                            │
 │                                  ││                                                                                  │
@@ -69,7 +69,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓✓        │
+│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓         │
 │ the antenna is in the… ││                                                    │
 │                        ││ long one, the hill eats signal  14:03              │
 │                        ││                                                    │
@@ -94,19 +94,19 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │▌<4f4f4f4f…>      14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓✓        │
+│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓         │
 │ ┌ message ─────────────────────────────────────────────────────────────────┐ │
 │ │from you to <4f4f4f4f…>                                                   │ │
 │ │peer   4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f                                   │ │
 │ │id     a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2   │ │
 │ │size   96 bytes                                                           │ │
-│ │state  delivered: it arrived on <4f4f4f4f…>'s device                      │ │
+│ │state  arrived: <4f4f4f4f…>'s mailbox or device has it                    │ │
 │ │<4f4f4f4f…> sends no read receipts                                        │ │
 │ │                                                                          │ │
 │ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
 │ │14:02:00  queued by the router as a2a2a2a2                                │ │
-│ │14:02:00  delivered: proof received                                       │ │
+│ │14:02:00  arrived: proof received                                         │ │
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
 │                        ││                                                    │
 │                        ││                          the tripod fits  14:06 ⠋  │

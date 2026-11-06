@@ -1,33 +1,38 @@
-//! Receipts for propagated post (1395,
-//! `docs/src/concepts/loquax-propagation-receipts.md`).
+//! The recipient's device says it has our message: `lev` `0x07` (1395,
+//! `docs/src/concepts/loquax-propagation-receipts.md`; since 1462 for
+//! direct mail too, `docs/src/concepts/loquax-read-receipts.md`).
 //!
 //! - Every message the model sends carries capability bit 2
 //!   ([`leviculum_lxmf::lev::CAP_PROPAGATION_RECEIPTS`], set by
-//!   [`super::groups::client_caps`]): "I acknowledge propagated post and want
-//!   mine acknowledged".
-//! - A message that came through the propagation network
-//!   ([`crate::outbox::OutboxEvent::Propagated`], which the engine says after
-//!   the router handed it on as `DeliveryMethod::Propagated`) and whose own
-//!   mark carries bit 2 owes its sender a propagation receipt, key `0x07`
-//!   ([`acknowledges`]). It gathers per sender with the clock of the first
-//!   arrival and goes [`super::receipts::BATCH_MS`] after that arrival, alone
-//!   or on the next message to that sender, as a read receipt does. It is not
-//!   switchable and does not follow the read-receipts switch: it behaves like
-//!   the transport proof. Read wins: a message seen before its batch goes,
-//!   whose read receipt goes too, is left out, since read includes arrived.
-//! - A client of a home node acknowledges nothing: the home node is the
-//!   recipient's endpoint, collects from the propagation node and signs the
-//!   receipt when the message reaches its archive
-//!   (`crate::home::server::propagation_receipts`). The device takes the
-//!   home's word for it as it takes a seen mark.
+//!   [`super::groups::client_caps`]): "I say when your post is on my
+//!   device, and want mine said".
+//! - A message on this device whose own mark carries bit 2 owes its sender
+//!   a device receipt, key `0x07` ([`acknowledges`]), however it came:
+//!   direct, by the propagation network, or pulled from this device's
+//!   mailbox. The proof cannot say it (1462): a mailbox signs the proof with
+//!   the recipient's identity as soon as it archived the message, so the
+//!   writer could not tell its proof from a device's. One rule, no guess
+//!   about who has a mailbox: a device without one sends it too. It gathers
+//!   per sender with the clock of the first arrival and goes
+//!   [`super::receipts::BATCH_MS`] after that arrival, alone or on the next
+//!   message to that sender, as a read receipt does. It is not switchable
+//!   and does not follow the read-receipts switch: it behaves like the
+//!   transport proof. Read wins: a message seen before its batch goes,
+//!   whose read receipt goes too, is left out, since read includes it.
+//!   Position reports and a group's states owe none, nor does the history a
+//!   new device's first pull hands it ([`super::UiModel::history`]): the
+//!   device that took them live said so then.
+//! - A client of a home node holds no identity, so it says it with a mark
+//!   ([`crate::home::wire::MarkFlag::Arrived`]) and the home signs the
+//!   receipt (`crate::home::server`), the first device's mark winning. The
+//!   home itself acknowledges nothing: it is no device.
 //! - A `0x07` for one of our messages moves it to the delivered rung, two
 //!   grey ticks, whatever the read-receipts switch says, and the ledger keeps
-//!   [`VIA_RECEIPT`]: the words in the detail view and for the screen reader
-//!   say "delivered via the propagation network", where a proof says "on the
-//!   device". Monotone: delivered or read stays as it is.
+//!   [`ON_DEVICE`]. Monotone: delivered or read stays as it is.
 //! - What the propagation node says of a message (section B,
-//!   [`crate::pn_status`]): `collected` is two grey ticks with
-//!   [`COLLECTED`]; `expired` and `evicted` keep the one tick and add
+//!   [`crate::pn_status`]): `collected` is the arrived rung, one tick, with
+//!   [`COLLECTED`]: the recipient's identity took it, which its mailbox may
+//!   have done; `expired` and `evicted` keep the mark and add
 //!   [`NOT_COLLECTED`], which never says lost, since with peering the
 //!   recipient may have collected it at another node; `held` and `unknown`
 //!   change nothing.
@@ -44,7 +49,13 @@ use leviculum_ui::delivery::DeliveryState;
 use super::{to_hex, Message, Trust, UiEffect, UiModel};
 use crate::when::WallTime;
 
-/// The ledger line of our message a propagation receipt named.
+/// The ledger line of our message the recipient's device receipt named
+/// (1462).
+pub const ON_DEVICE: &str = "on the recipient's device: its receipt";
+
+/// The ledger line a propagation receipt left before 1462, when the
+/// recipient's mailbox signed it too: a ledger kept from then still says
+/// it, and it is no word of a device.
 pub const VIA_RECEIPT: &str = "delivered via the propagation network";
 
 /// The ledger line of our message the propagation node said its recipient
@@ -64,7 +75,7 @@ pub const ACKNOWLEDGED: &str = "arrival acknowledged to the sender";
 /// keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Witness {
-    /// The recipient's propagation receipt, `0x07`.
+    /// The recipient's device receipt, `0x07`.
     Receipt,
     /// The propagation node saw the recipient collect it.
     Collected,
@@ -77,31 +88,28 @@ impl Witness {
     /// The ledger line it is kept as.
     pub const fn ledger(self) -> &'static str {
         match self {
-            Self::Receipt => VIA_RECEIPT,
+            Self::Receipt => ON_DEVICE,
             Self::Collected => COLLECTED,
             Self::NotCollected => NOT_COLLECTED,
         }
     }
 }
 
-/// What a sent message's ledger says got it past the propagation node, and
-/// when this device learned it: the first of a receipt and a collection, or,
-/// with neither, a node's word that it was not collected there. A
-/// transport proof before them wins (the message is on the device, the
-/// plain words); none for a message the propagation network never named.
+/// What a sent message's ledger says got it on, and when this device
+/// learned it: the first of a device receipt and a collection, or, with
+/// neither, a node's word that it was not collected there. A transport
+/// proof before them wins (the plain words of the rung); none for a
+/// message nobody but its proof named.
 pub fn witness(message: &Message) -> Option<(Witness, Option<WallTime>)> {
     if !message.outbound {
         return None;
     }
     let mut not_collected = None;
     for entry in &message.ledger {
-        if entry
-            .what
-            .starts_with(super::ledger_words(DeliveryState::Delivered))
-        {
+        if is_proof(&entry.what) {
             return None;
         }
-        if entry.what == VIA_RECEIPT {
+        if entry.what == ON_DEVICE || entry.what == VIA_RECEIPT {
             return Some((Witness::Receipt, entry.at));
         }
         if entry.what == COLLECTED {
@@ -114,19 +122,63 @@ pub fn witness(message: &Message) -> Option<(Witness, Option<WallTime>)> {
     not_collected
 }
 
-/// The acknowledgement rule: a message that came by propagation is
-/// acknowledged when its own `lev` mark carries bit 2 and it is a message,
-/// not a receipt of either kind (no receipt of a receipt) nor a group's copy
-/// (the group's home strips bit 2, so this is belt and braces). A direct
-/// one has its transport proof and gets none.
-pub fn acknowledges(propagated: bool, lev: Option<&Lev>) -> bool {
-    propagated
-        && lev.is_some_and(|lev| {
-            lev.supports_propagation_receipts()
-                && lev.receipt.is_none()
-                && lev.propagation_receipt.is_none()
-                && lev.group_copy.is_none()
-        })
+/// Whether a ledger line is a transport proof's, today's or one kept from
+/// before 1462 (an apply may have added the leg in brackets).
+fn is_proof(what: &str) -> bool {
+    what.starts_with(super::PROOF_LINE) || what.starts_with(super::PROOF_LINE_BEFORE_1462)
+}
+
+/// A message of ours kept from before 1462, when a proof, a propagation
+/// receipt (which the recipient's mailbox signed too) or a collection was
+/// two ticks: its ledger says which, and none of them is the device's word,
+/// so it is shown at one tick now. A message whose two ticks came another
+/// way (a group's status, an import) keeps them. The store applies it as it
+/// loads a message; the next write keeps it.
+pub fn before_1462(message: &mut Message) {
+    if !message.outbound || message.delivery != Some(DeliveryState::Delivered) {
+        return;
+    }
+    let ledger = &message.ledger;
+    if ledger.iter().any(|entry| entry.what == ON_DEVICE) {
+        return;
+    }
+    if ledger.iter().any(|entry| {
+        entry.what.starts_with(super::PROOF_LINE_BEFORE_1462)
+            || entry.what == VIA_RECEIPT
+            || entry.what == COLLECTED
+    }) {
+        message.delivery = Some(DeliveryState::Arrived);
+    }
+}
+
+/// When the ladder's rungs came (1462), as this device learned them: the
+/// arrived rung (the first proof or collection) and the device's receipt.
+/// The Info sheet names them beside Sent and Read.
+pub fn rung_times(message: &Message) -> (Option<WallTime>, Option<WallTime>) {
+    let first = |hit: &dyn Fn(&str) -> bool| {
+        message
+            .ledger
+            .iter()
+            .find(|entry| hit(&entry.what))
+            .and_then(|entry| entry.at)
+    };
+    let arrived = first(&|what: &str| is_proof(what) || what == COLLECTED);
+    let on_device = first(&|what: &str| what == ON_DEVICE);
+    (arrived, on_device)
+}
+
+/// The acknowledgement rule (1462): a message on this device is
+/// acknowledged, however it came, when its own `lev` mark carries bit 2 and
+/// it is a message, not a receipt of either kind (no receipt of a receipt)
+/// nor a group's copy (the group's home strips bit 2, so this is belt and
+/// braces). A stock sender's message has no mark and gets none.
+pub fn acknowledges(lev: Option<&Lev>) -> bool {
+    lev.is_some_and(|lev| {
+        lev.supports_propagation_receipts()
+            && lev.receipt.is_none()
+            && lev.propagation_receipt.is_none()
+            && lev.group_copy.is_none()
+    })
 }
 
 /// The receipt alone to `peer`: the namespace with key `0x07` and no
@@ -162,14 +214,13 @@ struct Owed {
 }
 
 impl<B> UiModel<B> {
-    /// The engine says `message_id` from `source` came by propagation: owe
-    /// its sender a receipt when the rule says so.
-    pub(super) fn arrived_propagated(
-        &mut self,
-        source: [u8; 16],
-        message_id: [u8; 32],
-    ) -> Vec<UiEffect> {
-        if self.home_client || self.names.trust(&source) == Trust::Blocked {
+    /// `message_id` from `source` is on this device: owe its sender a
+    /// device receipt when the rule says so ([`acknowledges`]). Said for
+    /// every message that arrived, and again when the engine says one came
+    /// by propagation; the ledger's [`ACKNOWLEDGED`] makes it once. History
+    /// a first pull hands over owes none.
+    pub(super) fn arrived_here(&mut self, source: [u8; 16], message_id: [u8; 32]) -> Vec<UiEffect> {
+        if self.history || self.names.trust(&source) == Trust::Blocked {
             return Vec::new();
         }
         let now = self.now;
@@ -185,7 +236,8 @@ impl<B> UiModel<B> {
             return Vec::new();
         };
         let lev = Lev::from_fields(&message.fields);
-        if !acknowledges(true, lev.as_ref())
+        if !acknowledges(lev.as_ref())
+            || message.is_report()
             || message
                 .ledger
                 .iter()
@@ -220,6 +272,12 @@ impl<B> UiModel<B> {
         let peers: Vec<[u8; 16]> = self.arrivals.owed.keys().copied().collect();
         for peer in peers {
             self.drop_read(&peer);
+        }
+        // A client of a home node signs nothing: the home does, on the
+        // device's mark.
+        if self.home_client {
+            self.arrival_marks();
+            return;
         }
         let mut riding = Vec::new();
         for (e, effect) in effects.iter().enumerate() {
@@ -285,6 +343,42 @@ impl<B> UiModel<B> {
         }
     }
 
+    /// On a client of a home node: the owed ids that are due, as marks the
+    /// home node signs the receipts for (1462), at the clock of each
+    /// sender's first arrival.
+    fn arrival_marks(&mut self) {
+        let now = self.elapsed_ms;
+        let due: Vec<[u8; 16]> = self
+            .arrivals
+            .owed
+            .iter()
+            .filter(|(_, owed)| now >= owed.first_ms.saturating_add(super::receipts::BATCH_MS))
+            .map(|(peer, _)| *peer)
+            .collect();
+        let mut by_time: BTreeMap<u32, Vec<[u8; 32]>> = BTreeMap::new();
+        for peer in due {
+            let Some(owed) = self.arrivals.owed.remove(&peer) else {
+                continue;
+            };
+            by_time
+                .entry(owed.received_at)
+                .or_default()
+                .extend(owed.ids);
+        }
+        for (at, ids) in by_time {
+            self.mark_out(crate::home::wire::MarkFlag::Arrived { at }, ids);
+        }
+    }
+
+    /// The home's archive says a device said these are on it (1462): owed
+    /// no more here.
+    pub(super) fn home_arrived(&mut self, ids: &[[u8; 32]]) {
+        self.arrivals.owed.retain(|_, owed| {
+            owed.ids.retain(|id| !ids.contains(id));
+            !owed.ids.is_empty()
+        });
+    }
+
     /// Read wins: an id owed `peer` that was seen while read receipts go to
     /// that peer is named by the read receipt, which includes arrived.
     fn drop_read(&mut self, peer: &[u8; 16]) {
@@ -312,10 +406,9 @@ impl<B> UiModel<B> {
         }
     }
 
-    /// A propagation receipt from `peer` named these ids: each of our
-    /// messages to `peer` below delivered becomes delivered via the
-    /// propagation network. Not switchable. The log lines of the ids
-    /// dropped.
+    /// A device receipt from `peer` named these ids: each of our messages
+    /// to `peer` below delivered becomes delivered, on the device (1462).
+    /// Not switchable. The log lines of the ids dropped.
     pub(super) fn apply_arrival(
         &mut self,
         peer: [u8; 16],
@@ -377,18 +470,26 @@ impl<B> UiModel<B> {
         else {
             return false;
         };
-        let done = matches!(
+        let on_device = matches!(
             message.delivery,
             Some(DeliveryState::Delivered | DeliveryState::Read { .. })
         );
+        let arrived = on_device || message.delivery == Some(DeliveryState::Arrived);
         let changed = match witness {
-            Witness::Receipt | Witness::Collected if !done => {
+            Witness::Receipt if !on_device => {
                 message.delivery = Some(DeliveryState::Delivered);
                 message.note(now, witness.ledger());
                 true
             }
+            // The recipient's identity collected it, which its mailbox may
+            // have done: one tick (1462).
+            Witness::Collected if !arrived => {
+                message.delivery = Some(DeliveryState::Arrived);
+                message.note(now, witness.ledger());
+                true
+            }
             Witness::NotCollected
-                if !done && !message.ledger.iter().any(|e| e.what == NOT_COLLECTED) =>
+                if !arrived && !message.ledger.iter().any(|e| e.what == NOT_COLLECTED) =>
             {
                 message.note(now, witness.ledger());
                 true
@@ -422,19 +523,12 @@ mod tests {
     #[test]
     fn the_acknowledgement_rule() {
         let asks = caps(CAP_PROPAGATION_RECEIPTS);
-        assert!(acknowledges(true, Some(&asks)));
-        assert!(acknowledges(
-            true,
-            Some(&caps(
-                CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS
-            ))
-        ));
-        assert!(!acknowledges(false, Some(&asks)), "direct has its proof");
-        assert!(!acknowledges(
-            true,
-            Some(&caps(CAP_READ_RECEIPTS | CAP_GROUPS))
-        ));
-        assert!(!acknowledges(true, None), "a stock sender");
+        assert!(acknowledges(Some(&asks)));
+        assert!(acknowledges(Some(&caps(
+            CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS
+        ))));
+        assert!(!acknowledges(Some(&caps(CAP_READ_RECEIPTS | CAP_GROUPS))));
+        assert!(!acknowledges(None), "a stock sender");
         let read = Lev {
             receipt: Some(Receipt {
                 read_at: 1,
@@ -442,7 +536,7 @@ mod tests {
             }),
             ..asks.clone()
         };
-        assert!(!acknowledges(true, Some(&read)), "no receipt of a receipt");
+        assert!(!acknowledges(Some(&read)), "no receipt of a receipt");
         let arrival = Lev {
             propagation_receipt: Some(PropagationReceipt {
                 received_at: 1,
@@ -450,7 +544,7 @@ mod tests {
             }),
             ..asks.clone()
         };
-        assert!(!acknowledges(true, Some(&arrival)));
+        assert!(!acknowledges(Some(&arrival)));
         let copy = Lev {
             group_copy: Some(GroupCopy {
                 sender: [1; 16],
@@ -459,7 +553,56 @@ mod tests {
             }),
             ..asks
         };
-        assert!(!acknowledges(true, Some(&copy)));
+        assert!(!acknowledges(Some(&copy)));
+    }
+
+    /// 1462: a stored message at two ticks loads at one when its ledger
+    /// shows only a proof, a mailbox-signed propagation receipt or a
+    /// collection; the device's receipt, a group's status, an incoming
+    /// message and another rung keep what they had.
+    #[test]
+    fn a_message_kept_from_before_1462_is_one_tick_unless_its_device_said_so() {
+        use crate::ui::{LedgerEntry, Signature, PROOF_LINE_BEFORE_1462};
+        let message = |outbound: bool, delivery: DeliveryState, lines: &[&str]| Message {
+            outbound,
+            size: 2,
+            body: "hi".into(),
+            id: Some([1; 32]),
+            delivery: Some(delivery),
+            signature: Signature::Verified,
+            leg: None,
+            unproven: false,
+            at: None,
+            ledger: lines
+                .iter()
+                .map(|line| LedgerEntry::new(None, line))
+                .collect(),
+            last_leg: None,
+            activity: 1,
+            fields: Vec::new(),
+        };
+        let after = |mut m: Message| {
+            before_1462(&mut m);
+            m.delivery
+        };
+        let d = DeliveryState::Delivered;
+        let proof = "delivered: proof received (direct)";
+        assert!(proof.starts_with(PROOF_LINE_BEFORE_1462));
+        for lines in [&[proof][..], &[VIA_RECEIPT], &[COLLECTED]] {
+            assert_eq!(
+                after(message(true, d, lines)),
+                Some(DeliveryState::Arrived),
+                "{lines:?}"
+            );
+        }
+        assert_eq!(after(message(true, d, &[proof, ON_DEVICE])), Some(d));
+        assert_eq!(
+            after(message(true, d, &["the group has it: proof received"])),
+            Some(d)
+        );
+        assert_eq!(after(message(false, d, &[proof])), Some(d));
+        let read = DeliveryState::Read { at: 5 };
+        assert_eq!(after(message(true, read, &[proof])), Some(read));
     }
 
     /// The receipt alone is the spec's size: 18 bytes plus 34 an id in the

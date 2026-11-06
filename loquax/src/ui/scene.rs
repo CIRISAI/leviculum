@@ -552,8 +552,8 @@ pub struct VoiceNode {
 /// The screen reader's words for `mark`; `read_at` is the reader's time
 /// for [`chat::Mark::Read`], shown in the zone `now` is in.
 ///
-/// `witness` says who confirmed [`chat::Mark::Delivered`] when it was not
-/// a proof (1395): the same two ticks, the words of the propagation
+/// `witness` says who confirmed [`chat::Mark::Arrived`] when it was not
+/// a proof (1395, 1462): the same one tick, the words of the propagation
 /// network.
 pub fn mark_words(
     mark: chat::Mark,
@@ -566,11 +566,11 @@ pub fn mark_words(
         chat::Mark::Sending => Text::key(StrId::StateSending),
         chat::Mark::Unconfirmed => Text::key(StrId::StateUnconfirmed),
         chat::Mark::Mailbox => Text::key(StrId::StateMailbox),
-        chat::Mark::Delivered => match witness {
-            Some(Witness::Receipt) => Text::key(StrId::StateDeliveredViaPn),
+        chat::Mark::Arrived => match witness {
             Some(Witness::Collected) => Text::key(StrId::StateCollected),
-            _ => Text::key(StrId::StateDelivered),
+            _ => Text::key(StrId::StateArrived),
         },
+        chat::Mark::Delivered => Text::key(StrId::StateDelivered),
         chat::Mark::Read => {
             let at = WallTime {
                 unix_secs: i64::from(read_at.unwrap_or(0)),
@@ -2870,6 +2870,7 @@ mod tests {
             DeliveryState::Queued,
             DeliveryState::Sent,
             DeliveryState::InMailbox,
+            DeliveryState::Arrived,
             DeliveryState::Delivered,
             DeliveryState::Read {
                 at: (t + 600) as u32,
@@ -2911,7 +2912,14 @@ mod tests {
                 "Waiting in the mailbox",
                 "Wartet im Postfach",
             ),
-            (chat::Mark::Delivered, "Delivered", "Zugestellt"),
+            // 1462: the proof is one tick and neutral, the device's own
+            // word is two.
+            (chat::Mark::Arrived, "Arrived", "Angekommen"),
+            (
+                chat::Mark::Delivered,
+                "On the recipient's device",
+                "Auf dem Gerät",
+            ),
             // 10:10 at the clock's +1 h.
             (chat::Mark::Read, "Read at 10:10", "Gelesen um 10:10"),
             (

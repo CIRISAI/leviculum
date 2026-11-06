@@ -131,11 +131,13 @@ leviculum_ui::catalogue! {
     StateSending = "state_sending", "Sending", "Wird gesendet";
     StateUnconfirmed = "state_unconfirmed", "Sent, not confirmed yet", "Gesendet, noch nicht bestätigt";
     StateMailbox = "state_mailbox", "Waiting in the mailbox", "Wartet im Postfach";
-    StateDelivered = "state_delivered", "Delivered", "Zugestellt";
+    // One tick from the recipient's proof (1462): its mailbox or its
+    // device, the word is neutral; two ticks are the device's own word.
+    StateArrived = "state_arrived", "Arrived", "Angekommen";
+    StateDelivered = "state_delivered", "On the recipient's device", "Auf dem Gerät";
     StateRead = "state_read", "Read at %1$s", "Gelesen um %1$s";
-    // The delivered rung's words when the propagation network, not a
-    // proof, witnessed it (1395, loquax-propagation-receipts.md).
-    StateDeliveredViaPn = "state_delivered_via_pn", "Delivered via the propagation network", "Über das Propagation-Netz zugestellt";
+    // The arrived rung's words when the propagation node, not a proof,
+    // witnessed it (1395, 1462, loquax-propagation-receipts.md).
     StateCollected = "state_collected", "Collected from the propagation network", "Aus dem Propagation-Netz abgeholt";
     StateFailed = "state_failed", "Not sent. Double tap to send again", "Nicht gesendet. Doppeltippen, um es erneut zu senden";
     SendAgain = "scene_send_again", "Send again", "Erneut senden";
@@ -157,8 +159,12 @@ leviculum_ui::catalogue! {
     InfoPreparing = "info_preparing", "Being prepared for sending", "Wird zum Senden vorbereitet";
     InfoSending = "info_sending", "Being sent now", "Wird gerade gesendet";
     InfoMailbox = "info_mailbox", "In the mailbox, delivered once %1$s is online", "Im Postfach, wird zugestellt, sobald %1$s online ist";
-    InfoDelivered = "info_delivered", "Arrived on %1$s's device", "Auf dem Gerät von %1$s angekommen";
-    InfoDeliveredViaPn = "info_delivered_via_pn", "Delivered via the propagation network at %1$s", "Über das Propagation-Netz zugestellt um %1$s";
+    InfoDelivered = "info_delivered", "On %1$s's device", "Auf dem Gerät von %1$s";
+    // The times of the ladder (1462): when the proof came, when the device
+    // said it has it, when it was read.
+    InfoArrived = "info_arrived", "Arrived", "Angekommen";
+    InfoOnDevice = "info_on_device", "On the device", "Auf dem Gerät";
+    InfoReadAt = "info_read_at", "Read", "Gelesen";
     InfoCollected = "info_collected", "Collected from the propagation network at %1$s", "Um %1$s aus dem Propagation-Netz abgeholt";
     InfoNotCollected = "info_not_collected", "Not collected at the propagation node; perhaps delivered via another", "Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt";
     InfoRefused = "info_refused", "Not sent: it was refused. Double tap to send again", "Nicht gesendet: es wurde abgelehnt. Doppeltippen, um es erneut zu senden";

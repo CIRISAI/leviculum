@@ -44,7 +44,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││               are you at the field site?  12:00 ✓✓ │
+│                        ││               are you at the field site?  12:00 ✓  │
 │                        │├● to Bob ·61dd────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -143,7 +143,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││               are you at the field site?  12:00 ✓✓ │
+│                        ││               are you at the field site?  12:00 ✓  │
 │                        ││                                                    │
 │                        ││ yes, from ten  12:00                               │
 │                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
@@ -246,7 +246,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││               are you at the field site?  12:00 ✓✓ │
+│                        ││               are you at the field site?  12:00 ✓  │
 │                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

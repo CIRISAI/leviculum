@@ -191,7 +191,10 @@ fn container(
     };
     let lxmf_state = match (row.outbound, row.delivery) {
         (false, _) => state::DELIVERED,
-        (true, Some(DeliveryState::Delivered | DeliveryState::Read { .. })) => state::DELIVERED,
+        (
+            true,
+            Some(DeliveryState::Arrived | DeliveryState::Delivered | DeliveryState::Read { .. }),
+        ) => state::DELIVERED,
         (true, Some(DeliveryState::Sent | DeliveryState::InMailbox)) => state::SENT,
         (true, Some(DeliveryState::Rejected)) => state::REJECTED,
         (true, Some(DeliveryState::Failed)) => state::FAILED,

@@ -68,6 +68,31 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     if let Some(at) = message.at {
         rows.push(InfoRow::new(StrId::InfoSent, when(&at, model.now.as_ref())));
     }
+    // The ladder's times of ours (1462): when its proof came (the
+    // recipient's mailbox or device), when the device said it has it, when
+    // it was read; each once known, read only where receipts are shown.
+    if message.outbound {
+        let (arrived, on_device) = super::arrival::rung_times(message);
+        let read = match message
+            .delivery
+            .map(|state| shown_delivery(state, model.home_client, model.reading.on))
+        {
+            Some(DeliveryState::Read { at }) if at > 0 => Some(WallTime {
+                unix_secs: i64::from(at),
+                offset_secs: message.at.or(model.now).map_or(0, |n| n.offset_secs),
+            }),
+            _ => None,
+        };
+        for (label, at) in [
+            (StrId::InfoArrived, arrived),
+            (StrId::InfoOnDevice, on_device),
+            (StrId::InfoReadAt, read),
+        ] {
+            if let Some(at) = at {
+                rows.push(InfoRow::new(label, when(&at, model.now.as_ref())));
+            }
+        }
+    }
     let taken = message.ledger.first().and_then(|entry| entry.at);
     if let (false, Some(at)) = (message.outbound, taken) {
         rows.push(InfoRow::new(
@@ -93,15 +118,13 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
                 }
                 DeliveryState::Sent => Text::key(StrId::StateUnconfirmed),
                 DeliveryState::InMailbox => Text::Key(StrId::InfoMailbox, Vec::from([name()])),
-                DeliveryState::Delivered => match witness {
-                    Some((Witness::Receipt, at)) => {
-                        Text::Key(StrId::InfoDeliveredViaPn, Vec::from([hh_mm(at)]))
-                    }
+                DeliveryState::Arrived => match witness {
                     Some((Witness::Collected, at)) => {
                         Text::Key(StrId::InfoCollected, Vec::from([hh_mm(at)]))
                     }
-                    _ => Text::Key(StrId::InfoDelivered, Vec::from([name()])),
+                    _ => Text::key(StrId::StateArrived),
                 },
+                DeliveryState::Delivered => Text::Key(StrId::InfoDelivered, Vec::from([name()])),
                 DeliveryState::Read { at } => {
                     let at = WallTime {
                         unix_secs: i64::from(at),
@@ -113,7 +136,9 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
                 DeliveryState::Failed => Text::key(StrId::StateFailed),
             };
             rows.push(InfoRow::new(StrId::InfoState, value));
-            if message.outbound && state == DeliveryState::Delivered {
+            if message.outbound
+                && matches!(state, DeliveryState::Arrived | DeliveryState::Delivered)
+            {
                 let why = match (model.reading.on, conversation.flags.receipts) {
                     (false, _) => Some(Text::key(StrId::InfoReceiptsOff)),
                     (true, false) => Some(Text::Key(StrId::InfoNoReceipts, Vec::from([name()]))),

@@ -385,7 +385,9 @@ fn read_message(
 /// the device is failed: loquax does not send it again on its behalf.
 fn delivery_of(state: Option<i64>, method: Option<i64>) -> DeliveryState {
     match state {
-        Some(state::DELIVERED) => DeliveryState::Delivered,
+        // A proof, which the recipient's mailbox may have signed: one tick
+        // (1462).
+        Some(state::DELIVERED) => DeliveryState::Arrived,
         Some(state::SENT) if method == Some(DeliveryMethod::Propagated as i64) => {
             DeliveryState::InMailbox
         }
@@ -417,7 +419,7 @@ mod tests {
     fn states_map_to_loquax_delivery() {
         assert_eq!(
             delivery_of(Some(state::DELIVERED), Some(2)),
-            DeliveryState::Delivered
+            DeliveryState::Arrived
         );
         assert_eq!(
             delivery_of(Some(state::SENT), Some(3)),

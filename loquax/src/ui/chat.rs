@@ -31,11 +31,17 @@ pub const GROUP_SECS: i64 = 180;
 
 /// The marks a pixel screen draws, the ladder of
 /// `docs/src/concepts/loquax-read-receipts.md`, section 6 (1232), from the
-/// glyph table's nine states: a clock while nobody confirmed it, one tick
-/// from the mailbox, two from the recipient's device, two heavier in the
-/// accent once read, a red circle with `!` when it was not sent. Six
-/// marks, five glyphs: sending and sent-unconfirmed share the clock and
-/// differ in their words.
+/// glyph table's ten states: a clock while nobody confirmed it, one tick
+/// from the mailbox or the recipient's proof, two once the recipient's
+/// device said it has it (`lev` 0x07, 1462), two heavier in the accent once
+/// read, a red circle with `!` when it was not sent. Seven marks, five
+/// glyphs: sending and sent-unconfirmed share the clock, mailbox and
+/// arrived the one tick, and each pair differs in its words.
+///
+/// The proof is one tick, never two: the recipient's mailbox signs it with
+/// the recipient's identity as soon as it archived the message, so the
+/// writer cannot tell it from a device's (1462). Only the device's own
+/// word is two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     /// Queued, stamping or in flight.
@@ -44,7 +50,10 @@ pub enum Mark {
     Unconfirmed,
     /// The mailbox took it (a propagated `Sent`).
     Mailbox,
-    /// The recipient's device proved it.
+    /// The recipient's identity proved it: its mailbox or its device has
+    /// it, the proof does not say which.
+    Arrived,
+    /// The recipient's device said it has it (`lev` 0x07).
     Delivered,
     /// The peer's read receipt named it (1230).
     Read,
@@ -58,10 +67,11 @@ fn shown<B>(state: Option<DeliveryState>, model: &UiModel<B>) -> Option<Delivery
 }
 
 /// Every mark, in the ladder's order.
-pub const MARKS: [Mark; 6] = [
+pub const MARKS: [Mark; 7] = [
     Mark::Sending,
     Mark::Unconfirmed,
     Mark::Mailbox,
+    Mark::Arrived,
     Mark::Delivered,
     Mark::Read,
     Mark::Failed,
@@ -76,6 +86,7 @@ impl Mark {
             | Some(DeliveryState::InFlight) => Self::Sending,
             Some(DeliveryState::Sent) => Self::Unconfirmed,
             Some(DeliveryState::InMailbox) => Self::Mailbox,
+            Some(DeliveryState::Arrived) => Self::Arrived,
             Some(DeliveryState::Delivered) => Self::Delivered,
             Some(DeliveryState::Read { .. }) => Self::Read,
             Some(DeliveryState::Rejected) | Some(DeliveryState::Failed) => Self::Failed,
@@ -83,12 +94,13 @@ impl Mark {
     }
 
     /// The facade's word: `sending`, `unconfirmed`, `mailbox`,
-    /// `delivered`, `read`, `failed`.
+    /// `arrived`, `delivered`, `read`, `failed`.
     pub fn word(self) -> &'static str {
         match self {
             Self::Sending => "sending",
             Self::Unconfirmed => "unconfirmed",
             Self::Mailbox => "mailbox",
+            Self::Arrived => "arrived",
             Self::Delivered => "delivered",
             Self::Read => "read",
             Self::Failed => "failed",
@@ -100,7 +112,7 @@ impl Mark {
     pub fn resource(self) -> &'static str {
         match self {
             Self::Sending | Self::Unconfirmed => "state_clock",
-            Self::Mailbox => "state_tick",
+            Self::Mailbox | Self::Arrived => "state_tick",
             Self::Delivered => "state_ticks",
             Self::Read => "state_ticks_read",
             Self::Failed => "state_failed",
@@ -111,7 +123,7 @@ impl Mark {
     pub fn shape(self) -> &'static Shape {
         match self {
             Self::Sending | Self::Unconfirmed => &CLOCK,
-            Self::Mailbox => &TICK,
+            Self::Mailbox | Self::Arrived => &TICK,
             Self::Delivered => &TICKS,
             Self::Read => &TICKS_READ,
             Self::Failed => &FAILED,
@@ -1288,7 +1300,7 @@ mod tests {
         assert_eq!(TICKS_READ.lines, TICKS.lines);
     }
 
-    /// Each state of the core's nine lands on its rung of five.
+    /// Each state of the core's ten lands on its rung of seven.
     #[test]
     fn each_delivery_state_has_its_rung() {
         use DeliveryState as S;
@@ -1299,6 +1311,7 @@ mod tests {
             Some(S::InFlight),
             Some(S::Sent),
             Some(S::InMailbox),
+            Some(S::Arrived),
             Some(S::Delivered),
             Some(S::Read { at: 7 }),
             Some(S::Rejected),
@@ -1314,6 +1327,7 @@ mod tests {
             Mark::Sending,
             Mark::Unconfirmed,
             Mark::Mailbox,
+            Mark::Arrived,
             Mark::Delivered,
             Mark::Read,
             Mark::Failed,
@@ -1327,6 +1341,7 @@ mod tests {
                 "sending",
                 "unconfirmed",
                 "mailbox",
+                "arrived",
                 "delivered",
                 "read",
                 "failed"
@@ -1338,6 +1353,7 @@ mod tests {
             [
                 "state_clock",
                 "state_clock",
+                "state_tick",
                 "state_tick",
                 "state_ticks",
                 "state_ticks_read",

@@ -47,7 +47,7 @@ pub struct ContactFacts {
 /// How a sent message went, in the words of a contact screen.
 fn route_words(state: DeliveryState) -> &'static str {
     match state {
-        DeliveryState::Delivered => "delivered directly",
+        DeliveryState::Arrived => "delivered directly",
         DeliveryState::InMailbox => "left at a propagation node",
         other => super::state_words(other),
     }

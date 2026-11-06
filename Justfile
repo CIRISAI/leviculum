@@ -2599,7 +2599,8 @@ m9-render-no-std:
 # receipts through the mailbox (`loquax/tests/mailbox_receipts.rs`, 1234)
 # need `history` too; in-process, no sockets. `loquax mailbox setup`
 # (`loquax/tests/mailbox_setup.rs`, 1266) is the terminal build's command;
-# it spawns the binary over a temporary home, no daemon.
+# it spawns the binary over a temporary home, no daemon. The ticks' cells
+# (`loquax/tests/device_receipts.rs`, 1462) need `history`; in-process.
 # The forge runs this recipe and has no reference submodule, so the home node
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
@@ -2607,7 +2608,7 @@ m9-render-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile

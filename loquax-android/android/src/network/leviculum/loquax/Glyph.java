@@ -37,6 +37,7 @@ final class Glyph extends Drawable {
     static Kind mark(String state) {
         switch (state) {
             case "mailbox": return Kind.TICK;
+            case "arrived": return Kind.TICK;
             case "delivered": return Kind.TICKS;
             case "read": return Kind.TICKS_READ;
             case "failed": return Kind.FAILED;

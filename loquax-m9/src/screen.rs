@@ -348,6 +348,7 @@ pub fn state_of(mark: Mark) -> DeliveryState {
         Mark::Sending => DeliveryState::Queued,
         Mark::Unconfirmed => DeliveryState::Sent,
         Mark::Mailbox => DeliveryState::InMailbox,
+        Mark::Arrived => DeliveryState::Arrived,
         Mark::Delivered => DeliveryState::Delivered,
         Mark::Read => DeliveryState::Read { at: 0 },
         Mark::Failed => DeliveryState::Failed,
@@ -450,7 +451,7 @@ mod tests {
     #[test]
     fn every_mark_has_an_ascii_rung_the_atlas_draws() {
         let rungs: Vec<&str> = MARKS.iter().map(|&m| glyph(state_of(m)).ascii).collect();
-        assert_eq!(rungs, [". ", ". ", "v ", "vv", "VV", "! "]);
+        assert_eq!(rungs, [". ", ". ", "v ", "v ", "vv", "VV", "! "]);
         for (mark, rung) in MARKS.iter().zip(&rungs) {
             assert!(rung.is_ascii(), "{mark:?} is {rung:?}");
             assert_eq!(
