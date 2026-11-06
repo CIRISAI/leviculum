@@ -13,7 +13,8 @@
 //! - rung 1, light: the passes of cost class C that only finish the
 //!   picture drop out ([`Pass::lowest`]);
 //! - rung 2, minimal: the ground, the pins, the tracks and the radar; the
-//!   names ride along as the sprites they were, not placed anew.
+//!   names ride along as the sprites they were, not placed anew, and the
+//!   tiles drawn are drafts without their edges smoothed.
 //!
 //! The rules, as the study numbers them: the average of the moving frame
 //! over the budget three frames running lowers the rung at once, even in
@@ -65,10 +66,14 @@ pub enum Pass {
     Buildings,
     /// The names placed anew by the rule (1225).
     Labels,
+    /// The edges of the ground's fills and lines blended by their
+    /// coverage (1422, the study's 2.1a): tiles drawn without it while
+    /// the view moves are drafts a frame with it draws again.
+    Smooth,
 }
 
 /// The passes.
-pub const PASSES: usize = 6;
+pub const PASSES: usize = 7;
 
 /// What a pass costs, host, 480 x 320, a frame or a tile (the study's
 /// classes): A under 0.1 ms, B 0.1 to 1 ms, C over 1 ms or a factor on
@@ -89,6 +94,7 @@ impl Pass {
         Pass::Tracks,
         Pass::Buildings,
         Pass::Labels,
+        Pass::Smooth,
     ];
 
     const fn index(self) -> usize {
@@ -99,16 +105,18 @@ impl Pass {
             Pass::Tracks => 3,
             Pass::Buildings => 4,
             Pass::Labels => 5,
+            Pass::Smooth => 6,
         }
     }
 
     /// The deepest rung a moving frame still runs this pass at: what
     /// orients survives to the minimal rung, the names placed anew
-    /// (class C on a phone) go below the light one.
+    /// (class C on a phone) and the smoothed edges go below the light
+    /// one.
     pub const fn lowest(self) -> u8 {
         match self {
             Pass::Ground | Pass::Radar | Pass::Pins | Pass::Tracks | Pass::Buildings => 2,
-            Pass::Labels => 1,
+            Pass::Labels | Pass::Smooth => 1,
         }
     }
 
@@ -116,7 +124,7 @@ impl Pass {
     pub const fn class(self) -> Cost {
         match self {
             Pass::Radar | Pass::Pins => Cost::A,
-            Pass::Tracks => Cost::B,
+            Pass::Tracks | Pass::Smooth => Cost::B,
             Pass::Ground | Pass::Buildings | Pass::Labels => Cost::C,
         }
     }
@@ -130,6 +138,7 @@ impl Pass {
             Pass::Tracks => "tracks",
             Pass::Buildings => "buildings",
             Pass::Labels => "labels",
+            Pass::Smooth => "smooth",
         }
     }
 }
@@ -549,8 +558,10 @@ mod tests {
             "at least one more a frame"
         );
         let (third, _) = l.rest_plan(second, usize::MAX, none);
-        assert_eq!(third, Layers::ALL);
-        assert_eq!(l.rest_step(third, usize::MAX, none), Rest::Full);
+        assert_eq!(third, second.with(Pass::Labels));
+        let (fourth, _) = l.rest_plan(third, usize::MAX, none);
+        assert_eq!(fourth, Layers::ALL, "the smoothing, not measured yet");
+        assert_eq!(l.rest_step(fourth, usize::MAX, none), Rest::Full);
     }
 
     #[test]
@@ -576,8 +587,10 @@ mod tests {
                 assert!(l.has(p), "{} at rung {rung}", p.name());
             }
         }
-        assert!(Layers::of_rung(1).has(Pass::Labels));
-        assert!(!Layers::of_rung(2).has(Pass::Labels));
+        for p in [Pass::Labels, Pass::Smooth] {
+            assert!(Layers::of_rung(1).has(p));
+            assert!(!Layers::of_rung(2).has(p));
+        }
         assert_eq!(Layers::of_rung(0), Layers::ALL);
     }
 
@@ -591,7 +604,7 @@ mod tests {
         assert_eq!(l.rung(), 0);
         assert_eq!(
             Layers::ALL.without(Layers::of_rung(2)),
-            Layers::NONE.with(Pass::Labels)
+            Layers::NONE.with(Pass::Labels).with(Pass::Smooth)
         );
         let bytes = |p| usize::from(p == Pass::Labels) << 30;
         assert_eq!(

@@ -16,6 +16,8 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
 
+use crate::coverage::Coverage;
+
 /// `c` as 8-bit red, green and blue, each channel's top bits repeated
 /// into its bottom ones so full intensity stays 255: the one conversion
 /// every consumer of a frame outside the panel (a PPM, a terminal picture)
@@ -127,6 +129,8 @@ pub struct RgbaFrame<'a> {
     px: &'a mut [u8],
     width: u32,
     height: u32,
+    /// Span ends blended by their coverage ([`Coverage`]).
+    smooth: bool,
 }
 
 impl<'a> RgbaFrame<'a> {
@@ -137,7 +141,20 @@ impl<'a> RgbaFrame<'a> {
             .checked_mul(height as usize)?
             .checked_mul(4)?;
         let px = px.get_mut(..n)?;
-        Some(Self { px, width, height })
+        Some(Self {
+            px,
+            width,
+            height,
+            smooth: false,
+        })
+    }
+
+    /// The frame with the filler's span ends blended by their coverage
+    /// (1422), or, with `false`, every pixel hard as the Rgb565 frame has
+    /// it.
+    pub fn smoothed(mut self, smooth: bool) -> Self {
+        self.smooth = smooth;
+        self
     }
 
     /// Width and height in pixels.
@@ -206,6 +223,27 @@ impl DrawTarget for RgbaFrame<'_> {
         let v = rgba(color);
         for px in self.px.chunks_exact_mut(4) {
             px.copy_from_slice(&v);
+        }
+        Ok(())
+    }
+}
+
+impl Coverage for Frame<'_> {}
+
+impl Coverage for RgbaFrame<'_> {
+    fn smooth(&self) -> bool {
+        self.smooth
+    }
+
+    fn blend(&mut self, x: i32, y: i32, color: Rgb565, alpha: u8) -> Result<(), Self::Error> {
+        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+            return Ok(());
+        }
+        let at = ((y as u32 * self.width + x as u32) * 4) as usize;
+        let (a, keep) = (u16::from(alpha), 256 - u16::from(alpha));
+        let src = rgba(color);
+        for (d, s) in self.px[at..at + 3].iter_mut().zip(src) {
+            *d = ((u16::from(s) * a + u16::from(*d) * keep) >> 8) as u8;
         }
         Ok(())
     }

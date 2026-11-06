@@ -627,6 +627,10 @@ impl Frames {
             fallback: self.last_zoom,
             moving: ask.moving,
             asked: shown,
+            // At rest a tile is drawn smoothed at once; while moving only
+            // at a rung that smooths, the others drafts (1422).
+            smooth: !ask.moving || layers.has(Pass::Smooth),
+            resmooth: layers.has(Pass::Smooth),
         };
         // The frontend's pixels are the frame's size (`frame_into`).
         let (rgba, (attribution, missing)) = match target {
@@ -1844,8 +1848,16 @@ mod tests {
         assert!(!first.layers.has(Pass::Labels), "the names wait a frame");
         assert!(first.missing >= 1, "owing the names, it asks again");
         let second = frames.frame(&at(Some(16), false, view));
-        assert_eq!(second.layers, Layers::ALL);
-        assert_eq!(second.missing, 0, "full");
+        assert!(second.layers.has(Pass::Labels));
+        assert!(second.missing >= 1, "the smoothing, owed");
+        let third = frames.frame(&at(Some(32), false, view));
+        assert_eq!(third.layers, Layers::ALL);
+        assert_eq!(third.missing, 0, "full");
+        assert_eq!(
+            frames.tile_stats().smoothed,
+            0,
+            "drawn smoothed at rest at once"
+        );
 
         // Too little memory for the names' sprites: skipped, not owed.
         let mut frames = florence();
@@ -1863,8 +1875,18 @@ mod tests {
         frames.hold_rung(Some(2));
         let mut moved = view;
         moved.pan(40, 0);
+        frames.clear_tiles();
+        let before = frames.tile_stats().rendered;
         let minimal = frames.frame(&at(Some(16), true, moved));
         assert_eq!((minimal.rung, minimal.layers), (2, Layers::of_rung(2)));
+        // The tiles it drew are drafts: the frame at rest draws them
+        // again smoothed, and the picture differs at the edges only.
+        let drafted = frames.tile_stats().rendered - before;
+        assert!(drafted > 0);
+        let rest = frames.frame(&at(Some(32), false, moved));
+        assert_eq!(rest.missing, 0);
+        assert_eq!(frames.tile_stats().smoothed, drafted, "every draft again");
+        assert_ne!(minimal.rgba, rest.rgba, "smoothed edges");
         frames.hold_rung(None);
         assert_eq!(frames.frame(&at(None, true, moved)).layers, Layers::ALL);
     }

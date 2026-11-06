@@ -52,6 +52,8 @@ fn main() {
                 fallback: None,
                 moving: false,
                 asked: None,
+                smooth: true,
+                resmooth: true,
             };
             let time = |cache: &mut TileCache, frame: &Frame| {
                 let mut ms = Vec::new();

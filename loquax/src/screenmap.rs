@@ -16,14 +16,10 @@
 use std::string::String;
 use std::vec::Vec;
 
-use embedded_graphics::pixelcolor::raw::RawU16;
-use embedded_graphics::pixelcolor::Rgb565;
-
 use leviculum_map::draw::Ink;
 use leviculum_map::labels::Rect as Box2;
 use leviculum_map::pins::{self, Mark, Metrics, Pin};
 use leviculum_map::viewport::{ExactView, Viewport};
-use leviculum_mapfill::frame::rgb888;
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::Rect;
 
@@ -104,7 +100,7 @@ impl std::fmt::Debug for Picture {
 
 /// `view` drawn in colour and `style` with lines as wide as `scale` asks
 /// (2.0 on a screen of twice the density draws them twice as wide), as
-/// RGBA; with `names_after` (the pins' boxes, [`taken`]) the map's names
+/// RGBA, the edges smoothed; with `names_after` (the pins' boxes, [`taken`]) the map's names
 /// set into it after them by `type_` ([`mapnames::set`]), streets along
 /// their lines.
 pub fn paint(
@@ -116,12 +112,10 @@ pub fn paint(
     type_: &mut Typesetter,
 ) -> Picture {
     let percent = (scale * 100.0).round().max(1.0) as u32;
-    let drawn = painter.draw(view, Ink::Colour, style, percent);
-    let mut rgba = Vec::with_capacity(drawn.fb.len() * 4);
-    for &px in &drawn.fb {
-        let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
-        rgba.extend_from_slice(&[r, g, b, 0xff]);
-    }
+    // Straight into RGBA, the edges smoothed as a tile at rest has them
+    // (1422).
+    let drawn = painter.draw_rgba(view, Ink::Colour, style, percent, true);
+    let mut rgba = drawn.rgba;
     let mut set = Vec::new();
     if let Some(taken) = &names_after {
         let labels = painter.labels(view, true);

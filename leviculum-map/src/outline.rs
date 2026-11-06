@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
+use leviculum_mapfill::coverage::Coverage;
 use leviculum_mapfill::fill::{Edge, FillRule, FillStats, Filler, Scratch};
 use leviculum_mapfill::stroke::stroke;
 use leviculum_mapfill::style::{Class, MapTheme};
@@ -339,7 +340,7 @@ pub fn draw<D>(
     target: &mut D,
 ) -> Result<OutlineStats, D::Error>
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
 {
     let mut st = OutlineStats::default();
     let palette = theme.palette();

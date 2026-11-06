@@ -105,18 +105,14 @@ fn now() -> WallTime {
 /// as RGBA.
 fn picture(home: &Path, theme: MapTheme) -> Vec<u8> {
     let mut painter = Painter::new(Maps::new(Some(home.join("maps"))));
-    let view = Viewport::new(project(LatLon::from_degrees(LAT, LON)), 16, W, H);
-    let drawn = painter.draw(&view, Ink::Colour, Style::PC.in_theme(theme), 100);
-    drawn
-        .fb
-        .iter()
-        .flat_map(|&px| {
-            use embedded_graphics::pixelcolor::raw::RawU16;
-            use embedded_graphics::pixelcolor::Rgb565;
-            let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
-            [r, g, b, 0xff]
-        })
-        .collect()
+    // On a whole pixel of its step, as the frame sits (1134): smoothed
+    // edges show a sub-pixel shift that integer ones hide (1422).
+    let at = ExactView::new(project(LatLon::from_degrees(LAT, LON)), 16_000, W, H).on_whole_pixel();
+    let view = Viewport::new(at.centre, 16, W, H);
+    // Smoothed, as a frame at rest draws its tiles (1422).
+    painter
+        .draw_rgba(&view, Ink::Colour, Style::PC.in_theme(theme), 100, true)
+        .rgba
 }
 
 /// How many of the pixels of `a` and `b` are the same, per cent.
@@ -126,7 +122,7 @@ fn same_share(a: &[u8], b: &[u8]) -> usize {
 }
 
 /// The frame through the facade with one pin: the window's renderer's
-/// pixels for the view, its names and its pin, but for a tenth of a per
+/// pixels for the view, its names and its pin, but for a fifth of a per
 /// cent at the tile seams
 /// (`loquax::screenmap::render` called here as the window's code calls
 /// it); the map under them `loquax::picture`'s; the pin's marker at its
@@ -172,14 +168,17 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
     // dashed path crosses a seam: its dashes start again at each tile's
     // edge, as they do at a view's. A turned name's sprite rounds its
     // coverage to a level (1156), so its pixels may be a step or two of
-    // a channel off the whole view's float paint: not counted.
+    // a channel off the whole view's float paint: not counted. With the
+    // edges smoothed (1422) a dash's end covers two pixels where it set
+    // one, so the restarted dashes at the view's left edge (x 0 to 14
+    // here, one dash period) count about twice: a fifth of a per cent.
     let differ = rgba
         .chunks(4)
         .zip(direct.picture.rgba.chunks(4))
         .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
         .count();
     assert!(
-        differ * 1000 < (W * H) as usize,
+        differ * 500 < (W * H) as usize,
         "the shared renderer's pixels: {differ} differ"
     );
     assert!(

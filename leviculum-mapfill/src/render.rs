@@ -9,6 +9,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Line, PrimitiveStyle};
 
+use crate::coverage::Coverage;
 use crate::fill::{FillRule, FillStats, Filler, Scratch, SUBPIXEL};
 use crate::fixture::{Feature, Fixture, Kind};
 use crate::stroke::{stroke_pen, Pen};
@@ -245,7 +246,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         clock: &mut C,
     ) -> Result<Self, D::Error>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
         C: Clock,
     {
         let mut stats = RenderStats::default();
@@ -335,7 +336,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         clock: &mut C,
     ) -> Result<(), D::Error>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
         C: Clock,
     {
         // A class the look leaves out is skipped as one the profile does:
@@ -417,7 +418,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         clock: &mut C,
     ) -> Result<(), D::Error>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
         C: Clock,
         R: Iterator<Item = P>,
         P: Iterator<Item = (i16, i16)>,
@@ -533,7 +534,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         clock: &mut C,
     ) -> Result<(), D::Error>
     where
-        D: DrawTarget<Color = Rgb565>,
+        D: Coverage<Color = Rgb565>,
         C: Clock,
     {
         let line = line_width(&self.look.widths, f.class);
@@ -588,7 +589,7 @@ pub fn render<D, C>(
     clock: &mut C,
 ) -> Result<RenderStats, D::Error>
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
     C: Clock,
 {
     let mut pass = Pass::begin(target, scratch, Look::DEFAULT, clock)?;

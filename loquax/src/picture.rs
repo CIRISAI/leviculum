@@ -39,7 +39,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::vec::Vec;
 
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::{DrawTarget, Point};
+use embedded_graphics::prelude::Point;
 use embedded_graphics::primitives::Rectangle;
 use leviculum_map::choice::{drawn, view_zooms};
 use leviculum_map::draw::{attach_buildings, draw_in_scaled, draw_tiles, draws_buildings, Ink};
@@ -47,6 +47,7 @@ use leviculum_map::labels::ViewLabel;
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region, TileId};
 use leviculum_map::viewport::{ViewTile, Viewport};
+use leviculum_mapfill::coverage::{Coverage, Hard};
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::{Frame, RgbaFrame};
 use leviculum_mapfill::render::{NoClock, Work};
@@ -400,19 +401,23 @@ impl Painter {
     /// [`draw`](Self::draw) into opaque 8-bit RGBA, four bytes a pixel:
     /// the same picture, each pixel the Rgb565 one widened by
     /// [`leviculum_mapfill::frame::rgb888`], without a pass to widen it
-    /// afterwards (1422). What the tile cache holds.
+    /// afterwards (1422). What the tile cache holds. With `smooth` the
+    /// fills' and lines' edges are blended by their coverage
+    /// ([`leviculum_mapfill::coverage`]); without, the picture is the
+    /// Rgb565 one exactly.
     pub fn draw_rgba(
         &mut self,
         view: &Viewport,
         ink: Ink,
         style: Style,
         percent: u32,
+        smooth: bool,
     ) -> DrawnRgba {
         let (w, h) = view.size();
         // Opaque black, as the Rgb565 frame's zeros widen.
         let mut rgba = [0u8, 0, 0, 0xff].repeat((w as usize) * (h as usize));
         let (attribution, pending) = match RgbaFrame::new(&mut rgba, w, h) {
-            Some(mut frame) => self.draw_into(view, ink, style, percent, &mut frame),
+            Some(frame) => self.draw_into(view, ink, style, percent, &mut frame.smoothed(smooth)),
             None => (outline::ATTRIBUTION.to_string(), 0),
         };
         DrawnRgba {
@@ -433,7 +438,7 @@ impl Painter {
         frame: &mut D,
     ) -> (String, usize)
     where
-        D: DrawTarget<Color = Rgb565, Error = core::convert::Infallible>,
+        D: Coverage<Color = Rgb565, Error = core::convert::Infallible>,
     {
         self.refresh();
         let order = drawn(
@@ -451,13 +456,15 @@ impl Painter {
             .iter()
             .any(|&i| self.regions[i].region.area(view) == whole);
         if !filled {
+            // Hard, as the tile cache draws it under a composed frame
+            // (`tiles::outline_under`): the two pictures agree there.
             let Ok(_) = outline::draw(
                 outline::WORLD_50M,
                 outline::BORDERS_50M,
                 view,
                 ink,
                 style.theme,
-                frame,
+                &mut Hard(frame),
             );
         }
         for &i in &order {
@@ -558,7 +565,7 @@ fn region_into<D>(
     frame: &mut D,
 ) -> Option<usize>
 where
-    D: DrawTarget<Color = Rgb565, Error = core::convert::Infallible>,
+    D: Coverage<Color = Rgb565, Error = core::convert::Infallible>,
 {
     let Ok(pending) = region.read_view(view, read) else {
         return None;

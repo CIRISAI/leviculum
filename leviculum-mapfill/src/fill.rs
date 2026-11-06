@@ -25,6 +25,8 @@
 //! in caller-provided slices rather than a hash map.
 
 use embedded_graphics::prelude::*;
+
+use crate::coverage::Coverage;
 use embedded_graphics::primitives::Rectangle;
 
 /// Sub-pixel steps per pixel in the coordinates the filler takes.
@@ -285,8 +287,9 @@ impl<'s, 'a> Filler<'s, 'a> {
         rule: FillRule,
     ) -> Result<FillStats, D::Error>
     where
-        D: DrawTarget,
+        D: Coverage,
     {
+        let smooth = target.smooth();
         let mut st = FillStats {
             edges: self.n as u32,
             ..FillStats::default()
@@ -336,13 +339,13 @@ impl<'s, 'a> Filler<'s, 'a> {
                 if before == 0 && wind != 0 {
                     start = ed.x;
                 } else if before != 0 && wind == 0 {
-                    self.span(target, color, y, start, ed.x, &mut st)?;
+                    self.span(target, color, y, start, ed.x, smooth, &mut st)?;
                 }
             }
             // Still inside after the last edge: the closing edges lay wholly
             // right of the clip and were never stored.
             if wind != 0 {
-                self.span(target, color, y, start, i32::MAX, &mut st)?;
+                self.span(target, color, y, start, i32::MAX, smooth, &mut st)?;
             }
             for i in 0..na {
                 let ed = &mut self.s.edges[self.s.active[i] as usize];
@@ -355,15 +358,20 @@ impl<'s, 'a> Filler<'s, 'a> {
         Ok(st)
     }
 
-    fn span<D: DrawTarget>(
+    #[allow(clippy::too_many_arguments)]
+    fn span<D: Coverage>(
         &self,
         target: &mut D,
         color: D::Color,
         y: i32,
         xa: i32,
         xb: i32,
+        smooth: bool,
         st: &mut FillStats,
     ) -> Result<(), D::Error> {
+        if smooth {
+            return self.span_smooth(target, color, y, xa, xb, st);
+        }
         // Pixel i is in when its centre i + 0.5 lies in [xa, xb):
         // i from ceil(xa - 0.5) to ceil(xb - 0.5), exclusive.
         let px = |v: i32| ((i64::from(v) - ONE / 2 + ONE - 1) >> 16) as i32;
@@ -381,9 +389,72 @@ impl<'s, 'a> Filler<'s, 'a> {
     }
 }
 
+impl Filler<'_, '_> {
+    /// The span `[xa, xb)` of row `y`, 16.16 pixels, with its two end
+    /// pixels blended by the share of them it covers ([`Coverage`]): pixel
+    /// `i` holds `[i, i + 1)`, and the pixels between the ends are set
+    /// hard. A span within one pixel blends that pixel by its width.
+    fn span_smooth<D: Coverage>(
+        &self,
+        target: &mut D,
+        color: D::Color,
+        y: i32,
+        xa: i32,
+        xb: i32,
+        st: &mut FillStats,
+    ) -> Result<(), D::Error> {
+        let (lo, hi) = (i64::from(self.left) * ONE, i64::from(self.right) * ONE);
+        let (a, b) = (i64::from(xa).max(lo), i64::from(xb).min(hi));
+        if b <= a {
+            return Ok(());
+        }
+        let (fa, fb) = (a >> 16, b >> 16);
+        if fa == fb {
+            st.spans += 1;
+            return covered(target, color, fa, y, b - a);
+        }
+        st.spans += 1;
+        covered(target, color, fa, y, ((fa + 1) << 16) - a)?;
+        if fb > fa + 1 {
+            st.pixels += (fb - fa - 1) as u32;
+            target.fill_solid(
+                &Rectangle::new(
+                    Point::new((fa + 1) as i32, y),
+                    Size::new((fb - fa - 1) as u32, 1),
+                ),
+                color,
+            )?;
+        }
+        // The pixel the span ends in, unless it ends on its left edge.
+        if b > fb << 16 {
+            covered(target, color, fb, y, b - (fb << 16))?;
+        }
+        Ok(())
+    }
+}
+
+/// Pixel `(x, y)` covered by `cover` of it, 16.16: blended, set when
+/// whole, left when nothing.
+fn covered<D: Coverage>(
+    target: &mut D,
+    color: D::Color,
+    x: i64,
+    y: i32,
+    cover: i64,
+) -> Result<(), D::Error> {
+    match (cover * 256) >> 16 {
+        c if c >= 255 => target.fill_solid(
+            &Rectangle::new(Point::new(x as i32, y), Size::new(1, 1)),
+            color,
+        ),
+        c if c >= 1 => target.blend(x as i32, y, color, c as u8),
+        _ => Ok(()),
+    }
+}
+
 /// Fill `rings` in one go: a convenience over [`Filler`] for callers that
 /// have every ring at hand. Holes are rings of their own.
-pub fn fill_rings<D: DrawTarget>(
+pub fn fill_rings<D: Coverage>(
     scratch: &mut Scratch<'_>,
     clip: Rectangle,
     rings: &[&[Point]],
