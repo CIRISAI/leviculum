@@ -24,7 +24,9 @@
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
-use super::wire::{ProbeProtocol, SessionId, Signal, REJECT_PUNCH_FAILED, REJECT_UNSUPPORTED};
+use super::wire::{
+    ProbeProtocol, SessionId, Signal, REJECT_GLARE, REJECT_PUNCH_FAILED, REJECT_UNSUPPORTED,
+};
 
 /// How long each waiting phase may last before the session gives up.
 ///
@@ -76,6 +78,19 @@ pub enum Failure {
     /// No punch frame got through in the punch window (symmetric NAT,
     /// a firewall dropping inbound UDP, or no route between the two).
     PunchFailed,
+    /// +ciris (leviculum#96): the peer proposed on this link at the same
+    /// moment and its proposal won the tie-break. Nothing is wrong: this
+    /// node takes the peer's proposal instead of its own.
+    Glare,
+    /// +ciris (leviculum#98): the punched interface went down before the
+    /// link moved onto it.
+    InterfaceLost,
+    /// +ciris (leviculum#98): the link waited on a transfer past
+    /// [`crate::node::DEFERRED_MOVE_TIMEOUT_MS`] without moving.
+    HeldTooLong,
+    /// +ciris (leviculum#98): the peer left the direct path while this node
+    /// waited on a transfer, so there is nothing to move onto.
+    PeerFellBack,
 }
 
 /// +ciris — the peer's host candidates worth punching:
@@ -272,6 +287,16 @@ impl Session {
         self.host_payload = payload;
     }
 
+    /// +ciris (leviculum#96): this node's own proposal has not reached the
+    /// punch, so a REQUEST arriving now crossed it.
+    pub fn is_crossable(&self) -> bool {
+        self.role == Role::Initiator
+            && matches!(
+                self.phase,
+                Phase::Discovering | Phase::Proposing | Phase::AwaitingReady
+            )
+    }
+
     /// The peer's reflexive address, once the session has learned it.
     pub fn peer_public(&self) -> Option<SocketAddr> {
         self.peer_public
@@ -383,7 +408,11 @@ impl Session {
                 Role::Initiator,
                 Phase::Proposing | Phase::AwaitingReady,
                 Signal::Reject { reason, .. },
-            ) => alloc::vec![Step::Failed(Failure::Rejected(*reason))],
+            ) => alloc::vec![Step::Failed(if *reason == REJECT_GLARE {
+                Failure::Glare
+            } else {
+                Failure::Rejected(*reason)
+            })],
             (
                 Role::Initiator,
                 Phase::AwaitingReady,
@@ -701,6 +730,49 @@ mod tests {
             );
             assert_eq!(steps, [Step::Failed(Failure::Rejected(REJECT_POLICY))]);
         }
+    }
+
+    /// +ciris (leviculum#96): the winner's refusal is no refusal of the link.
+    #[test]
+    fn a_glare_reject_is_not_a_rejection() {
+        for accept_first in [false, true] {
+            let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+            a.probed(a_pub(), 1);
+            if accept_first {
+                a.signal(&Signal::Accept { session: ID }, 2);
+            }
+            let steps = a.signal(
+                &Signal::Reject {
+                    session: ID,
+                    reason: REJECT_GLARE,
+                },
+                3,
+            );
+            assert_eq!(steps, [Step::Failed(Failure::Glare)]);
+        }
+    }
+
+    /// +ciris (leviculum#96): only a proposal that has not reached the punch
+    /// can be crossed; an accepted peer's session never can.
+    #[test]
+    fn a_session_is_crossable_only_as_an_initiator_before_the_punch() {
+        let (mut a, _) = Session::initiate(ID, TOKEN, t(), ProbeProtocol::Rnsp, 0);
+        assert!(a.is_crossable(), "discovering");
+        a.probed(a_pub(), 1);
+        assert!(a.is_crossable(), "proposing");
+        a.signal(&Signal::Accept { session: ID }, 2);
+        assert!(a.is_crossable(), "awaiting ready");
+        let ready = Signal::Ready {
+            session: ID,
+            responder_public: b_pub(),
+            responder_local: Vec::new(),
+            commit: true,
+        };
+        a.signal(&ready, 3);
+        assert_eq!(a.phase(), Phase::Punching);
+        assert!(!a.is_crossable(), "punching");
+        let (b, _) = Session::respond(ID, TOKEN, t(), a_pub(), Vec::new(), ProbeProtocol::Rnsp, 0);
+        assert!(!b.is_crossable(), "a responder");
     }
 
     #[test]

@@ -26,7 +26,7 @@ use rand_core::CryptoRngCore;
 
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::direct_link::session::Phase;
-use crate::direct_link::wire::{self, REJECT_BUSY, REJECT_POLICY};
+use crate::direct_link::wire::{self, REJECT_BUSY, REJECT_GLARE, REJECT_HOLDING, REJECT_POLICY};
 use crate::direct_link::{Failure, ProbeProtocol, Role, Session, SessionId, Signal, Step};
 use crate::hex_fmt::HexShort;
 use crate::link::channel::ChannelError;
@@ -42,10 +42,13 @@ use super::NodeCore;
 pub const PROPOSAL_COOLDOWN_MS: u64 = 60_000;
 
 /// +ciris: when a node's own proposal fails for a reason worth trying
-/// again (the punch, a timeout, the probe), or its direct path is lost, it
-/// proposes again after these waits, one per attempt, then stops. A
-/// rejection, a host's retire or the host proposing itself ends or resets
-/// the schedule. The first wait is the proposal cooldown.
+/// again (the punch, a timeout, the probe, a peer that was busy or won a
+/// crossing), or its direct path is lost, it proposes again after these
+/// waits, one per attempt, then stops. Any other rejection, a host's retire
+/// or the host proposing itself ends or resets the schedule. The first wait
+/// is the proposal cooldown. Each wait is a floor:
+/// up to a quarter of it is added at random ([`jittered`]), so two nodes that
+/// failed together do not try again together (leviculum#96).
 pub const RETRY_BACKOFF_MS: [u64; 6] = [60_000, 120_000, 300_000, 600_000, 900_000, 900_000];
 
 /// +ciris: the responder starts punching this long after it sends READY, at
@@ -55,8 +58,14 @@ pub const RESPONDER_START_DELAY_MAX_MS: u64 = 1_500;
 
 /// After a link moves onto its direct interface, link packets still in
 /// flight on the relayed path keep arriving for a while. Only past this grace
-/// does such an arrival mean the peer has gone back to the relay.
+/// does such an arrival mean the peer has gone back to the relay, unless the
+/// peer said it is holding its move ([`wire::REJECT_HOLDING`]).
 pub const FALLBACK_GRACE_MS: u64 = 10_000;
+
+/// +ciris (leviculum#98): how long a punched link waits on a transfer before
+/// it gives the move up, closes the punched interface and brings a peer that
+/// already moved back to the relay. The transfer itself carries on.
+pub const DEFERRED_MOVE_TIMEOUT_MS: u64 = 120_000;
 
 /// How long an [`DirectLinkPolicy::AskHost`] request waits for the host's
 /// answer before it is refused (+ciris, leviculum#82). Shorter than the
@@ -176,6 +185,13 @@ pub enum DirectLinkJob {
     CloseInterface { interface_index: usize },
 }
 
+/// +ciris (leviculum#96): `wait_ms` plus up to a quarter of it, taken from
+/// `random`. Only ever longer: the first wait is the proposal cooldown, and a
+/// shorter one would be refused by it.
+fn jittered(wait_ms: u64, random: u32) -> u64 {
+    wait_ms.saturating_add(u64::from(random) % (wait_ms / 4 + 1))
+}
+
 /// What became of one attempt to put a signal on a channel.
 enum SignalSend {
     Sent,
@@ -200,11 +216,11 @@ struct PendingRequest {
 
 /// +ciris: a link this node proposed on, for proposing again.
 #[derive(Debug, Clone)]
-struct Retry {
+pub(super) struct Retry {
     /// Attempts scheduled so far, an index into [`RETRY_BACKOFF_MS`].
     attempt: usize,
     /// When to propose again; `None` while nothing is due.
-    due_ms: Option<u64>,
+    pub(super) due_ms: Option<u64>,
     /// The host payload of the proposal, sent again with each retry.
     payload: Option<Vec<u8>>,
 }
@@ -221,12 +237,27 @@ struct Attachment {
     attached_at_ms: u64,
 }
 
+/// A punched link waiting on the relay for a transfer to finish before it
+/// moves.
+#[derive(Debug, Clone, Copy)]
+struct HeldMove {
+    session: SessionId,
+    /// The direct interface it would move onto.
+    index: usize,
+    proposed: bool,
+    /// Both ends ran the two-sided commit, so the peer nudges when it goes
+    /// back to the relay and lowers its MTU when it moves.
+    commit: bool,
+    /// When it started waiting, for [`DEFERRED_MOVE_TIMEOUT_MS`].
+    since_ms: u64,
+}
+
 /// The node's direct-link state.
 #[derive(Debug, Default)]
 pub(crate) struct DirectLinks {
     config: DirectLinkConfig,
     /// Running sessions, by wire link id. At most one per link.
-    sessions: BTreeMap<LinkId, Session>,
+    pub(super) sessions: BTreeMap<LinkId, Session>,
     /// When each link last proposed, for the cooldown.
     last_proposal_ms: BTreeMap<LinkId, u64>,
     /// Established direct interfaces, by interface index.
@@ -237,8 +268,13 @@ pub(crate) struct DirectLinks {
     /// The interface the link packet being processed arrived on.
     rx_iface: Option<usize>,
     /// Punched links waiting on the relay for a resource transfer to finish
-    /// before they move: (session, direct interface, proposed).
-    deferred: BTreeMap<LinkId, (SessionId, usize, bool)>,
+    /// before they move.
+    deferred: BTreeMap<LinkId, HeldMove>,
+    /// +ciris (leviculum#98): what a lowered link's MTU was before.
+    mtu_before_move: BTreeMap<LinkId, u32>,
+    /// +ciris (leviculum#98): peers that said they are holding their move,
+    /// and until when their relayed traffic means nothing.
+    peer_holding: BTreeMap<LinkId, u64>,
     /// Peer requests waiting for the host's answer (`AskHost`), by link.
     pending: BTreeMap<LinkId, PendingRequest>,
     /// +ciris (leviculum#89): punched links whose own punch succeeded,
@@ -246,10 +282,10 @@ pub(crate) struct DirectLinks {
     /// interface, proposed). Nothing is sent on the interface meanwhile.
     committing: BTreeMap<LinkId, (SessionId, usize, bool)>,
     /// +ciris: links this node proposed on, and their retry schedule.
-    retries: BTreeMap<LinkId, Retry>,
+    pub(super) retries: BTreeMap<LinkId, Retry>,
     /// +ciris: proposals are not retried ([`NodeCore::set_direct_link_retry`]).
     retry_off: bool,
-    jobs: VecDeque<DirectLinkJob>,
+    pub(super) jobs: VecDeque<DirectLinkJob>,
 }
 
 impl DirectLinks {
@@ -265,6 +301,44 @@ impl DirectLinks {
             .iter()
             .find(|(_, a)| &a.link_id == link_id)
             .map(|(idx, _)| *idx)
+    }
+
+    /// An upgrade is under way on the link, so its peer may be on the far
+    /// side of the move already (leviculum#98).
+    pub(super) fn is_moving(&self, link_id: &LinkId) -> bool {
+        self.sessions.contains_key(link_id)
+            || self.committing.contains_key(link_id)
+            || self.deferred.contains_key(link_id)
+    }
+
+    /// The part size to receive `adv` at, for a link that may be crossing a
+    /// move.
+    pub(super) fn part_sizes(
+        &self,
+        link_id: &LinkId,
+        link: &crate::link::Link,
+        adv: &crate::resource::ResourceAdvertisement,
+    ) -> (usize, Option<usize>) {
+        use crate::resource::resource_sdu;
+        let mtu = link.negotiated_mtu();
+        // The two ends cross a move at different moments, so the peer may
+        // have cut for the MTU this link left, or the one it is moving to.
+        let other = self.mtu_before_move.get(link_id).copied().or_else(|| {
+            self.is_moving(link_id)
+                .then_some(crate::direct_link::DIRECT_LINK_MTU.min(mtu))
+        });
+        let other = other.filter(|o| *o != mtu).map(resource_sdu);
+        crate::resource::incoming::resolve_part_size(adv, resource_sdu(mtu), other)
+    }
+
+    /// Lower the link for a direct interface, keeping what it had: a peer
+    /// may have cut a resource for it (leviculum#98).
+    fn lower_for_move(&mut self, link_id: LinkId, link: &mut crate::link::Link) {
+        let before = link.negotiated_mtu();
+        link.lower_mtu(crate::direct_link::DIRECT_LINK_MTU);
+        if link.negotiated_mtu() < before {
+            self.mtu_before_move.entry(link_id).or_insert(before);
+        }
     }
 }
 
@@ -333,6 +407,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok(self.process_events_and_actions())
     }
 
+    /// The refusal of a send on a link already sending, naming the link: the
+    /// error alone cannot say which (leviculum#98).
+    pub(super) fn transfer_in_progress(&self, link_id: &LinkId) -> crate::resource::ResourceError {
+        crate::tracing::info!(
+            link = %HexShort(link_id.as_bytes()),
+            "send_resource: transfer in progress"
+        );
+        crate::resource::ResourceError::TransferInProgress
+    }
+
     /// +ciris: stop or resume retrying failed proposals (on by default).
     /// Off, a failed upgrade stays failed until the host proposes again.
     pub fn set_direct_link_retry(&mut self, enabled: bool) {
@@ -371,6 +455,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         }
         if self.direct_links.sessions.contains_key(&link_id)
+            || self.direct_links.deferred.contains_key(&link_id)
             || self.direct_links.pending.contains_key(&link_id)
             || self.direct_links.interface_of_link(&link_id).is_some()
         {
@@ -411,6 +496,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if self.direct_links.retry_off {
             return;
         }
+        let random = self.rng.next_u32();
         let Some(retry) = self.direct_links.retries.get_mut(&link_id) else {
             return;
         };
@@ -418,12 +504,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.direct_links.retries.remove(&link_id);
             return;
         };
+        let wait = jittered(*wait, random);
         retry.attempt += 1;
-        retry.due_ms = Some(now_ms.saturating_add(*wait));
+        retry.due_ms = Some(now_ms.saturating_add(wait));
         crate::tracing::info!(
             link = %HexShort(link_id.as_bytes()),
             attempt = retry.attempt,
-            wait_ms = *wait,
+            wait_ms = wait,
             "direct link: proposing again later"
         );
     }
@@ -447,8 +534,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // nothing to retry.
                 Err(DirectLinkError::AlreadyUpgrading) => {}
                 Err(DirectLinkError::CoolingDown | DirectLinkError::ChannelBusy) => {
+                    let wait = jittered(PROPOSAL_COOLDOWN_MS, self.rng.next_u32());
                     if let Some(retry) = self.direct_links.retries.get_mut(&link_id) {
-                        retry.due_ms = Some(now_ms.saturating_add(PROPOSAL_COOLDOWN_MS));
+                        retry.due_ms = Some(now_ms.saturating_add(wait));
                     }
                 }
                 Err(_) => {
@@ -526,21 +614,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 };
                 if steps.contains(&Step::Established) {
                     if let Some(index) = interface_index {
-                        let proposed = self
+                        let (proposed, commit) = self
                             .direct_links
                             .sessions
                             .get(&link_id)
-                            .is_some_and(|s| s.role() == Role::Initiator);
-                        if self.resources_in_flight(&link_id) {
-                            // A transfer cut for the link's present MTU may
-                            // carry parts no UDP datagram can (Codex review
-                            // on #74): the link moves once it is done.
-                            self.direct_links
-                                .deferred
-                                .insert(link_id, (*session, index, proposed));
-                        } else {
-                            self.attach_direct_link(link_id, *session, index, proposed, now_ms);
-                        }
+                            .map_or((false, false), |s| {
+                                (s.role() == Role::Initiator, s.commit())
+                            });
+                        self.move_or_hold(link_id, *session, index, proposed, commit, now_ms);
                     }
                 } else if let (Some(index), true) = (
                     interface_index,
@@ -586,6 +667,91 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.process_events_and_actions()
     }
 
+    /// Move the punched link, or hold it on the relay while a transfer runs:
+    /// one cut for the link's present MTU may carry parts no UDP datagram can
+    /// (Codex review on #74).
+    fn move_or_hold(
+        &mut self,
+        link_id: LinkId,
+        session: SessionId,
+        index: usize,
+        proposed: bool,
+        commit: bool,
+        now_ms: u64,
+    ) {
+        if !self.resources_in_flight(&link_id) {
+            self.attach_direct_link(link_id, session, index, proposed, now_ms);
+            return;
+        }
+        crate::tracing::info!(
+            link = %HexShort(link_id.as_bytes()),
+            session = %HexShort(&session),
+            interface = index,
+            timeout_ms = DEFERRED_MOVE_TIMEOUT_MS,
+            "direct link: punched, the move waits for a transfer to finish"
+        );
+        self.direct_links.deferred.insert(
+            link_id,
+            HeldMove {
+                session,
+                index,
+                proposed,
+                commit,
+                since_ms: now_ms,
+            },
+        );
+    }
+
+    /// A held move will not happen: say why, and leave nobody on the other
+    /// side of it (leviculum#98). A peer that already moved is nudged back,
+    /// unless it is the one that left; with the two-sided commit it lowered
+    /// its MTU, so this end follows, or the ends disagree on the link MDU for
+    /// the rest of the link's life. A transfer under way keeps its own part
+    /// size and finishes on the relay.
+    fn give_up_held_move(
+        &mut self,
+        link_id: LinkId,
+        held: HeldMove,
+        failure: Failure,
+        interface_still_up: bool,
+        now_ms: u64,
+    ) {
+        crate::tracing::info!(
+            link = %HexShort(link_id.as_bytes()),
+            session = %HexShort(&held.session),
+            interface = held.index,
+            ?failure,
+            "direct link: held move given up, link stays on its current path"
+        );
+        if interface_still_up {
+            self.direct_links
+                .jobs
+                .push_back(DirectLinkJob::CloseInterface {
+                    interface_index: held.index,
+                });
+        }
+        if held.commit {
+            if let Some(link) = self.links.get_mut(&link_id) {
+                self.direct_links.lower_for_move(link_id, link);
+            }
+        }
+        if failure != Failure::PeerFellBack {
+            self.send_direct_link_signal(
+                &link_id,
+                &Signal::Complete {
+                    session: held.session,
+                },
+                now_ms,
+            );
+        }
+        self.events.push(NodeEvent::DirectLinkFailed {
+            link_id,
+            failure,
+            proposed: held.proposed,
+        });
+        self.schedule_direct_link_retry(link_id, now_ms);
+    }
+
     /// Move the link onto its new interface and say so.
     fn attach_direct_link(
         &mut self,
@@ -615,7 +781,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // UDP datagram on the open internet carries. Both ends lower it to
         // the same ceiling here, as rns-rs does, so they keep agreeing on the
         // link MDU (leviculum#70 review). Never raised.
-        link.lower_mtu(crate::direct_link::DIRECT_LINK_MTU);
+        self.direct_links.lower_for_move(link_id, link);
         // The direct path just proved itself both ways; do not let a stale
         // timer that was running on the relayed path fire against it.
         link.record_inbound(now_ms);
@@ -709,6 +875,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Signal::Complete { session } = &signal {
                 self.direct_link_nudged(&link_id, session);
             }
+            if matches!(
+                signal,
+                Signal::Reject {
+                    reason: REJECT_HOLDING,
+                    ..
+                }
+            ) {
+                let until = now_ms
+                    .saturating_add(DEFERRED_MOVE_TIMEOUT_MS)
+                    .saturating_add(FALLBACK_GRACE_MS);
+                self.direct_links.peer_holding.insert(link_id, until);
+                return;
+            }
             let steps = match self.direct_links.sessions.get_mut(&link_id) {
                 Some(s) => s.signal(&signal, now_ms),
                 None => Vec::new(),
@@ -733,7 +912,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // already in use anywhere on the node is refused, not just on this
         // link: a peer must not be able to reuse another link's id and take
         // over its probe (Codex review on #74).
-        let busy = self.direct_links.sessions.contains_key(&link_id)
+        let taken = self.direct_links.deferred.contains_key(&link_id)
             || self.direct_links.pending.contains_key(&link_id)
             || self.direct_links.interface_of_link(&link_id).is_some()
             || self
@@ -745,7 +924,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .direct_links
                 .pending
                 .values()
-                .any(|p| p.session == session)
+                .any(|p| p.session == session);
+        // +ciris (leviculum#96): the REQUEST crossed this node's own proposal
+        // on the link. Both ends know which of them initiated the link, so
+        // that one's proposal stands and the other's gives way. The cooldown
+        // does not apply: it runs from the proposal that is giving way, and a
+        // node gives way once per proposal of its own.
+        let crossing = !taken
+            && self
+                .direct_links
+                .sessions
+                .get(&link_id)
+                .is_some_and(Session::is_crossable);
+        let keep_ours = crossing && link.is_initiator();
+        let give_way = crossing && !keep_ours;
+        let busy = taken
+            || self.direct_links.sessions.contains_key(&link_id)
             // The cooldown binds the peer's proposals too, or one that keeps
             // asking keeps this node binding sockets and probing (Codex
             // review on #78).
@@ -756,7 +950,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .is_some_and(|last| now_ms.saturating_sub(*last) < PROPOSAL_COOLDOWN_MS);
         let reject = if !allowed {
             Some(REJECT_POLICY)
-        } else if busy {
+        } else if keep_ours {
+            Some(REJECT_GLARE)
+        } else if busy && !give_way {
             Some(REJECT_BUSY)
         } else {
             None
@@ -777,6 +973,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             return;
         };
+
+        if give_way {
+            crate::tracing::info!(
+                link = %HexShort(link_id.as_bytes()),
+                session = %HexShort(&session),
+                "direct link: a peer's proposal crossed ours, ours gives way"
+            );
+            self.end_direct_link_session(link_id, Some(Failure::Glare));
+        }
 
         let request = PendingRequest {
             session,
@@ -997,13 +1202,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     if let Some((session, index, proposed)) =
                         self.direct_links.committing.remove(&link_id)
                     {
-                        if self.resources_in_flight(&link_id) {
-                            self.direct_links
-                                .deferred
-                                .insert(link_id, (session, index, proposed));
-                        } else {
-                            self.attach_direct_link(link_id, session, index, proposed, now_ms);
-                        }
+                        self.move_or_hold(link_id, session, index, proposed, true, now_ms);
+                    }
+                    // After this side's COMPLETE, which the steps sent first:
+                    // the peer is past needing a verdict from here.
+                    if self
+                        .direct_links
+                        .deferred
+                        .get(&link_id)
+                        .is_some_and(|h| h.commit)
+                    {
+                        self.send_direct_link_signal(
+                            &link_id,
+                            &Signal::Reject {
+                                session: session_id,
+                                reason: REJECT_HOLDING,
+                            },
+                            now_ms,
+                        );
                     }
                     self.end_direct_link_session(link_id, None)
                 }
@@ -1064,9 +1280,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 failure,
                 proposed: session.role() == Role::Initiator,
             });
+            // Beaten in a crossing, the REQUEST that won is on its way or
+            // here, and the cooldown of the proposal that lost must not
+            // refuse it (leviculum#96).
+            if failure == Failure::Glare {
+                self.direct_links.last_proposal_ms.remove(&link_id);
+            }
             if session.role() == Role::Initiator {
-                if matches!(failure, Failure::Rejected(_)) {
-                    // The peer said no; asking again changes nothing.
+                if matches!(failure, Failure::Rejected(r) if r != REJECT_BUSY) {
+                    // The peer said no; asking again changes nothing. BUSY
+                    // is not a no: it says "not now".
                     self.direct_links.retries.remove(&link_id);
                 } else {
                     let now_ms = self.transport.clock().now_ms();
@@ -1229,9 +1452,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .filter(|link_id| !self.resources_in_flight(link_id))
             .collect();
         for link_id in ready {
-            if let Some((session, index, proposed)) = self.direct_links.deferred.remove(&link_id) {
-                self.attach_direct_link(link_id, session, index, proposed, now_ms);
+            if let Some(held) = self.direct_links.deferred.remove(&link_id) {
+                self.attach_direct_link(link_id, held.session, held.index, held.proposed, now_ms);
             }
+        }
+        // Whatever holds a move, it does not hold it forever (leviculum#98).
+        let overdue: Vec<(LinkId, HeldMove)> = self
+            .direct_links
+            .deferred
+            .iter()
+            .filter(|(_, h)| now_ms.saturating_sub(h.since_ms) >= DEFERRED_MOVE_TIMEOUT_MS)
+            .map(|(link_id, h)| (*link_id, *h))
+            .collect();
+        for (link_id, held) in overdue {
+            self.direct_links.deferred.remove(&link_id);
+            self.give_up_held_move(link_id, held, Failure::HeldTooLong, true, now_ms);
         }
         let due: Vec<(LinkId, Vec<Step>)> = self
             .direct_links
@@ -1253,12 +1488,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .values()
             .map(|p| p.asked_at_ms.saturating_add(ASK_HOST_TIMEOUT_MS));
         let retries = self.direct_links.retries.values().filter_map(|r| r.due_ms);
+        let moves = self
+            .direct_links
+            .deferred
+            .values()
+            .map(|h| h.since_ms.saturating_add(DEFERRED_MOVE_TIMEOUT_MS));
         self.direct_links
             .sessions
             .values()
             .filter_map(Session::deadline_ms)
             .chain(held)
             .chain(retries)
+            .chain(moves)
             .min()
     }
 
@@ -1294,6 +1535,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             + hc::btree_map_bytes(&d.last_proposal_ms)
             + hc::btree_map_bytes(&d.attached)
             + hc::btree_map_bytes(&d.deferred)
+            + hc::btree_map_bytes(&d.peer_holding)
+            + hc::btree_map_bytes(&d.mtu_before_move)
             + hc::btree_map_bytes(&d.committing)
             + hc::btree_map_bytes(&d.retries)
             + d.retries
@@ -1309,9 +1552,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// The link is being removed: end its session and retire its interface.
     pub(super) fn direct_link_link_removed(&mut self, link_id: &LinkId) {
-        let waiting = self.direct_links.deferred.remove(link_id);
+        let waiting = self.direct_links.deferred.remove(link_id).map(|h| h.index);
         let committing = self.direct_links.committing.remove(link_id);
-        for (_, index, _) in waiting.into_iter().chain(committing) {
+        for index in waiting.into_iter().chain(committing.map(|c| c.1)) {
             self.direct_links
                 .jobs
                 .push_back(DirectLinkJob::CloseInterface {
@@ -1324,6 +1567,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             });
         }
         self.direct_links.last_proposal_ms.remove(link_id);
+        self.direct_links.peer_holding.remove(link_id);
+        self.direct_links.mtu_before_move.remove(link_id);
         self.direct_links.retries.remove(link_id);
         self.direct_links.outbox.remove(link_id);
         self.direct_links.pending.remove(link_id);
@@ -1357,22 +1602,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .map(|(link_id, _)| *link_id);
         if let Some(link_id) = committing {
             self.direct_links.committing.remove(&link_id);
-            self.end_direct_link_session(link_id, Some(Failure::Timeout));
+            self.end_direct_link_session(link_id, Some(Failure::InterfaceLost));
         }
         // A punched link still waiting to move never got its direct path.
         let waiting = self
             .direct_links
             .deferred
             .iter()
-            .find(|(_, (_, i, _))| *i == index)
-            .map(|(link_id, (_, _, proposed))| (*link_id, *proposed));
-        if let Some((link_id, proposed)) = waiting {
+            .find(|(_, h)| h.index == index)
+            .map(|(link_id, h)| (*link_id, *h));
+        if let Some((link_id, held)) = waiting {
             self.direct_links.deferred.remove(&link_id);
-            self.events.push(NodeEvent::DirectLinkFailed {
-                link_id,
-                failure: Failure::Timeout,
-                proposed,
-            });
+            let now_ms = self.transport.clock().now_ms();
+            self.give_up_held_move(link_id, held, Failure::InterfaceLost, false, now_ms);
         }
         for attachment in self.direct_links.attached.values_mut() {
             if attachment.previous == Some(index) {
@@ -1504,10 +1746,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 return true;
             }
         }
-        d.deferred
-            .get(link_id)
-            .or_else(|| d.committing.get(link_id))
-            .is_some_and(|(_, index, _)| *index == iface)
+        d.deferred.get(link_id).map(|h| h.index) == Some(iface)
+            || d.committing.get(link_id).map(|c| c.1) == Some(iface)
     }
 
     /// A link packet from interface `iface` is about to be processed.
@@ -1551,7 +1791,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let Some(attachment) = self.direct_links.attached.get(&index).copied() else {
             return;
         };
+        // Over the direct path: a peer that was holding has moved.
+        if iface == index {
+            self.direct_links.peer_holding.remove(link_id);
+            return;
+        }
+        let holding = self
+            .direct_links
+            .peer_holding
+            .get(link_id)
+            .is_some_and(|until| now_ms < *until);
         if attachment.previous != Some(iface)
+            || holding
             || now_ms < attachment.attached_at_ms.saturating_add(FALLBACK_GRACE_MS)
         {
             return;
@@ -1565,10 +1816,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// unambiguous, so it counts during the grace too: a peer that lost its
     /// direct path seconds after the upgrade must not be ignored until its
     /// nudge's retries run out (Codex review on #78).
+    ///
+    /// A link still holding its move for that session has nothing left to
+    /// move onto (leviculum#98): moving alone would strand it on a path the
+    /// peer has left.
     fn direct_link_nudged(&mut self, link_id: &LinkId, session: &SessionId) {
         let Some(iface) = self.direct_links.rx_iface else {
             return;
         };
+        if let Some(held) = self.direct_links.deferred.get(link_id).copied() {
+            let on_the_relay = self
+                .links
+                .get(link_id)
+                .is_some_and(|l| l.attached_interface() == Some(iface));
+            if held.commit && on_the_relay && &held.session == session {
+                self.direct_links.deferred.remove(link_id);
+                let now_ms = self.transport.clock().now_ms();
+                self.give_up_held_move(*link_id, held, Failure::PeerFellBack, true, now_ms);
+            }
+            return;
+        }
         let Some(index) = self.direct_links.interface_of_link(link_id) else {
             return;
         };
@@ -1623,7 +1890,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // review on #78). That also moves attached links back to their
         // fallback and fails links still deferred.
         let mut gone: Vec<usize> = self.direct_links.attached.keys().copied().collect();
-        gone.extend(self.direct_links.deferred.values().map(|d| d.1));
+        gone.extend(self.direct_links.deferred.values().map(|h| h.index));
         gone.extend(self.direct_links.committing.values().map(|d| d.1));
         for index in gone {
             let out = self.handle_interface_down(crate::transport::InterfaceId(index));

@@ -1026,38 +1026,6 @@ fn a_dead_direct_interface_nudges_the_peer_over_the_relay() {
 }
 
 #[test]
-fn a_punched_link_with_a_transfer_under_way_moves_once_it_is_done() {
-    let mut pair = Pair::new();
-    let (session, _) = to_punch(&mut pair);
-    b_commits_first(&mut pair, &session);
-    pair.b
-        .set_resource_strategy(&pair.link, crate::resource::ResourceStrategy::AcceptAll)
-        .unwrap();
-    let (_, tick) = pair
-        .a
-        .send_resource(&pair.link, &[7u8; 3_000], None, true)
-        .expect("send_resource");
-    let first = packets(&tick);
-    let a_direct = add_iface(&mut pair.a, "A_direct");
-    let out = pair.a.direct_link_punched(&session, Some(a_direct));
-    assert!(
-        !out.events
-            .iter()
-            .any(|e| matches!(e, NodeEvent::DirectLinkEstablished { .. })),
-        "not while the transfer runs"
-    );
-    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
-    // The transfer completes over the relay; the next tick moves the link.
-    pair.pump_from_a(first);
-    pair.advance(2_000);
-    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
-    assert!(pair
-        .a_events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::DirectLinkEstablished { .. })));
-}
-
-#[test]
 fn a_full_sink_still_reproves_a_duplicate_signal() {
     let mut pair = Pair::new();
     pair.configure(DirectLinkPolicy::AcceptAll);
@@ -1636,8 +1604,9 @@ fn a_failed_punch_is_proposed_again_after_the_backoff() {
             .any(|j| matches!(j, DirectLinkJob::Probe { .. })),
         "nothing before the backoff ends"
     );
-    pair.advance(1_000);
-    let again = only_probe(&pair.a.take_direct_link_jobs());
+    pair.advance(first / 4 + 1_000);
+    let jobs = pair.a.take_direct_link_jobs();
+    let again = only_probe(&jobs[..1]);
     assert_ne!(again, session, "a new session");
     assert!(
         pair.b.take_direct_link_jobs().is_empty(),
@@ -1711,4 +1680,646 @@ fn both_punches_ask_for_fast_liveness_between_committing_peers() {
             "{jobs:?}"
         );
     }
+}
+
+// ─── +ciris leviculum#96: two proposals crossing on one link ───────────
+
+/// Both ends may propose and accept; each has started a proposal and is
+/// probing. A initiated the link, so A's proposal is the one that stands.
+fn both_propose(pair: &mut Pair) -> ([u8; 16], [u8; 16]) {
+    both_may_propose(pair, DirectLinkPolicy::AcceptAll);
+    let a_out = pair.a.propose_direct_link(&pair.link).expect("A proposes");
+    pair.a_events.extend(a_out.events.clone());
+    let b_out = pair.b.propose_direct_link(&pair.link).expect("B proposes");
+    pair.b_events.extend(b_out.events.clone());
+    (
+        only_probe(&pair.a.take_direct_link_jobs()),
+        only_probe(&pair.b.take_direct_link_jobs()),
+    )
+}
+
+fn both_may_propose(pair: &mut Pair, b_policy: DirectLinkPolicy) {
+    pair.a.set_direct_link_config(DirectLinkConfig {
+        policy: DirectLinkPolicy::AcceptAll,
+        facilitator: Some(facilitator()),
+        protocol: ProbeProtocol::Rnsp,
+    });
+    pair.b.set_direct_link_config(DirectLinkConfig {
+        policy: b_policy,
+        facilitator: Some(facilitator()),
+        protocol: ProbeProtocol::Rnsp,
+    });
+}
+
+fn a_requests(pair: &mut Pair, session: &[u8; 16]) -> Vec<Vec<u8>> {
+    let request = packets(&pair.a.direct_link_probed(session, Some(a_public())));
+    assert!(!request.is_empty(), "A's REQUEST leaves");
+    request
+}
+
+fn b_requests(pair: &mut Pair, session: &[u8; 16]) -> Vec<Vec<u8>> {
+    let request = packets(&pair.b.direct_link_probed(session, Some(b_public())));
+    assert!(!request.is_empty(), "B's REQUEST leaves");
+    request
+}
+
+fn b_failed(pair: &Pair) -> Vec<Failure> {
+    pair.b_events
+        .iter()
+        .filter_map(|e| match e {
+            NodeEvent::DirectLinkFailed { failure, .. } => Some(*failure),
+            _ => None,
+        })
+        .collect()
+}
+
+/// One session is left, A's, and with B's probe of it the upgrade goes the
+/// whole way: the link moves on both ends and neither proposes again.
+fn only_as_session_proceeds(pair: &mut Pair, session: &[u8; 16]) {
+    assert_eq!(a_failed(pair), [], "A's proposal stands");
+    assert_eq!(b_failed(pair), [Failure::Glare], "B's gives way, once");
+    assert!(
+        pair.b
+            .take_direct_link_jobs()
+            .contains(&DirectLinkJob::Probe {
+                session: *session,
+                server: facilitator(),
+                protocol: ProbeProtocol::Rnsp,
+            }),
+        "B takes up A's session"
+    );
+    pair.advance(1_000);
+    let out = pair.b.direct_link_probed(session, Some(b_public()));
+    assert_eq!(only_punch(&pair.b.take_direct_link_jobs()).0, *session);
+    pair.pump_from_b(packets(&out));
+    pair.advance(1_000);
+    assert_eq!(only_punch(&pair.a.take_direct_link_jobs()).0, *session);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    punch_both(pair, session, a_direct, b_direct);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+    assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
+    assert!(pair
+        .a_events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::DirectLinkEstablished { proposed: true, .. })));
+    assert!(pair.b_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::DirectLinkEstablished {
+            proposed: false,
+            ..
+        }
+    )));
+
+    // B's retry of the proposal that gave way finds the link direct.
+    pair.a.take_direct_link_jobs();
+    pair.b.take_direct_link_jobs();
+    pair.advance(super::direct_link::RETRY_BACKOFF_MS[0] * 5 / 4 + 1_000);
+    assert!(!pair
+        .b
+        .take_direct_link_jobs()
+        .iter()
+        .any(|j| matches!(j, DirectLinkJob::Probe { .. })));
+    assert_eq!(a_failed(pair), []);
+}
+
+#[test]
+fn crossing_proposals_end_in_one_session_when_as_request_lands_first() {
+    let mut pair = Pair::new();
+    let (a_session, b_session) = both_propose(&mut pair);
+    let from_a = a_requests(&mut pair, &a_session);
+    let from_b = b_requests(&mut pair, &b_session);
+    pair.pump_from_a(from_a);
+    pair.pump_from_b(from_b);
+    only_as_session_proceeds(&mut pair, &a_session);
+}
+
+#[test]
+fn crossing_proposals_end_in_one_session_when_bs_request_lands_first() {
+    let mut pair = Pair::new();
+    let (a_session, b_session) = both_propose(&mut pair);
+    let from_a = a_requests(&mut pair, &a_session);
+    let from_b = b_requests(&mut pair, &b_session);
+    pair.pump_from_b(from_b);
+    pair.pump_from_a(from_a);
+    only_as_session_proceeds(&mut pair, &a_session);
+}
+
+/// B's REQUEST beats A's probe: A refuses it before A's own REQUEST exists,
+/// and that REQUEST then arrives inside the cooldown of B's lost proposal.
+#[test]
+fn a_crossing_refused_before_the_winner_has_asked_leaves_the_loser_able_to_accept() {
+    let mut pair = Pair::new();
+    let (a_session, b_session) = both_propose(&mut pair);
+    let from_b = b_requests(&mut pair, &b_session);
+    pair.pump_from_b(from_b);
+    pair.advance(1_000);
+    assert_eq!(b_failed(&pair), [Failure::Glare]);
+    let from_a = a_requests(&mut pair, &a_session);
+    pair.pump_from_a(from_a);
+    only_as_session_proceeds(&mut pair, &a_session);
+}
+
+/// A's REQUEST beats B's probe: B gives way with nothing sent.
+#[test]
+fn a_proposal_still_probing_gives_way_without_a_word() {
+    let mut pair = Pair::new();
+    let (a_session, b_session) = both_propose(&mut pair);
+    let from_a = a_requests(&mut pair, &a_session);
+    pair.pump_from_a(from_a);
+    let jobs = pair.b.take_direct_link_jobs();
+    assert!(jobs.contains(&DirectLinkJob::Release { session: b_session }));
+    let _ = pair.b.direct_link_probed(&b_session, Some(b_public()));
+    assert_eq!(
+        pair.b.direct_links.sessions.get(&pair.link).unwrap().id(),
+        &a_session,
+        "the late probe of the proposal that gave way changes nothing"
+    );
+    let probe = jobs
+        .iter()
+        .find(|j| matches!(j, DirectLinkJob::Probe { .. }))
+        .cloned()
+        .expect("B probes for A's session");
+    pair.b.direct_links.jobs.push_back(probe);
+    only_as_session_proceeds(&mut pair, &a_session);
+}
+
+/// A node gives way only to a proposal it would take: without that it keeps
+/// its own, and the refusal is the policy's, not the tie-break's.
+#[test]
+fn a_node_that_would_refuse_the_peer_does_not_give_way() {
+    let mut pair = Pair::new();
+    both_may_propose(&mut pair, DirectLinkPolicy::Reject);
+    let _ = pair.a.propose_direct_link(&pair.link).unwrap();
+    let _ = pair.b.propose_direct_link(&pair.link).unwrap();
+    let a_session = only_probe(&pair.a.take_direct_link_jobs());
+    let b_session = only_probe(&pair.b.take_direct_link_jobs());
+    let from_a = a_requests(&mut pair, &a_session);
+    pair.pump_from_a(from_a);
+    assert_eq!(
+        pair.b.direct_links.sessions.get(&pair.link).unwrap().id(),
+        &b_session
+    );
+    assert_eq!(a_failed(&pair), [Failure::Rejected(REJECT_POLICY)]);
+    assert_eq!(b_failed(&pair), []);
+}
+
+/// Under `AskHost` the host sees the crossing proposal: leviculum no longer
+/// refuses it first.
+#[test]
+fn an_asking_host_hears_the_proposal_its_own_gave_way_to() {
+    let mut pair = Pair::new();
+    both_may_propose(&mut pair, DirectLinkPolicy::AskHost);
+    let _ = pair.a.propose_direct_link(&pair.link).unwrap();
+    let _ = pair.b.propose_direct_link(&pair.link).unwrap();
+    let a_session = only_probe(&pair.a.take_direct_link_jobs());
+    only_probe(&pair.b.take_direct_link_jobs());
+    let from_a = a_requests(&mut pair, &a_session);
+    pair.pump_from_a(from_a);
+    assert_eq!(requested(&pair.b_events, pair.link), 1);
+    assert_eq!(b_failed(&pair), [Failure::Glare]);
+    assert!(pair.b.direct_links.sessions.is_empty());
+    let _ = pair.b.accept_direct_link(&pair.link).unwrap();
+    let jobs = pair.b.take_direct_link_jobs();
+    assert!(jobs.contains(&DirectLinkJob::Probe {
+        session: a_session,
+        server: facilitator(),
+        protocol: ProbeProtocol::Rnsp,
+    }));
+}
+
+/// Past the point of no return a proposal does not yield, on either end of
+/// the link: a REQUEST there is BUSY, as it always was.
+#[test]
+fn a_session_already_punching_stays_busy() {
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let late = crate::direct_link::Signal::Request {
+        session: [9; 16],
+        facilitator: facilitator(),
+        initiator_public: b_public(),
+        protocol: ProbeProtocol::Rnsp,
+        initiator_local: Vec::new(),
+        commit: true,
+        host_payload: None,
+    };
+    pair.b.transport.clock().advance(1_000);
+    pair.a.transport.clock().advance(1_000);
+    let now = crate::traits::Clock::now_ms(pair.b.transport.clock());
+    assert!(pair.b.send_direct_link_signal(&pair.link, &late, now));
+    let out = pair.b.handle_timeout();
+    pair.pump_from_b(packets(&out));
+    assert_eq!(
+        pair.a.direct_links.sessions.get(&pair.link).unwrap().id(),
+        &session
+    );
+}
+
+/// A peer without the tie-break still refuses with BUSY. Facing a link
+/// initiator running it, both proposals end as they did before: refused, and
+/// no session left behind.
+#[test]
+fn an_old_style_peers_busy_ends_a_link_initiators_proposal_cleanly() {
+    let mut pair = Pair::new();
+    both_may_propose(&mut pair, DirectLinkPolicy::AcceptAll);
+    let out = pair.a.propose_direct_link(&pair.link).unwrap();
+    pair.a_events.extend(out.events);
+    let a_session = only_probe(&pair.a.take_direct_link_jobs());
+    let _ = a_requests(&mut pair, &a_session); // lost: the old peer refuses it.
+    pair.a.take_direct_link_jobs();
+
+    let old_peers = crate::direct_link::Signal::Reject {
+        session: a_session,
+        reason: wire::REJECT_BUSY,
+    };
+    let now = crate::traits::Clock::now_ms(pair.b.transport.clock());
+    assert!(pair.b.send_direct_link_signal(&pair.link, &old_peers, now));
+    pair.advance(1_000);
+    assert_eq!(a_failed(&pair), [Failure::Rejected(wire::REJECT_BUSY)]);
+    assert!(pair.a.direct_links.sessions.is_empty());
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert!(pair
+        .a
+        .take_direct_link_jobs()
+        .contains(&DirectLinkJob::Release { session: a_session }));
+    // BUSY says "not now", so A's retry is still alive.
+    pair.advance(super::direct_link::RETRY_BACKOFF_MS[0] * 5 / 4 + 1_000);
+    assert!(pair
+        .a
+        .take_direct_link_jobs()
+        .iter()
+        .any(|j| matches!(j, DirectLinkJob::Probe { .. })));
+}
+
+/// A link initiator that does not know the tie-break refuses this node's
+/// REQUEST with BUSY and carries on with its own: this node has already given
+/// way, so the BUSY finds no session and A's proposal goes through.
+#[test]
+fn an_old_style_link_initiators_busy_finds_the_responder_already_yielded() {
+    let mut pair = Pair::new();
+    let (_, b_session) = both_propose(&mut pair);
+    let from_b = b_requests(&mut pair, &b_session);
+    drop(from_b); // A refuses it below, as an old node would.
+    let request = crate::direct_link::Signal::Request {
+        session: [7; 16],
+        facilitator: facilitator(),
+        initiator_public: a_public(),
+        protocol: ProbeProtocol::Rnsp,
+        initiator_local: Vec::new(),
+        commit: true,
+        host_payload: None,
+    };
+    let busy = crate::direct_link::Signal::Reject {
+        session: b_session,
+        reason: wire::REJECT_BUSY,
+    };
+    pair.a.direct_links.sessions.clear(); // An old node's session is its own.
+    let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
+    assert!(pair.a.send_direct_link_signal(&pair.link, &request, now));
+    assert!(pair.a.send_direct_link_signal(&pair.link, &busy, now));
+    pair.advance(2_000);
+    assert_eq!(b_failed(&pair), [Failure::Glare]);
+    let session = pair.b.direct_links.sessions.get(&pair.link).unwrap();
+    assert_eq!(session.id(), &[7; 16]);
+    assert_eq!(session.role(), crate::direct_link::Role::Responder);
+}
+
+/// Two nodes that failed in the same instant do not try again in the same
+/// instant, and no retry comes sooner than the cooldown allows.
+#[test]
+fn retries_after_a_shared_failure_are_not_in_lockstep() {
+    let first = super::direct_link::RETRY_BACKOFF_MS[0];
+    let mut waits = Vec::new();
+    for _ in 0..8 {
+        let mut pair = Pair::new();
+        let (session, _) = to_punch(&mut pair);
+        let _ = pair.a.direct_link_punched(&session, None);
+        let now = crate::traits::Clock::now_ms(pair.a.transport.clock());
+        let due = pair.a.direct_links.retries[&pair.link].due_ms.unwrap();
+        waits.push(due - now);
+    }
+    assert!(
+        waits.iter().all(|w| (first..=first * 5 / 4).contains(w)),
+        "{waits:?}"
+    );
+    assert!(waits.iter().any(|w| *w != waits[0]), "{waits:?}");
+}
+
+// ─── +ciris leviculum#98: a Resource across the move ───────────────────
+
+/// A pair's two paths, carried for real: what leaves on a direct interface
+/// arrives on the other end's direct interface, and only what fits a UDP
+/// datagram may leave there.
+struct Paths {
+    a_direct: usize,
+    b_direct: usize,
+}
+
+impl Paths {
+    fn add(pair: &mut Pair) -> Self {
+        Paths {
+            a_direct: add_iface(&mut pair.a, "A_direct"),
+            b_direct: add_iface(&mut pair.b, "B_direct"),
+        }
+    }
+
+    fn carry(
+        &self,
+        pair: &mut Pair,
+        mut from_a: Vec<(Option<usize>, Vec<u8>)>,
+        mut from_b: Vec<(Option<usize>, Vec<u8>)>,
+    ) {
+        for _ in 0..512 {
+            if from_a.is_empty() && from_b.is_empty() {
+                return;
+            }
+            let mut next_a = Vec::new();
+            for (iface, data) in core::mem::take(&mut from_a) {
+                let direct = iface == Some(self.a_direct);
+                assert!(!direct || data.len() <= crate::direct_link::DIRECT_LINK_MTU as usize);
+                let to = if direct { self.b_direct } else { pair.b_mesh };
+                let tick = pair.b.handle_packet(InterfaceId(to), &data);
+                from_b.extend(sent(&tick));
+                pair.b_events.extend(tick.events);
+            }
+            for (iface, data) in core::mem::take(&mut from_b) {
+                let direct = iface == Some(self.b_direct);
+                assert!(!direct || data.len() <= crate::direct_link::DIRECT_LINK_MTU as usize);
+                let to = if direct { self.a_direct } else { pair.a_mesh };
+                let tick = pair.a.handle_packet(InterfaceId(to), &data);
+                next_a.extend(sent(&tick));
+                pair.a_events.extend(tick.events);
+            }
+            from_a = next_a;
+        }
+    }
+
+    fn run(&self, pair: &mut Pair, ms: u64) {
+        let mut left = ms;
+        while left > 0 {
+            let step = left.min(200);
+            left -= step;
+            pair.a.transport.clock().advance(step);
+            pair.b.transport.clock().advance(step);
+            let a_out = pair.a.handle_timeout();
+            pair.a_events.extend(a_out.events.clone());
+            let b_out = pair.b.handle_timeout();
+            pair.b_events.extend(b_out.events.clone());
+            self.carry(pair, sent(&a_out), sent(&b_out));
+        }
+    }
+}
+
+fn large_mtu(pair: &mut Pair, mtu: u32) {
+    for node in [&mut pair.a, &mut pair.b] {
+        let link = node.links.get_mut(&pair.link).unwrap();
+        link.set_negotiated_mtu_for_test(mtu);
+    }
+}
+
+/// Both punches succeed and both COMPLETEs cross; A holds a transfer, so B
+/// moves and A does not.
+fn b_moves_and_a_holds(pair: &mut Pair, paths: &Paths, session: &[u8; 16]) {
+    let out = pair.b.direct_link_punched(session, Some(paths.b_direct));
+    pair.b_events.extend(out.events.clone());
+    paths.carry(pair, Vec::new(), sent(&out));
+    paths.run(pair, 400);
+    let out = pair.a.direct_link_punched(session, Some(paths.a_direct));
+    pair.a_events.extend(out.events.clone());
+    paths.carry(pair, sent(&out), Vec::new());
+    paths.run(pair, 400);
+    assert_eq!(
+        pair.b.direct_link_interface(&pair.link),
+        Some(paths.b_direct)
+    );
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None, "A holds");
+}
+
+fn completed(events: &[NodeEvent], sender: bool) -> usize {
+    events
+        .iter()
+        .filter(
+            |e| matches!(e, NodeEvent::ResourceCompleted { is_sender, .. } if *is_sender == sender),
+        )
+        .count()
+}
+
+fn lost(events: &[NodeEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, NodeEvent::DirectLinkLost { .. }))
+        .count()
+}
+
+/// The two ends cross the move at different moments, so a Resource each way
+/// is cut for an MTU its receiver no longer, or does not yet, have. At these
+/// sizes the first MTU tells the part size from the advertisement alone; the
+/// second cannot, and the parts settle it.
+#[test]
+fn a_punched_link_with_a_transfer_under_way_moves_once_it_is_done() {
+    for (mtu, a_sends, b_sends) in [(16_384, 60_000, 5_000), (1_500, 3_500, 3_500)] {
+        let mut pair = Pair::new();
+        large_mtu(&mut pair, mtu);
+        let (session, _) = to_punch(&mut pair);
+        for node in [&mut pair.a, &mut pair.b] {
+            node.set_resource_strategy(&pair.link, crate::resource::ResourceStrategy::AcceptAll)
+                .unwrap();
+        }
+        let paths = Paths::add(&mut pair);
+        // A's advertisement is on its way while the move happens.
+        let (_, tick) = pair
+            .a
+            .send_resource(&pair.link, &std::vec![7u8; a_sends], None, false)
+            .expect("send_resource");
+        let held_adv = sent(&tick);
+        b_moves_and_a_holds(&mut pair, &paths, &session);
+        assert!(
+            !pair
+                .a_events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::DirectLinkEstablished { .. })),
+            "not while the transfer runs"
+        );
+        assert_eq!(
+            pair.b.links.get(&pair.link).unwrap().negotiated_mtu(),
+            crate::direct_link::DIRECT_LINK_MTU
+        );
+        assert_eq!(pair.a.links.get(&pair.link).unwrap().negotiated_mtu(), mtu);
+
+        // A's parts are cut for the MTU B has left, B's for the one A has
+        // not reached.
+        let (_, tick) = pair
+            .b
+            .send_resource(&pair.link, &std::vec![8u8; b_sends], None, false)
+            .expect("B sends");
+        paths.carry(&mut pair, held_adv, sent(&tick));
+        paths.run(&mut pair, 4_000);
+
+        assert_eq!(completed(&pair.b_events, false), 1, "B took A's resource");
+        assert_eq!(completed(&pair.a_events, false), 1, "A took B's resource");
+        assert_eq!(completed(&pair.a_events, true), 1);
+        assert_eq!(completed(&pair.b_events, true), 1);
+        assert_eq!(
+            pair.a.direct_link_interface(&pair.link),
+            Some(paths.a_direct),
+            "the transfer done, A moves too"
+        );
+        assert_eq!(
+            pair.b.direct_link_interface(&pair.link),
+            Some(paths.b_direct)
+        );
+        let a = pair.a.links.get(&pair.link).unwrap();
+        let b = pair.b.links.get(&pair.link).unwrap();
+        assert_eq!(a.mdu(), b.mdu(), "both ends agree on the MDU");
+    }
+}
+
+/// The moved end took a transfer longer than the fallback grace, while the
+/// held end's traffic kept arriving over the relay. The held end said it is
+/// holding, so that is no fallback: if it were, the moved end would leave and
+/// the held end then move alone.
+#[test]
+fn a_held_peers_relayed_traffic_past_the_grace_keeps_the_moved_end_direct() {
+    let mut pair = Pair::new();
+    large_mtu(&mut pair, 16_384);
+    let (session, _) = to_punch(&mut pair);
+    pair.b
+        .set_resource_strategy(&pair.link, crate::resource::ResourceStrategy::AcceptApp)
+        .unwrap();
+    let paths = Paths::add(&mut pair);
+    let (_, tick) = pair
+        .a
+        .send_resource(&pair.link, &[7u8; 40_000], None, false)
+        .unwrap();
+    let held_adv = sent(&tick);
+    b_moves_and_a_holds(&mut pair, &paths, &session);
+    paths.carry(&mut pair, held_adv, Vec::new());
+
+    paths.run(&mut pair, crate::node::FALLBACK_GRACE_MS + 1_000);
+    pair.a.transport.clock().advance(1_000);
+    pair.b.transport.clock().advance(1_000);
+    let out = pair.a.send_on_link(&pair.link, b"still relayed").unwrap();
+    assert!(sent(&out).iter().all(|(i, _)| *i != Some(paths.a_direct)));
+    paths.carry(&mut pair, sent(&out), Vec::new());
+    assert!(pair.b_events.iter().any(|e| matches!(
+        e,
+        NodeEvent::MessageReceived { data, .. } if data == b"still relayed"
+    )));
+    assert_eq!(lost(&pair.b_events), 0, "B stays direct");
+
+    let out = pair.b.accept_resource(&pair.link).expect("B accepts late");
+    paths.carry(&mut pair, Vec::new(), sent(&out));
+    paths.run(&mut pair, 4_000);
+    assert_eq!(completed(&pair.b_events, false), 1);
+    assert_eq!(
+        pair.a.direct_link_interface(&pair.link),
+        Some(paths.a_direct)
+    );
+    assert_eq!(
+        pair.b.direct_link_interface(&pair.link),
+        Some(paths.b_direct)
+    );
+}
+
+/// A with an advertisement its application never answers, so nothing ends
+/// the hold but the deadline; B with nothing holding it.
+fn held_for_good(pair: &mut Pair) -> (Paths, [u8; 16]) {
+    large_mtu(pair, 16_384);
+    let (session, _) = to_punch(pair);
+    pair.a
+        .set_resource_strategy(&pair.link, crate::resource::ResourceStrategy::AcceptApp)
+        .unwrap();
+    pair.a.transport.clock().advance(1_000);
+    pair.b.transport.clock().advance(1_000);
+    let (_, tick) = pair
+        .b
+        .send_resource(&pair.link, &[5u8; 2_000], None, false)
+        .unwrap();
+    let _ = deliver(&mut pair.a, pair.a_mesh, packets(&tick));
+    pair.b
+        .links
+        .get_mut(&pair.link)
+        .unwrap()
+        .clear_outgoing_resource();
+    assert!(pair.a.links.get(&pair.link).unwrap().has_pending_resource());
+    let paths = Paths::add(pair);
+    b_moves_and_a_holds(pair, &paths, &session);
+    (paths, session)
+}
+
+fn closes(jobs: &[DirectLinkJob], index: usize) -> bool {
+    jobs.contains(&DirectLinkJob::CloseInterface {
+        interface_index: index,
+    })
+}
+
+#[test]
+fn a_held_move_gives_up_at_its_deadline_and_brings_the_moved_end_back() {
+    let mut pair = Pair::new();
+    let (paths, _) = held_for_good(&mut pair);
+    pair.a.take_direct_link_jobs();
+    assert!(
+        pair.a.direct_link_next_deadline().is_some(),
+        "the deadline wakes the node"
+    );
+    paths.run(&mut pair, crate::node::DEFERRED_MOVE_TIMEOUT_MS - 2_000);
+    assert_eq!(a_failed(&pair), [], "not before the deadline");
+    paths.run(&mut pair, 4_000);
+    assert_eq!(a_failed(&pair), [Failure::HeldTooLong]);
+    assert!(closes(&pair.a.take_direct_link_jobs(), paths.a_direct));
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), None, "B is back");
+    assert_eq!(lost(&pair.b_events), 1);
+    let a = pair.a.links.get(&pair.link).unwrap();
+    let b = pair.b.links.get(&pair.link).unwrap();
+    assert_eq!(a.mdu(), b.mdu(), "both ends agree on the MDU");
+    assert!(pair.a.direct_links.retries.contains_key(&pair.link));
+    assert!(pair.a.direct_links.retries[&pair.link].due_ms.is_some());
+}
+
+#[test]
+fn a_held_links_lost_interface_is_named_and_brings_the_moved_end_back() {
+    let mut pair = Pair::new();
+    let (paths, _) = held_for_good(&mut pair);
+    let out = pair.a.handle_interface_down(InterfaceId(paths.a_direct));
+    pair.a_events.extend(out.events.clone());
+    paths.carry(&mut pair, sent(&out), Vec::new());
+    paths.run(&mut pair, 2_000);
+    assert_eq!(a_failed(&pair), [Failure::InterfaceLost]);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), None, "B is back");
+    let a = pair.a.links.get(&pair.link).unwrap();
+    let b = pair.b.links.get(&pair.link).unwrap();
+    assert_eq!(a.mdu(), b.mdu(), "both ends agree on the MDU");
+}
+
+/// The moved end loses its path while the other holds: the held end must not
+/// then move alone onto a path nobody is on.
+#[test]
+fn a_held_link_whose_peer_fell_back_never_moves() {
+    let mut pair = Pair::new();
+    let (paths, _) = held_for_good(&mut pair);
+    pair.a.take_direct_link_jobs();
+    let out = pair.b.handle_interface_down(InterfaceId(paths.b_direct));
+    pair.b_events.extend(out.events.clone());
+    paths.carry(&mut pair, Vec::new(), sent(&out));
+    paths.run(&mut pair, 2_000);
+    assert_eq!(a_failed(&pair), [Failure::PeerFellBack]);
+    assert!(closes(&pair.a.take_direct_link_jobs(), paths.a_direct));
+
+    let _ = pair.a.reject_resource(&pair.link).expect("the hold ends");
+    paths.run(&mut pair, 2_000);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), None);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), None);
+}
+
+/// A link waiting on a transfer is no link to start another upgrade on.
+#[test]
+fn a_held_move_keeps_the_link_busy() {
+    let mut pair = Pair::new();
+    let (paths, _) = held_for_good(&mut pair);
+    paths.run(&mut pair, crate::node::PROPOSAL_COOLDOWN_MS);
+    assert_eq!(
+        pair.a.propose_direct_link(&pair.link).unwrap_err(),
+        DirectLinkError::AlreadyUpgrading
+    );
 }
