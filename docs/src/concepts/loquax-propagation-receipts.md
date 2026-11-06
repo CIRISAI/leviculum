@@ -150,13 +150,18 @@ fields[0xFC] = map {
   batch window, 5 s after the first arrival, alone or riding on the next
   message to that sender. Read wins: an id seen while read receipts go to
   that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:290`).
-- **On a home node**: the archive step of the daemon's pump
-  (`loquax/src/home/daemon.rs:736`) gathers one pump's arrivals per
-  sender, `owes_arrival` (`loquax/src/home/server.rs:662`) applies the
-  rule to the packed message, and `propagation_receipts`
-  (`loquax/src/home/server.rs:733`) signs each alone into the outbox,
-  direct first and then by the propagation node, logging
-  `HOME propagation receipt to=… ids=… received_at=… message=…`.
+- **On a home node** (since 1462): the home acknowledges nothing on its
+  own; archiving is no device. A device that pulled the message hands the
+  home an arrived mark (`MarkFlag::Arrived`), and the home's `arrived`
+  (`loquax/src/home/server.rs`) applies the rule to the archived message
+  and signs each receipt alone into the outbox, the first device's mark
+  winning, logging `HOME device receipt to=… ids=… received_at=…
+  message=…`. Before 1462 the home signed it when the message reached its
+  archive, which said "on the device" of a message no device had.
+- **Direct post too** (1462): the rule no longer asks how the message
+  came. A proof is signed by the recipient's identity, which its mailbox
+  holds, so only this receipt says the device has it
+  ([the read-receipts page](loquax-read-receipts.md), section 6).
 - **Taking it**: `take_lev` (`loquax/src/ui/receipts.rs:192`) hands a
   `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:319`) before the
   read-receipts switch is looked at. A `0x07` alone carries no mark and
@@ -170,26 +175,26 @@ No new rung. The marks are the ladder of the read-receipts page
 | Event | Mark | Words in the detail view |
 |---|---|---|
 | the node took it | one grey tick, as today | "Waiting in the mailbox" |
-| `0x07` came | two grey ticks | "Delivered via the propagation network at 10:31" |
-| the node said `collected` | two grey ticks | "Collected from the propagation network at 10:31" |
+| `0x07` came | two grey ticks | "On [name]'s device" (1462; before, "Delivered via the propagation network") |
+| the node said `collected` | one grey tick, the arrived rung (1462: the recipient's mailbox may have collected it) | "Collected from the propagation network at 10:31" |
 | the node said `expired` or `evicted` | one grey tick | "Not collected at the propagation node; perhaps delivered via another" |
-| a proof came | two grey ticks | "Arrived on Anna's device", as before |
+| a proof came | one grey tick (1462; two before) | "Arrived" |
 | `0x01` came | two accent ticks | "Read at 10:32", as before |
 
 The screen reader says the words. The time is when this device learned
 it. The words in the catalogue (`loquax/src/ui/strings.rs`), English and
-German:
+German (`info_delivered_via_pn` and `state_delivered_via_pn` went with
+1462: a `0x07` is the device's word, "On [name]'s device"):
 
 | Key | English | German |
 |---|---|---|
-| `info_delivered_via_pn` | Delivered via the propagation network at %1$s | Über das Propagation-Netz zugestellt um %1$s |
 | `info_collected` | Collected from the propagation network at %1$s | Um %1$s aus dem Propagation-Netz abgeholt |
 | `info_not_collected` | Not collected at the propagation node; perhaps delivered via another | Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt |
-| `state_delivered_via_pn` | Delivered via the propagation network | Über das Propagation-Netz zugestellt |
 | `state_collected` | Collected from the propagation network | Aus dem Propagation-Netz abgeholt |
 
 **Where the words come from.** The message's ledger keeps the witness as
-a line (`delivered via the propagation network`, `collected from the
+a line (`on the recipient's device: its receipt`, before 1462 `delivered
+via the propagation network`, `collected from the
 propagation network`, `not collected at the propagation node; perhaps via
 another`), so the words survive a restart; `arrival::witness`
 (`loquax/src/ui/arrival.rs:92`) reads it, and a proof that came first
