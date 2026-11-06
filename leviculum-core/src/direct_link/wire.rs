@@ -59,6 +59,19 @@ pub const MAX_HOST_PAYLOAD: usize = 16 * 1024;
 /// the two-sided commit.
 pub const REJECT_PUNCH_FAILED: u8 = 0x10;
 
+/// +ciris (leviculum#96): REJECT reason from a link's initiator to a REQUEST
+/// that crossed its own proposal: "mine stands, take the one I sent". A peer
+/// that knows it gives way and waits for that REQUEST; one that does not
+/// reads it as any other refusal.
+pub const REJECT_GLARE: u8 = 0x11;
+
+/// +ciris (leviculum#98): REJECT reason sent after a COMPLETE, by a side that
+/// is holding its move for a transfer: "not a refusal, but until I move, my
+/// traffic comes over the relay and does not mean I fell back". Sent only to
+/// a peer on the two-sided commit, which by then holds no session, so one
+/// that does not know the reason ignores it.
+pub const REJECT_HOLDING: u8 = 0x12;
+
 /// HKDF `info` for the punch token. Shared with rns-rs; a different label
 /// would make every punch frame fail the other side's check.
 const PUNCH_TOKEN_INFO: &[u8] = b"rns-holepunch-v1";

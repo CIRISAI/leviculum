@@ -3267,7 +3267,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let transfer_size = adv.transfer_size;
         let data_size = adv.data_size;
         let link_mdu = link.mdu();
-        let sdu = crate::resource::resource_sdu(link.negotiated_mtu());
+        let part_sizes = self.direct_links.part_sizes(&link_id, link, &adv);
         let window_policy = self.resource_window_policy.for_path(
             link.attached_interface()
                 .map(|i| self.transport.interface_kind(i)),
@@ -3279,10 +3279,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             ResourceStrategy::AcceptAll => {
                 // Request Resources and responses matching a pending request
                 // bypass the application Resource strategy, matching Python.
-                match IncomingResource::from_advertisement(
+                match IncomingResource::from_advertisement_sized(
                     &adv,
                     link_mdu,
-                    sdu,
+                    part_sizes,
                     now_ms,
                     self.max_incoming_resource_size,
                     window_policy,

@@ -31,6 +31,36 @@ git tag, not the version string. -->
 - `send_on_link` and `send_on_link_timed` return `SendError::TooLarge` for a
   frame over the Channel limit, not `LinkFailed`. A link that moved onto a
   direct path has a smaller MDU, and that size error read as a dead link.
+- Two proposals crossing on one link no longer refuse each other
+  (leviculum#96). The link's initiator keeps its proposal and answers the
+  peer's REQUEST with the new reason `REJECT_GLARE`; the link's responder
+  drops its own proposal, ends it with the new `Failure::Glare` and handles
+  the REQUEST as usual, `AskHost` included, free of the cooldown its dropped
+  proposal started. A peer without the tie-break still ends cleanly: it reads
+  `REJECT_GLARE` as a refusal, and its `REJECT_BUSY` finds the responder
+  already yielded or ends the initiator's proposal `Rejected` as before.
+- Direct-link retries wait up to a quarter longer than `RETRY_BACKOFF_MS`, at
+  random, so two nodes that failed together do not retry together
+  (leviculum#96). A `REJECT_BUSY` no longer ends the retry schedule: it means
+  "not now". A REQUEST is `BUSY` while a punched link waits to move.
+- A Resource survives a link crossing a direct-link move (leviculum#98). Its
+  receive part size is chosen per resource from the link's MTU and the MTU on
+  the other side of the move by `ceil(t / sdu) == n`, and where both fit, the
+  first full part settles it.
+- A move held for a transfer is logged and has a deadline,
+  `DEFERRED_MOVE_TIMEOUT_MS` (leviculum#98). Past it the link gives the move
+  up and fails `HeldTooLong`; an interface lost meanwhile fails
+  `InterfaceLost` rather than `Timeout`, as does one lost while waiting on the
+  peer's verdict. A peer that already moved is nudged back, and both ends
+  stay at the lowered MTU. A peer's nudge reaching a held link ends the move
+  with `PeerFellBack`, so a held end never moves alone.
+- A side holding its move says so, after its COMPLETE, with the new reason
+  `REJECT_HOLDING` (leviculum#98). A peer that already moved does not read
+  that side's relayed traffic as a fallback until the hold ends, so a transfer
+  longer than `FALLBACK_GRACE_MS` no longer splits the two ends. A peer without
+  it ignores the reason; its fallback then reaches the held end as a nudge.
+- `send_resource: transfer in progress` is logged with the link id
+  (leviculum#98).
 
 ## [0.33.0+ciris.1] — CIRIS fork
 

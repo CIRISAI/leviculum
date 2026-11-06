@@ -151,6 +151,27 @@ impl IncomingResources {
     }
 }
 
+/// Which part size an advertisement was cut for, of `sdu` and `other`
+/// (+ciris, leviculum#98: the two sizes of a link crossing a move). The
+/// advertisement's own arithmetic says: `ceil(t / sdu) == n`. Returns the part
+/// size to receive at and, when both sizes fit that arithmetic, the smaller
+/// one still open: the parts themselves settle it. When neither fits, `sdu`
+/// stands and the advertisement is judged as it always was.
+pub(crate) fn resolve_part_size(
+    adv: &ResourceAdvertisement,
+    sdu: usize,
+    other: Option<usize>,
+) -> (usize, Option<usize>) {
+    let fits = |size: usize| {
+        size != 0 && (adv.transfer_size as usize).div_ceil(size) == adv.num_parts as usize
+    };
+    match other.filter(|size| fits(*size)) {
+        None => (sdu, None),
+        Some(size) if !fits(sdu) => (size, None),
+        Some(size) => (sdu.max(size), Some(sdu.min(size))),
+    }
+}
+
 /// Result of receiving a data part.
 #[derive(Debug)]
 pub(crate) enum ResourcePartResult {
@@ -213,6 +234,9 @@ pub(crate) struct IncomingResource {
     waiting_for_hmu: bool,
     link_mdu: usize,
     sdu: usize,
+    // A smaller part size this resource may have been cut for, until a part
+    // settles it (leviculum#98, `resolve_part_size`). `sdu` is the larger.
+    smaller_sdu: Option<usize>,
     // For proof computation: the digest `build_proof` needs, not the bytes
     // it is taken over (see `assemble`, step 5).
     proof_hash: Option<[u8; 32]>,
@@ -343,6 +367,7 @@ impl IncomingResource {
             waiting_for_hmu: false,
             link_mdu,
             sdu,
+            smaller_sdu: None,
             proof_hash: None,
         };
 
@@ -352,6 +377,24 @@ impl IncomingResource {
         incoming.req_sent_ms = Some(now_ms);
 
         Ok((incoming, req))
+    }
+
+    /// [`Self::from_advertisement`] at the part sizes
+    /// [`resolve_part_size`] returned: the second, when there is one, stays
+    /// open until a part settles which of the two the sender cut for
+    /// (leviculum#98).
+    pub(crate) fn from_advertisement_sized(
+        adv: &ResourceAdvertisement,
+        link_mdu: usize,
+        (sdu, smaller_sdu): (usize, Option<usize>),
+        now_ms: u64,
+        max_size: usize,
+        window_policy: WindowPolicy,
+    ) -> Result<(Self, Vec<u8>), ResourceError> {
+        let (mut incoming, request) =
+            Self::from_advertisement(adv, link_mdu, sdu, now_ms, max_size, window_policy)?;
+        incoming.smaller_sdu = smaller_sdu;
+        Ok((incoming, request))
     }
 
     /// Answer a repeated advertisement of this resource (Codeberg #404).
@@ -494,9 +537,31 @@ impl IncomingResource {
     }
 
     fn part_fits(&self, index: usize, bytes: usize) -> bool {
-        let consumed = (index as u64).saturating_mul(self.sdu as u64);
+        self.part_fits_size(index, bytes, self.sdu)
+            || self
+                .smaller_sdu
+                .is_some_and(|size| self.part_fits_size(index, bytes, size))
+    }
+
+    fn part_fits_size(&self, index: usize, bytes: usize, size: usize) -> bool {
+        let consumed = (index as u64).saturating_mul(size as u64);
         let remaining = self.transfer_size.saturating_sub(consumed);
-        bytes as u64 <= remaining.min(self.sdu as u64)
+        bytes as u64 <= remaining.min(size as u64)
+    }
+
+    /// A stored part names the size the sender cut for: longer than the
+    /// smaller size means the larger, and exactly that size anywhere but the
+    /// last slot means the smaller.
+    fn settle_part_size(&mut self, index: usize, bytes: usize) {
+        let Some(smaller) = self.smaller_sdu else {
+            return;
+        };
+        if bytes > smaller {
+            self.smaller_sdu = None;
+        } else if bytes == smaller && index + 1 < self.num_parts as usize {
+            self.sdu = smaller;
+            self.smaller_sdu = None;
+        }
     }
 
     pub(crate) fn receive_part(
@@ -542,6 +607,8 @@ impl IncomingResource {
         if !self.part_fits(index, part_data.len()) {
             return ResourcePartResult::InvalidPart;
         }
+
+        self.settle_part_size(index, part_data.len());
 
         // Store the part
         self.parts[index] = Some(part_data.to_vec());
@@ -1332,6 +1399,84 @@ mod tests {
                 ..Default::default()
             },
             hashmap_data,
+        }
+    }
+
+    /// leviculum#98: a link crossing a move has two part sizes, and the
+    /// advertisement's `ceil(t / sdu) == n` picks between them.
+    #[test]
+    fn the_advertisement_picks_the_part_size_of_a_link_crossing_a_move() {
+        let adv = |t: u64, n: u32| {
+            let mut adv = make_test_adv(n, Vec::new());
+            adv.transfer_size = t;
+            adv
+        };
+        // Cut for the pre-move MTU, read after the link lowered.
+        assert_eq!(
+            resolve_part_size(&adv(60_000, 4), 1_364, Some(16_348)),
+            (16_348, None)
+        );
+        // Cut for the lowered MTU, read before this end lowers.
+        assert_eq!(
+            resolve_part_size(&adv(60_000, 44), 16_348, Some(1_364)),
+            (1_364, None)
+        );
+        // Both fit: the larger, with the smaller left open.
+        assert_eq!(
+            resolve_part_size(&adv(3_600, 3), 1_364, Some(1_464)),
+            (1_464, Some(1_364))
+        );
+        // Neither does, or there is no other size: the link's own stands.
+        assert_eq!(
+            resolve_part_size(&adv(60_000, 7), 1_364, Some(16_348)),
+            (1_364, None)
+        );
+        assert_eq!(
+            resolve_part_size(&adv(60_000, 4), 1_364, None),
+            (1_364, None)
+        );
+    }
+
+    /// leviculum#98: where both sizes fit the advertisement, the first full
+    /// part settles it, and the other size closes behind it.
+    #[test]
+    fn parts_settle_a_part_size_the_advertisement_cannot() {
+        let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
+        for sender_cut in [100usize, 120] {
+            let stream: Vec<u8> = (0..250u32).map(|i| i as u8).collect();
+            let parts: Vec<&[u8]> = stream.chunks(sender_cut).collect();
+            assert_eq!(parts.len(), 3, "both sizes make three parts");
+            let hashes: Vec<u8> = parts
+                .iter()
+                .flat_map(|part| map_hash(part, &random_hash))
+                .collect();
+            let mut adv = make_test_adv(3, hashes);
+            adv.transfer_size = 250;
+            let sizes = resolve_part_size(&adv, 100, Some(120));
+            assert_eq!(sizes, (120, Some(100)));
+            let (mut incoming, _) = IncomingResource::from_advertisement_sized(
+                &adv,
+                431,
+                sizes,
+                100,
+                8192,
+                WindowPolicy::Current,
+            )
+            .unwrap();
+            assert!(!matches!(
+                incoming.receive_part(parts[0], 200, 100),
+                ResourcePartResult::InvalidPart
+            ));
+            assert_eq!(incoming.sdu, sender_cut, "the first part settled it");
+            assert_eq!(incoming.smaller_sdu, None);
+            for part in &parts[1..] {
+                assert!(incoming.claims_part(part));
+                assert!(!matches!(
+                    incoming.receive_part(part, 300, 100),
+                    ResourcePartResult::InvalidPart
+                ));
+            }
+            assert!(incoming.parts.iter().all(Option::is_some));
         }
     }
 

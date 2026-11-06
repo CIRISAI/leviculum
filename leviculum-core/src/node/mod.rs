@@ -2092,7 +2092,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .get(&link_id)
             .ok_or(ResourceError::InvalidRequest)?;
         if link.has_outgoing_resource() {
-            return Err(ResourceError::TransferInProgress);
+            return Err(self.transfer_in_progress(&link_id));
         }
         Ok(crate::resource::ResourceSendParams {
             crypt: link.resource_crypt_params(),
@@ -2131,7 +2131,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .get_mut(&link_id)
             .ok_or(ResourceError::InvalidRequest)?;
         if link.has_outgoing_resource() {
-            return Err(ResourceError::TransferInProgress);
+            return Err(self.transfer_in_progress(&link_id));
         }
         if link.link_key() != Some(&prepared.token_key) {
             return Err(ResourceError::LinkStateChanged);
@@ -2610,12 +2610,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return Err(ResourceError::TransferInProgress);
         }
         let link_mdu = link.mdu();
-        let sdu = crate::resource::resource_sdu(link.negotiated_mtu());
+        let part_sizes = self.direct_links.part_sizes(link_id, link, &adv);
 
-        let (incoming, req_payload) = IncomingResource::from_advertisement(
+        let (incoming, req_payload) = IncomingResource::from_advertisement_sized(
             &adv,
             link_mdu,
-            sdu,
+            part_sizes,
             now_ms,
             self.max_incoming_resource_size,
             self.resource_window_policy.for_path(
@@ -13582,7 +13582,8 @@ pub use telemetry::{
 mod direct_link;
 pub use direct_link::{
     DirectLinkConfig, DirectLinkError, DirectLinkJob, DirectLinkPolicy, ASK_HOST_TIMEOUT_MS,
-    FALLBACK_GRACE_MS, PROPOSAL_COOLDOWN_MS, RESPONDER_START_DELAY_MAX_MS, RETRY_BACKOFF_MS,
+    DEFERRED_MOVE_TIMEOUT_MS, FALLBACK_GRACE_MS, PROPOSAL_COOLDOWN_MS,
+    RESPONDER_START_DELAY_MAX_MS, RETRY_BACKOFF_MS,
 };
 #[cfg(test)]
 mod mvr_direct_link;

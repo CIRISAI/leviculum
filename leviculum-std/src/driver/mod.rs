@@ -4217,10 +4217,10 @@ impl ReticulumNode {
 
     /// Turn the background retry of this node's failed direct-link
     /// proposals off or back on (+ciris; on by default). A proposal that
-    /// failed on the punch, a timeout or the probe, or a direct path that
-    /// was lost, is proposed again after `RETRY_BACKOFF_MS` (1, 2, 5, 10,
-    /// 15, 15 min), with the same host payload; a refusal or
-    /// [`retire_direct_link`](Self::retire_direct_link) ends it. Off, a
+    /// failed on the punch, a timeout, the probe, a busy peer or a crossing,
+    /// or a direct path lost, is proposed again after `RETRY_BACKOFF_MS` (1,
+    /// 2, 5, 10, 15, 15 min, up to a quarter longer), with the same payload;
+    /// a refusal or [`retire_direct_link`](Self::retire_direct_link) ends it. Off, a
     /// failed upgrade stays failed until the host proposes again. Takes the
     /// core lock.
     pub fn set_direct_link_retry(&self, enabled: bool) {
