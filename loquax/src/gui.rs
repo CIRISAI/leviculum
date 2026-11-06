@@ -35,6 +35,8 @@
 //! loading word and the maps directory's epoch, and a new epoch reads the
 //! regions again and paints the view anew.
 
+#[cfg(test)]
+mod bench;
 pub mod chat;
 pub mod map;
 #[cfg(test)]
@@ -3125,7 +3127,7 @@ mod tests {
 
     /// The window over the Florence fixture, 480 x 320 at a density of
     /// one, `pins` seen, the view at `zoom_milli` over Piazza d'Azeglio.
-    fn window_over_florence(pins: Vec<MapPin>, zoom_milli: u32) -> App {
+    pub(super) fn window_over_florence(pins: Vec<MapPin>, zoom_milli: u32) -> App {
         let frames = florence();
         let maps = frames.painter().epoch();
         let mut app = App::new(frames, None);
@@ -4072,17 +4074,9 @@ mod tests {
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
     }
 
-    /// A long conversation scrolls softly without building the view
-    /// (1431): Anna's chat with 3000 more messages, a wheel's notch over
-    /// the messages and the screen's frames after it scroll the list on
-    /// every frame, eased, and publish no message, so iced redraws the
-    /// screen it has and builds no view per frame: the frame costs the
-    /// rows in sight. The numbers it prints are the report's: the view
-    /// built and laid out once (what a message arriving costs), and a
-    /// frame of the scroll.
-    #[test]
-    fn a_long_chat_scrolls_without_building_the_view() {
-        let (w, h) = (900u32, 560u32);
+    /// The window over Anna's chat with `chat_model`'s messages and 3000
+    /// more, open, `w` by `h` (1431, the window bench of 1441).
+    pub(super) fn long_chat(w: u32, h: u32) -> App {
         let mut model = chat_model();
         for i in 0..3000u32 {
             let mut id = [7u8; 32];
@@ -4101,10 +4095,27 @@ mod tests {
             );
         }
         update(&mut model, UiEvent::Open { peer: ANNA });
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // The channel's receiver dropped: what the window tells the model
+        // goes nowhere.
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
         app.window = Size::new(w as f32, h as f32);
         app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app
+    }
+
+    /// A long conversation scrolls softly without building the view
+    /// (1431): Anna's chat with 3000 more messages, a wheel's notch over
+    /// the messages and the screen's frames after it scroll the list on
+    /// every frame, eased, and publish no message, so iced redraws the
+    /// screen it has and builds no view per frame: the frame costs the
+    /// rows in sight. The numbers it prints are the report's: the view
+    /// built and laid out once (what a message arriving costs), and a
+    /// frame of the scroll.
+    #[test]
+    fn a_long_chat_scrolls_without_building_the_view() {
+        let (w, h) = (900u32, 560u32);
+        let app = long_chat(w, h);
         let bubbles: usize = app
             .scene
             .chat

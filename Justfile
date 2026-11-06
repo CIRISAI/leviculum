@@ -2761,3 +2761,64 @@ map-bench-baseline REGION:
     rm -rf "$out/maps" && mkdir -p "$out/maps"
     ln -s "$(realpath "{{REGION}}")" "$out/maps/$(basename "{{REGION}}")"
     "$bench" "$out/maps" --label host --write loquax/examples/map_eye_bench.baseline
+
+# 1441, #474, #232: the window's frames measured as Lew's window draws them
+# (loquax/src/gui/bench.rs): a map drag, five wheel notches, the chat's
+# wheel, its scrollbar dragged, a mouse drag on its body and a touchpad
+# scroll over 3000 messages, each in real time through iced's user
+# interface as its loop runs on X11, the frames presented as the software
+# renderer's compositor presents them (damage, no read back), at 900x560,
+# 1280x1190 and 1920x1080, headless. One WINDOW_BENCH line a size and
+# gesture. As map-bench: the bench of BASE (default: the commit that last
+# wrote loquax/tests/window_bench.baseline) built in a worktree under
+# target/, and this tree's, in turn for ROUNDS rounds, the medians
+# compared; a frame_ms_mean more than 5 % and 0.1 ms slower fails. The
+# table lands in target/window-bench/table.md. A measuring tool, never in
+# `guards`: two release builds, about 45 s a round and side.
+[doc('Measure the window frames at three sizes, A/B against the baseline (#474)')]
+window-bench BASE="" ROUNDS="3":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(realpath -m target/window-bench)"
+    mkdir -p "$out"
+    rm -f "$out"/base-*.txt "$out"/this-*.txt
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    exe() { python3 -c 'import json,sys
+    for l in sys.stdin:
+        m = json.loads(l)
+        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "loquax" and m["profile"]["test"]:
+            print(m["executable"])'; }
+    base="{{BASE}}"
+    [ -n "$base" ] || base="$(git log -1 --format=%H -- loquax/tests/window_bench.baseline)"
+    src="$out/base-src"
+    git worktree remove --force "$src" 2>/dev/null || rm -rf "$src"
+    git worktree add -q --detach "$src" "$base"
+    # The base's bench reads its fixture from its own tree: removed last.
+    trap 'git worktree remove --force "$src"' EXIT
+    target="$(realpath target)"
+    based="$(cd "$src" && CARGO_TARGET_DIR="$target" cargo test --release -p loquax --features gui --bins --target "$host" --no-run --message-format=json-render-diagnostics | exe)"
+    cp "$based" "$out/base-bench"
+    bench="$(cargo test --release -p loquax --features gui --bins --target "$host" --no-run --message-format=json-render-diagnostics | exe)"
+    for i in $(seq 1 {{ROUNDS}}); do
+        LOQUAX_WINDOW_BENCH="$out/base-$i.txt" "$out/base-bench" --exact gui::bench::window_bench --nocapture > "$out/base-$i.log" 2>&1
+        LOQUAX_WINDOW_BENCH="$out/this-$i.txt" "$bench" --exact gui::bench::window_bench --nocapture > "$out/this-$i.log" 2>&1
+    done
+    status=0
+    python3 scripts/window-bench-compare.py --base "$out"/base-*.txt --this "$out"/this-*.txt > "$out/table.md" || status=$?
+    cat "$out/table.md"
+    exit "$status"
+
+# 1441: rewrite the baseline `window-bench` measures against, after a change
+# whose cost was measured and accepted in its commit message; the commit
+# that writes it is the next runs' BASE.
+[doc('Rewrite the window-bench baseline from a host run (#474)')]
+window-bench-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    bench="$(cargo test --release -p loquax --features gui --bins --target "$host" --no-run --message-format=json-render-diagnostics | python3 -c 'import json,sys
+    for l in sys.stdin:
+        m = json.loads(l)
+        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "loquax" and m["profile"]["test"]:
+            print(m["executable"])')"
+    LOQUAX_WINDOW_BENCH="$(realpath loquax/tests/window_bench.baseline)" "$bench" --exact gui::bench::window_bench --nocapture

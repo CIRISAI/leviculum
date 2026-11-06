@@ -282,19 +282,28 @@ pub trait Program {
     fn idle(&self) -> bool;
     /// The theme, the text colour and the window's background.
     fn style(&self) -> (Theme, Color, Color);
+    /// Whether the frame about to be presented is one the program marks
+    /// (a map frame new from its worker, say); asked once a frame.
+    fn marked(&self) -> bool {
+        false
+    }
 }
 
-/// One frame of an emulated window, in milliseconds: the update (the
-/// program's and the widgets'), the view built, laid out and drawn, the
-/// present; the share of the window rasterised; whether the view was
+/// One frame of an emulated window: when, and in milliseconds the
+/// update (the program's and the widgets'), the view built, laid out and
+/// drawn, the present; the share of the window rasterised; whether the view was
 /// built anew for it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DrawnFrame {
+    /// When it was presented, seconds since the drive began.
+    pub at: f64,
     pub update_ms: f64,
     pub draw_ms: f64,
     pub present_ms: f64,
     pub damage: f32,
     pub rebuilt: bool,
+    /// The program marked it ([`Program::marked`]).
+    pub marked: bool,
 }
 
 impl DrawnFrame {
@@ -313,8 +322,10 @@ pub struct Run {
     /// Messages the program was handed, and views built.
     pub messages: usize,
     pub views: usize,
-    /// The last frame's pixels, RGB.
+    /// The last frame's pixels, RGB, and those on the window when the
+    /// drive's mark came.
     pub rgb: Vec<u8>,
+    pub marked_rgb: Option<Vec<u8>>,
 }
 
 /// `program` in a window of `w` by `h` as iced 0.14's loop runs it on X11
@@ -326,13 +337,14 @@ pub struct Run {
 /// request (a soft scroll on its way) redraws without a new view. A frame
 /// is drawn as soon as one is wanted and the events due are handled,
 /// with no frame clock, as winit's redraw on X11 has none. Over once the
-/// script is, no redraw is wanted and the program is idle; `None` without
-/// a renderer.
+/// script is, no redraw is wanted and the program is idle; the pixels on
+/// the window at `mark` kept. `None` without a renderer.
 pub fn drive<P: Program>(
     program: &mut P,
     w: u32,
     h: u32,
     script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
+    mark: std::time::Duration,
 ) -> Option<Run> {
     use iced::window::RedrawRequest;
     use iced_runtime::user_interface::{Cache, State, UserInterface};
@@ -370,6 +382,9 @@ pub fn drive<P: Program>(
         run.views += 1;
         let mut done = false;
         loop {
+            if run.marked_rgb.is_none() && start.elapsed() >= mark {
+                run.marked_rgb = Some(surface.rgb());
+            }
             if !over {
                 match script(start.elapsed()) {
                     Some(events) if !events.is_empty() => {
@@ -433,6 +448,8 @@ pub fn drive<P: Program>(
                 let t = Instant::now();
                 pending.damage = surface.present(&mut renderer, background);
                 pending.present_ms = ms(t.elapsed());
+                pending.at = start.elapsed().as_secs_f64();
+                pending.marked = program.marked();
                 run.frames.push(std::mem::take(&mut pending));
                 run.seconds = start.elapsed().as_secs_f64();
                 drawn = true;
