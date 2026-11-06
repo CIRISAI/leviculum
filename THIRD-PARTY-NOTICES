@@ -13438,7 +13438,6 @@ Applies to:
   iced_program 0.14.0
   iced_renderer 0.14.0
   iced_runtime 0.14.0
-  iced_tiny_skia 0.14.1
   iced_widget 0.14.2
   iced_winit 0.14.1
   libm 0.2.16
@@ -14448,6 +14447,7 @@ MIT — MIT License
 Applies to:
   iced 0.14.0
   iced_debug 0.14.0
+  iced_tiny_skia 0.14.1
 
 Copyright 2019 Héctor Ramón, Iced contributors
 

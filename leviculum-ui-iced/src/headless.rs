@@ -10,7 +10,7 @@ use iced::{mouse, Color, Element, Event, Point, Rectangle, Renderer, Size, Theme
 
 /// The software renderer, its default font `font` at 16 pixels; `None`
 /// where iced finds no backend to start.
-fn software(font: iced::Font) -> Option<Renderer> {
+pub(crate) fn software(font: iced::Font) -> Option<Renderer> {
     iced::futures::executor::block_on(<Renderer as Headless>::new(font, iced::Pixels(16.0), None))
 }
 
@@ -197,7 +197,9 @@ impl Offscreen {
 /// `window/compositor.rs`, `present`), into a buffer of our own that is
 /// kept between frames like a window's buffer of age one: the layers
 /// compared with the last frame's, only the damaged part filled and
-/// rasterised, and nothing read back. What a window adds after it, the
+/// rasterised (the whole window once the damage fragments, the vendored
+/// compositor's rule since 1456), and nothing read back. What a window
+/// adds after it, the
 /// display server taking the buffer (softbuffer's present), is not here.
 pub struct Surface {
     pixels: Vec<u8>,
@@ -241,7 +243,10 @@ impl Surface {
         if damaged.is_empty() {
             return 0.0;
         }
-        let damaged = damage::group(damaged, whole);
+        let damaged = iced_tiny_skia::window::compositor::whole_when_fragmented(
+            damage::group(damaged, whole),
+            whole,
+        );
         let area: f32 = damaged
             .iter()
             .filter_map(|r| r.intersection(&whole))
@@ -586,6 +591,66 @@ mod tests {
         assert_eq!(px(55, 5), &[200, 100, 50]);
         assert_eq!(px(5, 5), &[10, 20, 30], "the old place cleared");
         assert_eq!(px(150, 80), &[10, 20, 30]);
+    }
+
+    /// Damage in more pieces than the compositor's rule allows is drawn
+    /// as the whole window (1456): six squares on the diagonal, too far
+    /// apart for iced to group, each moved, are six small rectangles, a
+    /// thousandth of the window together, and the surface rasterises all
+    /// of it; the pixels are right. The control: one square moved is
+    /// drawn alone.
+    #[test]
+    fn a_fragmented_damage_is_drawn_whole() {
+        use iced::widget::{container, stack};
+        const SIDE: u32 = 1200;
+        let ground = Color::from_rgb8(10, 20, 30);
+        let ink = Color::from_rgb8(200, 100, 50);
+        let mut renderer = software(iced::Font::DEFAULT).expect("a renderer");
+        let frame = |squares: u16, x: f32, renderer: &mut Renderer, surface: &mut Surface| {
+            let square = |i: u16| -> Element<'_, u8> {
+                let i = f32::from(i) * 200.0;
+                container(
+                    container(Space::new().width(10).height(10))
+                        .style(move |_: &Theme| container::Style::default().background(ink)),
+                )
+                .padding(iced::Padding::ZERO.left(i + x).top(i))
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into()
+            };
+            let mut view: Element<'_, u8> = stack((0..squares).map(square)).into();
+            let mut tree = Tree::new(&view);
+            let size = Size::new(SIDE as f32, SIDE as f32);
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            renderer.reset(Rectangle::with_size(size));
+            view.as_widget().draw(
+                &tree,
+                renderer,
+                &Theme::Light,
+                &renderer::Style {
+                    text_color: Color::BLACK,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(size),
+            );
+            surface.present(renderer, ground)
+        };
+        let mut surface = Surface::new(SIDE, SIDE).expect("a surface");
+        assert_eq!(frame(6, 0.0, &mut renderer, &mut surface), 1.0);
+        assert_eq!(frame(6, 50.0, &mut renderer, &mut surface), 1.0);
+        let rgb = surface.rgb();
+        let px = |x: usize, y: usize| &rgb[(y * SIDE as usize + x) * 3..][..3];
+        assert_eq!(px(1055, 1005), &[200, 100, 50]);
+        assert_eq!(px(1005, 1005), &[10, 20, 30], "the old place cleared");
+        let mut one = Surface::new(SIDE, SIDE).expect("a surface");
+        assert_eq!(frame(1, 0.0, &mut renderer, &mut one), 1.0);
+        let moved = frame(1, 50.0, &mut renderer, &mut one);
+        assert!(moved > 0.0 && moved < 0.01, "{moved}");
     }
 
     /// The pixels are the size asked, the ground where nothing is drawn.

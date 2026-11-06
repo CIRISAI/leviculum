@@ -70,10 +70,11 @@ other dependency.
 | `vendor/crossterm` | [crossterm-rs/crossterm](https://github.com/crossterm-rs/crossterm) | 0.29.0 | MIT | Mouse side buttons 8/9 surface as `MouseButton::Back` / `Forward` instead of being dropped in `parse_cb` | lnomad (host) |
 | `vendor/termbg` | [dalance/termbg](https://github.com/dalance/termbg) | 0.6.2 | MIT OR Apache-2.0 | One line: the crossterm requirement raised from 0.28 to 0.29, so lnomad links one crossterm | lnomad (host) |
 | `vendor/iced_debug` | [iced-rs/iced](https://github.com/iced-rs/iced) | 0.14.0 | MIT | `set_sink`: the finished view, layout, interact, draw and present spans handed to a function the window sets, for its frame meter (1441) | loquax (host, `gui`) |
+| `vendor/iced_tiny_skia` | [iced-rs/iced](https://github.com/iced-rs/iced) | 0.14.1 | MIT | `whole_when_fragmented`: a frame's damage of more than four rectangles or an eighth of the window is drawn as the whole window, where iced redraws every layer once per rectangle through a clip mask (1456) | loquax, lnomad (host, `gui`) |
 | `vendor/nmea0183` | [nsforth/nmea0183](https://github.com/nsforth/nmea0183) | 0.6.0 | BSD-3-Clause | The float parse replaced by a fixed-point one (Codeberg #386) | nRF firmware |
 
 The patches are described where they are wired in: the workspace
-`Cargo.toml` (crossterm, termbg, iced_debug) and `leviculum-nrf/Cargo.toml`
+`Cargo.toml` (crossterm, termbg, iced_debug, iced_tiny_skia) and `leviculum-nrf/Cargo.toml`
 (nmea0183). The vendored `Cargo.toml` files keep upstream's name, version
 and repository URL; this table is where the difference is recorded.
 

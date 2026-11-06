@@ -85,7 +85,7 @@ default-members = [
 # leviculum-mapfill/measure and leviculum-mapfill/m9 are the map measurement's
 # host harness and M9 firmware (#474). Their own workspaces keep the harness's
 # protobuf decoder and the firmware's Xtensa toolchain out of this graph.
-exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapfill/measure", "leviculum-mapfill/m9", "vendor/crossterm", "vendor/termbg", "vendor/iced_debug"]
+exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapfill/measure", "leviculum-mapfill/m9", "vendor/crossterm", "vendor/termbg", "vendor/iced_debug", "vendor/iced_tiny_skia"]
 
 # Vendored, minimally-patched crossterm 0.29.0. The patch exposes mouse side
 # buttons (X buttons 8/9) as MouseButton::Back / MouseButton::Forward, which
@@ -106,10 +106,20 @@ exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapf
 # the finished spans to, so `loquax --fps` measures what iced itself does
 # per frame, the software renderer's rasterise and present included. Until
 # a sink is set a span costs a check of a OnceLock.
+#
+# iced_tiny_skia is vendored for the window's present (1456): iced 0.14.1
+# draws a frame's damage once per grouped rectangle, every quad or
+# paragraph a rectangle cuts through a clip mask, and a scroll frame of a
+# real chat is 26 to 60 such rectangles (121 ms at 1276x2099, 13 ms drawn
+# whole). The patch, `whole_when_fragmented` in `window/compositor.rs`,
+# draws the whole window when the damage fragments; the headless surface
+# the bench measures calls the same function. iced's renderer type is
+# fixed by its feature, so a wrapper of our own cannot reach the present.
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
 termbg = { path = "vendor/termbg" }
 iced_debug = { path = "vendor/iced_debug" }
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
 
 [workspace.package]
 # The development window, not a release. Every build between 0.9.0 and
