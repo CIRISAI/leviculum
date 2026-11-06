@@ -35,12 +35,38 @@
 # the same way to leviculum-esp/.cargo/config.toml (`esp_rustflags_export`,
 # called by scripts/build-m9-image.sh).
 #
+# The remap is not enough on its own (order 1460, #474). leviculum-nrf is a
+# workspace of its own and leviculum-core, leviculum-lxmf, ... are path
+# dependencies outside it, and cargo hashes the ABSOLUTE path of such a
+# dependency into its `-C metadata`. That hash is the crate's StableCrateId,
+# it lands in every mangled symbol, and LTO folds differently on different
+# names: on 2026-11-06 the T114 image of one commit, remapped, was 704,736 B
+# in one checkout and 704,776 B in a clone. So the wrapper form below runs its
+# command in a private user and mount namespace (`unshare`, util-linux) that
+# binds the repository at one fixed path, $NRF_CANON, whatever its real path
+# is, and starts in the same place relative to it. The namespace's /mnt is a
+# fresh tmpfs: nothing on the host is touched, concurrent builds do not meet,
+# and a host directory under /mnt is not visible in there. RUSTC_WRAPPER is
+# emptied in there, because an sccache server started outside cannot see
+# $NRF_CANON. scripts/build-m9-image.sh makes the same hop for the M9 (1458).
+#
+# A host that refuses unprivileged user namespaces builds in place, and the
+# wrapper says on stderr that this image is not the reproducible one.
+#
+# `cargo run` is refused through the wrapper: the runner flashes, and a UF2
+# volume udisks mounts after the 1200-baud touch never shows up inside a
+# private mount namespace. Flash with scripts/nrf-flash.sh, which builds
+# through here and runs the runner outside on the image it built.
+#
 # Two ways in:
 #
-#   source "$ROOT/scripts/nrf-rustflags.sh"; nrf_rustflags_export || exit 1
-#   bash scripts/nrf-rustflags.sh cargo run --release --bin t114 ...   # wrapper
+#   source "$ROOT/scripts/nrf-rustflags.sh"; nrf_cargo build --release ...
+#   bash scripts/nrf-rustflags.sh cargo build --release --bin t114 ...  # wrapper
 #
-# The wrapper form is for the Justfile, whose recipes run under sh.
+# The wrapper form is for the Justfile, whose recipes run under sh. `nrf_cargo`
+# is the wrapper form for a script that sourced this file. Every nRF build goes
+# through one of the two; `nrf_rustflags_export` alone gives the remap without
+# the fixed path, which is what the wrapper calls once it is inside.
 
 # firmware_remap_flags <firmware dir name>: prints the remap flags for the
 # firmware crate in that directory of the repository (leviculum-nrf,
@@ -100,11 +126,65 @@ esp_rustflags_export() {
     export CARGO_TARGET_XTENSA_ESP32S3_NONE_ELF_RUSTFLAGS="${CARGO_TARGET_XTENSA_ESP32S3_NONE_ELF_RUSTFLAGS:+$CARGO_TARGET_XTENSA_ESP32S3_NONE_ELF_RUSTFLAGS }${flags% }"
 }
 
+# The fixed path every nRF and M9 image is built at, inside the namespace.
+NRF_CANON=/mnt/leviculum
+
+# nrf_canon_available: true when this host lets an unprivileged user open a
+# user and mount namespace, which the hop to $NRF_CANON needs.
+nrf_canon_available() {
+    unshare --user --map-root-user --mount true 2>/dev/null
+}
+
+# nrf_cargo <cargo args...>: cargo for the nRF firmware workspace, at
+# $NRF_CANON when the host allows it, with the remap in place. Same as the
+# wrapper form below, for a script that sourced this file.
+nrf_cargo() {
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+    bash "$here/nrf-rustflags.sh" cargo "$@"
+}
+
+# nrf_canon_exec <command...>: the wrapper. Runs the command with the remap
+# exported, at $NRF_CANON when it can, else in place with a note on stderr.
+nrf_canon_exec() {
+    local root here inner
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)" || return 1
+    if [ "${1:-}" = cargo ] && [ "${2:-}" = run ]; then
+        echo "nrf-rustflags: 'cargo run' would run the flash runner inside a private" >&2
+        echo "nrf-rustflags: mount namespace, where no UF2 volume appears; use" >&2
+        echo "nrf-rustflags: scripts/nrf-flash.sh <bin> <features> (order 1460)" >&2
+        return 2
+    fi
+    if [ "$root" = "$NRF_CANON" ]; then
+        nrf_rustflags_export || return 1
+        exec "$@"
+    fi
+    if ! nrf_canon_available; then
+        echo "nrf-rustflags: note: no unprivileged user namespace here; building at $root," >&2
+        echo "nrf-rustflags: note: not at $NRF_CANON, so this image is not the reproducible one" >&2
+        nrf_rustflags_export || return 1
+        exec "$@"
+    fi
+    here="$(pwd -P)" || return 1
+    case "$here" in
+        "$root" | "$root"/*) inner="$NRF_CANON${here#"$root"}" ;;
+        *) inner="$here" ;;
+    esac
+    # shellcheck disable=SC2016 # expanded by the inner shell
+    RUSTC_WRAPPER="" CARGO_BUILD_RUSTC_WRAPPER="" \
+        exec unshare --user --map-root-user --mount bash -c '
+        mount -t tmpfs nrf-build "${2%/*}" && mkdir "$2" && mount --bind "$1" "$2" &&
+            cd "$3" || exit 1
+        shift 3
+        exec bash "$0" "$@"' \
+        "$NRF_CANON/scripts/nrf-rustflags.sh" "$root" "$NRF_CANON" "$inner" "$@"
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     [ "$#" -gt 0 ] || {
         echo "usage: $0 <command> [args...]   (or source it)" >&2
         exit 2
     }
-    nrf_rustflags_export || exit 1
-    exec "$@"
+    nrf_canon_exec "$@"
+    exit $?
 fi

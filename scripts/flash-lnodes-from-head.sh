@@ -189,7 +189,7 @@ log "[CI_HW] flashing LNodes from HEAD $head_sha"
 # desktop-flash default on hamster keeps 30.
 #
 # T114 fleet, then Pocket-V2 fleet. Each just-target builds the embedded
-# firmware (cargo run) and touch-flashes every attached board of that
+# firmware (scripts/nrf-flash.sh) and touch-flashes every attached board of that
 # kind. A failing fleet warns + notifies but does not abort; a hard flash
 # failure marks the board UNVERIFIED (collected in flash_failed_ids) so the
 # verdict goes RED rather than silently testing whatever firmware remains.

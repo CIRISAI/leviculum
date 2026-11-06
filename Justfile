@@ -350,6 +350,7 @@ nrf-shellcheck:
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
         scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh \
+        scripts/nrf-flash.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/check-nrf-stack-frames.sh \
@@ -2155,11 +2156,13 @@ btvirt-selftest:
 # device. Details: leviculum-nrf/README.md §Build and flash.
 # The runner refuses a board whose SoftDevice our image is not linked for,
 # because that write is a soft brick: docs/src/concepts/lnode-flashing.md.
-# The firmware crate is outside the workspace (cross-compiled), so we
-# invoke cargo from its own directory.
+# scripts/nrf-flash.sh builds at the fixed path of scripts/nrf-rustflags.sh
+# (so a clone of the commit builds the same bytes, 1460), prints the image's
+# NRF_IMAGE sha256, and runs tools/uf2-runner.sh outside the build's
+# namespace on the ELF it built.
 [doc('Flash every attached T114 with the current firmware')]
 flash:
-    cd leviculum-nrf && bash ../scripts/nrf-rustflags.sh cargo run --release --bin t114 --features bsp-t114
+    bash scripts/nrf-flash.sh t114 bsp-t114
 
 # Wiring, gdb setup and the probe's own quirks: docs/src/firmware/probe-debugging.md
 [doc('SWD firmware debugging via the RPi Debug Probe')]
@@ -2171,7 +2174,7 @@ probe *args:
 #   just flash-one /dev/leviculum-transport
 [doc('Flash a single T114 by port path or udev symlink')]
 flash-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin t114 --features bsp-t114
+    LEVICULUM_FLASH_ONLY={{PORT}} bash scripts/nrf-flash.sh t114 bsp-t114
 
 # What every RAK4631 flash recipe tells the runner about this board: the USB
 # PID our firmware enumerates on, the names it puts in its messages, and the
@@ -2187,13 +2190,13 @@ rak4631_env := 'LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF
 # flashes use the touch path automatically.
 [doc('Flash every attached RAK4631 (WisMesh Pocket V2) with our firmware')]
 flash-rak4631:
-    cd leviculum-nrf && {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631
+    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
 
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
 [doc('Flash a single RAK4631 by port path or udev symlink')]
 flash-rak4631-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631
+    LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
 
 # Flash with all RAK19026 baseboard peripherals enabled — the WisMesh
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
@@ -2201,7 +2204,7 @@ flash-rak4631-one PORT:
 # bundle ships for this board (docs/src/concepts/board-support-scope.md).
 [doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
-    cd leviculum-nrf && {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 
 # What every SenseCAP Solar Node flash recipe tells the runner about this
 # board. The Board-ID is the XIAO MODULE's, not this product's: a DIY XIAO
@@ -2216,11 +2219,11 @@ solarnode_env := 'LEVICULUM_USB_PID=0003 LEVICULUM_BOARD_NAME=SolarNode LEVICULU
 # touch. Once our firmware is on, this recipe works like the other two.
 [doc('Flash every attached SenseCAP Solar Node P1-Pro with our firmware')]
 flash-solarnode:
-    cd leviculum-nrf && {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin solarnode --features bsp-solarnode
+    {{solarnode_env}} bash scripts/nrf-flash.sh solarnode bsp-solarnode
 
 [doc('Flash a single SenseCAP Solar Node by port path or udev symlink')]
 flash-solarnode-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin solarnode --features bsp-solarnode
+    LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} bash scripts/nrf-flash.sh solarnode bsp-solarnode
 
 # The SenseCAP T1000-E's bootloader (2886:0057, Board-ID nRF52840-T1000-E-v1)
 # answers serial DFU only on the rig unit, with no UF2 volume, so the UF2
@@ -2244,7 +2247,7 @@ t1000e-dfu-package:
 # firmware back.
 [doc('Measurement tool: ERASES all SolarNode external flash, tests it')]
 flash-solarnode-qspi-selftest:
-    cd leviculum-nrf && {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin qspi-selftest --features bsp-solarnode,qspi-selftest
+    {{solarnode_env}} bash scripts/nrf-flash.sh qspi-selftest bsp-solarnode,qspi-selftest
 
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no

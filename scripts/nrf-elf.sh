@@ -57,3 +57,13 @@ if end == 0:
 print(end)
 '
 }
+
+# nrf_flat_image <elf> <out>: the image as flashed, the flat binary
+# leviculum-nrf/tools/uf2-runner.sh makes the UF2 from, with the same three
+# NOBITS-or-RAM sections left out. scripts/nrf-flash.sh prints its sha256 and
+# scripts/check-nrf-reproducible.sh compares two of them (order 1460).
+nrf_flat_image() {
+    local objcopy
+    objcopy="$(nrf_elf_tool nrf-image objcopy)" || return 1
+    "$objcopy" -O binary -R .bss -R .uninit -R .retained "$1" "$2"
+}
