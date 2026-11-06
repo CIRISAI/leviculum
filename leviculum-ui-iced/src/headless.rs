@@ -53,6 +53,67 @@ pub fn render<M>(
     )
 }
 
+/// A screen drawn again and again off screen by the software renderer,
+/// as a window draws it: one renderer, so its image cache holds a picture
+/// shown before, and one widget tree, so a canvas keeps its state between
+/// frames. For measuring what a frame costs (1431).
+pub struct Offscreen {
+    renderer: Renderer,
+    tree: Option<Tree>,
+    size: Size,
+}
+
+impl Offscreen {
+    /// `w` by `h` at a density of one; `None` without a renderer.
+    pub fn new(w: u32, h: u32) -> Option<Self> {
+        Some(Self {
+            renderer: software(iced::Font::DEFAULT)?,
+            tree: None,
+            size: Size::new(w as f32, h as f32),
+        })
+    }
+
+    /// `element` laid out and rasterised as the window's frame: the time
+    /// the layout and the drawing took, and the time the rasterising took
+    /// (with the read back of the pixels, which a window does not do).
+    pub fn frame<M>(
+        &mut self,
+        mut element: Element<'_, M>,
+        theme: &Theme,
+        text: Color,
+        background: Color,
+    ) -> (std::time::Duration, std::time::Duration) {
+        let start = std::time::Instant::now();
+        let tree = match &mut self.tree {
+            Some(tree) => {
+                tree.diff(&element);
+                tree
+            }
+            None => self.tree.insert(Tree::new(&element)),
+        };
+        let node = element.as_widget_mut().layout(
+            tree,
+            &self.renderer,
+            &layout::Limits::new(Size::ZERO, self.size),
+        );
+        let viewport = Rectangle::with_size(self.size);
+        self.renderer.reset(viewport);
+        element.as_widget().draw(
+            tree,
+            &mut self.renderer,
+            theme,
+            &renderer::Style { text_color: text },
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &viewport,
+        );
+        let laid = start.elapsed();
+        let size = iced::Size::new(self.size.width as u32, self.size.height as u32);
+        let _ = self.renderer.screenshot(size, 1.0, background);
+        (laid, start.elapsed() - laid)
+    }
+}
+
 /// A left click at `at` on `element` laid out on `w` by `h`: the pointer
 /// moves there, the button goes down and comes up. The messages the
 /// widgets published, in order; `None` without a renderer.

@@ -22,7 +22,10 @@
 //!   frames ([`loquax::mapframe`], the phone's pipeline, 1144), whose
 //!   frames run on iced's executor so a drag never waits for one. A frame
 //!   is composed from the tile cache with margins past the screen and
-//!   shown where the view moved it until the next lands; while a drag or
+//!   shown where the view moved it until the next lands; a drag asks for
+//!   the next only when the margin left runs short, at most once a frame
+//!   interval, and a wheel's notch glides to its zoom over the frame on
+//!   screen scaled while the frame at that zoom is drawn (1431); while a drag or
 //!   the wheel moves the view the names drawn at rest are kept, and at
 //!   rest, with the window focused, the cache prefetches around the view.
 //!
@@ -34,6 +37,9 @@
 
 pub mod chat;
 pub mod map;
+#[cfg(test)]
+mod smooth;
+pub mod trace;
 pub mod viewer;
 
 use std::process::ExitCode;
@@ -438,6 +444,9 @@ pub enum Message {
     Painted(Arc<Shown>),
     /// The wheel may have come to rest.
     WheelRest,
+    /// The screen is about to draw a frame (1431): the wheel's glide
+    /// moves on, and a frame held back for the frame interval is asked.
+    Frame(Instant),
     /// A prefetch batch ended; whether more is to draw.
     Prefetched(bool),
     /// The desktop's light or dark setting, at the start and on a change.
@@ -517,6 +526,7 @@ impl Message {
                 | Message::Select(_)
                 | Message::Painted(_)
                 | Message::WheelRest
+                | Message::Frame(_)
                 | Message::Prefetched(_)
                 | Message::Settings
                 | Message::Viewer(_)
@@ -557,6 +567,13 @@ const WHEEL_REST_MS: u64 = 200;
 /// reveals drawn map while the next frame is drawn.
 const MARGIN_PART: u32 = 8;
 
+/// A frame interval of the screen: 60 frames a second. While the view
+/// moves, the worker is asked for a frame at most once in it (1431).
+const FRAME: Duration = Duration::from_micros(16_667);
+/// How long a wheel's notch glides from the zoom on screen to the zoom it
+/// asks (1431), as the phone's pinch follows the fingers: eased out.
+const GLIDE_MS: u64 = 150;
+
 /// Where the window sends what it asks of the shell.
 type Asks = tokio::sync::mpsc::UnboundedSender<Want>;
 
@@ -596,6 +613,8 @@ pub struct Shown {
     pub missing: usize,
     /// A name fades in or out: the window asks again.
     pub fading: bool,
+    /// What drawing it took on the worker, in milliseconds (1431).
+    pub ms: f64,
 }
 
 /// What the worker does next.
@@ -606,11 +625,12 @@ enum Job {
 }
 
 /// `order` drawn through the map's frames ([`loquax::mapframe`], the
-/// phone's pipeline): the tiles composed at the exact zoom, while the
-/// wheel turns at the tile step one to one for the canvas to scale
-/// (1155), the names placed at rest and kept while moving, the pins
-/// placed with the window's font and left for its canvas.
+/// phone's pipeline): the tiles composed at the exact zoom, also while
+/// the wheel's glide scales the frame on screen towards it (1431), the
+/// names placed at rest and kept while moving, the pins placed with the
+/// window's font and left for its canvas.
 pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
+    let start = Instant::now();
     let mut frames = frames.lock().unwrap_or_else(PoisonError::into_inner);
     frames.set_motion(order.motion);
     let now_ms = frames.clock_ms();
@@ -628,7 +648,10 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         draw_pins: false,
         measure: Some(map::measure),
         now_ms: Some(now_ms),
-        scaled_while_moving: true,
+        // The wheel's glide asks for the frame at the zoom it ends on
+        // (1431): drawn there, at the exact zoom, the glide scales it the
+        // rest of the way and ends on it sharp. A pan stays at its zoom.
+        scaled_while_moving: false,
     });
     let (w, h) = shot.view.size();
     Arc::new(Shown {
@@ -638,6 +661,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         attribution: shot.attribution,
         missing: shot.missing,
         fading: shot.fading,
+        ms: start.elapsed().as_secs_f64() * 1e3,
         order,
     })
 }
@@ -671,6 +695,41 @@ struct Press {
     last: (i32, i32),
     pin: Option<[u8; 16]>,
     dragging: bool,
+}
+
+/// A wheel's zoom on its way (1431): from the view on screen when the
+/// notch came to the view the notches ask, over [`GLIDE_MS`], eased out.
+#[derive(Clone, Copy, Debug)]
+struct Glide {
+    from: ExactView,
+    to: ExactView,
+    start: Instant,
+}
+
+impl Glide {
+    /// The view on screen at `now`, and whether the glide is over. The
+    /// zoom moves evenly in steps (the scale by its logarithm) about the
+    /// one screen point the two views share, so what is under the
+    /// pointer stays under it all the way.
+    fn at(&self, now: Instant) -> (ExactView, bool) {
+        let t = now.saturating_duration_since(self.start).as_secs_f64() * 1e3 / GLIDE_MS as f64;
+        if t >= 1.0 {
+            return (self.to, true);
+        }
+        let (x, y, k) = onto(&self.from, &self.to);
+        if (1.0 - k).abs() < 1e-6 {
+            return (self.to, true);
+        }
+        let (px, py) = (x / (1.0 - k), y / (1.0 - k));
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let (a, b) = (
+            f64::from(self.from.zoom_milli()),
+            f64::from(self.to.zoom_milli()),
+        );
+        let mut view = self.from;
+        view.zoom_about((a + (b - a) * eased).round() as u32, px, py);
+        (view, false)
+    }
 }
 
 /// The window's state.
@@ -712,6 +771,14 @@ struct App {
     wheel: Option<Instant>,
     /// A wake for the wheel's rest is set.
     wheel_timer: bool,
+    /// The wheel's zoom on its way (1431).
+    glide: Option<Glide>,
+    /// When the worker was last asked for a frame, and whether one is
+    /// held back for the frame interval (1431).
+    asked_at: Option<Instant>,
+    owed: bool,
+    /// What the map did per event and per frame (1431).
+    trace: trace::Trace,
     /// The window has the focus: only then does it prefetch.
     focused: bool,
     /// The prefetch around the frame on screen may have more to draw.
@@ -842,6 +909,10 @@ impl App {
             busy: false,
             wheel: None,
             wheel_timer: false,
+            glide: None,
+            asked_at: None,
+            owed: false,
+            trace: trace::Trace::from_env(),
             focused: true,
             prefetching: false,
             motion: Motion::default(),
@@ -1461,6 +1532,7 @@ impl App {
     /// eighths of the view, fit every pin, step through the pins, open the
     /// pin's conversation, or close the map.
     fn map_cmd(&mut self, cmd: MapCmd) {
+        self.settle();
         let (w, h) = self.view.size();
         let (cx, cy) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
         let z = i64::from(self.view.zoom_milli());
@@ -1549,6 +1621,11 @@ impl App {
         }
         if self.probe.is_some() {
             all.push(window::frames().map(|_| Message::Probed));
+        }
+        // The screen's frames while the wheel's zoom glides or a frame is
+        // held back for the frame interval (1431).
+        if self.screen == Screen::Map && (self.animating() || self.owed) {
+            all.push(window::frames().map(Message::Frame));
         }
         Subscription::batch(all)
     }
@@ -1855,6 +1932,7 @@ impl App {
                 }
             }
             Message::MapSize(size) => {
+                self.settle();
                 self.size = Some(size);
                 self.hold();
                 if !self.fitted {
@@ -1862,6 +1940,7 @@ impl App {
                 }
             }
             Message::Scale(scale) | Message::Window(window::Event::Rescaled(scale)) => {
+                self.settle();
                 self.scale = scale.max(0.25);
                 self.hold();
             }
@@ -1875,6 +1954,7 @@ impl App {
             Message::Window(_) => return false,
             Message::Pointer(pointer) => self.pointer(pointer),
             Message::Select(peer) => {
+                self.settle();
                 self.selected = Some(peer);
                 if let Some(pin) = self.seen.pins.iter().find(|p| p.peer == peer) {
                     self.view.centre = pin.at;
@@ -1883,8 +1963,13 @@ impl App {
             }
             Message::Painted(shown) => {
                 self.busy = false;
+                self.trace.painted(&shown);
                 self.shown = Some(shown);
                 self.prefetching = true;
+            }
+            Message::Frame(now) => {
+                self.owed = false;
+                self.tick(now);
             }
             Message::WheelRest => {
                 self.wheel_timer = false;
@@ -1915,12 +2000,25 @@ impl App {
         // prefetch plans by, before the order carries it (1189).
         self.motion.asked(self.now_ms());
         let order = self.order()?;
-        let current = self
-            .shown
-            .as_ref()
-            .is_some_and(|s| s.order == order && s.missing == 0 && !s.fading);
+        let current = self.shown.as_ref().is_some_and(|s| {
+            (s.order == order && s.missing == 0 && !s.fading) || self.covers(s, &order)
+        });
+        // While the view moves, a frame at most once in a frame interval:
+        // the screen's next frame asks again.
+        let now = Instant::now();
+        let soon = self
+            .asked_at
+            .is_some_and(|at| now.saturating_duration_since(at) < FRAME);
+        if !current && order.moving && soon {
+            self.owed = true;
+            return None;
+        }
         let job = match current {
-            false => Job::Draw(Box::new(order)),
+            false => {
+                self.asked_at = Some(now);
+                self.trace.asked(&order);
+                Job::Draw(Box::new(order))
+            }
             true if self.prefetching && self.focused && !order.moving => {
                 Job::Prefetch(self.now_ms())
             }
@@ -1935,7 +2033,9 @@ impl App {
         let (w, h) = self.pixels()?;
         let (pins, radar) = self.radar_pins();
         Some(Order {
-            view: self.view,
+            // While the wheel's zoom glides, the view it ends on: the
+            // glide scales the frame on screen towards it.
+            view: self.glide.map_or(self.view, |g| g.to),
             margin: (w / MARGIN_PART, h / MARGIN_PART),
             moving: self.moving(),
             style: self.seen.style,
@@ -2006,9 +2106,70 @@ impl App {
         tracks
     }
 
+    /// Whether the window has frames to show by itself (1431): the
+    /// wheel's zoom glides.
+    fn animating(&self) -> bool {
+        self.glide.is_some()
+    }
+
+    /// The wheel's glide at `now` (1431): the view on screen moves on,
+    /// and is the view it ends on once it is over.
+    fn tick(&mut self, now: Instant) {
+        let Some(glide) = self.glide else {
+            return;
+        };
+        let (view, over) = glide.at(now);
+        self.view = view;
+        if over {
+            self.glide = None;
+        }
+    }
+
+    /// The wheel's glide ended where it goes, at once: before a drag, a
+    /// key or a new size moves the view from there.
+    fn settle(&mut self) {
+        if let Some(glide) = self.glide.take() {
+            self.view = glide.to;
+        }
+    }
+
+    /// Whether `shown` still serves `order` while a drag moves the view
+    /// (1431): asked for the same map, at the zoom on screen, and its
+    /// margins still past each edge of the screen by half their width at
+    /// least. The phone pans its last frame the same way; a frame drawn
+    /// for every event would cost the screen a new picture each time.
+    fn covers(&self, shown: &Shown, order: &Order) -> bool {
+        if !self.press.is_some_and(|p| p.dragging) || shown.missing > 0 || shown.fading {
+            return false;
+        }
+        let same = Order {
+            view: shown.order.view,
+            moving: shown.order.moving,
+            motion: shown.order.motion,
+            ..order.clone()
+        };
+        if same != shown.order {
+            return false;
+        }
+        let (x, y, k) = onto(&shown.view, &order.view);
+        if (k - 1.0).abs() > 1e-9 {
+            return false;
+        }
+        let (w, h) = shown.view.size();
+        let (sw, sh) = order.view.size();
+        let (mx, my) = (
+            f64::from(order.margin.0) / 2.0,
+            f64::from(order.margin.1) / 2.0,
+        );
+        -x >= mx
+            && -y >= my
+            && x + f64::from(w) - f64::from(sw) >= mx
+            && y + f64::from(h) - f64::from(sh) >= my
+    }
+
     /// A drag or the wheel moves the view.
     fn moving(&self) -> bool {
-        self.press.is_some_and(|p| p.dragging) || self.wheel.is_some()
+        self.press.is_some_and(|p| p.dragging) || self.wheel.is_some() || self.glide.is_some()
     }
 
     /// Run the worker's next job on iced's executor, so a drag never
@@ -2139,14 +2300,12 @@ impl App {
         if self.pixels().is_none() {
             return;
         }
-        let at = |p: Point| {
-            (
-                (p.x * self.scale).round() as i32,
-                (p.y * self.scale).round() as i32,
-            )
-        };
+        self.trace.event(&pointer);
+        let scale = self.scale;
+        let at = |p: Point| ((p.x * scale).round() as i32, (p.y * scale).round() as i32);
         match pointer {
             Pointer::Down(p) => {
+                self.settle();
                 let (x, y) = at(p);
                 self.press = Some(Press {
                     from: (x, y),
@@ -2182,10 +2341,24 @@ impl App {
                 }
             }
             Pointer::Wheel(p, by) => {
+                // The notch adds to the zoom the glide goes to, and the
+                // glide starts again from the view on screen (1431): a
+                // touchpad's many small turns chase their sum the same way.
                 let (x, y) = at(p);
-                self.wheel = Some(Instant::now());
-                let z = i64::from(self.view.zoom_milli()) + i64::from(by);
-                self.zoom_to(z, f64::from(x), f64::from(y));
+                let now = Instant::now();
+                self.wheel = Some(now);
+                let goal = self
+                    .glide
+                    .map_or(self.view.zoom_milli(), |g| g.to.zoom_milli());
+                let from = self.view;
+                self.zoom_to(i64::from(goal) + i64::from(by), f64::from(x), f64::from(y));
+                let to = self.view;
+                self.view = from;
+                self.glide = (to != from).then_some(Glide {
+                    from,
+                    to,
+                    start: now,
+                });
             }
         }
     }
@@ -2639,7 +2812,11 @@ impl canvas::Program<Message> for PictureCanvas<'_> {
         if let Some((shown, x, y, k)) = self.app.onto() {
             let scale = f64::from(self.app.scale);
             let (w, h) = shown.view.size();
-            let filter = match (k - 1.0).abs() < 1e-9 {
+            // Scaled smoothly only at rest: while the wheel's zoom glides
+            // the nearest pixel costs the software renderer half of the
+            // smooth scaling (13 against 22 ms a frame at 1860 x 1024,
+            // 1431), and the glide ends on a frame drawn at its zoom.
+            let filter = match (k - 1.0).abs() < 1e-9 || self.app.moving() {
                 true => FilterMethod::Nearest,
                 false => FilterMethod::Linear,
             };
@@ -3006,10 +3183,14 @@ mod tests {
 
     /// A fractional wheel zoom stays where it ends (1144): a touchpad's
     /// 0.37 of a step about a point keeps the world point there and the
-    /// zoom between the steps; the frames while the wheel turns are moving
-    /// ones, and once it rests the frame at rest is drawn at that very
-    /// zoom, with its names, and nothing asks for another: the next job is
-    /// the prefetch.
+    /// zoom between the steps. It glides there (1431): right after the
+    /// turn the view on screen is still the old one, the frame asked is a
+    /// moving one at the zoom the glide ends on, drawn at that exact zoom
+    /// (not at the step, so the glide ends on it sharp), and the frame on
+    /// screen scaled onto the view keeps the point under the pointer. At
+    /// the glide's end the view is that zoom; once the wheel rests the
+    /// frame at rest is drawn at it, with its names, and nothing asks for
+    /// another: the next job is the prefetch.
     #[test]
     fn a_fractional_wheel_zoom_stays_where_it_ends() {
         let mut app = window_over_florence(Vec::new(), 14 * MILLI);
@@ -3020,26 +3201,28 @@ mod tests {
             Point::new(100.0, 80.0),
             370,
         )));
-        assert_eq!(app.view.zoom_milli(), 14_370);
-        let (x, y) = app.view.to_screen(held);
-        assert!(
-            (x - under.0).abs() < 1.0 && (y - under.1).abs() < 1.0,
-            "{x} {y}"
-        );
+        assert_eq!(app.view.zoom_milli(), 14_000, "the glide has not moved yet");
         let (turning, _) = run(&mut app);
         let turning = turning.expect("a frame while the wheel turns");
         assert!(turning.order.moving);
-        // While it turns the frame is the step one to one (1155), and
-        // the image scales it to the view: the point stays under it.
-        assert_eq!(turning.view.zoom_milli(), 14_000);
+        assert_eq!(
+            turning.view.zoom_milli(),
+            14_370,
+            "drawn at the glide's end"
+        );
         let (tx, ty, k) = onto(&turning.view, &app.view);
-        assert!((k - 2f64.powf(0.37)).abs() < 1e-9, "{k}");
+        assert!((k - 2f64.powf(-0.37)).abs() < 1e-9, "{k}");
         let (fx, fy) = turning.view.to_screen(held);
         let (x, y) = (tx + k * fx, ty + k * fy);
         assert!(
             (x - under.0).abs() < 1.0 && (y - under.1).abs() < 1.0,
             "{x} {y}"
         );
+        app.tick(Instant::now() + Duration::from_millis(GLIDE_MS));
+        assert!(!app.animating(), "the glide is over");
+        assert_eq!(app.view.zoom_milli(), 14_370);
+        let (_, _, k) = onto(&turning.view, &app.view);
+        assert!((k - 1.0).abs() < 1e-9, "it ends on the frame drawn for it");
         std::thread::sleep(Duration::from_millis(WHEEL_REST_MS + 50));
         app.apply(Message::WheelRest);
         let (rested, prefetch) = run(&mut app);
