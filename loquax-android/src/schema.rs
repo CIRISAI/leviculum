@@ -2520,6 +2520,12 @@ pub struct MapShown {
     pub dark: bool,
     #[serde(default)]
     pub theme_chosen: bool,
+    /// The map's ground in its table, `0xAARRGGBB` (1441): what the
+    /// view shows where the frame it moves or scales does not reach, a
+    /// pan past the margin or a pinch out, instead of the window's dark
+    /// background. An older core sends none, zero, and the app draws none.
+    #[serde(default)]
+    pub ground: u32,
     /// The config's `map_theme` as the settings page shows it: `auto`,
     /// `light` or `dark`; `auto` when unset.
     #[serde(default)]

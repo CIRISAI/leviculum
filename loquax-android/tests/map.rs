@@ -439,6 +439,17 @@ fn the_map_switch_wins_over_the_phone_until_it_follows_again() {
     );
     let (shown, _) = draw(&request(home.path(), true));
     assert!(shown.dark && !shown.theme_chosen, "and the dark one");
+    // Its ground (1441), what the view shows where the frame it moves
+    // does not reach: the dark table's land, opaque; the light one's in
+    // the light table.
+    let argb = |theme: MapTheme| {
+        let [r, g, b] = rgb888(theme.palette().background);
+        0xff00_0000 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+    };
+    assert_eq!(shown.ground, argb(MapTheme::Dark));
+    let (shown, _) = draw(&request(home.path(), false));
+    assert_eq!(shown.ground, argb(MapTheme::Light));
+    assert_ne!(argb(MapTheme::Light), argb(MapTheme::Dark));
 }
 
 /// A choice stored before the app draws its first map wins over the

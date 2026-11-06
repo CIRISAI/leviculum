@@ -210,6 +210,13 @@ final class MapView extends View {
      * that lands is placed by it.
      */
     private float scale = 1f;
+    /**
+     * The map's ground, as the core says it with each frame (1441): where
+     * the frame the fingers move or shrink does not reach, the view shows
+     * it and not the window's background, which is near black in the dark
+     * theme. Zero from an older core: nothing drawn.
+     */
+    private int ground;
     private float offX;
     private float offY;
     /** A finger is on the map. */
@@ -701,6 +708,9 @@ final class MapView extends View {
         if (bitmap == null) {
             return;
         }
+        if (ground != 0) {
+            canvas.drawColor(ground);
+        }
         canvas.save();
         canvas.translate(offX, offY);
         canvas.scale(scale, scale);
@@ -956,6 +966,7 @@ final class MapView extends View {
                     retired = bitmap;
                     bitmap = next;
                     bare = moving;
+                    ground = (int) Core.num(shown, "ground");
                     marginX = (int) Core.num(shown, "margin_x");
                     marginY = (int) Core.num(shown, "margin_y");
                     x = Core.num(shown, "x");

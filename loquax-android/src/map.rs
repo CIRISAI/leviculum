@@ -642,6 +642,7 @@ impl Renderer {
             notice,
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
+            ground: ground(table),
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
             theme: theme_word(self.theme).to_string(),
             prefetching: self.frames.at_rest(),
@@ -834,6 +835,13 @@ pub fn theme(dir: &Path, set: Option<&str>) -> Result<MapThemeChoice, String> {
 /// the renderer the map draws with, so the next frame says it.
 pub fn fling(dir: &Path, set: Option<bool>) -> Result<MapFlingChoice, String> {
     with_dir(dir, |renderer| renderer.fling(set))
+}
+
+/// The map's ground in `table` as Android's `0xAARRGGBB` (1441): the
+/// land a frame is cleared to, opaque.
+fn ground(table: MapTheme) -> u32 {
+    let [r, g, b] = leviculum_mapfill::frame::rgb888(table.palette().background);
+    0xff00_0000 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
 }
 
 /// How many whole pixels the centre of `view`, held to one world, may

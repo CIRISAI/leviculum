@@ -2838,6 +2838,8 @@ impl canvas::Program<Message> for PictureCanvas<'_> {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
+        let whole = Rectangle::with_size(bounds.size());
+        let mut covered = None;
         if let Some((shown, x, y, k)) = self.app.onto() {
             let scale = f64::from(self.app.scale);
             let (w, h) = shown.view.size();
@@ -2855,6 +2857,7 @@ impl canvas::Program<Message> for PictureCanvas<'_> {
                 width: (f64::from(w) * k / scale) as f32,
                 height: (f64::from(h) * k / scale) as f32,
             };
+            covered = at.intersection(&whole);
             frame.draw_image(
                 at,
                 canvas::Image::new(shown.handle.clone())
@@ -2862,8 +2865,45 @@ impl canvas::Program<Message> for PictureCanvas<'_> {
                     .snap(true),
             );
         }
+        // Never black (1441): what no frame covers yet, past a drag's
+        // margin, round a frame the wheel's zoom shrinks, before the first
+        // frame, is the map's ground in its theme, the land a frame is
+        // cleared to, and not the window's background under the canvas.
+        // Only the strips the frame leaves, a pixel into it against the
+        // snapped edge, so the ground costs no second pass under the map.
+        let [r, g, b] =
+            leviculum_mapfill::frame::rgb888(self.app.seen.style.theme.palette().background);
+        for strip in uncovered(whole, covered) {
+            frame.fill_rectangle(strip.position(), strip.size(), Color::from_rgb8(r, g, b));
+        }
         vec![frame.into_geometry()]
     }
+}
+
+/// The parts of `whole` outside `covered`, each reaching a pixel into it:
+/// above, below, left and right of it; `whole` itself when nothing covers.
+fn uncovered(whole: Rectangle, covered: Option<Rectangle>) -> Vec<Rectangle> {
+    let Some(c) = covered else {
+        return vec![whole];
+    };
+    let (top, bottom) = (c.y + 1.0, c.y + c.height - 1.0);
+    let (left, right) = (c.x + 1.0, c.x + c.width - 1.0);
+    [
+        Rectangle::new(Point::ORIGIN, Size::new(whole.width, top)),
+        Rectangle::new(
+            Point::new(0.0, bottom),
+            Size::new(whole.width, whole.height - bottom),
+        ),
+        Rectangle::new(Point::new(0.0, c.y), Size::new(left, c.height)),
+        Rectangle::new(
+            Point::new(right, c.y),
+            Size::new(whole.width - right, c.height),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|r| r.intersection(&whole))
+    .filter(|r| r.width >= 1.0 && r.height >= 1.0)
+    .collect()
 }
 
 /// The map's canvas over the picture: the pins, their labels, and the
@@ -4655,6 +4695,56 @@ mod tests {
             }
             assert_eq!(panes[0], panes[1], "{w} x {h}");
         }
+    }
+
+    /// Never black (1441): a frame the view moved half off the canvas, as
+    /// a drag past its margin leaves it until the next frame lands, shows
+    /// the map's ground in the dark theme where it does not reach, the
+    /// land a frame is cleared to, and not the window's ground; pixel for
+    /// pixel the golden. The control: the half the frame covers is the
+    /// map, not the ground.
+    #[test]
+    fn a_map_half_off_its_frame_shows_its_ground_not_black() {
+        let (w, h) = (480u32, 320u32);
+        let mut app = window_over_florence(Vec::new(), 16 * MILLI);
+        app.seen.style = Style::SCREEN.in_theme(leviculum_mapfill::style::MapTheme::Dark);
+        let _ = run(&mut app);
+        assert!(app.shown.is_some(), "a frame at rest");
+        app.view.pan(i32::try_from(w / 2).expect("small"), 0);
+        let picture: Element<'_, Message> = Canvas::new(PictureCanvas { app: &app })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        let rgb = leviculum_ui_iced::headless::render(
+            picture,
+            &Theme::Dark,
+            Color::WHITE,
+            Color::BLACK,
+            w,
+            h,
+        )
+        .expect("a renderer");
+        let [r, g, b] = leviculum_mapfill::frame::rgb888(
+            leviculum_mapfill::style::MapTheme::Dark
+                .palette()
+                .background,
+        );
+        let px = |x: u32, y: u32| {
+            let i = ((y * w + x) * 3) as usize;
+            [rgb[i], rgb[i + 1], rgb[i + 2]]
+        };
+        let black = rgb.chunks(3).filter(|p| p == &[0, 0, 0]).count();
+        assert_eq!(black, 0, "black pixels");
+        // The frame's margin is 60 pixels: 180 of the right are uncovered.
+        for y in (0..h).step_by(40) {
+            assert_eq!(px(w - 5, y), [r, g, b], "uncovered at {y}");
+        }
+        let map = (0..w / 3)
+            .flat_map(|x| (0..h).map(move |y| (x, y)))
+            .filter(|&(x, y)| px(x, y) != [r, g, b])
+            .count();
+        assert!(map > 1000, "the covered half is the map: {map} pixels");
+        map::tests::same_as("gui-map-uncovered-dark.png", &rgb, w, h);
     }
 
     /// The tracks' time window is in the map's menu, not on the map

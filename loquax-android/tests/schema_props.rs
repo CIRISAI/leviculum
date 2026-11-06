@@ -1042,7 +1042,8 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
         )
             .boxed(),
         (any::<bool>(), u32s(), u32s(), any::<bool>()).boxed(),
-        any::<bool>(),
+        // 1441: the ground beside `filling`.
+        (any::<bool>(), u32s()),
         // 1419: the map's title and the time window sheet.
         (
             text(),
@@ -1065,7 +1066,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                 shown,
                 (own_x, own_y, autoload),
                 (fling, room_north, room_south, loading_here),
-                filling,
+                (filling, ground),
                 (track_window, title, track_windows),
             )| {
                 MapShown {
@@ -1077,6 +1078,7 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                     room_south,
                     loading_here,
                     filling,
+                    ground,
                     track_window,
                     title,
                     track_windows,
