@@ -18,8 +18,16 @@
 # census allows one screen to go.
 #
 # Red when the image does not build, when fewer than 8 KiB of the partition
-# are free (the nRF floor, for the nRF reason), or when the stack is below
-# the need.
+# are free (the nRF floor, for the nRF reason), when the stack is below the
+# need, or when the image names this tree's path or the home directory.
+#
+# The image is the same bytes from any clone of the same commit (order
+# 1458, scripts/check-m9-reproducible.sh guards it): rustc gets the path
+# remap of scripts/nrf-rustflags.sh for the xtensa triple, so no absolute
+# path of the building tree, the cargo home or the toolchain is compiled in,
+# and SOURCE_DATE_EPOCH is the commit's date unless the caller set one,
+# because esp-bootloader-esp-idf's build script stamps the application
+# descriptor with that time, else with the clock.
 #
 # The esp toolchain is optional per host (see `build-esp32` in the
 # Justfile): without ~/export-esp.sh this says SKIP, unless
@@ -36,7 +44,6 @@ ESP="$ROOT/leviculum-esp"
 TAG="[m9-image]"
 FLOOR=8192
 STACK_NEED=184000
-OUT="$ESP/target/xtensa-esp32s3-none-elf/release"
 
 # verdict <used> <partition> <stack>: the two headroom lines; 1 when either
 # is below its floor.
@@ -89,11 +96,26 @@ if [ ! -f "$HOME/export-esp.sh" ]; then
 fi
 
 selftest || exit 1
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+# shellcheck source=scripts/nrf-rustflags.sh
+source "$ROOT/scripts/nrf-rustflags.sh"
+target="$(cargo_target_dir "$ESP")" || { echo "$TAG FAIL no target directory for $ESP"; exit 1; }
+OUT="$target/xtensa-esp32s3-none-elf/release"
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct HEAD 2>/dev/null)" || SOURCE_DATE_EPOCH=""
+fi
+if [ -n "$SOURCE_DATE_EPOCH" ]; then
+    export SOURCE_DATE_EPOCH
+else
+    unset SOURCE_DATE_EPOCH
+    echo "$TAG note: no git commit date here, the image carries the build clock"
+fi
 mkdir -p "$ROOT/target/tmp"
 log="$ROOT/target/tmp/m9-image.log"
 # shellcheck disable=SC1091
 if ! (source "$HOME/export-esp.sh" >/dev/null && export PATH="$HOME/.cargo/bin:$PATH" \
-        && cd "$ESP" && cargo build --release --locked --bin thinknode_m9 \
+        && esp_rustflags_export && cd "$ESP" && cargo build --release --locked --bin thinknode_m9 \
         && espflash save-image --chip esp32s3 --flash-size 16mb \
             "$OUT/thinknode_m9" "$OUT/thinknode_m9.bin") >"$log" 2>&1; then
     tail -30 "$log"
@@ -110,4 +132,14 @@ fi
 stack="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-size -A "$OUT/thinknode_m9" \
     | awk '$1 == ".stack" { print $2 }')"
 echo "$TAG image $OUT/thinknode_m9.bin ($(stat -c %s "$OUT/thinknode_m9.bin") B), elf $OUT/thinknode_m9"
-verdict "$used" "$partition" "${stack:-0}"
+rc=0
+verdict "$used" "$partition" "${stack:-0}" || rc=1
+# The cheap half of check-m9-reproducible.sh, on every build: the shipped
+# image names no path of this host (the remap above, order 1458).
+for p in "$ROOT/" "$HOME/"; do
+    if grep -qaF -- "$p" "$OUT/thinknode_m9.bin"; then
+        echo "$TAG FAIL the image names the host path $p ($(grep -caF -- "$p" "$OUT/thinknode_m9.bin") lines); the path remap did not reach it"
+        rc=1
+    fi
+done
+exit "$rc"

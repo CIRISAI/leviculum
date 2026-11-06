@@ -349,7 +349,7 @@ nrf-shellcheck:
         scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
-        scripts/nrf-elf.sh scripts/nrf-rustflags.sh \
+        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/check-nrf-stack-frames.sh \
@@ -2696,3 +2696,14 @@ flash-m9 port:
     test -f "$elf" || { echo "no $elf: run just build-m9 first"; exit 1; }
     espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
         --non-interactive --flash-size 16mb "$elf"
+
+# The M9 image is the same bytes from any clone of the same commit (1458,
+# #474): builds it in this tree and in a clone of HEAD under a throwaway path
+# and compares sha256, red on a difference or on a host path in either image.
+# Needs a clean tree. Not in a gate, for build-m9's reason (the Xtensa fork
+# is optional per host) and its cost (two builds, the clone's cold); the
+# cheap half, no host path in the image, is in build-m9 itself.
+[doc('Check the ThinkNode M9 image builds to the same bytes from a clone')]
+m9-reproducible:
+    bash scripts/check-m9-reproducible.sh --selftest
+    bash scripts/check-m9-reproducible.sh
