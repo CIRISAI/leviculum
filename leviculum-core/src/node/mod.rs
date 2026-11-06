@@ -583,7 +583,14 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     max_incoming_resource_size: usize,
     /// How many incoming resources one link may carry at once; an
     /// advertisement beyond it is refused with an RCL (Codeberg #657).
-    max_incoming_resources_per_link: usize,
+    /// A `u16` (the builder clamps), so the flag below shares its word
+    /// and the node box a board pins (`leviculum_heap_budget::
+    /// NODE_BOX_BYTES`, 8 B of slack) does not grow (1459).
+    max_incoming_resources_per_link: u16,
+    /// Whether a compressed incoming resource is taken; when not, its
+    /// advertisement is refused with an RCL at once
+    /// ([`NodeCoreBuilder::decompresses`]).
+    decompresses: bool,
     /// Receive-window adaptation policy for incoming resources (Codeberg
     /// #85). Passed into every `IncomingResource` this node creates.
     resource_window_policy: crate::resource::WindowPolicy,
@@ -695,7 +702,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link_id_aliases: BTreeMap::new(),
             link_origin_ids: BTreeMap::new(),
             max_incoming_resource_size,
-            max_incoming_resources_per_link: crate::resource::RESOURCE_MAX_INCOMING_PER_LINK,
+            max_incoming_resources_per_link: crate::resource::RESOURCE_MAX_INCOMING_PER_LINK as u16,
+            decompresses: cfg!(feature = "compression"),
             resource_window_policy,
             announce_control: None,
             pending_single_dest_plaintext: None,
@@ -1716,7 +1724,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // (`reference/Reticulum/RNS/Link.py:516-517`, split at
         // `reference/Reticulum/RNS/Resource.py:299-313`).
         let resource_hash = if packed.len() > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
-            self.send_internal_split(link_id, packed, None, &request_id, false, Some(timeout))?
+            self.send_internal_split(
+                link_id,
+                packed,
+                None,
+                &request_id,
+                false,
+                Some(timeout),
+                true,
+            )?
         } else {
             let outgoing = OutgoingResource::new_request(
                 &packed,
@@ -2001,6 +2017,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id: &[u8; TRUNCATED_HASHBYTES],
         response_data: &[u8],
     ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        self.send_response_resource_with(link_id, request_id, response_data, true)
+    }
+
+    /// [`send_response_resource`](Self::send_response_resource), saying
+    /// whether the resource may be compressed. `true` compresses whenever
+    /// bz2 shrinks the data, as the reference does
+    /// (`reference/Reticulum/RNS/Resource.py:248`); `false` never does, for
+    /// a responder whose requesters include boards: no board build links
+    /// the decompressor, and a board refuses a compressed advertisement
+    /// with an RCL at once (1459). Without the `compression` feature both
+    /// are uncompressed.
+    pub fn send_response_resource_with(
+        &mut self,
+        link_id: &LinkId,
+        request_id: &[u8; TRUNCATED_HASHBYTES],
+        response_data: &[u8],
+        compress: bool,
+    ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
         use crate::msgpack::{write_bin, write_fixarray_header};
         use crate::packet::PacketContext;
         use crate::resource::outgoing::OutgoingResource;
@@ -2025,7 +2059,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         debug_assert_eq!(wrapped.len(), framed_len);
         if wrapped.len() > crate::resource::RESOURCE_MAX_EFFICIENT_SIZE {
             let resource_hash =
-                self.send_internal_split(link_id, wrapped, None, request_id, true, None)?;
+                self.send_internal_split(link_id, wrapped, None, request_id, true, None, compress)?;
             return Ok((resource_hash, self.process_events_and_actions()));
         }
 
@@ -2043,7 +2077,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             None,
             Some(request_id),
             &link.resource_crypt_params(),
-            true,
+            compress,
             &mut self.rng,
             now_ms,
         )?;
@@ -2140,7 +2174,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let mut framed = PrefixSource::new(prefix, response);
             let wrapped = crate::resource::read_source_to_vec(&mut framed)?;
             let resource_hash =
-                self.send_internal_split(link_id, wrapped, None, request_id, true, None)?;
+                self.send_internal_split(link_id, wrapped, None, request_id, true, None, true)?;
             return Ok((resource_hash, self.process_events_and_actions()));
         }
 
@@ -2236,6 +2270,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 request_id,
                 true,
                 None,
+                true,
             )?;
             return Ok((resource_hash, self.process_events_and_actions()));
         }
@@ -2296,6 +2331,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// (`advance_outgoing_segments`). The reference builds its next segment
     /// with the same request id and flag
     /// (`reference/Reticulum/RNS/Resource.py:770-778`).
+    #[allow(clippy::too_many_arguments)]
     fn send_internal_split(
         &mut self,
         link_id: &LinkId,
@@ -2304,6 +2340,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id: &[u8],
         is_response: bool,
         advertisement_timeout_ms: Option<u64>,
+        compress: bool,
     ) -> Result<[u8; 32], crate::resource::ResourceError> {
         use crate::packet::PacketContext;
         use crate::resource::outgoing::{segment_count, InternalRequestTag, OutgoingSegmentPlan};
@@ -2329,7 +2366,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let metadata_size = metadata.as_ref().map_or(0, |m| 3 + m.len());
         let total_segments = segment_count(metadata_size + data.len());
         let mut plan =
-            OutgoingSegmentPlan::new(data, metadata, metadata_size, total_segments, true);
+            OutgoingSegmentPlan::new(data, metadata, metadata_size, total_segments, compress);
         let segment1 = plan.build_segment(1, &crypt, &mut self.rng, now_ms, Some(&tag))?;
         let resource_hash = *segment1.resource_hash();
         let adv_bytes = segment1.adv_packet().to_vec();
@@ -2406,7 +2443,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // response resource bypasses the application): refuse the way
         // `handle_resource_adv` refuses one it has no room for, so the
         // sender is not left advertising into silence (Codeberg #657).
-        if link.incoming_resource_count() >= self.max_incoming_resources_per_link {
+        if link.incoming_resource_count() >= usize::from(self.max_incoming_resources_per_link) {
             self.refuse_incoming_resource(link_id, &resource_hash, now_ms, "incoming_full");
             return Err(ResourceError::TransferInProgress);
         }
@@ -2473,6 +2510,53 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.route_link_packet(link_id, &pkt);
         }
 
+        Ok(self.process_events_and_actions())
+    }
+
+    /// Cancel the resource this node is sending on `link_id`: an initiator
+    /// cancel (ICL) naming it, so the receiver fails it at once, the
+    /// sender's state for it gone, and a `ResourceFailed` with
+    /// [`Cancelled`](crate::resource::ResourceError::Cancelled). Python's
+    /// `Resource.cancel()` on the sending side
+    /// (`reference/Reticulum/RNS/Resource.py:1086-1095`). A receiver that
+    /// was fetching the response to a request learns it as that request
+    /// timing out, and may ask again on the same link (1459, the home
+    /// cancelling a page mid-way). A later segment of a split send is
+    /// dropped with it.
+    pub fn cancel_outgoing_resource(
+        &mut self,
+        link_id: &LinkId,
+    ) -> Result<crate::transport::TickOutput, crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceError;
+
+        let link_id = self.resolve_link_id(link_id);
+        let now_ms = self.transport.clock().now_ms();
+        let link = self
+            .links
+            .get_mut(&link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        let resource = link
+            .take_outgoing_resource()
+            .ok_or(ResourceError::NoPendingResource)?;
+        let resource_hash = *resource.resource_hash();
+        drop(resource);
+        let _ = link.take_outgoing_segments();
+        if let Ok(pkt) = link.build_data_packet_with_context(
+            &resource_hash,
+            PacketContext::ResourceIcl,
+            &mut self.rng,
+        ) {
+            link.record_outbound(now_ms);
+            self.route_link_packet(&link_id, &pkt);
+        }
+        self.end_split_send(&link_id);
+        self.events.push(NodeEvent::ResourceFailed {
+            link_id,
+            resource_hash,
+            error: ResourceError::Cancelled,
+            is_sender: true,
+        });
         Ok(self.process_events_and_actions())
     }
 

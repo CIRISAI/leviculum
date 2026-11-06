@@ -2991,7 +2991,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // A link carries a bounded number of incoming resources; one it
         // would take but has no room for is refused now.
         if strategy != ResourceStrategy::AcceptNone
-            && link.incoming_resource_count() >= self.max_incoming_resources_per_link
+            && link.incoming_resource_count() >= usize::from(self.max_incoming_resources_per_link)
         {
             self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms, "incoming_full");
             self.drop_link_packet(packet, rx, DropReason::ResourceFull);
@@ -3003,10 +3003,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // here instead, before the first request, so the sender fails it at
         // once (review finding L-0028). Python senders compress whenever it
         // shrinks the data (`reference/Reticulum/RNS/Resource.py:248`).
-        if strategy != ResourceStrategy::AcceptNone
-            && adv.flags.compressed
-            && !cfg!(feature = "compression")
-        {
+        // A node built with the decompressor can still say it has none
+        // (`NodeCoreBuilder::decompresses`), so a host test meets the
+        // refusal a board's home answer met (1459).
+        if strategy != ResourceStrategy::AcceptNone && adv.flags.compressed && !self.decompresses {
             self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms, "compressed");
             self.drop_link_packet(packet, rx, DropReason::ResourceCompressed);
             return;
@@ -3819,7 +3819,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Forget the request tag of a split send on `link_id` once its plan is
     /// done or gone.
-    fn end_split_send(&mut self, link_id: &LinkId) {
+    pub(super) fn end_split_send(&mut self, link_id: &LinkId) {
         if let Some(split) = self.split_internal.as_mut() {
             split.sends.remove(link_id);
             if split.is_empty() {

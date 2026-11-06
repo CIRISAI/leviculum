@@ -46,6 +46,7 @@ pub struct NodeCoreBuilder {
     remote_management_allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
     max_incoming_resource_size: usize,
     max_incoming_resources_per_link: usize,
+    decompresses: bool,
     resource_window_policy: WindowPolicy,
     peer_up_pull_names: Option<Vec<alloc::string::String>>,
 }
@@ -68,6 +69,7 @@ impl NodeCoreBuilder {
             remote_management_allowed: Vec::new(),
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
             max_incoming_resources_per_link: RESOURCE_MAX_INCOMING_PER_LINK,
+            decompresses: cfg!(feature = "compression"),
             resource_window_policy: WindowPolicy::default(),
             peer_up_pull_names: None,
         }
@@ -287,10 +289,25 @@ impl NodeCoreBuilder {
     ///
     /// Default: [`RESOURCE_MAX_INCOMING_PER_LINK`]. An advertisement beyond
     /// the bound is refused with a receiver cancel (RCL) at once. Zero is
-    /// read as one: a link that could carry none could never receive. The
+    /// read as one: a link that could carry none could never receive; past
+    /// 65 535 is read as 65 535, the node keeps the bound in 16 bits. The
     /// firmware sets one, the transfer its heap budget prices.
     pub fn max_incoming_resources_per_link(mut self, count: usize) -> Self {
-        self.max_incoming_resources_per_link = count.max(1);
+        self.max_incoming_resources_per_link = count.clamp(1, usize::from(u16::MAX));
+        self
+    }
+
+    /// Whether this node takes compressed incoming resources.
+    ///
+    /// Default: whether the build links the decompressor (the
+    /// `compression` feature). `false` makes a node refuse every
+    /// compressed advertisement with an RCL at once, as every board build
+    /// does: a host test builds a board-shaped receiver with it (1459,
+    /// the M9 refusing its home's compressed `/sync` answer). `true`
+    /// without the feature stays `false`, a build that cannot decompress
+    /// never says it can.
+    pub fn decompresses(mut self, on: bool) -> Self {
+        self.decompresses = on && cfg!(feature = "compression");
         self
     }
 
@@ -353,7 +370,9 @@ impl NodeCoreBuilder {
             clock,
             storage,
         );
-        node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
+        node.max_incoming_resources_per_link =
+            u16::try_from(self.max_incoming_resources_per_link).unwrap_or(u16::MAX);
+        node.decompresses = self.decompresses;
 
         if self.respond_to_probes {
             node.enable_probe_responder();
@@ -427,7 +446,9 @@ impl NodeCoreBuilder {
             clock,
             storage,
         ));
-        node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
+        node.max_incoming_resources_per_link =
+            u16::try_from(self.max_incoming_resources_per_link).unwrap_or(u16::MAX);
+        node.decompresses = self.decompresses;
 
         if self.respond_to_probes {
             node.enable_probe_responder();

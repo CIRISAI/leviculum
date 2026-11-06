@@ -363,3 +363,73 @@ fn file_response_resource_does_not_emit_generic_resource_completed() {
         "a file response resource must not surface a receiver-side ResourceCompleted.\nevents: {events:?}"
     );
 }
+
+/// 1459: a responder cancels the response resource it is sending (an ICL,
+/// Python's `Resource.cancel()` on the sender). The requester fails the
+/// download as `Cancelled` and learns it as its request timing out, at
+/// once, not at the end of the resource's retries; it never sees the
+/// response. The responder reports its own resource failed.
+#[test]
+fn a_cancelled_response_resource_fails_the_request_at_once() {
+    let response_value = large_response_value();
+    let mut responder_failed = None;
+    let (events, request_id) = run_request_roundtrip("/page/large.mu", |responder, link, rid| {
+        let (resource_hash, mut out) = responder
+            .send_response_resource_with(link, rid, &response_value, false)
+            .expect("send_response_resource_with must advertise");
+        let cancelled = responder
+            .cancel_outgoing_resource(link)
+            .expect("a resource under way");
+        responder_failed = cancelled.events.iter().find_map(|e| match e {
+            NodeEvent::ResourceFailed {
+                resource_hash: h,
+                error,
+                is_sender: true,
+                ..
+            } if *h == resource_hash => Some(*error),
+            _ => None,
+        });
+        out.merge(cancelled);
+        out
+    });
+    assert_eq!(
+        responder_failed,
+        Some(crate::resource::ResourceError::Cancelled),
+        "the responder reports its resource cancelled"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceFailed {
+                error: crate::resource::ResourceError::Cancelled,
+                is_sender: false,
+                ..
+            }
+        )),
+        "the requester's download fails as cancelled: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            NodeEvent::RequestTimedOut { request_id: r, .. } if *r == request_id
+        )),
+        "the request fails with it: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::ResponseReceived { .. })),
+        "no response after a cancel"
+    );
+}
+
+/// 1459, the control: a link sending nothing has nothing to cancel.
+#[test]
+fn cancelling_with_nothing_under_way_is_refused() {
+    let (_initiator, mut responder, _, _, _) = establish();
+    let link = *responder.links.keys().next().expect("the responder's link");
+    assert!(matches!(
+        responder.cancel_outgoing_resource(&link),
+        Err(crate::resource::ResourceError::NoPendingResource)
+    ));
+}

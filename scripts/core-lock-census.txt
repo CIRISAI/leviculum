@@ -75,7 +75,7 @@ driver::ReticulumNode::send_request_awaited
 driver::ReticulumNode::send_resource
 driver::ReticulumNode::send_resource_awaited
 driver::ReticulumNode::send_response
-driver::ReticulumNode::send_response_resource
+driver::ReticulumNode::send_response_resource_with
 driver::ReticulumNode::send_single_packet
 driver::ReticulumNode::set_announce_control
 driver::ReticulumNode::set_interface_announce_cap
