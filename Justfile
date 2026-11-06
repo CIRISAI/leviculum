@@ -2776,7 +2776,7 @@ map-bench-baseline REGION:
 # gesture of fewer than 30 frames is reported, not held). The
 # table lands in target/window-bench/table.md. A measuring tool, never in
 # `guards`: two release builds, about 45 s a round and side.
-[doc('Measure the window frames at three sizes, A/B against the baseline (#474)')]
+[doc('Measure window frames at three sizes, A/B against the baseline (#474)')]
 window-bench BASE="" ROUNDS="3":
     #!/usr/bin/env bash
     set -euo pipefail
