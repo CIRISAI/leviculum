@@ -1147,7 +1147,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4481`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4499`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1263,7 +1263,7 @@ All targets:
   our pin on the map where it is newer than our last share; otherwise
   unchanged.
 - **Android:** the phone's own fix (`Intent::OwnFix`,
-  `loquax-android/src/session.rs:1259`) is our pin the same way;
+  `loquax-android/src/session.rs:1311`) is our pin the same way;
   otherwise unchanged.
 - **The home:** unchanged; it carries no region yet (above).
 
@@ -1275,7 +1275,7 @@ is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:133`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:592`), which
 the model already returns while the tab is in front (`rooms_scene`,
-`loquax/src/ui/scene.rs:1074`), and its tab in the tab bar the screen
+`loquax/src/ui/scene.rs:1093`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
 list (name, unread count) or the open room's one live line and its lines
 as `who text`, and one input line at the bottom on the chat's editor
