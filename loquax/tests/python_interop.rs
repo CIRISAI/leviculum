@@ -62,6 +62,16 @@ fn hex_bytes(message: &serde_json::Value, key: &str) -> Vec<u8> {
     .unwrap_or_else(|_| panic!("{key} is not hex in {message}"))
 }
 
+/// The positive control's knob for the renamed-sender check (leviculum
+/// 1465): with `LOQUAX_TEST_HOLD_RENAME_S=<seconds>` the Python peer stores
+/// an announce that renames a sender it knows that much later, which is the
+/// order the land gate on b07e759b saw. Unset in every gate.
+fn held_rename_s() -> Option<f64> {
+    std::env::var("LOQUAX_TEST_HOLD_RENAME_S")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
+
 /// Positive: a message sent by the shipped binary arrives in a real Python
 /// LXMF inbox with its body and title intact, non-ASCII included.
 #[tokio::test(flavor = "multi_thread")]
@@ -145,6 +155,12 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
     // And `--from` is what an operator uses when the bare account name is
     // ambiguous — three hosts, one user. Same identity, so this run's announce
     // replaces the name Python holds for us.
+    if let Some(seconds) = held_rename_s() {
+        peer.rpc(
+            "lxmf_hold_renames",
+            serde_json::json!({ "seconds": seconds }),
+        );
+    }
     let overridden = mesh
         .send(
             vec![
@@ -165,10 +181,48 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
     let overridden_id = overridden.enqueued_id();
     let message = wait_for_python(&peer, &overridden_id, Duration::from_secs(40)).await;
     assert_eq!(
-        message.get("source_display_name").and_then(|v| v.as_str()),
-        Some("lew@schneckenschreck"),
-        "--from must reach the receiver verbatim: {message}"
+        String::from_utf8(hex_bytes(&message, "content")).expect("the body round-trips as UTF-8"),
+        "second line",
+        "the renamed sender's message must arrive itself: {message}"
     );
+    // The new name is asserted where Python holds it, not on the message.
+    // Names come from announces, and a recipient shows the old one until the
+    // new announce lands, which is the reference's model and its clients'.
+    // Nothing orders that announce ahead of the message: the instance holds
+    // a client's announce for the fresh-interface pacer (up to 600 ms after
+    // the previous own announce on that TCP link, `ANN_PACED`, and a timer
+    // releases it), while the message's link packets are forwarded as they
+    // arrive. On an idle host the announce still won by about 230 ms in 20 of
+    // 20 runs; the land gate on b07e759b starved the timer and the message
+    // came first. A relay would add its rebroadcast wait to the announce and
+    // none to the link, so a multi-hop path orders even less.
+    let source = message
+        .get("source_hash")
+        .and_then(|v| v.as_str())
+        .expect("the message carries its source")
+        .to_string();
+    let shown = message.get("source_display_name").and_then(|v| v.as_str());
+    assert!(
+        shown == Some(expected_name.as_str()) || shown == Some("lew@schneckenschreck"),
+        "the message shows the old name or the new one, nothing else: {message}"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        let known = peer.rpc(
+            "lxmf_known_name",
+            serde_json::json!({ "destination_hash": source }),
+        );
+        if known.as_str() == Some("lew@schneckenschreck") {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "--from must reach the receiver verbatim; Python holds {known} and heard {}",
+                peer.rpc("lxmf_names_heard", serde_json::json!({}))
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }

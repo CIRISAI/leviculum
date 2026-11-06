@@ -235,6 +235,12 @@ class TestDaemon:
         self.lxmf_identity = None
         self.lxmf_dest = None
         self.lxmf_received = []  # [dict] recorded by _on_lxmf_delivery
+        # [dict] every app_data Identity.remember stored, with its time: the
+        # moment a sender's announced name changes here (leviculum 1465).
+        self.lxmf_names_heard = []
+        # Seconds an announce replacing a known sender's app_data is held
+        # back before it is stored; 0 stores it at once (lxmf_hold_renames).
+        self.lxmf_rename_hold_s = 0.0
         self.lxmf_sent = {}  # message_hash_hex -> LXMessage
 
         # Create temp config directory
@@ -2013,6 +2019,7 @@ class TestDaemon:
             )
             self.lxmf_router.register_delivery_callback(self._on_lxmf_delivery)
             self._install_receipt_probe()
+            self._install_name_recorder()
             return {"result": {
                 "delivery_hash": self.lxmf_dest.hash.hex(),
                 "public_key": self.lxmf_identity.get_public_key().hex(),
@@ -2123,6 +2130,28 @@ class TestDaemon:
 
         elif method == "lxmf_get_received":
             return {"result": self.lxmf_received}
+
+        elif method == "lxmf_names_heard":
+            # Every announce whose app_data this node stored, in arrival
+            # order: what a client here would show as a sender's name from
+            # that moment on (leviculum 1465).
+            return {"result": self.lxmf_names_heard}
+
+        elif method == "lxmf_hold_renames":
+            # Test-only: hold an announce that renames a known sender for
+            # `seconds` before this node stores it, so a message can be
+            # delivered under the old name (leviculum 1465's positive control).
+            self.lxmf_rename_hold_s = float(params.get("seconds", 0))
+            return {"result": self.lxmf_rename_hold_s}
+
+        elif method == "lxmf_known_name":
+            # The name a client here shows for `destination_hash` now,
+            # resolved as _on_lxmf_delivery resolves it.
+            import LXMF
+            dest = bytes.fromhex(params["destination_hash"])
+            return {"result": LXMF.display_name_from_app_data(
+                RNS.Identity.recall_app_data(dest)
+            )}
 
         elif method == "lxmf_enable_propagation":
             # The lxmd propagation node in-process: lxmd wires an LXMRouter and
@@ -2246,6 +2275,51 @@ class TestDaemon:
             self._probe_lxm_cls = ProbeLXMessage
         return self._probe_lxm_cls
 
+    def _install_name_recorder(self):
+        """Record every app_data RNS.Identity.remember stores, with its time.
+
+        remember is where a received announce replaces the name a node holds
+        for a sender (Identity.py validate_announce), on every valid announce
+        and not only on those the path table takes, so the record is the
+        timeline of the name this node would show. Wire behaviour is unchanged.
+        """
+        if getattr(self, "_name_recorder_installed", False):
+            return
+        self._name_recorder_installed = True
+        import LXMF
+        original = RNS.Identity.remember
+        daemon = self
+
+        def remember(packet_hash, destination_hash, public_key, app_data=None):
+            # The positive control's knob (`lxmf_hold_renames`): an announce
+            # that replaces what this node holds for a sender it knows already
+            # lands `hold` seconds late, as when it is queued behind the
+            # message on the way here. A first announce is never held, so
+            # signatures still validate against the known identity.
+            hold = daemon.lxmf_rename_hold_s
+            if hold > 0 and destination_hash in RNS.Identity.known_destinations:
+                timer = threading.Timer(
+                    hold, record, (packet_hash, destination_hash, public_key, app_data)
+                )
+                timer.daemon = True
+                timer.start()
+                return
+            record(packet_hash, destination_hash, public_key, app_data)
+
+        def record(packet_hash, destination_hash, public_key, app_data=None):
+            original(packet_hash, destination_hash, public_key, app_data)
+            try:
+                name = LXMF.display_name_from_app_data(app_data) if app_data else None
+            except Exception:
+                name = None
+            daemon.lxmf_names_heard.append({
+                "t": time.time(),
+                "destination_hash": destination_hash.hex(),
+                "display_name": name,
+            })
+
+        RNS.Identity.remember = staticmethod(remember)
+
     def _on_lxmf_delivery(self, message):
         """LXMRouter delivery callback: record every asserted LXMessage field."""
         try:
@@ -2261,6 +2335,7 @@ class TestDaemon:
                 RNS.Identity.recall_app_data(message.source_hash)
             )
             self.lxmf_received.append({
+                "received_at": time.time(),
                 "source_display_name": source_display_name,
                 "message_hash": message.hash.hex(),
                 "content": message.content.hex(),
