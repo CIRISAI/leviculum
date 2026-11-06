@@ -2764,19 +2764,22 @@ map-bench-baseline REGION:
 
 # 1441, #474, #232: the window's frames measured as Lew's window draws them
 # (loquax/src/gui/bench.rs): a map drag, five wheel notches, the chat's
-# wheel, its scrollbar dragged, a mouse drag on its body and a touchpad
-# scroll over 3000 messages, each in real time through iced's user
-# interface as its loop runs on X11, the frames presented as the software
-# renderer's compositor presents them (damage, no read back), at 900x560,
-# 1280x1190 and 1920x1080, headless. One WINDOW_BENCH line a size and
+# wheel, its scrollbar dragged, a mouse drag on its body, a touchpad
+# scroll and the compose field's blink, over 3000 one-line messages
+# (`chat-*`) and over a few hundred long ones shaped like Lew's chats
+# (`real-*`, 1456), each in real time through iced's user interface as
+# its loop runs on X11, the frames presented as the software renderer's
+# compositor presents them (damage, no read back), at 900x560, 1280x1190,
+# 1276x2099 and 1920x1080, headless, and at 1276x2099 again with the
+# frame meter's overlay on (`+fps`). One WINDOW_BENCH line a size and
 # gesture. As map-bench: the bench of BASE (default: the commit that last
 # wrote loquax/tests/window_bench.baseline) built in a worktree under
 # target/, and this tree's, in turn for ROUNDS rounds, the medians
 # compared; a frame_ms_mean more than 5 % and 0.1 ms slower fails (a
 # gesture of fewer than 30 frames is reported, not held). The
 # table lands in target/window-bench/table.md. A measuring tool, never in
-# `guards`: two release builds, about 45 s a round and side.
-[doc('Measure window frames at three sizes, A/B against the baseline (#474)')]
+# `guards`: two release builds, about 160 s a round and side.
+[doc('Measure window frames at four sizes, A/B against the baseline (#474)')]
 window-bench BASE="" ROUNDS="3":
     #!/usr/bin/env bash
     set -euo pipefail

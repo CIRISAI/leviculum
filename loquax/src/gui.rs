@@ -4180,6 +4180,152 @@ mod tests {
         app
     }
 
+    /// The window over Anna's chat shaped like Lew's real ones (1456): not
+    /// thousands of one-line bubbles but a few hundred messages, most of
+    /// them long and wrapping over several lines, runs of hers and of
+    /// ours, every fourth of ours a reply quoting her last, emoji here and
+    /// there, the days going by; open, `w` by `h`. Deterministic.
+    pub(super) fn real_chat(w: u32, h: u32) -> App {
+        const WORDS: [&str; 24] = [
+            "the relay",
+            "on the hill",
+            "came back",
+            "after the storm",
+            "and the battery",
+            "held the night",
+            "through",
+            "I moved",
+            "the antenna",
+            "two metres higher",
+            "so the link",
+            "to the valley",
+            "reaches the farm now",
+            "but the solar panel",
+            "needs cleaning",
+            "before winter",
+            "tomorrow",
+            "maybe",
+            "with Bert",
+            "if the road is open",
+            "🙂",
+            "👍",
+            "🍎",
+            "📡",
+        ];
+        let mut model = chat_model();
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % n
+        };
+        let mut sentence = |words: u32| {
+            let mut out = String::new();
+            for i in 0..words {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push_str(WORDS[next(WORDS.len() as u32) as usize]);
+            }
+            out.push('.');
+            out
+        };
+        let mut hers = [0u8; 32];
+        let mut ours = 0u32;
+        // From ten on the morning of chat_model's last message, a day
+        // and a half of talk.
+        let mut minute = 10 * 60u32;
+        let mut messages = 0u32;
+        while messages < 300 {
+            // A run of hers, one to three messages, then one of ours, one
+            // or two.
+            for _ in 0..1 + messages % 3 {
+                minute += 7;
+                update(
+                    &mut model,
+                    UiEvent::Clock(at(30 + minute / 1440, minute / 60 % 24, minute % 60)),
+                );
+                let length = 2 + messages % 5;
+                let body = (0..length)
+                    .map(|_| sentence(6 + messages % 9))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                hers = [0u8; 32];
+                hers[..4].copy_from_slice(&(10_000 + messages).to_be_bytes());
+                update(
+                    &mut model,
+                    UiEvent::Engine(OutboxEvent::Received {
+                        message_id: hers,
+                        source: ANNA,
+                        title: Vec::new(),
+                        body: body.into_bytes(),
+                        fields: Vec::new(),
+                        verified: true,
+                    }),
+                );
+                messages += 1;
+            }
+            for _ in 0..1 + messages % 2 {
+                minute += 3;
+                update(
+                    &mut model,
+                    UiEvent::Clock(at(30 + minute / 1440, minute / 60 % 24, minute % 60)),
+                );
+                let body = (0..3 + ours % 4)
+                    .map(|_| sentence(8 + ours % 7))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                ours += 1;
+                let event = match ours % 4 {
+                    0 => UiEvent::Reply {
+                        peer: ANNA,
+                        target: hers,
+                        body,
+                    },
+                    _ => UiEvent::Write { peer: ANNA, body },
+                };
+                update(&mut model, event);
+                messages += 1;
+            }
+        }
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app
+    }
+
+    /// The bench's real-shaped chat is what its doc says (1456): a few
+    /// hundred bubbles, more than half of them over 200 characters, a
+    /// quarter of them ours, replies quoting hers, emoji among the words.
+    #[test]
+    fn the_real_chat_is_shaped_like_lews() {
+        let app = real_chat(1276, 2099);
+        let chat = app.scene.chat.as_ref().expect("the chat open");
+        let bubbles: Vec<_> = chat
+            .groups
+            .iter()
+            .flat_map(|g| g.bubbles.iter().map(|b| &b.bubble))
+            .collect();
+        let n = bubbles.len();
+        assert!((300..400).contains(&n), "{n} bubbles");
+        let ours = bubbles.iter().filter(|b| b.ours).count();
+        assert!(ours * 4 > n, "{ours} of {n} ours");
+        let quoting = bubbles
+            .iter()
+            .filter(|b| b.quote.as_ref().is_some_and(|q| !q.text.is_empty()))
+            .count();
+        assert!(quoting > 20, "{quoting} quoting");
+        let long = bubbles
+            .iter()
+            .filter(|b| b.body.chars().count() > 200)
+            .count();
+        assert!(long * 2 > n, "{long} of {n} long");
+        assert!(bubbles.iter().any(|b| b.body.contains('\u{1f642}')));
+    }
+
     /// A long conversation scrolls softly without building the view
     /// (1431): Anna's chat with 3000 more messages, a wheel's notch over
     /// the messages and the screen's frames after it scroll the list on

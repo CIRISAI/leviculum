@@ -2,7 +2,13 @@
 //! stutters at, replayed in real time through iced's user interface as
 //! its loop runs on X11 ([`leviculum_ui_iced::headless::drive`]), the
 //! frames presented as the software renderer's compositor presents them,
-//! damage and all; at three window sizes. One `WINDOW_BENCH` line a size
+//! damage and all; at four window sizes. The chat's gestures run over two
+//! conversations, 1441's 3000 one-line bubbles (`chat-*`) and one shaped
+//! like Lew's real chats (`real-*`, 1456), and the idle case counts the
+//! compose field's blink frames; at Lew's tall size every gesture runs a
+//! second time with the frame meter's overlay on (`+fps`). The overlay is
+//! a switch for the whole process: only `window_bench` turns it on, and
+//! it runs alone (`--exact`). One `WINDOW_BENCH` line a size
 //! and gesture: frames a second while it runs, a frame's time (mean, 95th
 //! percentile, longest, all on the window's thread: update, view and draw,
 //! present), the parts' means, the share of the window rasterised, and
@@ -14,15 +20,20 @@
 //! it the test returns at once. The map gestures run over the Florence
 //! fixture, or over the regions in `LOQUAX_WINDOW_BENCH_MAPS`.
 
-use super::tests::{long_chat, window_over_florence};
+use super::tests::{long_chat, real_chat, window_over_florence};
 use super::*;
 use iced::advanced::Layout;
 use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
 use std::sync::mpsc;
 
-/// The window sizes: the one the goldens use, Lew's (2026-11-06), a
-/// full HD screen.
-const SIZES: [(u32, u32); 3] = [(900, 560), (1280, 1190), (1920, 1080)];
+/// The window sizes: the one the goldens use, Lew's two (2026-11-06,
+/// the second his window on the tall screen where it ran at 6 to 7
+/// frames a second, 1456), a full HD screen.
+const SIZES: [(u32, u32); 4] = [(900, 560), (1280, 1190), (1276, 2099), (1920, 1080)];
+
+/// The size the gestures run at a second time with the frame meter's
+/// overlay on (`--fps`, 1456): Lew's tall window, where he read it.
+const OVERLAY_SIZE: (u32, u32) = (1276, 2099);
 
 /// When the gesture begins, after the first frames settled the window.
 const SETTLE: Duration = Duration::from_millis(400);
@@ -152,7 +163,9 @@ fn map_window(w: u32, h: u32) -> (App, Rectangle) {
         app.frames = Arc::new(Mutex::new(frames));
     }
     app.window = Size::new(w as f32, h as f32);
-    let node = headless::layout(app.view(), w, h).expect("a renderer");
+    // The window without the frame meter's overlay, which stacks over it
+    // and would move the path below (1456).
+    let node = headless::layout(app.window_view(), w, h).expect("a renderer");
     // The rail, then the map screen: the column, then the map over its bar.
     let map = Layout::new(&node)
         .children()
@@ -213,35 +226,82 @@ fn drag(from: Point, step: iced::Vector, span: Duration) -> Vec<(Duration, iced:
     out
 }
 
+/// The conversation a chat gesture runs over.
+#[derive(Clone, Copy, Debug)]
+enum Chat {
+    /// 3000 one-line bubbles ([`long_chat`]), 1441's.
+    Long,
+    /// A few hundred long, wrapping messages with quotes and wide bubbles
+    /// of ours, shaped like Lew's ([`real_chat`], 1456).
+    Real,
+}
+
+impl Chat {
+    fn open(self, w: u32, h: u32) -> App {
+        match self {
+            Chat::Long => long_chat(w, h),
+            Chat::Real => real_chat(w, h),
+        }
+    }
+}
+
 /// One gesture.
 #[derive(Clone, Copy, Debug)]
 enum Case {
     MapDrag,
     MapWheel,
-    ChatWheel,
-    ChatScrollbar,
-    ChatDrag,
-    ChatTouchpad,
+    ChatWheel(Chat),
+    ChatScrollbar(Chat),
+    ChatDrag(Chat),
+    ChatTouchpad(Chat),
+    /// The compose field focused and nothing else: the cursor's blink, two
+    /// frames a second (1456).
+    ChatIdle(Chat),
 }
 
+/// From the idle case's settle, when the blink frames are counted, and
+/// when the focus leaves the field again.
+const IDLE_FROM: Duration = Duration::from_millis(600);
+const IDLE_UNTIL: Duration = Duration::from_millis(3000);
+
 impl Case {
-    const ALL: [Case; 6] = [
+    const ALL: [Case; 12] = [
         Case::MapDrag,
         Case::MapWheel,
-        Case::ChatWheel,
-        Case::ChatScrollbar,
-        Case::ChatDrag,
-        Case::ChatTouchpad,
+        Case::ChatWheel(Chat::Long),
+        Case::ChatScrollbar(Chat::Long),
+        Case::ChatDrag(Chat::Long),
+        Case::ChatTouchpad(Chat::Long),
+        Case::ChatIdle(Chat::Long),
+        Case::ChatWheel(Chat::Real),
+        Case::ChatScrollbar(Chat::Real),
+        Case::ChatDrag(Chat::Real),
+        Case::ChatTouchpad(Chat::Real),
+        Case::ChatIdle(Chat::Real),
     ];
 
     fn name(self) -> &'static str {
         match self {
             Case::MapDrag => "map-drag",
             Case::MapWheel => "map-wheel",
-            Case::ChatWheel => "chat-wheel",
-            Case::ChatScrollbar => "chat-scrollbar",
-            Case::ChatDrag => "chat-drag",
-            Case::ChatTouchpad => "chat-touchpad",
+            Case::ChatWheel(Chat::Long) => "chat-wheel",
+            Case::ChatScrollbar(Chat::Long) => "chat-scrollbar",
+            Case::ChatDrag(Chat::Long) => "chat-drag",
+            Case::ChatTouchpad(Chat::Long) => "chat-touchpad",
+            Case::ChatIdle(Chat::Long) => "chat-idle",
+            Case::ChatWheel(Chat::Real) => "real-wheel",
+            Case::ChatScrollbar(Chat::Real) => "real-scrollbar",
+            Case::ChatDrag(Chat::Real) => "real-drag",
+            Case::ChatTouchpad(Chat::Real) => "real-touchpad",
+            Case::ChatIdle(Chat::Real) => "real-idle",
+        }
+    }
+
+    /// The frames measured: from when, until when (the end without).
+    fn span(self) -> (Duration, Option<Duration>) {
+        match self {
+            Case::ChatIdle(_) => (SETTLE + IDLE_FROM, Some(SETTLE + IDLE_UNTIL)),
+            _ => (SETTLE, None),
         }
     }
 
@@ -270,20 +330,20 @@ impl Case {
             }
             // Two seconds of a wheel turned fast, a notch every 50 ms,
             // back into the 3000 messages.
-            Case::ChatWheel => {
+            Case::ChatWheel(chat) => {
                 let at = Point::new(wf - 200.0, hf / 2.0);
                 let mut events = vec![(Duration::ZERO, moved(at))];
                 for i in 0..40u32 {
                     events.push((SETTLE + Duration::from_millis(50) * i, wheel(1.0)));
                 }
-                (long_chat(w, h), events)
+                (chat.open(w, h), events)
             }
             // The scrollbar at the window's right edge taken at the
             // middle and dragged up for two seconds, 2 pixels a report.
-            Case::ChatScrollbar => {
+            Case::ChatScrollbar(chat) => {
                 let from = Point::new(wf - 4.0, hf / 2.0);
                 (
-                    long_chat(w, h),
+                    chat.open(w, h),
                     drag(from, iced::Vector::new(0.0, -2.0), two),
                 )
             }
@@ -292,16 +352,16 @@ impl Case {
             // scrollable scrolls on a finger's drag, not on a mouse's:
             // this scrolls nothing and costs what the widgets do with
             // every move over 3000 bubbles.
-            Case::ChatDrag => {
+            Case::ChatDrag(chat) => {
                 let from = Point::new(wf - 200.0, hf / 3.0);
                 (
-                    long_chat(w, h),
+                    chat.open(w, h),
                     drag(from, iced::Vector::new(0.0, 2.0), two),
                 )
             }
             // The chat dragged on a touchpad, two fingers: two seconds of
             // pixel scrolls, 4 pixels a report, back into the messages.
-            Case::ChatTouchpad => {
+            Case::ChatTouchpad(chat) => {
                 let at = Point::new(wf - 200.0, hf / 2.0);
                 let mut events = vec![(Duration::ZERO, moved(at))];
                 let n = (two.as_micros() / MOUSE.as_micros()) as u32;
@@ -313,7 +373,24 @@ impl Case {
                         }),
                     ));
                 }
-                (long_chat(w, h), events)
+                (chat.open(w, h), events)
+            }
+            // A press into the compose field at the window's foot, then
+            // nothing for longer than the frames counted (the cursor
+            // blinks), then a press on the chat list's empty foot, which
+            // takes the focus and ends the blinking.
+            Case::ChatIdle(chat) => {
+                let field = Point::new(wf - 250.0, hf - 28.0);
+                let list = Point::new(200.0, hf - 40.0);
+                let events = vec![
+                    (Duration::ZERO, moved(field)),
+                    (SETTLE, button(true)),
+                    (SETTLE + MOUSE, button(false)),
+                    (SETTLE + IDLE_UNTIL, moved(list)),
+                    (SETTLE + IDLE_UNTIL + MOUSE, button(true)),
+                    (SETTLE + IDLE_UNTIL + MOUSE * 2, button(false)),
+                ];
+                (chat.open(w, h), events)
             }
         }
     }
@@ -323,7 +400,8 @@ impl Case {
 #[derive(Debug)]
 pub(super) struct Measured {
     pub size: (u32, u32),
-    pub case: &'static str,
+    /// The gesture's name, `+fps` with the frame meter's overlay on.
+    pub case: String,
     pub fps: f64,
     pub mean: f64,
     pub p95: f64,
@@ -367,15 +445,28 @@ impl Measured {
     }
 }
 
-/// `case` at `w` by `h`, run.
-fn measure(case: Case, w: u32, h: u32) -> Measured {
+/// `case` at `w` by `h`, run; with the frame meter's overlay over the
+/// window when `overlay`, as `loquax --fps` draws it.
+fn measure(case: Case, w: u32, h: u32, overlay: bool) -> Measured {
     let (app, events) = case.setup(w, h);
     let mut window = Window::new(app);
     let mut script = script(events);
-    let run =
-        headless::drive(&mut window, w, h, &mut script, SETTLE).expect("the software renderer");
-    let at = SETTLE.as_secs_f64();
-    let frames: Vec<&DrawnFrame> = run.frames.iter().filter(|f| f.at >= at).collect();
+    if overlay {
+        leviculum_ui_iced::fps::enable(|_| {});
+    }
+    let run = headless::drive(&mut window, w, h, &mut script, SETTLE);
+    if overlay {
+        leviculum_ui_iced::fps::disable();
+    }
+    let run = run.expect("the software renderer");
+    let (from, until) = case.span();
+    let at = from.as_secs_f64();
+    let until = until.map_or(f64::INFINITY, |u| u.as_secs_f64());
+    let frames: Vec<&DrawnFrame> = run
+        .frames
+        .iter()
+        .filter(|f| f.at >= at && f.at < until)
+        .collect();
     let n = frames.len().max(1);
     let mut totals: Vec<f64> = frames.iter().map(|f| f.total_ms()).collect();
     totals.sort_by(f64::total_cmp);
@@ -389,7 +480,11 @@ fn measure(case: Case, w: u32, h: u32) -> Measured {
             .collect();
         0.0 + p.iter().sum::<f64>() / p.len().max(1) as f64
     };
-    let span = frames.last().map_or(0.0, |f| f.at - at).max(1e-3);
+    let span = match case.span().1 {
+        Some(_) => until - at,
+        None => frames.last().map_or(0.0, |f| f.at - at),
+    }
+    .max(1e-3);
     let pick = |q: usize| {
         totals
             .get((totals.len() * q / 100).min(totals.len().saturating_sub(1)))
@@ -398,7 +493,7 @@ fn measure(case: Case, w: u32, h: u32) -> Measured {
     };
     Measured {
         size: (w, h),
-        case: case.name(),
+        case: format!("{}{}", case.name(), if overlay { "+fps" } else { "" }),
         fps: frames.len() as f64 / span,
         mean: 0.0 + totals.iter().sum::<f64>() / n as f64,
         p95: pick(95),
@@ -426,12 +521,14 @@ fn window_bench() {
         return;
     };
     let mut lines = Vec::new();
-    for (w, h) in SIZES {
-        for case in Case::ALL {
-            let line = measure(case, w, h).line();
-            println!("{line}");
-            lines.push(line);
-        }
+    let runs = SIZES
+        .iter()
+        .flat_map(|&size| Case::ALL.map(|case| (size, case, false)))
+        .chain(Case::ALL.map(|case| (OVERLAY_SIZE, case, true)));
+    for ((w, h), case, overlay) in runs {
+        let line = measure(case, w, h, overlay).line();
+        println!("{line}");
+        lines.push(line);
     }
     std::fs::write(&out, lines.join("\n") + "\n").expect("the bench's file");
 }
@@ -441,18 +538,36 @@ fn window_bench() {
 /// scroll the messages, each in frames that the window drew; the drag on
 /// the messages is measured, whatever it moves. And a wheel's notch on the
 /// chat builds no view per frame, where the scrollbar's drag is a message
-/// to the update per mouse report or not, as the line says.
+/// to the update per mouse report or not, as the line says. The idle
+/// case draws the cursor's blink frames. The real-shaped chat's gestures
+/// run only in an optimised build: unoptimised, its first view (300 long
+/// paragraphs shaped) takes longer than the gesture lasts, and the
+/// release bench runs them (`the_real_chat_is_shaped_like_lews` holds the
+/// fixture in every build).
 #[test]
 fn the_benchs_gestures_move_the_window() {
+    let optimised = !cfg!(debug_assertions);
     for case in Case::ALL {
-        let m = measure(case, 900, 560);
+        if !optimised
+            && matches!(
+                case,
+                Case::ChatWheel(Chat::Real)
+                    | Case::ChatScrollbar(Chat::Real)
+                    | Case::ChatDrag(Chat::Real)
+                    | Case::ChatTouchpad(Chat::Real)
+                    | Case::ChatIdle(Chat::Real)
+            )
+        {
+            continue;
+        }
+        let m = measure(case, 900, 560, false);
         println!("{}", m.line());
         assert!(
-            m.frames > 3 || matches!(case, Case::ChatDrag),
+            m.frames > 3 || matches!(case, Case::ChatDrag(_)),
             "{}",
             m.line()
         );
-        if !matches!(case, Case::ChatDrag) {
+        if !matches!(case, Case::ChatDrag(_) | Case::ChatIdle(_)) {
             assert!(m.moved, "{}", m.line());
         }
     }
