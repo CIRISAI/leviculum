@@ -38,6 +38,8 @@
 #[cfg(test)]
 mod bench;
 pub mod chat;
+#[cfg(test)]
+mod idle;
 pub mod map;
 #[cfg(test)]
 mod smooth;
@@ -276,7 +278,7 @@ async fn drive(
     shell.model.lang = locale();
     shell.apply(UiEvent::Clock(local_now()));
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
-    let mut last: Option<Seen> = None;
+    let mut sent = Sent::default();
     let mut photo: Option<viewer::Picture> = None;
     let mut notices = desktop::Notices::default();
     let mut front = true;
@@ -314,11 +316,10 @@ async fn drive(
         }
         let mut now = Seen::of(&shell);
         now.photo = photo.clone();
-        if last.as_ref() != Some(&now) {
-            if seen.unbounded_send(now.clone()).is_err() {
+        if let Some(now) = sent.offer(now) {
+            if seen.unbounded_send(now).is_err() {
                 break;
             }
-            last = Some(now);
             // New mail while the window is in the background (1341): the
             // desktop's notification, as the phone's service posts one.
             let rows = desktop::Count::of(&loquax::ui::chat::list_rows(&shell.model));
@@ -347,6 +348,42 @@ async fn drive(
         }
     }
     shell
+}
+
+/// What the shell sent the window last (1455): a message wakes iced's
+/// loop, which builds the view anew and redraws after every one, so the
+/// window is sent only what it would show differently. The model's clock
+/// moves every second, and the window shows no second of it: a list's
+/// time and the date lines are by the day, a message's time by the
+/// minute, the tracks are kept by the minute ([`TrackKey`]), a stale
+/// fix by the hour. So the clock counts by the minute here; what else
+/// moves each second (a pin's age in words, a recording's length) moves
+/// the scene or the pins and is sent.
+#[derive(Default)]
+struct Sent {
+    /// The last state sent, its clock at the start of its minute.
+    last: Option<Seen>,
+}
+
+impl Sent {
+    /// `seen` when the window would show it differently from the last
+    /// state sent, its own clock exact; `None` otherwise.
+    fn offer(&mut self, mut seen: Seen) -> Option<Seen> {
+        let exact = seen.now;
+        seen.now = exact.map(|now| WallTime {
+            unix_secs: now.unix_secs - now.unix_secs.rem_euclid(60),
+            ..now
+        });
+        if self.last.as_ref() == Some(&seen) {
+            return None;
+        }
+        let out = Seen {
+            now: exact,
+            ..seen.clone()
+        };
+        self.last = Some(seen);
+        Some(out)
+    }
 }
 
 /// The photo file at `path` decoded for the viewer, its serial past
@@ -3377,7 +3414,7 @@ mod tests {
     /// A model as the shell holds one, the reader Mia: Anna wrote yesterday and twice this
     /// morning, we answered, she reacted; Bert wrote once, unread. Anna's
     /// conversation is open.
-    fn chat_model() -> crate::shell::Model {
+    pub(super) fn chat_model() -> crate::shell::Model {
         let mut model = crate::shell::Model::new(&[]);
         model.address = Some(OWN);
         model.names.remember(OWN, "Mia Sander");
@@ -3422,7 +3459,7 @@ mod tests {
         model
     }
 
-    fn seen_of(model: &crate::shell::Model) -> Seen {
+    pub(super) fn seen_of(model: &crate::shell::Model) -> Seen {
         Seen {
             pins: model.map_pins(),
             tracks: model.track_input(),

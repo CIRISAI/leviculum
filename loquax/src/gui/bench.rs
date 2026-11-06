@@ -43,8 +43,8 @@ const MOUSE: Duration = Duration::from_millis(8);
 
 /// The window with its worker as iced runs them: the map's frames drawn
 /// on a thread, taken in as the loop's messages.
-struct Window {
-    app: App,
+pub(super) struct Window {
+    pub(super) app: App,
     jobs: mpsc::Sender<Order>,
     done: mpsc::Receiver<Arc<Shown>>,
     /// A frame from the worker came since the last frame presented.
@@ -52,7 +52,7 @@ struct Window {
 }
 
 impl Window {
-    fn new(app: App) -> Self {
+    pub(super) fn new(app: App) -> Self {
         let (jobs, orders) = mpsc::channel::<Order>();
         let (painted, done) = mpsc::channel();
         let frames = app.frames.clone();
@@ -73,7 +73,7 @@ impl Window {
 
     /// The worker's next job, as [`App::paint`] hands it to iced's pool;
     /// no prefetch.
-    fn dispatch(&mut self) {
+    pub(super) fn dispatch(&mut self) {
         match self.app.next_job() {
             Some(Job::Draw(order)) => {
                 let _ = self.jobs.send(*order);
@@ -155,7 +155,7 @@ impl Program for Window {
 /// The map window `w` by `h` over the Florence fixture (or the regions
 /// of `LOQUAX_WINDOW_BENCH_MAPS`), at z15 over Piazza d'Azeglio, and
 /// where its map canvas lies.
-fn map_window(w: u32, h: u32) -> (App, Rectangle) {
+pub(super) fn map_window(w: u32, h: u32) -> (App, Rectangle) {
     let mut app = window_over_florence(Vec::new(), 15 * MILLI);
     if let Some(dir) = std::env::var_os("LOQUAX_WINDOW_BENCH_MAPS") {
         let frames = Frames::new(loquax::picture::Maps::new(Some(dir.into())));
