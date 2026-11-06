@@ -48,7 +48,7 @@ use leviculum_ui_ratatui::geometry::to_ratatui;
 use leviculum_ui_ratatui::images::{self, Between, Picker};
 use leviculum_ui_ratatui::style::downgrade_buffer;
 use leviculum_ui_ratatui::terminal::{
-    draw_synced, install_panic_hook, set_mouse_capture, TerminalOps,
+    draw_changed, install_panic_hook, set_mouse_capture, Held, TerminalOps,
 };
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
 
@@ -246,8 +246,10 @@ async fn run_terminal(
         enhanced,
     })
     .map_err(|e| e.to_string())?;
-    let mut terminal =
-        Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(|e| e.to_string())?;
+    // A pass of the loop that changes no cell writes nothing (1455): the
+    // loop runs every 20 ms for the engine's queue.
+    let (writer, mut drawn) = Held::new(std::io::stdout());
+    let mut terminal = Terminal::new(CrosstermBackend::new(writer)).map_err(|e| e.to_string())?;
     // The map's backend, asked of the terminal in raw mode, before the
     // event stream reads stdin. Only when a protocol may be taken: braille
     // and half-blocks need no answer, and `--no-color` sends no query.
@@ -362,7 +364,7 @@ async fn run_terminal(
         // so a terminal never shows a map picture's erase without the
         // picture (1118).
         match unwound(|| {
-            draw_synced(&mut terminal, |frame| {
+            draw_changed(&mut terminal, &mut drawn, |frame| {
                 draw_screen(frame, &shell.model, &view, Some(&mut painter))
             })
         }) {
