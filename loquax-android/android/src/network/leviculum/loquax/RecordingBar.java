@@ -365,22 +365,38 @@ final class RecordingBar {
     }
 
     /** One input to the library, then its answer. */
-    private void input(String input, long now, int dx, int dy, int rms) {
-        String error = Core.record(host.peer(), input, now, dx, dy, rms);
-        if (error != null) {
-            host.line(error);
-        }
-        answer();
+    private void input(final String input, final long now, final int dx, final int dy,
+            final int rms) {
+        final String peer = host.peer();
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.record(peer, input, now, dx, dy, rms);
+            }
+        }, said);
     }
 
     /** One button of the bar, then the library's answer. */
-    void verb(String verb) {
-        String error = Core.recordingVerb(host.peer(), verb);
-        if (error != null) {
-            host.line(error);
-        }
-        answer();
+    void verb(final String verb) {
+        final String peer = host.peer();
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.recordingVerb(peer, verb);
+            }
+        }, said);
     }
+
+    /** What an input or a button handed to the engine said (1446), then the library's answer. */
+    private final Engine.Said said = new Engine.Said() {
+        @Override
+        public void said(String error) {
+            if (error != null) {
+                host.line(error);
+            }
+            answer();
+        }
+    };
 
     /** The screen goes: a recording in any state goes nowhere. */
     void leave() {

@@ -154,17 +154,38 @@ final class RoomsPane {
 
     /** The field's line to the library; what it leaves in the field back. */
     private void say() {
-        verb("say", input.getText().toString(), 0);
-        input.setText(Core.str(Core.roomsScreen(), "input"));
-        input.setSelection(input.getText().length());
+        verb("say", input.getText().toString(), 0, new Runnable() {
+            @Override
+            public void run() {
+                input.setText(Core.str(Core.roomsScreen(), "input"));
+                input.setSelection(input.getText().length());
+            }
+        });
     }
 
     private void verb(String verb, String text, int index) {
-        String error = Core.rooms(verb, text, index);
-        if (error != null) {
-            Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
-        }
-        draw();
+        verb(verb, text, index, null);
+    }
+
+    /** A verb on the engine's thread (1446); the tab drawn after it, then `after`. */
+    private void verb(final String verb, final String text, final int index, final Runnable after) {
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.rooms(verb, text, index);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (error != null) {
+                    Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
+                }
+                draw();
+                if (after != null) {
+                    after.run();
+                }
+            }
+        });
     }
 
     /** Draw what the library says the tab shows. */

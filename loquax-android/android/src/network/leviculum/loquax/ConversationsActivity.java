@@ -75,6 +75,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private boolean homeClient;
     /** The map tab is selected; its pane is made on first selection. */
     private boolean onMap;
+    /** Between onResume and onPause: an answer from the engine after onPause starts nothing (1446). */
+    private boolean resumed;
     /** The Browse tab is in front (1337), and its pane once built. */
     private boolean onBrowse;
     private BrowsePane browsePane;
@@ -309,7 +311,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private void leaveRooms() {
         if (onRooms) {
             onRooms = false;
-            Core.rooms("chats", "", 0);
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.rooms("chats", "", 0);
+                }
+            });
             findViewById(R.id.pane_rooms).setVisibility(View.GONE);
             tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
             findViewById(R.id.tab_rooms).setSelected(false);
@@ -320,7 +327,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private void leaveBrowse() {
         if (onBrowse) {
             onBrowse = false;
-            Core.browse("chats", "", "");
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.browse("chats", "", "");
+                }
+            });
             findViewById(R.id.pane_browse).setVisibility(View.GONE);
             tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
             findViewById(R.id.tab_browse).setSelected(false);
@@ -571,13 +583,29 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             public boolean onMenuItemClick(MenuItem item) {
                 int id = item.getItemId();
                 if (id == R.string.mark_read) {
-                    say(Core.unread(peer, !unread));
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.unread(peer, !unread);
+                        }
+                    }, said);
                 } else if (id == R.string.pin) {
-                    say(Core.pin(peer, !pinned));
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.pin(peer, !pinned);
+                        }
+                    }, said);
                 } else if (id == R.string.mute) {
                     ContactActivity.muteDialog(ConversationsActivity.this, peer, muted, again);
                 } else if (id == R.string.archive) {
-                    say(Core.archive(peer, !archivedView));
+                    final boolean archive = !archivedView;
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.archive(peer, archive);
+                        }
+                    }, said);
                 } else if (id == R.string.delete) {
                     ContactActivity.deleteDialog(ConversationsActivity.this, peer, name,
                             homeClient, again);
@@ -663,19 +691,42 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        if (Ui.NOT_STARTED.equals(Core.close())) {
-            // Back from the recent apps after the session was stopped: the
-            // first screen starts it again.
-            startActivity(new Intent(this, MainActivity.class));
-            finish();
-            return;
-        }
-        Core.front(true);
-        refresh();
-        if (onMap) {
-            mapPane.ask();
-        }
-        ticker.postDelayed(tick, 30_000);
+        resumed = true;
+        // On the engine's thread, never here (1446): the close waits on the
+        // session's lock, which the pump holds while it folds a first pull.
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.close();
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (Ui.NOT_STARTED.equals(error)) {
+                    // Back from the recent apps after the session was stopped:
+                    // the first screen starts it again.
+                    if (!isFinishing()) {
+                        startActivity(new Intent(ConversationsActivity.this, MainActivity.class));
+                        finish();
+                    }
+                    return;
+                }
+                if (!resumed) {
+                    return;
+                }
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.front(true);
+                    }
+                });
+                refresh();
+                if (onMap) {
+                    mapPane.ask();
+                }
+                ticker.postDelayed(tick, 30_000);
+            }
+        });
     }
 
     @Override
@@ -683,8 +734,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         if (mapPane != null) {
             mapPane.pause();
         }
+        resumed = false;
         ticker.removeCallbacks(tick);
-        Core.front(false);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(false);
+            }
+        });
         Events.listen(null);
         super.onPause();
     }
@@ -694,6 +751,15 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             line(error);
         }
     }
+
+    /** What a command handed to the engine said (1446), and the list after it. */
+    private final Engine.Said said = new Engine.Said() {
+        @Override
+        public void said(String error) {
+            say(error);
+            refresh();
+        }
+    };
 
     /** The line under the bar, shown only while it has something to say. */
     private void line(String text) {

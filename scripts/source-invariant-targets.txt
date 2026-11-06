@@ -260,6 +260,7 @@ skip  loquax-android   schema_props               # property tests of the facade
 skip  loquax-android   viewer                     # the photo viewer's zoom through the JNI query in Java's bytes (1269); subject is the code
 run   loquax-android   strings                    # reads the app's res/values*/strings.xml and asserts the words of walk findings 27 to 30 (1283)
 run   loquax-android   icon                       # reads the icon PNGs, the adaptive icon, the manifest and the deb's desktop entry and asserts their sizes and names (1336)
+run   loquax-android   ui_thread                  # reads the app's Java sources, the manifest and Core.java's builders and asserts no command is called outside the engine's thread (1446)
 skip  loquax-m9        golden                     # the M9 chats list drawn into the 320x240 frame and pinned as PNG (1351); subject is the renderer
 skip  loquax-m9        firmware                   # the M9 image's fixture screens drawn, dumped and read back against PNG goldens (1361); subject is the renderer and the dump
 skip  loquax-m9        groups                     # the M9's group screens and their key table walked through the model, frames drawn against each other (1366); subject is the renderer and the keys

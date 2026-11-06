@@ -116,13 +116,28 @@ public class ProfileActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        Core.profileShown(true);
-        refresh();
+        // The profile's state on the engine's thread (1446); the screen after it.
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.profileShown(true);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                refresh();
+            }
+        });
     }
 
     @Override
     protected void onPause() {
-        Core.profileShown(false);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.profileShown(false);
+            }
+        });
         super.onPause();
     }
 

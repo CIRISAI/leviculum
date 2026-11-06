@@ -571,12 +571,22 @@ final class MapPane implements MapView.Listener {
         add.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                String why = Core.addContact(peer, Core.str(row, "announced"));
-                if (why != null && !why.isEmpty()) {
-                    say(why);
-                    return;
-                }
-                host.chat(peer);
+                final String announced = Core.str(row, "announced");
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.addContact(peer, announced);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String why) {
+                        if (why != null && !why.isEmpty()) {
+                            say(why);
+                            return;
+                        }
+                        host.chat(peer);
+                    }
+                });
             }
         });
         View chat = activity.findViewById(R.id.card_chat);

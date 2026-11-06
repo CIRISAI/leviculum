@@ -92,6 +92,10 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     private final List<Map<String, Object>> rows = new ArrayList<>();
     private String peer;
+    /** Between onResume and onPause: an answer from the engine after onPause starts nothing (1446). */
+    private boolean resumed;
+    /** A send handed to the engine and not yet answered (1446). */
+    private boolean sending;
     /** The own position for the attachment menu's share (1201). */
     private final Locator locator = new Locator(this);
     private TextView title;
@@ -343,8 +347,19 @@ public class ChatActivity extends Activity implements Events.Listener {
         unstage.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                say(Core.unstage(peer));
-                sendable();
+                final String to = peer;
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.unstage(to);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        say(error);
+                        sendable();
+                    }
+                });
             }
         });
         replyBar = findViewById(R.id.reply_bar);
@@ -386,8 +401,13 @@ public class ChatActivity extends Activity implements Events.Listener {
         shareStop.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                say(Core.stopShare(peer));
-                refresh();
+                final String to = peer;
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.stopShare(to);
+                    }
+                }, said);
             }
         });
         ((Button) findViewById(R.id.book_add)).setOnClickListener(new View.OnClickListener() {
@@ -399,8 +419,13 @@ public class ChatActivity extends Activity implements Events.Listener {
         ((Button) findViewById(R.id.book_not_now)).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                say(Core.notNow(peer));
-                refresh();
+                final String to = peer;
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.notNow(to);
+                    }
+                }, said);
             }
         });
         if (savedInstanceState != null) {
@@ -552,16 +577,37 @@ public class ChatActivity extends Activity implements Events.Listener {
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        String error = Core.open(peer);
-        if (Ui.NOT_STARTED.equals(error)) {
-            finish();
-            return;
-        }
-        Core.front(true);
-        say(error);
-        draftOwed = true;
-        refresh();
-        ticker.postDelayed(tick, 30_000);
+        resumed = true;
+        // On the engine's thread, never here (1446): the open waits on the
+        // session's lock, which the pump holds while it folds a pull.
+        final String to = peer;
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.open(to);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (Ui.NOT_STARTED.equals(error)) {
+                    finish();
+                    return;
+                }
+                if (!resumed) {
+                    return;
+                }
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.front(true);
+                    }
+                });
+                say(error);
+                draftOwed = true;
+                refresh();
+                ticker.postDelayed(tick, 30_000);
+            }
+        });
     }
 
     @Override
@@ -569,9 +615,20 @@ public class ChatActivity extends Activity implements Events.Listener {
         ticker.removeCallbacks(tick);
         recordingBar.leave();
         player.stop();
-        Core.front(false);
+        resumed = false;
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(false);
+            }
+        });
         Events.listen(null);
-        Core.close();
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.close();
+            }
+        });
         super.onPause();
     }
 
@@ -607,6 +664,15 @@ public class ChatActivity extends Activity implements Events.Listener {
             line(error);
         }
     }
+
+    /** What a command handed to the engine said (1446), and the chat after it. */
+    private final Engine.Said said = new Engine.Said() {
+        @Override
+        public void said(String error) {
+            say(error);
+            refresh();
+        }
+    };
 
     /** The line under the bar, shown only while it has something to say. */
     private void line(String text) {
@@ -696,18 +762,40 @@ public class ChatActivity extends Activity implements Events.Listener {
      * The plus's sheet or the position button's (1270): the library opens
      * it and says what it holds; the position sheet asks for a fix first.
      */
-    private void openSheet(String kind) {
-        say(Core.sheet(peer, kind));
-        if ("position".equals(kind)) {
-            findFix();
-        }
-        sendable();
+    private void openSheet(final String kind) {
+        final String to = peer;
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.sheet(to, kind);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                say(error);
+                if ("position".equals(kind)) {
+                    findFix();
+                }
+                sendable();
+            }
+        });
     }
 
     /** The sheet goes, the library told. */
     private void closeSheet() {
         if (peer != null) {
-            say(Core.sheet(peer, ""));
+            final String to = peer;
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.sheet(to, "");
+                }
+            }, new Engine.Said() {
+                @Override
+                public void said(String error) {
+                    say(error);
+                }
+            });
         }
         dropSheet();
     }
@@ -730,18 +818,48 @@ public class ChatActivity extends Activity implements Events.Listener {
     private void findFix() {
         android.location.Location seeded = locator.fixture();
         if (seeded != null) {
-            say(Locator.tell(seeded));
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Locator.tell(seeded);
+                }
+            }, new Engine.Said() {
+                @Override
+                public void said(String error) {
+                    say(error);
+                }
+            });
             return;
         }
         if (!locator.allowed()) {
-            say(Locator.tell(null));
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Locator.tell(null);
+                }
+            }, new Engine.Said() {
+                @Override
+                public void said(String error) {
+                    say(error);
+                }
+            });
             return;
         }
         locator.once(new Locator.Fix() {
             @Override
-            public void on(android.location.Location location) {
-                say(Locator.tell(location));
-                sendable();
+            public void on(final android.location.Location location) {
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Locator.tell(location);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        say(error);
+                        sendable();
+                    }
+                });
             }
         });
     }
@@ -863,8 +981,19 @@ public class ChatActivity extends Activity implements Events.Listener {
                     sheet = null;
                     sheetShown = "";
                     if (peer != null) {
-                        say(Core.sheet(peer, ""));
-                        sendable();
+                        final String to = peer;
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.sheet(to, "");
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                say(error);
+                                sendable();
+                            }
+                        });
                     }
                 }
             }
@@ -897,12 +1026,23 @@ public class ChatActivity extends Activity implements Events.Listener {
                 openSheet("position");
                 break;
             case "sheet_share_now": {
-                String error = Core.shareFix(peer);
-                line(error == null
-                        ? getString(R.string.shared_to, Core.str(header, "name"))
-                        : getString(R.string.share_failed, error));
-                sendable();
-                refresh();
+                final String to = peer;
+                final String name = Core.str(header, "name");
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.shareFix(to);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        line(error == null
+                                ? getString(R.string.shared_to, name)
+                                : getString(R.string.share_failed, error));
+                        sendable();
+                        refresh();
+                    }
+                });
                 break;
             }
             case "sheet_share_15_min":
@@ -911,13 +1051,24 @@ public class ChatActivity extends Activity implements Events.Listener {
             case "sheet_share_until_stopped": {
                 // A share (1273): the library sends on the fixes the share
                 // service brings; the service starts as the list says it runs.
-                String error = Core.startShare(peer, id.substring("sheet_share_".length()));
-                if (error != null) {
-                    line(getString(R.string.share_failed, error));
-                }
-                ShareService.start(this);
-                sendable();
-                refresh();
+                final String to = peer;
+                final String span = id.substring("sheet_share_".length());
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.startShare(to, span);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        if (error != null) {
+                            line(getString(R.string.share_failed, error));
+                        }
+                        ShareService.start(ChatActivity.this);
+                        sendable();
+                        refresh();
+                    }
+                });
                 break;
             }
             case "sheet_location_on":
@@ -1045,8 +1196,13 @@ public class ChatActivity extends Activity implements Events.Listener {
                 } else if (id == R.string.contact_addresses) {
                     addresses();
                 } else if (id == R.string.unlink) {
-                    say(Core.unlink(peer));
-                    refresh();
+                    final String to = peer;
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.unlink(to);
+                        }
+                    }, said);
                 } else if (id == R.string.add_to_contacts) {
                     choose();
                 } else if (id == R.string.rename) {
@@ -1120,8 +1276,13 @@ public class ChatActivity extends Activity implements Events.Listener {
         actions.add(new Runnable() {
             @Override
             public void run() {
-                say(Core.notNow(peer));
-                refresh();
+                final String to = peer;
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.notNow(to);
+                    }
+                }, said);
             }
         });
         new AlertDialog.Builder(this)
@@ -1238,17 +1399,28 @@ public class ChatActivity extends Activity implements Events.Listener {
                 .setPositiveButton(R.string.link, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        String error = Core.link(peer, copy);
-                        if (error != null) {
-                            line(error);
-                            return;
-                        }
-                        line(getString(R.string.linked_to, contactName));
-                        refresh();
-                        if (save.isChecked() && !Book.saveAddress(ChatActivity.this,
-                                Core.num(copy, "contact_id"), Core.str(copy, "lookup"), peer)) {
-                            line(getString(R.string.no_contacts_app));
-                        }
+                        final String to = peer;
+                        final boolean saving = save.isChecked();
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.link(to, copy);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                if (error != null) {
+                                    line(error);
+                                    return;
+                                }
+                                line(getString(R.string.linked_to, contactName));
+                                refresh();
+                                if (saving && !Book.saveAddress(ChatActivity.this,
+                                        Core.num(copy, "contact_id"), Core.str(copy, "lookup"), to)) {
+                                    line(getString(R.string.no_contacts_app));
+                                }
+                            }
+                        });
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null);
@@ -1333,9 +1505,20 @@ public class ChatActivity extends Activity implements Events.Listener {
             confirm(copy);
             return;
         }
-        String error = Core.link(peer, copy);
-        line(error != null ? error : getString(R.string.linked_to, Core.str(copy, "name")));
-        refresh();
+        final String to = peer;
+        final Map<String, Object> picked = copy;
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.link(to, picked);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                line(error != null ? error : getString(R.string.linked_to, Core.str(picked, "name")));
+                refresh();
+            }
+        });
     }
 
     /**
@@ -1527,9 +1710,14 @@ public class ChatActivity extends Activity implements Events.Listener {
             return;
         }
         player.stop();
-        say(Core.playVoice(peer, key, true));
+        final String to = peer;
         played = 0f;
-        refresh();
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.playVoice(to, key, true);
+            }
+        }, said);
         playback.execute(new Runnable() {
             @Override
             public void run() {
@@ -1540,9 +1728,13 @@ public class ChatActivity extends Activity implements Events.Listener {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            Core.playVoice(peer, key, false);
                             line(error);
-                            refresh();
+                            Engine.run(new Engine.Call() {
+                                @Override
+                                public String run() {
+                                    return Core.playVoice(to, key, false);
+                                }
+                            }, said);
                         }
                     });
                     return;
@@ -1559,8 +1751,12 @@ public class ChatActivity extends Activity implements Events.Listener {
                     @Override
                     public void ended(long at) {
                         played = 0f;
-                        Core.playVoice(peer, at, false);
-                        refresh();
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.playVoice(to, at, false);
+                            }
+                        }, said);
                     }
                 });
             }
@@ -1771,8 +1967,14 @@ public class ChatActivity extends Activity implements Events.Listener {
                 .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        say(Core.rename(peer, field.getText().toString()));
-                        refresh();
+                        final String to = peer;
+                        final String name = field.getText().toString();
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.rename(to, name);
+                            }
+                        }, said);
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null)
@@ -1809,7 +2011,17 @@ public class ChatActivity extends Activity implements Events.Listener {
                 int at = Math.max(compose.getSelectionStart(), 0);
                 int end = Math.max(compose.getSelectionEnd(), 0);
                 compose.getText().replace(Math.min(at, end), Math.max(at, end), emoji);
-                say(Core.used(emoji));
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.used(emoji);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        say(error);
+                    }
+                });
             }
         });
     }
@@ -1822,24 +2034,41 @@ public class ChatActivity extends Activity implements Events.Listener {
         String body = compose.getText().toString();
         // A staged photo goes with the text as its caption, or alone (1270).
         boolean staged = stagedBar.getVisibility() == View.VISIBLE;
-        if (body.trim().isEmpty() && !staged) {
+        if (body.trim().isEmpty() && !staged || sending) {
             return;
         }
-        String error = replyTo == null || staged
-                ? Core.send(peer, body) : Core.reply(peer, Core.str(replyTo, "id"), body);
-        if (error != null) {
-            line(error);
-            return;
-        }
-        // The library dropped the draft with the send (1219).
-        mirroring = true;
-        try {
-            compose.setText("");
-            replyTo(null);
-        } finally {
-            mirroring = false;
-        }
-        refresh();
+        // One send at a time: the field empties when the library took it,
+        // and a second tap meanwhile would send the text twice (1446).
+        sending = true;
+        final String to = peer;
+        final String answers = replyTo == null || staged ? null : Core.str(replyTo, "id");
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return answers == null ? Core.send(to, body) : Core.reply(to, answers, body);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                sending = false;
+                if (error != null) {
+                    line(error);
+                    return;
+                }
+                // The library dropped the draft with the send (1219); the
+                // field is emptied unless it was typed on meanwhile.
+                if (body.equals(compose.getText().toString())) {
+                    mirroring = true;
+                    try {
+                        compose.setText("");
+                        replyTo(null);
+                    } finally {
+                        mirroring = false;
+                    }
+                }
+                refresh();
+            }
+        });
     }
 
     /**
@@ -1953,7 +2182,19 @@ public class ChatActivity extends Activity implements Events.Listener {
                 QUICK, ourReaction(row), actions, labels, new LongPress.Listener() {
                     @Override
                     public void react(String emoji) {
-                        say(Core.react(peer, Core.str(row, "id"), emoji));
+                        final String to = peer;
+                        final String id = Core.str(row, "id");
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.react(to, id, emoji);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                say(error);
+                            }
+                        });
                     }
 
                     @Override
@@ -2053,9 +2294,21 @@ public class ChatActivity extends Activity implements Events.Listener {
                 .setItems(names, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        Map<String, Object> to = all.get(which);
-                        String error = Core.forward(peer, Core.num(row, "key"), Core.str(to, "peer"));
-                        line(error != null ? error : getString(R.string.forwarded, Core.str(to, "name")));
+                        final Map<String, Object> to = all.get(which);
+                        final String from = peer;
+                        final long key = Core.num(row, "key");
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.forward(from, key, Core.str(to, "peer"));
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                line(error != null ? error
+                                        : getString(R.string.forwarded, Core.str(to, "name")));
+                            }
+                        });
                     }
                 })
                 .show();
@@ -2130,11 +2383,16 @@ public class ChatActivity extends Activity implements Events.Listener {
                         for (Map<String, Object> row : picked) {
                             keys.add(Core.num(row, "key"));
                         }
-                        say(Core.delete(peer, keys));
+                        final String to = peer;
                         if (selection != null) {
                             select(null);
                         }
-                        refresh();
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.delete(to, keys);
+                            }
+                        }, said);
                     }
                 })
                 .setNegativeButton(R.string.keep, null)
@@ -2358,8 +2616,15 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (mirroring || peer == null) {
             return;
         }
-        Core.draft(peer, compose.getText().toString(),
-                replyTo == null ? "" : Core.str(replyTo, "id"));
+        final String to = peer;
+        final String body = compose.getText().toString();
+        final String answers = replyTo == null ? "" : Core.str(replyTo, "id");
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.draft(to, body, answers);
+            }
+        });
     }
 
     @Override
@@ -2482,10 +2747,18 @@ public class ChatActivity extends Activity implements Events.Listener {
                     mark.setOnClickListener(new View.OnClickListener() {
                         @Override
                         public void onClick(View v) {
-                            String error = Core.sendAgain(peer, key);
-                            if (error != null) {
-                                line(error);
-                            }
+                            final String to = peer;
+                            Engine.run(new Engine.Call() {
+                                @Override
+                                public String run() {
+                                    return Core.sendAgain(to, key);
+                                }
+                            }, new Engine.Said() {
+                                @Override
+                                public void said(String error) {
+                                    say(error);
+                                }
+                            });
                         }
                     });
                 }
@@ -2562,11 +2835,12 @@ public class ChatActivity extends Activity implements Events.Listener {
             join.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    String error = Core.group("join", group, "", "", false);
-                    if (error != null) {
-                        line(error);
-                    }
-                    refresh();
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.group("join", group, "", "", false);
+                        }
+                    }, said);
                 }
             });
         }

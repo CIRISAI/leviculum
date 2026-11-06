@@ -120,14 +120,24 @@ public class MapActivity extends Activity implements Events.Listener {
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        Core.front(true);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(true);
+            }
+        });
         map.ask();
     }
 
     @Override
     protected void onPause() {
         map.pause();
-        Core.front(false);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(false);
+            }
+        });
         Events.listen(null);
         super.onPause();
     }

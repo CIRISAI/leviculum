@@ -50,8 +50,13 @@ public class ShareService extends Service {
     private LocationManager manager;
     private final LocationListener listener = new LocationListener() {
         @Override
-        public void onLocationChanged(Location location) {
-            Locator.tell(location);
+        public void onLocationChanged(final Location location) {
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Locator.tell(location);
+                }
+            });
         }
 
         @Override
@@ -71,7 +76,12 @@ public class ShareService extends Service {
             }
             Location seeded = Locator.fixture(ShareService.this);
             if (seeded != null) {
-                Locator.tell(seeded);
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Locator.tell(seeded);
+                    }
+                });
             }
             main.postDelayed(this, LOOK_MS);
         }
@@ -124,7 +134,13 @@ public class ShareService extends Service {
             // The notification's Stop: every share ends, each with its end
             // report.
             for (Map<String, Object> share : Core.list(Core.shares(), "shares")) {
-                Core.stopShare(Core.str(share, "peer"));
+                final String peer = Core.str(share, "peer");
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.stopShare(peer);
+                    }
+                });
             }
         }
         running = this;

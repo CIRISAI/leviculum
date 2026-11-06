@@ -178,17 +178,36 @@ final class BrowsePane {
         if (c > 0 && r > 0 && (c != cols || r != lines)) {
             cols = c;
             lines = r;
-            Core.browseSize(c, r);
-            draw();
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.browseSize(c, r);
+                }
+            }, new Engine.Said() {
+                @Override
+                public void said(String error) {
+                    draw();
+                }
+            });
         }
     }
 
-    private void verb(String verb, String node, String text) {
-        String error = Core.browse(verb, node, text);
-        if (error != null) {
-            Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
-        }
-        draw();
+    /** A verb on the engine's thread (1446); the tab drawn after it. */
+    private void verb(final String verb, final String node, final String text) {
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.browse(verb, node, text);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (error != null) {
+                    Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
+                }
+                draw();
+            }
+        });
     }
 
     /** Draw what the library says the tab shows. */

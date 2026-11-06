@@ -384,13 +384,22 @@ public class SettingsActivity extends Activity implements Events.Listener {
             stop.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    String error = Core.stopShare(peer);
-                    if (error != null) {
-                        android.widget.Toast.makeText(SettingsActivity.this, error,
-                                android.widget.Toast.LENGTH_LONG).show();
-                    }
-                    ShareService.look(SettingsActivity.this, false);
-                    recreate();
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.stopShare(peer);
+                        }
+                    }, new Engine.Said() {
+                        @Override
+                        public void said(String error) {
+                            if (error != null) {
+                                android.widget.Toast.makeText(SettingsActivity.this, error,
+                                        android.widget.Toast.LENGTH_LONG).show();
+                            }
+                            ShareService.look(SettingsActivity.this, false);
+                            recreate();
+                        }
+                    });
                 }
             });
             line.addView(stop);
@@ -787,8 +796,17 @@ public class SettingsActivity extends Activity implements Events.Listener {
         unblock.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                Core.block(peer, false);
-                refresh();
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.block(peer, false);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        refresh();
+                    }
+                });
             }
         });
         line.addView(unblock);

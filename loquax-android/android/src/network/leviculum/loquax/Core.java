@@ -110,6 +110,7 @@ final class Core {
 
     /** Start; code and server null on a later start. Blocks: not on the UI thread. */
     static Map<String, Object> start(String dir, String server, String code, String name) {
+        Engine.offMain("Native.start");
         Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(),
                 "camera", camera);
         if (server != null) request.put("server", server);
@@ -267,8 +268,13 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "rooms"))));
     }
 
-    /** One request; the error in words, or null. */
+    /**
+     * One request; the error in words, or null. Waits on the session's
+     * lock: never on the UI thread, where {@link Engine#offMain} guards it;
+     * screens go through {@link Engine#run} (1446).
+     */
     static String command(Map<String, Object> request) {
+        Engine.offMain("Native.command " + request.get("t"));
         Map<String, Object> done = answer(Native.command(MsgPack.pack(request)));
         return bool(done, "ok") ? null : str(done, "error");
     }

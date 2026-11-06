@@ -73,16 +73,26 @@ final class AddContact {
                 .setPositiveButton(R.string.add_contact, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        String why = Core.addContact(lxma, name.getText().toString().trim());
-                        if (why != null) {
-                            Toast.makeText(activity, why, Toast.LENGTH_LONG).show();
-                            return;
-                        }
-                        activity.startActivity(new Intent(activity, ChatActivity.class)
-                                .putExtra(ChatActivity.PEER, address));
-                        if (then != null) {
-                            then.run();
-                        }
+                        final String typed = name.getText().toString().trim();
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Core.addContact(lxma, typed);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String why) {
+                                if (why != null) {
+                                    Toast.makeText(activity, why, Toast.LENGTH_LONG).show();
+                                    return;
+                                }
+                                activity.startActivity(new Intent(activity, ChatActivity.class)
+                                        .putExtra(ChatActivity.PEER, address));
+                                if (then != null) {
+                                    then.run();
+                                }
+                            }
+                        });
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null)
