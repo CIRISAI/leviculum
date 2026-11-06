@@ -17,7 +17,7 @@
 //!   back, without a header (`encode_codec2`, `Sideband/sbapp/sideband/audioproc.py:117-143`).
 //!
 //! So ours go as Opus in Ogg, the one mode every receiver plays, and ours
-//! play both. The codec is the shell's ([`crate::voice`], behind the
+//! play both. The codec is the shell's (`crate::voice`, behind the
 //! `voice` feature); the model knows the field, reads a recording's length
 //! and a level bar off the stream without decoding it, and keeps which
 //! message plays.
@@ -46,7 +46,7 @@ pub const AM_CODEC2_3200: u8 = 0x09;
 pub const AM_OPUS_OGG: u8 = 0x10;
 
 /// The bits a second a recording is coded at, on average
-/// ([`crate::voice::BITRATE`] is this).
+/// (`crate::voice::BITRATE` is this).
 pub const OPUS_BITRATE: u32 = 12_000;
 
 /// The bytes a second of a recording on the wire, counted high: the

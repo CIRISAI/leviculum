@@ -228,7 +228,7 @@ pub const KIND_PEERSTATE: u8 = 10;
 /// before it skips it as a kind it cannot show.
 pub const KIND_STALLED: u8 = 11;
 /// A member's message to a group this home hosts (1307,
-/// [`group`]), packed as it came: the group's history and the source of
+/// `group`), packed as it came: the group's history and the source of
 /// its copies. The owner's devices get the owner's own copy as a received
 /// message, so a client skips this kind.
 pub const KIND_GROUP: u8 = 12;

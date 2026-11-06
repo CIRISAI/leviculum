@@ -161,7 +161,7 @@ pub enum Role {
     Home {
         requests: UnboundedSender<HomeRequest>,
     },
-    /// A group the home node hosts (1307, [`crate::home::group`]): the
+    /// A group the home node hosts (1307, `crate::home::group`): the
     /// group identity's delivery destination, announced with the group's
     /// name, handing every received message out packed as the home's does,
     /// its proof held until the archive keeps it. No home destination: the

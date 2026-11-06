@@ -261,7 +261,7 @@ impl Sheet {
 }
 
 /// A photo the camera took, scaled and stripped by the shell already
-/// ([`crate::photo::prepare`]), waiting in the compose bar for Send and
+/// (`crate::photo::prepare`), waiting in the compose bar for Send and
 /// its optional caption. Kept in memory only: a photo is not a draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Staged {
