@@ -208,6 +208,9 @@ pub struct Surface {
     background: Option<Color>,
     width: u32,
     height: u32,
+    /// The last present's damage as the layers' diff gave it, before
+    /// grouping and the whole-window rule (1455).
+    rects: Vec<Rectangle>,
 }
 
 impl Surface {
@@ -220,12 +223,13 @@ impl Surface {
             background: None,
             width: w,
             height: h,
+            rects: Vec::new(),
         })
     }
 
     /// What `renderer` holds since its last reset, presented on
     /// `background`: the share of the window it rasterised, zero when
-    /// nothing changed.
+    /// nothing changed, which is no present (1455).
     pub fn present(&mut self, renderer: &mut Renderer, background: Color) -> f32 {
         use iced_tiny_skia::graphics::{damage, Viewport};
         let viewport = Viewport::with_physical_size(Size::new(self.width, self.height), 1.0);
@@ -240,9 +244,12 @@ impl Surface {
             ),
             _ => vec![whole],
         };
-        if damaged.is_empty() {
+        // Nothing changed, or only the frame meter's box: no present, and
+        // the next frame is compared with what is on it (1455).
+        if damaged.is_empty() || iced_tiny_skia::window::compositor::is_quiet(&damaged) {
             return 0.0;
         }
+        self.rects = damaged.clone();
         let damaged = iced_tiny_skia::window::compositor::whole_when_fragmented(
             damage::group(damaged, whole),
             whole,
@@ -261,6 +268,12 @@ impl Surface {
         self.last = Some(layers);
         self.background = Some(background);
         (area / (whole.width * whole.height)).min(1.0)
+    }
+
+    /// The last present's damage as the layers' diff gave it, before
+    /// grouping and the whole-window rule: what changed.
+    pub fn rects(&self) -> &[Rectangle] {
+        &self.rects
     }
 
     /// The pixels on it, RGB, row by row.
@@ -320,7 +333,15 @@ impl DrawnFrame {
 /// What a [`drive`] did.
 #[derive(Debug, Default)]
 pub struct Run {
+    /// The frames presented.
     pub frames: Vec<DrawnFrame>,
+    /// Each presented frame's damage as the layers' diff gave it, before
+    /// grouping and the whole-window rule (1455), in `frames`' order.
+    pub rects: Vec<Vec<Rectangle>>,
+    /// When a redraw changed nothing and so presented nothing (1455),
+    /// seconds since the drive began: iced asks a redraw after every
+    /// message, and before 1455 each was a present.
+    pub unpresented: Vec<f64>,
     /// From the first event to the last frame.
     pub seconds: f64,
     pub events: usize,
@@ -454,6 +475,13 @@ pub fn drive<P: Program>(
                 pending.damage = surface.present(&mut renderer, background);
                 pending.present_ms = ms(t.elapsed());
                 pending.at = start.elapsed().as_secs_f64();
+                drawn = true;
+                if pending.damage == 0.0 {
+                    // No frame: nothing changed (1455).
+                    run.unpresented.push(pending.at);
+                    pending = DrawnFrame::default();
+                    continue;
+                }
                 pending.marked = program.marked();
                 crate::fps::emulated(
                     Instant::now(),
@@ -463,9 +491,9 @@ pub fn drive<P: Program>(
                         present: pending.present_ms,
                     },
                 );
+                run.rects.push(surface.rects().to_vec());
                 run.frames.push(std::mem::take(&mut pending));
                 run.seconds = start.elapsed().as_secs_f64();
-                drawn = true;
                 continue;
             }
             if over && redraw_at.is_none() && program.idle() {

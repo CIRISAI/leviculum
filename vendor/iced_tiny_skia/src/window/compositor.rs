@@ -7,6 +7,8 @@ use crate::{Layer, Renderer, Settings};
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 pub struct Compositor {
     context: softbuffer::Context<Box<dyn compositor::Display>>,
@@ -186,11 +188,19 @@ pub fn present(
         })
         .unwrap_or_else(|| vec![Rectangle::with_size(viewport.logical_size())]);
 
-    if damage.is_empty() {
-        if let Some(last_layers) = last_layers {
-            surface.layer_stack.push_front(last_layers.clone());
-        }
-    } else {
+    // Leviculum's patch (1455): a frame in which nothing changed, or only
+    // the box `set_quiet` names, is not presented. softbuffer's present
+    // hands the whole buffer to the display server even when nothing was
+    // drawn into it (0.4.8, X11: `shm_put_image` of the whole window; Lew's
+    // window at 1276x2099 logged `present=24 ms` twice a second while
+    // nothing moved), and iced asks a redraw after every message. The buffer goes back unpresented, so its
+    // age does not move, and the layer stack does not either: the next
+    // frame is compared with what is on the screen, the quiet box's
+    // change with it.
+    if damage.is_empty() || is_quiet(&damage) {
+        return Ok(());
+    }
+    {
         surface.layer_stack.push_front(renderer.layers().to_vec());
         surface.background_color = background_color;
 
@@ -216,7 +226,50 @@ pub fn present(
     }
 
     on_pre_present();
-    buffer.present().map_err(|_| compositor::SurfaceError::Lost)
+    buffer
+        .present()
+        .map_err(|_| compositor::SurfaceError::Lost)?;
+    let _ = PRESENTS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Leviculum's patch (1455): the frames presented so far, by every
+/// surface of the process. A frame meter tells a present from a redraw
+/// that changed nothing by whether this moved.
+static PRESENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Leviculum's patch (1455): the rectangle whose change alone presents
+/// no frame (a frame meter's own numbers), logical pixels.
+static QUIET: Mutex<Option<Rectangle>> = Mutex::new(None);
+
+/// Leviculum's patch (1455): the frames presented so far.
+pub fn presents() -> u64 {
+    PRESENTS.load(Ordering::Relaxed)
+}
+
+/// Leviculum's patch (1455): a change inside `quiet` alone presents no
+/// frame; it is drawn with the next frame that changes anything else.
+/// For a frame meter, whose numbers change with every frame it counts
+/// and must never be the reason for one. `None` lifts it.
+pub fn set_quiet(quiet: Option<Rectangle>) {
+    *QUIET.lock().unwrap_or_else(PoisonError::into_inner) = quiet;
+}
+
+/// Leviculum's patch (1455): whether `damage` lies inside the quiet
+/// rectangle, a pixel of rounding allowed.
+pub fn is_quiet(damage: &[Rectangle]) -> bool {
+    let quiet = *QUIET.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(quiet) = quiet else {
+        return false;
+    };
+    let quiet = quiet.expand(1.0);
+    !damage.is_empty()
+        && damage.iter().all(|r| {
+            r.x >= quiet.x
+                && r.y >= quiet.y
+                && r.x + r.width <= quiet.x + quiet.width
+                && r.y + r.height <= quiet.y + quiet.height
+        })
 }
 
 /// Leviculum's patch (1456): above this many damage rectangles a frame is

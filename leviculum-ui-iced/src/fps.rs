@@ -20,6 +20,13 @@
 //! each frame, so a frame that builds no view still updates them;
 //! the program's log gets them as one `WINDOW_FRAME` line a second while
 //! the window draws more than one frame a second.
+//!
+//! The meter is never the reason for a frame (1455): a redraw the
+//! compositor does not present (nothing changed, or only the overlay's
+//! numbers, the box the overlay hands the vendored compositor's
+//! `set_quiet`) is no frame and is not counted, and the overlay's new
+//! numbers wait for the next frame something else draws. While the
+//! window draws at most one frame a second the overlay says `idle`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,6 +61,7 @@ pub fn enable(log: fn(&str)) {
 /// measures a window with and without the overlay in one process (1456).
 pub fn disable() {
     ON.store(false, Ordering::Relaxed);
+    iced_tiny_skia::window::compositor::set_quiet(None);
 }
 
 /// A frame an emulated window ([`crate::headless::drive`]) presented at
@@ -97,7 +105,16 @@ fn meter() -> std::sync::MutexGuard<'static, Meter> {
 }
 
 fn sink(stage: iced_debug::Stage, start: Instant, took: Duration) {
-    let line = meter().stage(stage, start, took);
+    let line = {
+        let mut meter = meter();
+        // A redraw the compositor did not present (1455) is no frame.
+        match matches!(stage, iced_debug::Stage::Present)
+            && !meter.counted(iced_tiny_skia::window::compositor::presents())
+        {
+            true => meter.unpresented(),
+            false => meter.stage(stage, start, took),
+        }
+    };
     if let (Some(line), Some(log)) = (line, LOG.get()) {
         log(&line);
     }
@@ -150,13 +167,17 @@ impl Snapshot {
         )
     }
 
-    /// The overlay's three lines.
+    /// The overlay's three lines; `idle` for the rate while the last
+    /// second held at most one frame (1455).
     pub fn lines(&self) -> [String; 3] {
         [
-            format!(
-                "{:>3.0} fps  {:5.1} ms  p95 {:5.1}",
-                self.fps, self.mean_ms, self.p95_ms
-            ),
+            match self.fps > 1.0 {
+                true => format!(
+                    "{:>3.0} fps  {:5.1} ms  p95 {:5.1}",
+                    self.fps, self.mean_ms, self.p95_ms
+                ),
+                false => format!("   idle   {:5.1} ms", self.mean_ms),
+            },
             format!(
                 "upd {:4.1}  draw {:4.1}  pres {:4.1}",
                 self.parts.update, self.parts.draw, self.parts.present
@@ -178,6 +199,8 @@ pub struct Meter {
     last: Option<Snapshot>,
     logged: Option<Instant>,
     size: (u32, u32),
+    /// The compositor's present count at the last present span.
+    presents: u64,
 }
 
 impl Default for Meter {
@@ -199,7 +222,24 @@ impl Meter {
             last: None,
             logged: None,
             size: (0, 0),
+            presents: 0,
         }
+    }
+
+    /// Whether the compositor presented since the last present span: its
+    /// count `presents` moved.
+    pub fn counted(&mut self, presents: u64) -> bool {
+        let moved = presents != self.presents;
+        self.presents = presents;
+        moved
+    }
+
+    /// A redraw ended without a present (1455): what it spent is no
+    /// frame's, and nothing is logged.
+    pub fn unpresented(&mut self) -> Option<String> {
+        self.pending = Parts::default();
+        self.updates.clear();
+        None
     }
 
     /// The program's update.
@@ -336,6 +376,8 @@ impl<M> Widget<M, Theme, Renderer> for Overlay {
             return;
         };
         let bounds = layout.bounds();
+        // Its numbers alone never present a frame (1455).
+        iced_tiny_skia::window::compositor::set_quiet(Some(bounds));
         renderer.fill_quad(
             renderer::Quad {
                 bounds,
@@ -371,11 +413,14 @@ mod tests {
     use iced_debug::Stage;
 
     /// The overlay's numbers changing damage its box and nothing else
-    /// (1456): drawn over a 400 by 600 window and presented, a second
-    /// frame with other numbers rasterises at most the box's share of the
-    /// window. A canvas's text, which has no bottom, damaged a column to
-    /// the window's foot, more than an eighth of this window, which the
-    /// compositor then draws whole.
+    /// (1456), and so present no frame (1455): drawn over a 400 by 600
+    /// window and presented, a second frame with other numbers presents
+    /// nothing, the box being the compositor's quiet one. The control,
+    /// the quiet box lifted: the third frame with other numbers again
+    /// rasterises at most the box's share of the window. A canvas's text,
+    /// which has no bottom, damaged a column to the window's foot, more
+    /// than an eighth of this window, which the compositor then draws
+    /// whole, and which no quiet box holds.
     #[test]
     fn a_change_of_the_numbers_damages_the_box_alone() {
         use crate::headless::{software, Surface};
@@ -384,7 +429,7 @@ mod tests {
         let mut renderer = software(Font::DEFAULT).expect("a renderer");
         let mut surface = Surface::new(w, h).expect("a surface");
         let t0 = Instant::now();
-        let mut frame = |at: Duration, present: f64| {
+        let mut frame = |at: Duration, present: f64, loud: bool| {
             let _ = meter().presented(
                 t0 + at,
                 Parts {
@@ -413,10 +458,15 @@ mod tests {
                 mouse::Cursor::Unavailable,
                 &Rectangle::with_size(size),
             );
+            if loud {
+                iced_tiny_skia::window::compositor::set_quiet(None);
+            }
             surface.present(&mut renderer, Color::WHITE)
         };
-        assert_eq!(frame(Duration::ZERO, 3.0), 1.0);
-        let changed = frame(Duration::from_millis(16), 47.0);
+        assert_eq!(frame(Duration::ZERO, 3.0, false), 1.0);
+        let quiet = frame(Duration::from_millis(16), 47.0, false);
+        assert_eq!(quiet, 0.0, "the numbers alone presented a frame");
+        let changed = frame(Duration::from_millis(32), 9.0, true);
         let most = (BOX.width + 12.0) * (BOX.height + 12.0) / (w * h) as f32;
         assert!(
             changed > 0.0 && changed <= most,
@@ -461,5 +511,37 @@ mod tests {
         let mut one = Meter::new();
         assert_eq!(one.stage(Stage::Present, t0, d(5)), None);
         assert!(one.last.is_some());
+        assert!(one
+            .last
+            .as_ref()
+            .is_some_and(|s| s.lines()[0].contains("idle")));
+        assert!(s.lines()[0].contains("fps"), "{:?}", s.lines());
+    }
+
+    /// A redraw the compositor did not present is no frame (1455): its
+    /// update and draw are dropped, the frames a second do not move, and
+    /// no line is logged; a present after it counts its own parts only.
+    #[test]
+    fn a_redraw_without_a_present_is_no_frame() {
+        let mut m = Meter::new();
+        let t0 = Instant::now();
+        let d = Duration::from_millis;
+        assert!(m.counted(1));
+        m.update(t0, d(2));
+        let _ = m.stage(Stage::Present, t0 + d(3), d(5));
+        // A redraw: an update and a draw, and the count did not move.
+        m.update(t0 + d(100), d(7));
+        let _ = m.stage(Stage::Draw, t0 + d(107), d(1));
+        assert!(!m.counted(1));
+        assert_eq!(m.unpresented(), None);
+        assert_eq!(m.last.as_ref().map(|s| s.fps), Some(1.0));
+        // The next present: its own parts, none of the redraw's.
+        assert!(m.counted(2));
+        m.update(t0 + d(200), d(1));
+        let _ = m.stage(Stage::Present, t0 + d(201), d(4));
+        let s = m.last.clone().expect("a snapshot");
+        assert_eq!(s.fps, 2.0);
+        assert!((s.parts.update - 1.5).abs() < 1e-6, "{:?}", s.parts);
+        assert!((s.parts.draw - 0.0).abs() < 1e-6, "{:?}", s.parts);
     }
 }

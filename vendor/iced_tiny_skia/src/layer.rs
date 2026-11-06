@@ -281,6 +281,23 @@ impl Layer {
                         && bounds_a == bounds_b
                         && transformation_a == transformation_b
                 }
+                // Leviculum's patch (1455): a canvas's shapes drawn anew
+                // each frame without a cache (icons, marks) are the same
+                // when their paths and paints are. Upstream counts them
+                // changed on every frame, so each redraw damaged every
+                // such shape on screen (about 40 small rectangles in
+                // Loquax's chat at 900x560), and past four rectangles the
+                // whole window was rasterised: a cursor blink cost a
+                // whole frame twice a second.
+                (Item::Live(a), Item::Live(b)) => a == b,
+                (
+                    Item::Group(primitives_a, bounds_a, transformation_a),
+                    Item::Group(primitives_b, bounds_b, transformation_b),
+                ) => {
+                    bounds_a == bounds_b
+                        && transformation_a == transformation_b
+                        && primitives_a == primitives_b
+                }
                 _ => false,
             },
         );
