@@ -85,7 +85,7 @@ default-members = [
 # leviculum-mapfill/measure and leviculum-mapfill/m9 are the map measurement's
 # host harness and M9 firmware (#474). Their own workspaces keep the harness's
 # protobuf decoder and the firmware's Xtensa toolchain out of this graph.
-exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapfill/measure", "leviculum-mapfill/m9", "vendor/crossterm", "vendor/termbg"]
+exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapfill/measure", "leviculum-mapfill/m9", "vendor/crossterm", "vendor/termbg", "vendor/iced_debug"]
 
 # Vendored, minimally-patched crossterm 0.29.0. The patch exposes mouse side
 # buttons (X buttons 8/9) as MouseButton::Back / MouseButton::Forward, which
@@ -98,9 +98,18 @@ exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapf
 # vendor/termbg is the published 0.6.2 with one line changed, its crossterm
 # requirement raised to 0.29 (the API it uses did not change). Drop the patch
 # once a termbg release asks for 0.29 itself.
+#
+# iced_debug is vendored for the window's frame meter (1441): iced times
+# every frame's view, layout, interact, draw and present in it, and without
+# its `enable` feature (which streams to iced's comet tool over a socket)
+# the spans are empty. The patch adds `set_sink`, a function a window hands
+# the finished spans to, so `loquax --fps` measures what iced itself does
+# per frame, the software renderer's rasterise and present included. Until
+# a sink is set a span costs a check of a OnceLock.
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
 termbg = { path = "vendor/termbg" }
+iced_debug = { path = "vendor/iced_debug" }
 
 [workspace.package]
 # The development window, not a release. Every build between 0.9.0 and

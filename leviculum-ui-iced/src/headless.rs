@@ -53,6 +53,18 @@ pub fn render<M>(
     )
 }
 
+/// `element` laid out on `w` by `h`: the tree of its bounds, for a test
+/// of where things are; `None` without a renderer.
+pub fn layout<M>(mut element: Element<'_, M>, w: u32, h: u32) -> Option<layout::Node> {
+    let renderer = software(iced::Font::DEFAULT)?;
+    let mut tree = Tree::new(&element);
+    Some(element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, Size::new(w as f32, h as f32)),
+    ))
+}
+
 /// A screen drawn again and again off screen by the software renderer,
 /// as a window draws it: one renderer, so its image cache holds a picture
 /// shown before, and one widget tree, so a canvas keeps its state between
@@ -180,6 +192,274 @@ impl Offscreen {
     }
 }
 
+/// A window's surface off screen (1441): the software renderer's present
+/// as its compositor runs it in a window (iced_tiny_skia 0.14.1,
+/// `window/compositor.rs`, `present`), into a buffer of our own that is
+/// kept between frames like a window's buffer of age one: the layers
+/// compared with the last frame's, only the damaged part filled and
+/// rasterised, and nothing read back. What a window adds after it, the
+/// display server taking the buffer (softbuffer's present), is not here.
+pub struct Surface {
+    pixels: Vec<u8>,
+    mask: tiny_skia::Mask,
+    last: Option<Vec<iced_tiny_skia::Layer>>,
+    background: Option<Color>,
+    width: u32,
+    height: u32,
+}
+
+impl Surface {
+    /// `w` by `h` at a density of one; `None` for an empty size.
+    pub fn new(w: u32, h: u32) -> Option<Self> {
+        Some(Self {
+            pixels: vec![0; w as usize * h as usize * 4],
+            mask: tiny_skia::Mask::new(w, h)?,
+            last: None,
+            background: None,
+            width: w,
+            height: h,
+        })
+    }
+
+    /// What `renderer` holds since its last reset, presented on
+    /// `background`: the share of the window it rasterised, zero when
+    /// nothing changed.
+    pub fn present(&mut self, renderer: &mut Renderer, background: Color) -> f32 {
+        use iced_tiny_skia::graphics::{damage, Viewport};
+        let viewport = Viewport::with_physical_size(Size::new(self.width, self.height), 1.0);
+        let whole = Rectangle::with_size(viewport.logical_size());
+        let layers = renderer.layers().to_vec();
+        let damaged = match (&self.last, self.background == Some(background)) {
+            (Some(last), true) => damage::diff(
+                last,
+                &layers,
+                |layer| vec![layer.bounds],
+                iced_tiny_skia::Layer::damage,
+            ),
+            _ => vec![whole],
+        };
+        if damaged.is_empty() {
+            return 0.0;
+        }
+        let damaged = damage::group(damaged, whole);
+        let area: f32 = damaged
+            .iter()
+            .filter_map(|r| r.intersection(&whole))
+            .map(|r| r.width * r.height)
+            .sum();
+        let Some(mut pixmap) =
+            tiny_skia::PixmapMut::from_bytes(&mut self.pixels, self.width, self.height)
+        else {
+            return 0.0;
+        };
+        renderer.draw(&mut pixmap, &mut self.mask, &viewport, &damaged, background);
+        self.last = Some(layers);
+        self.background = Some(background);
+        (area / (whole.width * whole.height)).min(1.0)
+    }
+
+    /// The pixels on it, RGB, row by row.
+    pub fn rgb(&self) -> Vec<u8> {
+        // The renderer writes the window's format: blue, green, red, alpha.
+        self.pixels
+            .chunks(4)
+            .flat_map(|p| [p[2], p[1], p[0]])
+            .collect()
+    }
+}
+
+/// A program as an emulated window runs it ([`drive`], 1441).
+pub trait Program {
+    type Message;
+    fn view(&self) -> Element<'_, Self::Message>;
+    fn update(&mut self, message: Self::Message);
+    /// What else the window's loop hands the program now, besides the
+    /// widgets' messages: a worker's results, a subscription's ticks;
+    /// `drawn` when a frame was just presented (what iced's
+    /// `window::frames` answers).
+    fn pump(&self, drawn: bool) -> Vec<Self::Message>;
+    /// Whether the program waits on nothing of its own (a worker).
+    fn idle(&self) -> bool;
+    /// The theme, the text colour and the window's background.
+    fn style(&self) -> (Theme, Color, Color);
+}
+
+/// One frame of an emulated window, in milliseconds: the update (the
+/// program's and the widgets'), the view built, laid out and drawn, the
+/// present; the share of the window rasterised; whether the view was
+/// built anew for it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DrawnFrame {
+    pub update_ms: f64,
+    pub draw_ms: f64,
+    pub present_ms: f64,
+    pub damage: f32,
+    pub rebuilt: bool,
+}
+
+impl DrawnFrame {
+    pub fn total_ms(&self) -> f64 {
+        self.update_ms + self.draw_ms + self.present_ms
+    }
+}
+
+/// What a [`drive`] did.
+#[derive(Debug, Default)]
+pub struct Run {
+    pub frames: Vec<DrawnFrame>,
+    /// From the first event to the last frame.
+    pub seconds: f64,
+    pub events: usize,
+    /// Messages the program was handed, and views built.
+    pub messages: usize,
+    pub views: usize,
+    /// The last frame's pixels, RGB.
+    pub rgb: Vec<u8>,
+}
+
+/// `program` in a window of `w` by `h` as iced 0.14's loop runs it on X11
+/// (iced_winit 0.14.1, `lib.rs`), in real time: the events `script` says
+/// are due (it is asked with the time since the start, and says `None`
+/// once it is over) go to the widgets; their messages, and what the
+/// program's [`Program::pump`] hands it, go to its update, after which
+/// the view is built anew and the window redrawn; a widget's redraw
+/// request (a soft scroll on its way) redraws without a new view. A frame
+/// is drawn as soon as one is wanted and the events due are handled,
+/// with no frame clock, as winit's redraw on X11 has none. Over once the
+/// script is, no redraw is wanted and the program is idle; `None` without
+/// a renderer.
+pub fn drive<P: Program>(
+    program: &mut P,
+    w: u32,
+    h: u32,
+    script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
+) -> Option<Run> {
+    use iced::window::RedrawRequest;
+    use iced_runtime::user_interface::{Cache, State, UserInterface};
+    use std::time::{Duration, Instant};
+    let mut renderer = software(iced::Font::DEFAULT)?;
+    let mut surface = Surface::new(w, h)?;
+    let size = Size::new(w as f32, h as f32);
+    let mut cache = Cache::default();
+    let mut cursor = mouse::Cursor::Unavailable;
+    let mut run = Run::default();
+    let mut pending = DrawnFrame::default();
+    let mut want = true;
+    let mut over = false;
+    let mut drawn = false;
+    let mut redraw_at: Option<Instant> = None;
+    let mut messages: Vec<P::Message> = Vec::new();
+    let start = Instant::now();
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let wants = |state: &State, redraw_at: &mut Option<Instant>| match state {
+        State::Outdated => true,
+        State::Updated { redraw_request, .. } => match redraw_request {
+            RedrawRequest::NextFrame => true,
+            RedrawRequest::At(at) => {
+                *redraw_at = Some(redraw_at.map_or(*at, |t| t.min(*at)));
+                false
+            }
+            RedrawRequest::Wait => false,
+        },
+    };
+    loop {
+        let built = Instant::now();
+        let mut ui = UserInterface::build(program.view(), size, cache, &mut renderer);
+        pending.draw_ms += ms(built.elapsed());
+        pending.rebuilt = true;
+        run.views += 1;
+        let mut done = false;
+        loop {
+            if !over {
+                match script(start.elapsed()) {
+                    Some(events) if !events.is_empty() => {
+                        for event in &events {
+                            if let Event::Mouse(mouse::Event::CursorMoved { position }) = event {
+                                cursor = mouse::Cursor::Available(*position);
+                            }
+                        }
+                        run.events += events.len();
+                        let t = Instant::now();
+                        let (state, _) = ui.update(
+                            &events,
+                            cursor,
+                            &mut renderer,
+                            &mut clipboard::Null,
+                            &mut messages,
+                        );
+                        pending.update_ms += ms(t.elapsed());
+                        want |= wants(&state, &mut redraw_at);
+                        if matches!(state, State::Outdated) && messages.is_empty() {
+                            break;
+                        }
+                    }
+                    Some(_) => {}
+                    None => over = true,
+                }
+            }
+            if messages.is_empty() {
+                messages = program.pump(std::mem::take(&mut drawn));
+            }
+            if !messages.is_empty() {
+                break;
+            }
+            if redraw_at.is_some_and(|at| at <= Instant::now()) {
+                redraw_at = None;
+                want = true;
+            }
+            if want {
+                let t = Instant::now();
+                let (state, _) = ui.update(
+                    &[Event::Window(iced::window::Event::RedrawRequested(t))],
+                    cursor,
+                    &mut renderer,
+                    &mut clipboard::Null,
+                    &mut messages,
+                );
+                pending.update_ms += ms(t.elapsed());
+                if !messages.is_empty() || matches!(state, State::Outdated) {
+                    break;
+                }
+                want = wants(&state, &mut redraw_at);
+                let (theme, text, background) = program.style();
+                let t = Instant::now();
+                ui.draw(
+                    &mut renderer,
+                    &theme,
+                    &renderer::Style { text_color: text },
+                    cursor,
+                );
+                pending.draw_ms += ms(t.elapsed());
+                let t = Instant::now();
+                pending.damage = surface.present(&mut renderer, background);
+                pending.present_ms = ms(t.elapsed());
+                run.frames.push(std::mem::take(&mut pending));
+                run.seconds = start.elapsed().as_secs_f64();
+                drawn = true;
+                continue;
+            }
+            if over && redraw_at.is_none() && program.idle() {
+                done = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        cache = ui.into_cache();
+        if done {
+            break;
+        }
+        run.messages += messages.len();
+        let t = Instant::now();
+        for message in messages.drain(..) {
+            program.update(message);
+        }
+        pending.update_ms += ms(t.elapsed());
+        want = true;
+    }
+    run.rgb = surface.rgb();
+    Some(run)
+}
+
 /// A left click at `at` on `element` laid out on `w` by `h`: the pointer
 /// moves there, the button goes down and comes up. The messages the
 /// widgets published, in order; `None` without a renderer.
@@ -239,6 +519,56 @@ mod tests {
             click(view(), Point::new(150.0, 20.0), 200, 200),
             Some(vec![])
         );
+    }
+
+    /// The surface rasterises what changed (1441): a first frame is the
+    /// whole window, the same frame again nothing, a frame whose one
+    /// small square moved only about the square's old and new place; the
+    /// pixels are the background and the square where they belong.
+    #[test]
+    fn a_surface_rasterises_what_changed() {
+        use iced::widget::container;
+        let ground = Color::from_rgb8(10, 20, 30);
+        let ink = Color::from_rgb8(200, 100, 50);
+        let mut renderer = software(iced::Font::DEFAULT).expect("a renderer");
+        let mut surface = Surface::new(200, 100).expect("a surface");
+        let frame = |x: f32, renderer: &mut Renderer, surface: &mut Surface| {
+            let square = container(Space::new().width(10).height(10))
+                .style(move |_: &Theme| container::Style::default().background(ink));
+            let view: Element<'_, u8> = container(square)
+                .padding(iced::Padding::ZERO.left(x))
+                .into();
+            let mut tree = Tree::new(&view);
+            let mut view = view;
+            let size = Size::new(200.0, 100.0);
+            let node = view.as_widget_mut().layout(
+                &mut tree,
+                renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            renderer.reset(Rectangle::with_size(size));
+            view.as_widget().draw(
+                &tree,
+                renderer,
+                &Theme::Light,
+                &renderer::Style {
+                    text_color: Color::BLACK,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(size),
+            );
+            surface.present(renderer, ground)
+        };
+        assert_eq!(frame(0.0, &mut renderer, &mut surface), 1.0);
+        assert_eq!(frame(0.0, &mut renderer, &mut surface), 0.0);
+        let moved = frame(50.0, &mut renderer, &mut surface);
+        assert!(moved > 0.0 && moved < 0.2, "{moved}");
+        let rgb = surface.rgb();
+        let px = |x: usize, y: usize| &rgb[(y * 200 + x) * 3..][..3];
+        assert_eq!(px(55, 5), &[200, 100, 50]);
+        assert_eq!(px(5, 5), &[10, 20, 30], "the old place cleared");
+        assert_eq!(px(150, 80), &[10, 20, 30]);
     }
 
     /// The pixels are the size asked, the ground where nothing is drawn.

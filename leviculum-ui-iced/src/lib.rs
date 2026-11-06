@@ -14,7 +14,7 @@
 //! drawn into pixels for the goldens, clicked for the tests. The desktop's
 //! light or dark, which iced alone does not read on Linux ([`desktop`]).
 //! The suite's window icon ([`window_icon`]). A list whose wheel scrolls
-//! softly ([`smooth`]).
+//! softly ([`smooth`]). The window's frame meter ([`fps`]).
 //!
 //! Generic over the program's message: a press is the `M` it was given.
 //!
@@ -30,6 +30,7 @@ pub mod avatar;
 pub mod chrome;
 pub mod control;
 pub mod desktop;
+pub mod fps;
 pub mod headless;
 pub mod help;
 pub mod icon;
