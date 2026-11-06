@@ -2899,57 +2899,97 @@ mod tests {
         }
     }
 
-    /// 1279, walk finding 23: `my code` shows the contact code a friend
-    /// pastes and its QR, which a phone's scanner reads as that code. At
-    /// 80x40 the whole QR is on screen; pinned in
-    /// `tests/fixtures/tui_my_code.frames`.
+    /// 1279, 1443: `P` opens the profile, the scene's, as a tap on the
+    /// avatar does on the phone: the name, the address in fours, the
+    /// mailbox and how it is reached, the devices, the contact code and
+    /// its QR, the modules the window draws (`verbatim_modules`), which a
+    /// phone's scanner reads as that code. At 100x60 the whole QR is on
+    /// screen; pinned in `tests/fixtures/tui_profile.frames`. Esc closes
+    /// it, and a click on the list's title, the reader's own, opens it.
     #[test]
-    fn my_code_shows_the_contact_code_and_its_qr() {
+    fn the_profile_shows_the_name_the_address_and_the_code_and_its_qr() {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
         let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
         let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
             .expect("a key")
             .public_key_bytes();
         let code = loquax::lxma::encode(&key_bytes).expect("a code");
-        let qr = loquax::home::qr::lines(&code).expect("a QR");
+        let qr = loquax::home::qr::verbatim_modules(&code).expect("a QR");
         let mut model = Model::new(&[[0xab; 16]]);
-        model.own_code = Some(ui::OwnCode {
-            code: code.clone(),
-            qr: qr.clone(),
-        });
-        update(
-            &mut model,
-            UiEvent::Resize {
-                width: 80,
-                height: 40,
+        model.address = Some([0x4c; 16]);
+        model.own_code = Some(ui::OwnCode::of(code.clone(), Some(qr.clone())));
+        model.profile = ProfileFacts {
+            name: "Mia Sander".to_string(),
+            mailbox: Mailbox::Away {
+                host: Some("leviculum.network".to_string()),
+                rung: Some(Rung::Relayed),
+                word: Some(loquax::home::board::Word::Connected),
             },
-        );
-        for name in [":", "m", "y", "space", "c", "o", "d", "e", "enter"] {
-            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+            devices: vec![
+                Device {
+                    name: "Laptop".to_string(),
+                    this: true,
+                },
+                Device {
+                    name: "Pixel 8".to_string(),
+                    this: false,
+                },
+            ],
+        };
+        let (width, height) = (100, 60);
+        update(&mut model, UiEvent::Resize { width, height });
+        update(&mut model, UiEvent::Key(parse_key("P").expect("key")));
+        let shown = screen(&model, width, height);
+        assert!(shown.contains(" Your profile "), "{shown}");
+        for words in [
+            "Mia Sander",
+            "4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c",
+            "Mailbox: on leviculum.network",
+            "Connected over a relay server",
+            "Laptop (this device)",
+            "Pixel 8",
+            "s  Share my address",
+        ] {
+            assert!(shown.contains(words), "{words}: {shown}");
         }
-        let shown = screen(&model, 80, 40);
-        assert!(shown.contains(" your code "), "{shown}");
         // The code wraps at the box's width; its pieces are all there.
         let flat: String = shown
             .lines()
             .map(|row| row.trim_matches(|c| c == '│' || c == ' '))
             .collect();
         assert!(flat.contains(&code), "{shown}");
-        for row in &qr {
+        let node = loquax::ui::profile::QrNode {
+            side: qr.0,
+            modules: qr.1.clone(),
+        };
+        for row in node.half_blocks(4) {
             assert!(shown.contains(row.as_str()), "the QR row {row:?}: {shown}");
         }
         update(&mut model, UiEvent::Key(parse_key("esc").expect("key")));
-        assert!(!screen(&model, 80, 40).contains(" your code "));
+        assert!(!screen(&model, width, height).contains(" Your profile "));
 
-        let expected = include_str!("../tests/fixtures/tui_my_code.frames");
+        let expected = include_str!("../tests/fixtures/tui_profile.frames");
         if shown != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-my-code.frames");
+            let kept = std::env::temp_dir().join("loquax-tui-profile.frames");
             let _ = std::fs::write(&kept, &shown);
             panic!(
                 "the frame moved; this run's is in {}, the pinned one in \
-                 loquax/tests/fixtures/tui_my_code.frames\n{shown}",
+                 loquax/tests/fixtures/tui_profile.frames\n{shown}",
                 kept.display()
             );
         }
+
+        // The click on the list's title, its third cell: the profile.
+        update(
+            &mut model,
+            UiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 3,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert!(model.profile_open, "a click on the title opens it");
     }
 
     #[test]

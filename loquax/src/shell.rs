@@ -1337,16 +1337,39 @@ async fn drain(outbox: &mut Watched, context: RunContext) -> Result<usize, Fetch
     .map(|fetched| fetched.new)
 }
 
-/// Our contact code for `my code`, with its QR where the build draws one
-/// (the terminal's; the window shows the code alone). `None` when the key
-/// makes no address, which `my code` then says.
+/// Our contact code for the profile (1443), with its QR where the build
+/// encodes one: verbatim in byte mode, the code the phone's profile and a
+/// friend's scanner read. `None` when the key makes no address.
 fn own_code(public_key: &[u8; loquax::lxma::KEY_BYTES]) -> Option<loquax::ui::OwnCode> {
     let code = loquax::lxma::encode(public_key).ok()?;
     #[cfg(feature = "qr")]
-    let qr = loquax::home::qr::lines(&code).unwrap_or_default();
+    let qr = loquax::home::qr::verbatim_modules(&code).ok();
     #[cfg(not(feature = "qr"))]
-    let qr = Vec::new();
-    Some(loquax::ui::OwnCode { code, qr })
+    let qr = None;
+    Some(loquax::ui::OwnCode::of(code, qr))
+}
+
+/// What the profile shows of the reader that the model does not know
+/// (1443): the name the announce carries, the mailbox, this device. A
+/// client's mailbox is another device's, reached over this computer's
+/// node; a messenger without one has none.
+fn profile_facts(name: &str, client: bool) -> loquax::ui::profile::ProfileFacts {
+    use loquax::ui::profile::{Device, Mailbox, ProfileFacts};
+    ProfileFacts {
+        name: name.to_string(),
+        mailbox: match client {
+            true => Mailbox::Away {
+                host: None,
+                rung: None,
+                word: None,
+            },
+            false => Mailbox::Unknown,
+        },
+        devices: vec![Device {
+            name: String::new(),
+            this: true,
+        }],
+    }
 }
 
 /// Everything before the first frame: the log, the identity, the history
@@ -1480,6 +1503,7 @@ pub(crate) async fn start(
     // history (1429): none of it is read by arriving.
     model.history = model.home_client && loquax::home::client::history_owed(&home);
     model.own_code = own_code(&own_key);
+    model.profile = profile_facts(&display_name.name, model.home_client);
     model.names = loquax::names::Names::new(contacts);
     let (restored, names, last_key, positions, unverified, track_fixes, pn_asks) = history;
     // The messages an earlier run kept unverified: the engine checks each

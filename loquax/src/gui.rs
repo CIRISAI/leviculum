@@ -126,8 +126,6 @@ pub struct Seen {
     pub receipts: bool,
     /// The reader's photo size (1220), the settings' row (1371).
     pub photo_size: loquax::ui::photos::PhotoSize,
-    /// Our own contact code, what "My code" shows (1371).
-    pub own_code: Option<String>,
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
@@ -187,7 +185,6 @@ impl Seen {
             now: shell.model.now,
             receipts: shell.model.reading.on,
             photo_size: shell.model.photo_size,
-            own_code: shell.model.own_code.as_ref().map(|c| c.code.clone()),
             photo: None,
             browse: match (shell.model.browse.showing(), &shell.browsing.pictures) {
                 (true, Some(pictures)) => Some(Browsed {
@@ -821,8 +818,6 @@ struct App {
     /// The keys' help over the window while it is open (1371), at this
     /// line.
     help: Option<usize>,
-    /// "My code" over the window while it is open (1371).
-    code_open: bool,
     /// The map's menu over the map while it is open (1419): the tracks'
     /// time window and "fit all".
     map_menu: bool,
@@ -905,7 +900,6 @@ impl App {
                 now: None,
                 receipts: true,
                 photo_size: loquax::ui::photos::PhotoSize::default(),
-                own_code: None,
                 photo: None,
                 browse: None,
                 copied: None,
@@ -943,7 +937,6 @@ impl App {
             renaming: None,
             map_shown: false,
             help: None,
-            code_open: false,
             map_menu: false,
             forwarding: None,
             compose: text_editor::Content::new(),
@@ -1231,16 +1224,18 @@ impl App {
             // as lnomad's window draws it; Back or a click closes it.
             Intent::Help => self.help = Some(0),
             Intent::Back | Intent::Dismiss if self.help.is_some() => self.help = None,
-            // Our own code and its QR (1371), as the phone's profile and
-            // the terminal's `my code` show it.
-            Intent::MyCode => match self.seen.own_code {
-                Some(_) => self.code_open = true,
-                None => self.seen.notice = Some(loquax::ui::NO_OWN_CODE.to_string()),
-            },
-            Intent::Back | Intent::Dismiss if self.code_open => self.code_open = false,
+            // The profile (1443): a click on the avatar, the settings' row
+            // and the palette's `my code` open the scene's profile, as a
+            // tap on the avatar does on the phone; Back closes it.
+            Intent::Profile => self.tell(UiEvent::Profile { open: true }),
+            Intent::Back | Intent::Dismiss if self.scene.profile.is_some() => {
+                self.tell(UiEvent::Profile { open: false })
+            }
             Intent::Back | Intent::Dismiss if self.map_menu => self.map_menu = false,
-            Intent::Copy if self.code_open => {
-                if let Some(code) = self.seen.own_code.clone() {
+            // "Share my address": the desktop's share is its clipboard.
+            Intent::ShareCode => {
+                if let Some(code) = self.scene.profile.as_ref().and_then(|p| p.code.clone()) {
+                    self.seen.notice = Some(StrId::ProfileCopied.text(self.lang).to_string());
                     return iced::clipboard::write(code);
                 }
             }
@@ -2429,60 +2424,91 @@ impl App {
             (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
             (None, _) => body,
         };
-        match (self.help, self.code_open) {
+        match (self.help, &self.scene.profile) {
             (Some(scroll), _) => stack![window, self.help_layer(scroll)].into(),
-            (None, true) => stack![window, self.code_layer()].into(),
-            (None, false) => window,
+            (None, Some(profile)) => stack![window, self.profile_layer(profile)].into(),
+            (None, None) => window,
         }
     }
 
-    /// "My code" over the window (1371): the code's QR, the code as
-    /// text, Copy and Close.
-    fn code_layer(&self) -> Element<'_, Message> {
+    /// The profile over the window (1443): the scene's
+    /// [`loquax::ui::profile::ProfileScreen`] as the phone's activity
+    /// draws it, the avatar, the name, the address in fours, the mailbox
+    /// and the devices, the code's QR on white, "Share my address" and
+    /// Close.
+    fn profile_layer<'a>(
+        &'a self,
+        profile: &'a loquax::ui::profile::ProfileScreen,
+    ) -> Element<'a, Message> {
         let t = self.tokens();
-        let Some(code) = &self.seen.own_code else {
-            return Space::new().into();
-        };
-        let qr: Element<'_, Message> = match loquax::home::qr::verbatim_modules(code) {
-            Ok((size, modules)) => Canvas::new(QrCanvas { size, modules })
-                .width(QR_SIDE)
-                .height(QR_SIDE)
-                .into(),
-            Err(why) => text(why).into(),
-        };
-        let words = column![
-            text(StrId::MyCode.text(self.lang))
-                .size(18)
-                .color(chat::colour(t.text)),
-            qr,
-            text(code.clone())
-                .size(13)
-                .wrapping(text::Wrapping::Glyph)
+        let lang = self.lang;
+        let said = |words: &loquax::ui::strings::Text, size: f32, ink: u32| {
+            text(words.resolve(lang))
+                .size(size)
                 .align_x(iced::Alignment::Center)
                 .width(Length::Fill)
-                .color(chat::colour(t.text_secondary)),
-            row![
-                button(
-                    text(StrId::ActionCopy.text(self.lang))
-                        .size(15)
-                        .color(chat::colour(t.accent))
-                )
-                .on_press(Message::Intent(Intent::Copy))
-                .style(|_: &Theme, _| button::Style::default()),
-                button(
-                    text(StrId::Close.text(self.lang))
-                        .size(15)
-                        .color(chat::colour(t.accent))
-                )
-                .on_press(Message::Intent(Intent::Back))
-                .style(|_: &Theme, _| button::Style::default()),
-            ]
-            .spacing(12),
+                .color(chat::colour(ink))
+        };
+        let mut words = column![
+            said(&profile.title, 18.0, t.text),
+            chat::avatar_of(&profile.avatar, 64.0, t),
+            said(&profile.name, 20.0, t.text),
+            said(&profile.address_label, 13.0, t.text_secondary),
+            text(profile.fours.clone())
+                .size(13)
+                .font(iced::Font::MONOSPACE)
+                .align_x(iced::Alignment::Center)
+                .width(Length::Fill)
+                .color(chat::colour(t.text)),
+            said(&profile.mailbox, 14.0, t.text),
         ]
-        .spacing(10)
-        .align_x(iced::Alignment::Center)
-        .width(Length::Fixed(380.0));
-        let panel = container(words)
+        .spacing(6)
+        .align_x(iced::Alignment::Center);
+        if let Some(state) = &profile.state {
+            words = words.push(said(state, 13.0, t.text_secondary));
+        }
+        if !profile.devices.is_empty() {
+            words = words.push(said(&profile.devices_label, 13.0, t.text_secondary));
+            for device in &profile.devices {
+                words = words.push(said(device, 14.0, t.text));
+            }
+        }
+        let button_of = |action: &loquax::ui::scene::Action| {
+            let label = text(action.label_key.text(lang))
+                .size(15)
+                .color(chat::colour(match action.enabled {
+                    true => t.accent,
+                    false => t.text_secondary,
+                }));
+            button(label)
+                .on_press_maybe(
+                    action
+                        .enabled
+                        .then(|| Message::Intent(action.intent.clone())),
+                )
+                .style(|_: &Theme, _| button::Style::default())
+        };
+        words = words.push(row![button_of(&profile.share), button_of(&profile.back)].spacing(12));
+        // The code beside the words, as wide as a phone's is tall.
+        let mut body = row![words.width(Length::Fixed(340.0))]
+            .spacing(20)
+            .align_y(iced::Alignment::Center);
+        if let Some(qr) = &profile.qr {
+            body = body.push(
+                column![
+                    Canvas::new(QrCanvas {
+                        size: qr.side,
+                        modules: qr.modules.clone(),
+                    })
+                    .width(QR_SIDE)
+                    .height(QR_SIDE),
+                    said(&profile.caption, 13.0, t.text_secondary),
+                ]
+                .spacing(6)
+                .width(QR_SIDE),
+            );
+        }
+        let panel = container(iced::widget::scrollable(body).height(Length::Shrink))
             .padding(20)
             .style(move |_: &Theme| container::Style {
                 background: Some(iced::Background::Color(chat::colour(t.panel))),
@@ -3159,7 +3185,6 @@ mod tests {
             now: None,
             receipts: true,
             photo_size: loquax::ui::photos::PhotoSize::default(),
-            own_code: None,
             photo: None,
             browse: None,
             copied: None,
@@ -3411,7 +3436,6 @@ mod tests {
             now: model.now,
             receipts: model.reading.on,
             photo_size: model.photo_size,
-            own_code: model.own_code.as_ref().map(|c| c.code.clone()),
             photo: None,
             browse: None,
             copied: None,
@@ -3540,46 +3564,85 @@ mod tests {
         );
     }
 
-    /// 1371: "My code" in the window: the settings' row opens the code
-    /// and its QR over the window, pixel for pixel the golden, the QR
-    /// reading back as the code; Copy hands the code to the clipboard
-    /// and Back closes it. Control: without a code only the notice.
+    /// The profile's facts for the window's and the terminal's goldens
+    /// (1443): a client of a mailbox on a server, connected over the
+    /// relay, and two devices.
+    pub(crate) fn profile_facts() -> loquax::ui::profile::ProfileFacts {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
+        ProfileFacts {
+            name: "Mia Sander".to_string(),
+            mailbox: Mailbox::Away {
+                host: Some("leviculum.network".to_string()),
+                rung: Some(Rung::Relayed),
+                word: Some(loquax::home::board::Word::Connected),
+            },
+            devices: vec![
+                Device {
+                    name: "Laptop".to_string(),
+                    this: true,
+                },
+                Device {
+                    name: "Pixel 8".to_string(),
+                    this: false,
+                },
+            ],
+        }
+    }
+
+    /// 1443: a click on the reader's avatar opens the profile the scene
+    /// carries, pixel for pixel the golden, its QR reading back as the
+    /// code; "Share my address" hands the code to the clipboard and says
+    /// so, and Back closes the profile. Control: before the click no
+    /// profile is in the scene.
     #[test]
-    fn my_code_shows_the_code_and_its_qr() {
+    fn a_click_on_the_avatar_opens_the_profile() {
         let (w, h) = (900, 560);
         let mut model = chat_model();
-        let (mut app, _rx) = {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            (
-                App::new(Frames::new(loquax::picture::Maps::default()), Some(tx)),
-                rx,
-            )
-        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
         app.window = Size::new(w as f32, h as f32);
-        app.apply(Message::Seen(Box::new(seen_of(&model))));
-        let _ = app.update(Message::Intent(Intent::MyCode));
-        assert!(!app.code_open, "control: no code yet");
-        assert_eq!(app.seen.notice.as_deref(), Some(loquax::ui::NO_OWN_CODE));
-
         let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
         let key = leviculum_core::Identity::from_private_key_bytes(&private)
             .expect("a key")
             .public_key_bytes();
         let code = loquax::lxma::encode(&key).expect("a code");
-        model.own_code = Some(loquax::ui::OwnCode {
-            code: code.clone(),
-            qr: Vec::new(),
-        });
+        model.own_code = Some(loquax::ui::OwnCode::of(
+            code.clone(),
+            loquax::home::qr::verbatim_modules(&code).ok(),
+        ));
+        model.profile = profile_facts();
         app.apply(Message::Seen(Box::new(seen_of(&model))));
-        let _ = app.update(Message::Intent(Intent::MyCode));
-        assert!(app.code_open);
+        assert!(app.scene.profile.is_none(), "control: closed");
+        let open = app
+            .scene
+            .action(NodeId::Me)
+            .expect("the avatar does something")
+            .intent
+            .clone();
+        assert_eq!(open, Intent::Profile);
+        let _ = app.update(Message::Intent(open));
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.scene.profile.is_some());
         let shot = shoot(&app, w, h);
-        map::tests::same_as("gui-my-code-light.png", &shot, w, h);
+        map::tests::same_as("gui-profile-light.png", &shot, w, h);
         let luma: Vec<u8> = shot.chunks(3).map(|px| px[1]).collect();
         let read = loquax::scan::decode(w as usize, h as usize, w as usize, &luma);
         assert_eq!(read, [code], "the QR reads as the code");
+
+        let _ = app.update(Message::Intent(Intent::ShareCode));
+        assert_eq!(
+            app.seen.notice.as_deref(),
+            Some(StrId::ProfileCopied.text(app.lang))
+        );
         let _ = app.update(Message::Intent(Intent::Back));
-        assert!(!app.code_open);
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.scene.profile.is_none());
     }
 
     /// 1371: a right click on a row opens its menu with the scene's verbs

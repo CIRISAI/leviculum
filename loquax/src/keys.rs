@@ -314,9 +314,16 @@ pub const ROWS: &[Row<Action>] = {
         Row::new("add a contact", CONVERSATIONS, &[])
             .palette("add contact")
             .note("a friend's code, then a name"),
-        Row::new("show your code and its QR", CONVERSATIONS, &[])
-            .palette("my code")
-            .note("for a friend to scan or paste"),
+        // The profile (1443): what a tap on the avatar opens on the phone
+        // and a click on it in the window; here `P`, and a click on the
+        // list's title, which is the reader's own name.
+        Row::new(
+            "your profile: name, address, code and QR",
+            CONVERSATIONS,
+            &[&[key(Char('P'), Mods::Plain, run(C::MyCode), COMMAND_PANES)]],
+        )
+        .palette("my code")
+        .note("for a friend to scan or paste"),
         Row::new("import from another messenger", CONVERSATIONS, &[])
             .palette("import")
             .note("contacts and history; the identity: loquax import"),

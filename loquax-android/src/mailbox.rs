@@ -189,6 +189,14 @@ pub fn link_code(app: &Path) -> Result<(loquax::home::admit::Admission, Linking)
     Ok((admission, linking))
 }
 
+/// The names of the devices the mailbox on this phone admitted, the
+/// earliest first (1443, the profile's devices).
+pub fn devices(app: &Path) -> Result<Vec<String>, String> {
+    let store = store(app)?;
+    let devices = store.devices().map_err(|e| e.to_string())?;
+    Ok(devices.into_iter().map(|device| device.name).collect())
+}
+
 /// Whether the device of `linking` came: its token still open, a device
 /// admitted since that was not (a device admitted again counts, under its
 /// new name), or neither.

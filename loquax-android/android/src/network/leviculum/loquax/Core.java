@@ -73,6 +73,13 @@ final class Core {
         return strings(map.get(key));
     }
 
+    /** A map inside an answer, empty for none (1443: the profile's words). */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> sub(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        return value instanceof Map ? (Map<String, Object>) value : new java.util.HashMap<String, Object>();
+    }
+
     static boolean bool(Map<String, Object> map, String key) {
         return Boolean.TRUE.equals(map.get(key));
     }
@@ -194,6 +201,15 @@ final class Core {
     /** The contact of `lxma` under `name` (none when empty), its key to the mailbox, its chat open. */
     static String addContact(String lxma, String name) {
         return command(map("t", "addcontact", "lxma", lxma, "name", name));
+    }
+
+    /**
+     * The profile came to the front or left it (1443): a tap on the avatar is the core's
+     * `Intent::Profile` here as in the window and the terminal, and the profile's words are the
+     * core's scene. The error in words, or null.
+     */
+    static String profileShown(boolean open) {
+        return command(map("t", "profile", "open", open));
     }
 
     /** The name recipients see, for the mailbox on this phone. Blocks a moment: not on the UI thread. */

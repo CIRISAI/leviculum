@@ -383,3 +383,58 @@ fn the_browse_tab_is_the_golden_scene() {
     );
     check("scene-browse-form.json", &model.scene(LayoutClass::Compact));
 }
+
+/// 1443: the profile as every target gets it, the phone's facade too:
+/// the reader of the ugly store with a contact code, a mailbox on a
+/// server reached over the relay and pulling, and two devices. The
+/// avatar of the list's bar raises the profile, and the profile's
+/// scene is the golden; its QR is the code's modules row by row.
+#[test]
+fn the_profile_is_the_golden_scene() {
+    use loquax::ui::intent::Intent;
+    use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
+    use loquax::ui::scene::NodeId;
+
+    let home = tempfile::tempdir().expect("home");
+    let mut model = ugly_model(home.path());
+    model.selected = NONE_OPEN;
+    let list = model.scene(LayoutClass::Compact);
+    assert!(list.profile.is_none(), "control: closed");
+    let open = list.action(NodeId::Me).expect("the avatar opens");
+    assert_eq!(open.intent, Intent::Profile);
+
+    let own = ugly_store::identity(OWN);
+    let code = loquax::lxma::encode(&own.public_key_bytes()).expect("a code");
+    let qr = loquax::home::qr::verbatim_modules(&code).expect("a QR");
+    model.own_code = Some(loquax::ui::OwnCode::of(code, Some(qr)));
+    update(
+        &mut model,
+        UiEvent::ProfileFacts(ProfileFacts {
+            name: "Mia Sander".to_string(),
+            mailbox: Mailbox::Away {
+                host: Some("leviculum.network".to_string()),
+                rung: Some(Rung::Relayed),
+                word: Some(loquax::home::board::Word::Fetched {
+                    taken: 3,
+                    of: Some(10),
+                }),
+            },
+            devices: vec![
+                Device {
+                    name: "Pixel 8".to_string(),
+                    this: true,
+                },
+                Device {
+                    name: "Laptop".to_string(),
+                    this: false,
+                },
+            ],
+        }),
+    );
+    update(&mut model, UiEvent::Profile { open: true });
+    let scene = model.scene(LayoutClass::Compact);
+    assert!(scene.profile.is_some());
+    check("scene-profile.json", &scene);
+    update(&mut model, UiEvent::Profile { open: false });
+    assert!(model.scene(LayoutClass::Compact).profile.is_none());
+}

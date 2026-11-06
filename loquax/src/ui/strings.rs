@@ -279,6 +279,29 @@ leviculum_ui::catalogue! {
     // A group's status of our message in its ledger (1381): kept as numbers, said in the reader's language.
     GroupStatusNote = "group_status_note", "Group: delivered to %1$d of %2$d, read by %3$d of %4$d", "Gruppe: bei %1$d von %2$d angekommen, von %3$d von %4$d gelesen";
     MyCode = "scene_my_code", "My code", "Mein Code";
+    // The profile behind the avatar (1443): one scene on every target; the keys are the phone's as they were.
+    ProfileTitle = "profile_title", "Your profile", "Dein Profil";
+    ProfileNameElsewhere = "profile_name_elsewhere", "Your name is set where your mailbox runs.", "Dein Name wird dort festgelegt, wo dein Postfach läuft.";
+    ProfileAddress = "profile_address", "Your address", "Deine Adresse";
+    ProfileQrCaption = "profile_qr_caption", "Scan this code to add me as a contact", "Scanne diesen Code, um mich als Kontakt hinzuzufügen";
+    ProfileMailboxHere = "profile_mailbox_here", "Mailbox: on this device", "Postfach: auf diesem Gerät";
+    ProfileMailboxAway = "profile_mailbox_away_undated", "Mailbox: on %1$s", "Postfach: auf %1$s";
+    ProfileMailboxElsewhere = "profile_mailbox_elsewhere", "Mailbox: on another device", "Postfach: auf einem anderen Gerät";
+    ProfileThisDeviceUnnamed = "profile_this_device_unnamed", "This device", "Dieses Gerät";
+    ProfileDeviceUnnamed = "profile_device_unnamed", "A device without a name", "Ein Gerät ohne Namen";
+    ProfileMailboxUnknown = "profile_mailbox_unknown", "Mailbox: not set up yet", "Postfach: noch nicht eingerichtet";
+    ProfileVia = "profile_via", "Connected over %1$s", "Verbunden über %1$s";
+    ProfileDevices = "profile_devices", "Your devices", "Deine Geräte";
+    ProfileThisDevice = "profile_this_device", "%1$s (this device)", "%1$s (dieses Gerät)";
+    ProfileShare = "profile_share", "Share my address", "Meine Adresse teilen";
+    ProfileCopied = "profile_copied", "Your address is on the clipboard", "Deine Adresse ist in der Zwischenablage";
+    // The ladder's header words (loquax-reachability.md), as "Connected over %1$s" names them.
+    RungLocal = "rung_local", "this computer", "diesen Rechner";
+    RungBluetooth = "rung_bluetooth", "Bluetooth", "Bluetooth";
+    RungHomeWifi = "rung_home_wifi", "the home WiFi", "das Heim-WLAN";
+    RungDirect = "rung_direct", "a direct connection", "eine direkte Verbindung";
+    RungRelayed = "rung_relayed", "a relay server", "einen Vermittlungsserver";
+    RungMesh = "rung_mesh", "the mesh", "das Mesh";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";
     Front = "scene_front", "App in front", "App im Vordergrund";

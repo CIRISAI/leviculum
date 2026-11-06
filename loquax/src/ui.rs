@@ -149,6 +149,7 @@ pub mod layout;
 pub mod liveness;
 pub mod map;
 pub mod photos;
+pub mod profile;
 pub mod radar;
 pub mod reactions;
 pub mod receipts;
@@ -689,8 +690,12 @@ pub struct UiModel<B> {
     /// (the QR needs the `qr` feature, the model does not): what `my code`
     /// shows (1279).
     pub own_code: Option<OwnCode>,
-    /// Whether `my code`'s view is up, drawn as a detail view.
-    pub code_shown: bool,
+    /// Whether the profile is up (1443): what a tap on the avatar and
+    /// `my code` open, the scene's [`profile::ProfileScreen`] while it is.
+    pub profile_open: bool,
+    /// What the shell knows of the reader for the profile: the name the
+    /// announce carries, the mailbox, the devices.
+    pub profile: profile::ProfileFacts,
     /// Draw the delivery glyphs' ASCII fallback.
     pub ascii: bool,
     /// The tick counter: spinner frames and toast ages.
@@ -956,7 +961,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             scroll_top: None,
             detail: None,
             own_code: None,
-            code_shown: false,
+            profile_open: false,
+            profile: profile::ProfileFacts::default(),
             detail_scroll: 0,
             mailbox: MailboxShown::default(),
             activity: 0,
@@ -1098,13 +1104,13 @@ impl<B: InputBuffer> UiModel<B> {
 impl<B> UiModel<B> {
     /// Whether a detail view is up: a message's, or `my code`'s.
     pub fn detail_open(&self) -> bool {
-        self.detail.is_some() || self.code_shown
+        self.detail.is_some() || self.profile_open
     }
 
     /// Close the detail view up, whichever it is.
     pub fn close_detail(&mut self) {
         self.detail = None;
-        self.code_shown = false;
+        self.profile_open = false;
     }
 
     /// `peer`'s message went out: its draft goes, from the store at once,
@@ -1572,6 +1578,14 @@ pub enum UiEvent {
     },
     /// The reader's photo size (1220), set: the settings page's row.
     PhotoSize(photos::PhotoSize),
+    /// The profile (1443), opened or closed: [`intent::Intent::Profile`],
+    /// and Back from it.
+    Profile { open: bool },
+    /// What the shell knows of the reader for the profile, anew.
+    ProfileFacts(profile::ProfileFacts),
+    /// The profile's "Share my address" where the share is a copy: the
+    /// window and the terminal ([`intent::Intent::ShareCode`]).
+    ShareCode,
     /// A photo the camera took for `peer` (1270), scaled by the shell as
     /// [`UiEvent::SendPhoto`]'s: it waits in the compose bar, and the next
     /// [`UiEvent::Write`] sends it with the text as its caption.
@@ -2065,6 +2079,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::StartShare { peer, span } => model.start_share(peer, span),
         UiEvent::StopShare { peer } => model.stop_share(peer),
         UiEvent::ShareFix { peer } => model.share_fix(peer),
+        UiEvent::Profile { open } => model.show_profile(open),
+        UiEvent::ProfileFacts(facts) => {
+            model.profile = facts;
+            Vec::new()
+        }
+        UiEvent::ShareCode => model.share_code(),
         UiEvent::PhotoSize(size) => {
             model.photo_size = size;
             vec![UiEffect::Remember {
@@ -2415,6 +2435,11 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
         return Vec::new();
     }
     if model.detail_open() {
+        // The profile's "Share my address" (1443): the code to the
+        // clipboard, as the window's button does.
+        if model.profile_open && key.code == KeyCode::Char('s') {
+            return model.share_code();
+        }
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Enter) {
             model.close_detail();
         } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
@@ -3046,6 +3071,7 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
         }
         Target::Badge(index) => open_at_new(model, index),
         Target::SearchHint | Target::SearchField => open_search(model),
+        Target::Me => return model.show_profile(true),
         Target::Result(index) => {
             if let Some(search) = model.search.as_mut() {
                 search.selected = index;
@@ -3962,16 +3988,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             member: None,
             confirmed: false,
         }),
-        PaletteCommand::MyCode => {
-            match model.own_code {
-                Some(_) => {
-                    model.code_shown = true;
-                    model.detail_scroll = 0;
-                }
-                None => model.toast(ToastKind::Error, NO_OWN_CODE.to_string()),
-            }
-            Vec::new()
-        }
+        PaletteCommand::MyCode => model.show_profile(true),
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -5062,8 +5079,24 @@ pub struct DetailView {
 pub struct OwnCode {
     /// The `lxma://` code, what a friend pastes.
     pub code: String,
-    /// Its QR code, as lines of half blocks.
-    pub qr: Vec<String>,
+    /// Its QR code verbatim in byte mode, as the phone's and the
+    /// window's scanners read it (`loquax::home::qr::verbatim_modules`):
+    /// `side` modules a side, row by row, true for dark. A side of 0 where
+    /// the build encodes none (no `qr` feature).
+    pub side: u32,
+    pub modules: Vec<bool>,
+}
+
+impl OwnCode {
+    /// `code` with its QR, the side and the modules, where there is one.
+    pub fn of(code: String, qr: Option<(u32, Vec<bool>)>) -> Self {
+        let (side, modules) = qr.unwrap_or_default();
+        Self {
+            code,
+            side,
+            modules,
+        }
+    }
 }
 
 /// What each part of the screen shows.
@@ -5151,9 +5184,6 @@ pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
 
 /// What the share's chip row says after its words in the terminal (1273).
 pub const SHARE_CLICK: &str = "click to stop";
-
-/// What `my code` says when the frontend has no code to show.
-pub const NO_OWN_CODE: &str = "Your code is not known yet.";
 
 /// The toast of a send that failed: the legs' reasons are in its details.
 pub const NOT_SENT: &str = "Not sent. Its details say why.";
@@ -5445,27 +5475,61 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
     })
 }
 
-/// `my code`'s view: the code a friend pastes, then its QR to scan.
-fn code_view(code: &OwnCode) -> DetailView {
+/// The profile's view (1443): the scene's [`profile::ProfileScreen`] in
+/// the terminal's detail view, its words in the reader's language: the
+/// name, the address in fours, the mailbox and how it is reached, the
+/// devices, then the code a friend pastes and its QR to scan, and the key
+/// that shares the address.
+fn profile_view(screen: &profile::ProfileScreen, lang: strings::Lang) -> DetailView {
+    let mut rows = vec![
+        screen.name.resolve(lang),
+        String::new(),
+        screen.address_label.resolve(lang),
+        screen.fours.clone(),
+        String::new(),
+        screen.mailbox.resolve(lang),
+    ];
+    rows.extend(screen.state.as_ref().map(|state| state.resolve(lang)));
+    if !screen.devices.is_empty() {
+        rows.push(String::new());
+        rows.push(screen.devices_label.resolve(lang));
+        rows.extend(
+            screen
+                .devices
+                .iter()
+                .map(|d| format!("  {}", d.resolve(lang))),
+        );
+    }
+    let mut fixed = Vec::new();
+    if let Some(code) = &screen.code {
+        rows.push(String::new());
+        rows.push(format!("s  {}", strings::StrId::ProfileShare.text(lang)));
+        rows.push(String::new());
+        rows.push(screen.caption.resolve(lang));
+        rows.push(String::new());
+        rows.push(code.clone());
+        rows.push(String::new());
+        fixed = screen
+            .qr
+            .as_ref()
+            .map(|qr| qr.half_blocks(QR_QUIET))
+            .unwrap_or_default();
+    }
     DetailView {
-        title: "your code".to_string(),
-        rows: vec![
-            "A friend adds you with this code: they scan the QR, or you send \
-             them the text."
-                .to_string(),
-            String::new(),
-            code.code.clone(),
-            String::new(),
-        ],
-        fixed: code.qr.clone(),
+        title: screen.title.resolve(lang),
+        rows,
+        fixed,
     }
 }
 
-/// The detail view up, `my code`'s or a message's.
+/// The light margin a scanner needs around a QR code, in modules.
+const QR_QUIET: u32 = 4;
+
+/// The detail view up, the profile's or a message's.
 fn shown_detail<B>(model: &UiModel<B>) -> Option<DetailView> {
-    match (&model.own_code, model.code_shown) {
-        (Some(code), true) => Some(code_view(code)),
-        _ => model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+    match model.profile_screen() {
+        Some(screen) => Some(profile_view(&screen, model.lang)),
+        None => model.detail.and_then(|(c, m)| detail_view(model, c, m)),
     }
 }
 
@@ -13004,32 +13068,53 @@ pub(crate) mod tests {
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`
     /// sets the typed one, sanitised, and an empty line clears it.
-    /// 1279: `my code` shows the code a friend pastes and its QR, closes as
-    /// a detail view does, and says so when the frontend had none to give.
+    /// 1279, 1443: `my code` and `P` open the profile, the scene's, in the
+    /// detail view: the name, the address, the code a friend pastes and
+    /// its QR in half blocks under the text, never wrapped. Without a code
+    /// it opens all the same, without the code and with nothing to share;
+    /// with one, `s` copies it and says so; Esc closes it.
     #[test]
-    fn my_code_shows_the_code_and_its_qr_and_closes() {
+    fn my_code_opens_the_profile_with_the_code_and_its_qr() {
         let mut model = UiModel::<Field>::new(&[PEER]);
+        model.address = Some([0xcd; 16]);
         assert!(palette(&mut model, "my code").is_empty());
+        let detail = view(&model).detail.expect("the profile's view");
+        assert_eq!(detail.title, "Your profile");
+        assert!(detail.fixed.is_empty(), "no code, no QR: {detail:?}");
+        assert!(update(&mut model, key(KeyCode::Char('s'))).is_empty());
+        update(&mut model, key(KeyCode::Esc));
         assert!(!model.detail_open());
-        assert_eq!(
-            model.current_toast().map(|t| t.text.as_str()),
-            Some(NO_OWN_CODE)
-        );
-        model.own_code = Some(OwnCode {
-            code: "lxma://00:11".to_string(),
-            qr: vec!["█▀▀█".to_string(), "█▄▄█".to_string()],
-        });
-        palette(&mut model, "my code");
-        let detail = view(&model).detail.expect("the code's view");
-        assert_eq!(detail.title, "your code");
+
+        model.own_code = Some(OwnCode::of(
+            "lxma://00:11".to_string(),
+            Some((1, vec![true])),
+        ));
+        update(&mut model, key(KeyCode::Char('P')));
+        assert!(model.profile_open, "P opens it from the list");
+        let detail = view(&model).detail.expect("the profile's view");
         assert!(
             detail.rows.contains(&"lxma://00:11".to_string()),
             "{detail:?}"
         );
-        assert_eq!(detail.fixed, ["█▀▀█", "█▄▄█"]);
-        // Drawn as they are, after the text, never wrapped.
+        assert!(
+            detail
+                .rows
+                .contains(&"cdcd cdcd cdcd cdcd cdcd cdcd cdcd cdcd".to_string()),
+            "{detail:?}"
+        );
+        // A 1x1 code in a quiet zone of four: nine modules a side, five
+        // rows of half blocks, drawn as they are after the text.
+        assert_eq!(detail.fixed.len(), 5);
         let (_, rows) = detail_layout(&detail, Rect::new(0, 0, 80, 40));
-        assert_eq!(rows[rows.len() - 2..], ["█▀▀█", "█▄▄█"]);
+        assert_eq!(rows[rows.len() - 5..], detail.fixed[..]);
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('s'))),
+            [UiEffect::Copy("lxma://00:11".to_string())]
+        );
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("Your address is on the clipboard")
+        );
         update(&mut model, key(KeyCode::Esc));
         assert!(!model.detail_open());
         assert!(view(&model).detail.is_none());

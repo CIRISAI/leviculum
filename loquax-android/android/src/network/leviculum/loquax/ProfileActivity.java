@@ -13,7 +13,6 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
-import android.text.format.DateUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -30,7 +29,13 @@ import android.widget.Toast;
 import java.util.Map;
 
 /**
- * Our own screen behind the avatar at the top left of the list (1187),
+ * Our own screen behind the avatar at the top left of the list (1187); since 1443 the renderer of
+ * the core's profile scene (`loquax::ui::profile`), the one the window and the terminal draw: the
+ * words are the scene's ({@code words} of the answer, from the catalogue), and the activity comes
+ * and goes with the avatar's intent ({@link Core#profileShown}). What stays here is the phone's
+ * own: the name's field, the share sheet, the scanner, the code sheets and Advanced.
+ *
+ * As first built (1187),
  * after the modern messenger cut and Columba's "Your Identity": what a
  * user who knows nothing of Reticulum needs on the main path, the rest
  * under Advanced (`feedback_end_user_apps_whatsapp_simple`).
@@ -51,7 +56,10 @@ public class ProfileActivity extends Activity {
     private static final int SCAN = 1;
 
     private LinearLayout body;
+    private TextView title;
     private Map<String, Object> profile;
+    /** The core's profile scene in the reader's words (1443). */
+    private Map<String, Object> words;
     private boolean advancedOpen;
     private final ServiceLink link = new ServiceLink(this);
 
@@ -77,7 +85,8 @@ public class ProfileActivity extends Activity {
             }
         });
         bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        TextView title = text(getString(R.string.profile_title), 20, R.color.text);
+        title = text(getString(R.string.profile_title), 20, R.color.text);
+        title.setId(R.id.profile_title);
         title.setPadding(dp(12), 0, 0, 0);
         bar.addView(title);
         screen.addView(bar, new LinearLayout.LayoutParams(
@@ -107,7 +116,14 @@ public class ProfileActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        Core.profileShown(true);
         refresh();
+    }
+
+    @Override
+    protected void onPause() {
+        Core.profileShown(false);
+        super.onPause();
     }
 
     private void refresh() {
@@ -117,6 +133,8 @@ public class ProfileActivity extends Activity {
             body.addView(padded(text(Core.str(profile, "error"), 15, R.color.text_secondary)));
             return;
         }
+        words = Core.sub(profile, "words");
+        title.setText(Core.str(words, "title"));
         top();
         qr();
         share();
@@ -163,7 +181,7 @@ public class ProfileActivity extends Activity {
             wide.rightMargin = dp(32);
             body.addView(edit, wide);
         } else {
-            TextView shown = text(name.isEmpty() ? getString(R.string.profile_name_elsewhere) : name,
+            TextView shown = text(Core.str(words, "name"),
                     name.isEmpty() ? 14 : 22, name.isEmpty() ? R.color.text_secondary : R.color.text);
             shown.setId(R.id.profile_name);
             shown.setGravity(Gravity.CENTER);
@@ -171,7 +189,7 @@ public class ProfileActivity extends Activity {
             body.addView(shown, matchWrap());
         }
 
-        TextView label = text(getString(R.string.profile_address), 13, R.color.text_secondary);
+        TextView label = text(Core.str(words, "address_label"), 13, R.color.text_secondary);
         label.setPadding(dp(16), dp(16), dp(16), 0);
         body.addView(label);
         LinearLayout row = new LinearLayout(this);
@@ -193,6 +211,12 @@ public class ProfileActivity extends Activity {
         });
         row.addView(copy);
         body.addView(row, matchWrap());
+        // The address in groups of four, to read out (1443, the scene's).
+        TextView fours = text(Core.str(words, "fours"), 14, R.color.text_secondary);
+        fours.setId(R.id.profile_fours);
+        fours.setTypeface(Typeface.MONOSPACE);
+        fours.setPadding(dp(16), 0, dp(16), dp(4));
+        body.addView(fours, matchWrap());
     }
 
     /** The contact code's QR on a white card, and what it is for. */
@@ -205,7 +229,7 @@ public class ProfileActivity extends Activity {
         white.setColor(Color.WHITE);
         white.setCornerRadius(dp(16));
         card.setBackground(white);
-        ImageView code = QrCode.view(this, profile, dp(240), getString(R.string.profile_qr_caption));
+        ImageView code = QrCode.view(this, profile, dp(240), Core.str(words, "caption"));
         if (code != null) {
             code.setId(R.id.profile_qr);
             card.addView(code, new LinearLayout.LayoutParams(dp(240), dp(240)));
@@ -215,7 +239,7 @@ public class ProfileActivity extends Activity {
         centred.gravity = Gravity.CENTER_HORIZONTAL;
         centred.topMargin = dp(16);
         body.addView(card, centred);
-        TextView caption = text(getString(R.string.profile_qr_caption), 14, R.color.text_secondary);
+        TextView caption = text(Core.str(words, "caption"), 14, R.color.text_secondary);
         caption.setGravity(Gravity.CENTER);
         caption.setPadding(dp(16), dp(8), dp(16), dp(8));
         body.addView(caption, matchWrap());
@@ -223,7 +247,8 @@ public class ProfileActivity extends Activity {
 
     /** Share the code as text, as a picture, and copy the address. */
     private void share() {
-        Button text = wide(getString(R.string.share), R.id.profile_share);
+        // "Share my address" (1443): the scene's one share, the phone's share sheet.
+        Button text = wide(Core.str(words, "share"), R.id.profile_share);
         text.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -264,23 +289,36 @@ public class ProfileActivity extends Activity {
         });
     }
 
-    /** Where the mailbox is, in one line, and the way to another. */
+    /**
+     * Where the mailbox is and how it is reached, the devices of this identity (1443, the scene's
+     * words), and the way to another mailbox.
+     */
     private void mailbox() {
-        String line;
-        if (Core.bool(profile, "here")) {
-            line = getString(R.string.profile_mailbox_here);
-        } else {
-            long since = Core.num(profile, "since");
-            String where = Core.str(profile, "mailbox");
-            line = since > 0
-                    ? getString(R.string.profile_mailbox_away, where, DateUtils.formatDateTime(
-                            this, since * 1000, DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_SHOW_YEAR))
-                    : getString(R.string.profile_mailbox_away_undated, where);
-        }
-        TextView said = text(line, 15, R.color.text);
+        TextView said = text(Core.str(words, "mailbox"), 15, R.color.text);
         said.setId(R.id.profile_mailbox);
         said.setPadding(dp(16), dp(24), dp(16), dp(4));
         body.addView(said, matchWrap());
+        String state = Core.str(words, "state");
+        if (!state.isEmpty()) {
+            TextView how = text(state, 14, R.color.text_secondary);
+            how.setId(R.id.profile_state);
+            how.setPadding(dp(16), 0, dp(16), dp(4));
+            body.addView(how, matchWrap());
+        }
+        java.util.List<String> devices = Core.words(words, "devices");
+        if (!devices.isEmpty()) {
+            TextView label = text(Core.str(words, "devices_label"), 13, R.color.text_secondary);
+            label.setPadding(dp(16), dp(16), dp(16), 0);
+            body.addView(label);
+            StringBuilder lines = new StringBuilder();
+            for (String device : devices) {
+                lines.append(lines.length() == 0 ? "" : "\n").append(device);
+            }
+            TextView list = text(lines.toString(), 15, R.color.text);
+            list.setId(R.id.profile_devices);
+            list.setPadding(dp(16), dp(2), dp(16), dp(4));
+            body.addView(list, matchWrap());
+        }
         if (Core.bool(profile, "here")) {
             TextView link = row(getString(R.string.profile_link_device), R.id.profile_link_device);
             link.setTextColor(getColor(R.color.accent));

@@ -156,6 +156,11 @@ pub enum NodeId {
     Join([u8; 16]),
     Members,
     Member([u8; 16]),
+    /// The reader's avatar in the top bar, which opens the profile, and
+    /// the profile and its "Share my address" (1443).
+    Me,
+    Profile,
+    ProfileShare,
 }
 
 impl NodeId {
@@ -207,6 +212,9 @@ impl NodeId {
             NodeId::Join(group) => format!("join_{}", to_hex(group)),
             NodeId::Members => "members".to_string(),
             NodeId::Member(peer) => format!("member_{}", to_hex(peer)),
+            NodeId::Me => "me".to_string(),
+            NodeId::Profile => "profile".to_string(),
+            NodeId::ProfileShare => "profile_share".to_string(),
         }
     }
 }
@@ -1001,11 +1009,20 @@ pub struct Scene {
     pub browse: Option<lnomad::app::scene::Scene>,
     /// The Rooms surface while its tab is in front (1379).
     pub rooms: Option<super::rooms::RoomsNode>,
+    /// The profile over the screen while it is open (1443).
+    pub profile: Option<super::profile::ProfileScreen>,
 }
 
 impl<B> UiModel<B> {
     /// The scene of the list and the open chat for `class`.
     pub fn scene(&self, class: LayoutClass) -> Scene {
+        let mut scene = self.content_scene(class);
+        scene.profile = self.profile_screen();
+        scene
+    }
+
+    /// [`UiModel::scene`] without what lies over it.
+    fn content_scene(&self, class: LayoutClass) -> Scene {
         if self.browse.enabled && self.browse.open {
             return browse_scene(self).in_class(class);
         }
@@ -1037,6 +1054,7 @@ impl<B> UiModel<B> {
             members: super::group_scene::member_sheet(self),
             browse: None,
             rooms: None,
+            profile: None,
         }
         .in_class(class)
     }
@@ -1065,6 +1083,7 @@ fn browse_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: Some(model.browse.model.scene()),
         rooms: None,
+        profile: None,
     }
 }
 
@@ -1091,6 +1110,7 @@ fn rooms_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: None,
         rooms: Some(super::rooms::node(model)),
+        profile: None,
     }
 }
 
@@ -1124,6 +1144,12 @@ impl Scene {
             }
         }
         match id {
+            NodeId::Me => match &self.top.lead {
+                Lead::Me { open, .. } => open.as_ref(),
+                Lead::Back { .. } => None,
+            },
+            NodeId::Profile => self.profile.as_ref().map(|p| &p.back),
+            NodeId::ProfileShare => self.profile.as_ref().map(|p| &p.share),
             NodeId::Row(_) => self
                 .list
                 .as_ref()
@@ -1254,7 +1280,11 @@ fn me_bar<B>(model: &UiModel<B>) -> TopBar {
     };
     TopBar {
         id: NodeId::TopBar,
-        lead: Lead::Me { avatar, link: None },
+        lead: Lead::Me {
+            avatar,
+            link: None,
+            open: Some(Action::of(Intent::Profile)),
+        },
         title: Text::key(StrId::TabChats),
         actions: Vec::from([
             Action::of(Intent::Search),
@@ -2279,6 +2309,9 @@ impl Scene {
         }
         if let Some(rooms) = &self.rooms {
             map.insert("rooms".into(), rooms.to_json());
+        }
+        if let Some(profile) = &self.profile {
+            map.insert("profile".into(), profile.to_json());
         }
         Value::Object(map)
     }

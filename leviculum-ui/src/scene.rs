@@ -186,10 +186,13 @@ pub fn actions_json<I: Labelled>(list: &[Action<I>]) -> Value {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lead<C: Contract> {
     /// The reader's own avatar, which opens the profile, with the mailbox
-    /// link's dot when the shell knows it.
+    /// link's dot when the shell knows it. `open` is what a tap or a click
+    /// on it raises (Loquax's profile, 1443); none where the avatar is a
+    /// picture alone.
     Me {
         avatar: C::Avatar,
         link: Option<bool>,
+        open: Option<Action<C::Intent>>,
     },
     /// A sub view: back, and the avatar of what it shows.
     Back {
@@ -211,8 +214,12 @@ pub struct TopBar<C: Contract> {
 impl<C: Contract> TopBar<C> {
     pub fn to_json(&self) -> Value {
         let lead = match &self.lead {
-            Lead::Me { avatar, link } => {
-                json!({ "me": { "avatar": avatar.to_json(), "link": link } })
+            Lead::Me { avatar, link, open } => {
+                let mut me = json!({ "avatar": avatar.to_json(), "link": link });
+                if let Some(open) = open {
+                    me["open"] = open.to_json();
+                }
+                json!({ "me": me })
             }
             Lead::Back { back, avatar } => {
                 json!({ "back": { "action": back.to_json(), "avatar": avatar.to_json() } })

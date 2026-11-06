@@ -743,13 +743,14 @@ impl Session {
                 .unwrap_or_default(),
             false => String::new(),
         };
+        let name = match here {
+            true => mailbox::name(&home),
+            false => String::new(),
+        };
+        let words = self.profile_words(&home, here, &name, &lxma, (qr_size, modules.clone()));
         Ok(schema::Profile {
             v: VERSION,
-            name: if here {
-                mailbox::name(&home)
-            } else {
-                String::new()
-            },
+            name,
             name_editable: here,
             address: loquax::address::to_hex(&self.address),
             initials,
@@ -773,7 +774,56 @@ impl Session {
                 .join("\n"),
             propagation_node,
             version: loquax::VERSION.to_string(),
+            words,
         })
+    }
+
+    /// The core's profile scene (1443) in the reader's words: the phone's
+    /// facts told to the model (the name, where the mailbox is and how the
+    /// phone reaches it, the devices, the code), then the scene the window
+    /// and the terminal draw, resolved for the activity.
+    fn profile_words(
+        &self,
+        home: &std::path::Path,
+        here: bool,
+        name: &str,
+        lxma: &str,
+        qr: (u32, Vec<bool>),
+    ) -> schema::ProfileWords {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
+        let mailbox = match here {
+            true => Mailbox::Here,
+            false => {
+                let relayed = self.rendezvous().iter().any(|(_, up)| *up);
+                let link = self.lock().link;
+                Mailbox::Away {
+                    host: Some(server_host(&self.server).to_string()),
+                    rung: relayed.then_some(Rung::Relayed),
+                    word: link.map(|up| match up {
+                        true => loquax::home::board::Word::Connected,
+                        false => loquax::home::board::Word::Unreachable,
+                    }),
+                }
+            }
+        };
+        let others = match here {
+            true => mailbox::devices(home).unwrap_or_default(),
+            false => Vec::new(),
+        };
+        let devices = std::iter::once(Device {
+            name: String::new(),
+            this: true,
+        })
+        .chain(others.into_iter().map(|name| Device { name, this: false }))
+        .collect();
+        let mut inner = self.lock();
+        inner.model.own_code = Some(loquax::ui::OwnCode::of(lxma.to_string(), Some(qr)));
+        inner.apply(UiEvent::ProfileFacts(ProfileFacts {
+            name: name.to_string(),
+            mailbox,
+            devices,
+        }));
+        profile_words(&inner.model, inner.lang)
     }
 
     /// A contact from its contact code ([`schema::Request::AddContact`],
@@ -1174,6 +1224,8 @@ impl Session {
             }
             Intent::Viewport { peer, keys } => UiEvent::Viewport { peer, keys },
             Intent::Name(name) => return self.rename(&name),
+            Intent::Profile => UiEvent::Profile { open: true },
+            Intent::Back if self.lock().model.profile_open => UiEvent::Profile { open: false },
             Intent::AddContact { lxma, name } => return self.add_contact(&lxma, name.as_deref()),
             // The group verbs (1307) are the model's own.
             Intent::Group(verb) => UiEvent::Group(verb),
@@ -3485,6 +3537,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             keys: keys.into_iter().map(schema::model_key).collect(),
         },
         R::Name { name } => Intent::Name(name),
+        // The profile's activity is the scene's renderer (1443): it comes
+        // with the avatar's intent and leaves with Back.
+        R::Profile { open: true } => Intent::Profile,
+        R::Profile { open: false } => Intent::Back,
         R::Link { peer, contact } => {
             return Ok(Decoded::Platform(Platform::Link {
                 peer: parse_peer(&peer)?,
@@ -3971,6 +4027,29 @@ fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
     node.interface_stats()
         .iter()
         .any(|interface| !interface.is_local_client && interface.online)
+}
+
+/// The core's profile scene of `model` (1443, `loquax::ui::profile`) in
+/// `lang`'s words, as [`schema::Profile::words`] carries it to the
+/// activity: the scene the window and the terminal draw, resolved.
+pub fn profile_words<B>(model: &UiModel<B>, lang: Lang) -> schema::ProfileWords {
+    let screen = loquax::ui::profile::profile(model);
+    schema::ProfileWords {
+        title: screen.title.resolve(lang),
+        name: screen.name.resolve(lang),
+        address_label: screen.address_label.resolve(lang),
+        fours: screen.fours.clone(),
+        caption: screen.caption.resolve(lang),
+        mailbox: screen.mailbox.resolve(lang),
+        state: screen
+            .state
+            .as_ref()
+            .map(|state| state.resolve(lang))
+            .unwrap_or_default(),
+        devices_label: screen.devices_label.resolve(lang),
+        devices: screen.devices.iter().map(|d| d.resolve(lang)).collect(),
+        share: screen.share.label_key.text(lang).to_string(),
+    }
 }
 
 /// An address in groups of four hex digits, to read out and compare.

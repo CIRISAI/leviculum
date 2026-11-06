@@ -1398,7 +1398,12 @@
           "initials": "E1",
           "ring": null
         },
-        "link": null
+        "link": null,
+        "open": {
+          "enabled": true,
+          "intent": "Profile",
+          "label_key": "profile_title"
+        }
       }
     },
     "title": {

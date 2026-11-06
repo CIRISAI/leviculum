@@ -388,6 +388,12 @@ pub enum Request {
     Name {
         name: String,
     },
+    /// The profile came to the front, or left it (1443): a tap on the
+    /// avatar is `Intent::Profile` on every target, and the model's
+    /// profile scene is what [`Query::Profile`] answers from.
+    Profile {
+        open: bool,
+    },
     /// Linked `peer` to a contact of the address book the user picked or
     /// confirmed (1139), or the link's copy refreshed: what the contact
     /// said right then, its thumbnail's bytes among it.
@@ -1322,6 +1328,31 @@ pub struct Profile {
     pub propagation_node: String,
     /// Advanced: the app's version and commit.
     pub version: String,
+    /// The core's profile scene (1443, `loquax::ui::profile`), its words
+    /// in the reader's language: what the screen says, from the
+    /// catalogue, so the activity draws them and words nothing itself.
+    #[serde(default)]
+    pub words: ProfileWords,
+}
+
+/// The words of the core's profile scene, resolved: the title, the name
+/// as the screen shows it, the address's label and its groups of four,
+/// the QR's caption, where the mailbox is and how it is reached, the
+/// devices, and the share's label.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileWords {
+    pub title: String,
+    pub name: String,
+    pub address_label: String,
+    pub fours: String,
+    pub caption: String,
+    pub mailbox: String,
+    /// How the mailbox is reached or how far a pull came; empty when the
+    /// phone knows neither.
+    pub state: String,
+    pub devices_label: String,
+    pub devices: Vec<String>,
+    pub share: String,
 }
 
 /// What [`Query::Lxma`] answers for a code (`loquax::code::read`, 1263):

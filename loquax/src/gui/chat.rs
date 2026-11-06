@@ -117,6 +117,11 @@ fn avatar_with_dot<'a>(
     face::with_dot(avatar(a, diameter, t), diameter, ink, colour(t.bar))
 }
 
+/// [`avatar`] for the window's layers: the profile's (1443).
+pub(super) fn avatar_of<'a>(a: &scene::Avatar, diameter: f32, t: Colours) -> Element<'a, Message> {
+    avatar(a, diameter, t)
+}
+
 /// A scene's avatar: a circle of `diameter` with its initials in its
 /// colours, ringed by the liveness of the peer's position (1209).
 fn avatar<'a>(a: &scene::Avatar, diameter: f32, t: Colours) -> Element<'a, Message> {
@@ -228,7 +233,15 @@ impl App {
     fn top_bar<'a>(&'a self, t: Colours) -> Element<'a, Message> {
         let top = &self.scene.top;
         let lead = match &top.lead {
-            Lead::Me { avatar, link } => Some(avatar_with_dot(avatar, size::BAR_AVATAR, *link, t)),
+            // A click on the reader's avatar raises what the scene says
+            // it does: the profile (1443), as a tap does on the phone.
+            Lead::Me { avatar, link, open } => {
+                let face = avatar_with_dot(avatar, size::BAR_AVATAR, *link, t);
+                Some(match open {
+                    Some(open) => flat(face, Message::Intent(open.intent.clone())).into(),
+                    None => face,
+                })
+            }
             Lead::Back { .. } => None,
         };
         let mut actions = Vec::new();
@@ -372,7 +385,11 @@ impl App {
                 self.maps_rows(t),
                 container(
                     column![
-                        link(self.word(StrId::MyCode), Message::Intent(Intent::MyCode), t),
+                        link(
+                            self.word(StrId::ProfileTitle),
+                            Message::Intent(Intent::Profile),
+                            t
+                        ),
                         link(self.word(StrId::Help), Message::Intent(Intent::Help), t),
                     ]
                     .spacing(4)

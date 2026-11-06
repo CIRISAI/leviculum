@@ -373,6 +373,11 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
         ),
         ("pull", java_map(&[("t", Java::Str("pull"))]), Request::Pull),
         (
+            "profileShown",
+            java_map(&[("t", Java::Str("profile")), ("open", Java::Bool(true))]),
+            Request::Profile { open: true },
+        ),
+        (
             "front",
             java_map(&[("t", Java::Str("front")), ("front", Java::Bool(true))]),
             Request::Front { front: true },

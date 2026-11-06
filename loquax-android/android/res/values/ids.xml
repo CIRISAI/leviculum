@@ -68,6 +68,10 @@
     <item name="profile_avatar" type="id" />
     <item name="profile_name" type="id" />
     <item name="profile_address" type="id" />
+    <item name="profile_fours" type="id" />
+    <item name="profile_state" type="id" />
+    <item name="profile_devices" type="id" />
+    <item name="profile_title" type="id" />
     <item name="profile_copy" type="id" />
     <item name="profile_qr" type="id" />
     <item name="welcome_qr" type="id" />
