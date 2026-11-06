@@ -13433,7 +13433,6 @@ Applies to:
   codec2 0.3.1
   dpi 0.1.2
   iced_core 0.14.0
-  iced_debug 0.14.0
   iced_futures 0.14.0
   iced_graphics 0.14.0
   iced_program 0.14.0
@@ -14448,6 +14447,7 @@ MIT — MIT License
 
 Applies to:
   iced 0.14.0
+  iced_debug 0.14.0
 
 Copyright 2019 Héctor Ramón, Iced contributors
 
