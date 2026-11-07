@@ -1,5 +1,5 @@
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -18,13 +18,13 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: before the load ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────────── loading map ┐
+┌  tui───────────────────┐┌● map────────────────────────────────── loading map ┐
 │▌them ·61dd       14:00 ││  ·        · ·                        · ·        ·  │
 │▌◎ position · live   ⌖  ││ ·        ·             100 m            ·        · │
 │                        ││·       ·         · · ·      · · ·         ·       ·│
@@ -49,7 +49,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: after the load ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
@@ -74,7 +74,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: held already ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
@@ -99,7 +99,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: loading the area ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────────── loading map ┐
+┌  tui───────────────────┐┌● map────────────────────────────────── loading map ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -124,7 +124,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: the area loaded ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │

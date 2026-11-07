@@ -10,7 +10,7 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  compose─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -27,7 +27,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                   │  fetch  F5                           │                   │
 │                   │  quit  q                             │                   │
 │                   │  help  ?                             │                   │
-│                   │  focus conversations                 │s device           │
+│                   │  focus conversations                 │                   │
 │                   │  focus messages  Enter               │ Alt-Enter newline ┤
 │                   │  focus compose  i                    │                   │
 └────────────── / se│  next conversation  Alt-↓            │───────────────────┘
@@ -44,7 +44,7 @@ Enter run │ Esc clos└  previous conversation  Alt-↑───────�
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  compose─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -61,7 +61,7 @@ Enter run │ Esc close
 │                        ││                                                    │
 │                        ││                      ┌────────────────────────────┐│
 │                        ││                      │⚠ That is not a Loquax code.││
-│                        ││           nothing ear└────────────────────────────┘│
+│                        ││                  No m└────────────────────────────┘│
 │                        │├● to <4ca16772…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

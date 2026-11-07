@@ -1,6 +1,6 @@
 === 80x24 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -19,13 +19,13 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: reading ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
+┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       09:12 ││                                                    │
 │▌you: on my way         ││                                                    │
 │                        ││                                                    │
@@ -36,7 +36,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││             ── Saturday 24 October ──              │
 │                        ││▌are you at the field site tomorrow?  13:58         │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
+┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:04 ││                                                    │
 │▌ok, bring the T114.    ││                                                    │
 │                        ││                                                    │
@@ -58,7 +58,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││             ── Saturday 24 October ──              │
 │                        ││▌are you at the field site tomorrow?  13:58         │
 │                        ││                                                    │
@@ -75,12 +75,12 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
+┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
 │ <5ec0ea2e…>            ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││             ── Saturday 24 October ──              │
 │                        ││▌are you at the field site tomorrow?  13:58         │
 │                        ││                                                    │
@@ -100,12 +100,12 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
+┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
 │ <5ec0ea2e…>            ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││             ── Saturday 24 October ──              │
 │                        ││ are you at the field site tomorrow?  13:58         │
 │                        ││                                                    │
@@ -125,10 +125,10 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
-┌  Loquax afbda7b3───────┐┌  them ·61dd────────────────────────────────────────┐
+┌  tui───────────────────┐┌  them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:06 ││                                                    │
 │▌you: the tripod fits   ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │ <5ec0ea2e…>            ││             ── Saturday 24 October ──              │
 │                        ││ are you at the field site tomorrow?  13:58         │
 │                        ││                                                    │
@@ -150,10 +150,10 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 7: detail ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd────────────────────────────────────────┐
+┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
 │▌them ·61dd       14:06 ││                                                    │
 │▌you: the tripod fits   ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │ ┌ message ─────────────────────────────────────────────────────────────────┐ │
 │ │from you to them ·61dd                                                    │ │
 │ │peer   61ddb79ada973523799227bbaf41e204                                   │ │
@@ -176,7 +176,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === 120x40 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌● tui─────────────────────────────┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌<61ddb79a…>                      ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -211,13 +211,13 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                 No messages yet                                  │
 │                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: reading ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌  tui─────────────────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 09:12 ││                                                                                  │
 │▌you: on my way                   ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -245,7 +245,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                            ── Saturday 24 October ──                             │
 │                                  ││▌are you at the field site tomorrow?  13:58                                       │
 │                                  ││                                                                                  │
@@ -258,7 +258,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌  tui─────────────────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:04 ││                                                                                  │
 │▌ok, bring the T114.              ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -283,7 +283,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                            ── Saturday 24 October ──                             │
 │                                  ││▌are you at the field site tomorrow?  13:58                                       │
 │                                  ││                                                                                  │
@@ -299,7 +299,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌  tui─────────────────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:05 ││                                                                                  │
 │▌and the small tripod             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -321,7 +321,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                            ── Saturday 24 October ──                             │
 │                                  ││▌are you at the field site tomorrow?  13:58                                       │
 │                                  ││                                                                                  │
@@ -340,7 +340,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌  tui─────────────────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:05 ││                                                                                  │
 │▌and the small tripod             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -362,7 +362,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow?  13:58                                       │
 │                                  ││                                                                                  │
@@ -381,7 +381,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
-┌  Loquax afbda7b3─────────────────┐┌  them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌  tui─────────────────────────────┐┌  them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:06 ││                                                                                  │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -401,7 +401,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                            ── Saturday 24 October ──                             │
 │                                  ││ are you at the field site tomorrow?  13:58                                       │
 │                                  ││                                                                                  │
@@ -422,7 +422,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 7: detail ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌  tui─────────────────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:06 ││                                                                                  │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │

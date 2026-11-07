@@ -13,7 +13,7 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││ lunch at noon?  12:01                              │
 │                        ││                                                    │
@@ -38,7 +38,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌lunch at noon?  12:01                              │
 │                        ││                                                    │
@@ -62,7 +62,7 @@ Enter run │ Esc close
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌lunch at noon?  12:01                              │
 │                        ││ [👍 ]                                               │

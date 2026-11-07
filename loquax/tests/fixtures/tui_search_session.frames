@@ -33,7 +33,7 @@
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
 │                                  ││                    the «tripod» stays in the van, 61ddb79a has the bag  14:07 ◷  │
 │                                  │├  to <5ec0ea2e…>────────────────────────────────── Enter send · Alt-Enter newline ┤
@@ -68,7 +68,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
@@ -109,7 +109,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
@@ -150,7 +150,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
@@ -191,7 +191,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
@@ -205,7 +205,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- frame 6: closed ---
-┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌● tui─────────────────────────────┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │ <5ec0ea2e…>                14:07 ││                                                                         no relay │
 │ you: the tripod stays in the va… ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -232,7 +232,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││                                 did the board come back from the soak?  19:40 ◷  │
 │                                  ││                                                                                  │
@@ -263,7 +263,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                     the «tripod» stays in the van, │
 │                        ││                     61ddb79a has the bag  14:07 ◷  │
@@ -282,7 +282,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q qu
 │  you to <61ddb7… 14:06 ││                                                    │
 │  the «tripod» fits     ││                                                    │
 │                        ││                                                    │
-│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌you to <61ddb7… 14:05 ││                                                    │
 │ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
 │                        ││                   soak?  19:40 ◷                   │
@@ -307,7 +307,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 │  you to <61ddb7… 14:06 ││                                                    │
 │  the «tripod» fits     ││                                                    │
 │                        ││                                                    │
-│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌you to <61ddb7… 14:05 ││                                                    │
 │ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
 │                        ││                   soak?  19:40 ◷                   │
@@ -332,7 +332,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 │  you to <61ddb7… 14:06 ││                                                    │
 │  the «tripod» fits     ││                                                    │
 │                        ││                                                    │
-│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌you to <61ddb7… 14:05 ││                                                    │
 │ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
 │                        ││                   soak?  19:40 ◷                   │
@@ -357,7 +357,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 │ MESSAGES             1 ││                                                    │
 │  you to <5ec0ea… 14:07 ││                                                    │
 │  … in the van, «61dd»… ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
 │                        ││                   soak?  19:40 ◷                   │
@@ -372,7 +372,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- frame 6: closed ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │ <5ec0ea2e…>      14:07 ││                                                    │
 │ you: the tripod stays… ││                                                    │
 │                        ││                                                    │
@@ -382,7 +382,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q qu
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││              ── Friday 23 October ──               │
 │                        ││                   did the board come back from the │
 │                        ││                   soak?  19:40 ◷                   │

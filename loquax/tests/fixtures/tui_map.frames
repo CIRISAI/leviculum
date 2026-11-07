@@ -1,6 +1,6 @@
 === braille ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -19,13 +19,13 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: next pin ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
@@ -75,7 +75,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: dragged ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││    ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏            │
 │▌◎ position · live   ⌖  ││    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶<33333333…> · 3 h ago ●⢷⣦⣄        ⣰│
 │                        ││⠶⣤⣀⣴⠏ ⡴⠋         ⠉⠻⢦⣄  ⠈⠳⣦⣀        ⢠⡾⠁   ⠈⠙⠿⣦⣄   ⢀⣴⡟│
@@ -100,7 +100,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: outline ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││                                     ⡠⢄⠼⠁           │
 │▌◎ position · live   ⌖  ││                                     ⡇              │
 │                        ││                                     ⢣              │
@@ -125,7 +125,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: opened ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
+┌  tui───────────────────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -141,7 +141,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more) · live · 4 min ago  14:00                    │
@@ -150,7 +150,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
+┌  tui───────────────────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -166,7 +166,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more) · live · 4 min ago  14:00                    │
@@ -175,7 +175,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 8: from the report ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││⠻⢷⣤⣀          ⢀⣼⠟⠁  ⢹⡟               ⠈⠛⢷⣦⣀       ⠈⠛⢶│
 │▌◎ position · live   ⌖  ││  ⠈⠛⠿⣦⣄⡀    ⢀⣴⡿⠃   ⣴⠏                   ⠈⠻⢷⣤⡀       │
 │                        ││     ⠈⠙⠻⢶⣤⡀⣠⣿⠋   ⢠⡾⠁                       ⠉⠻⢷⣤⡀    │
@@ -200,7 +200,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: report closed ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
+┌  tui───────────────────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -216,7 +216,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more) · live · 4 min ago  14:00                    │
@@ -226,7 +226,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === halfblocks ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -245,13 +245,13 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -276,7 +276,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: next pin ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -301,7 +301,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: dragged ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀<33333333…> · 3 h ago ●▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -326,7 +326,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: outline ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -351,7 +351,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: opened ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
+┌  tui───────────────────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -367,7 +367,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more) · live · 4 min ago  14:00                    │
@@ -376,7 +376,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
+┌  tui───────────────────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -392,7 +392,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more) · live · 4 min ago  14:00                    │
@@ -401,7 +401,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 8: from the report ---
-┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -426,7 +426,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: report closed ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
+┌  tui───────────────────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
@@ -442,7 +442,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more) · live · 4 min ago  14:00                    │

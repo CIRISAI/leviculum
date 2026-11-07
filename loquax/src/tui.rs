@@ -2228,7 +2228,7 @@ mod tests {
         let screen = render(&model);
         assert!(screen.contains("● Loquax (attaching)"), "{screen}");
         assert!(screen.contains("▌<abababab…>"), "{screen}");
-        assert!(screen.contains(ui::layout::EARLIEST), "{screen}");
+        assert!(screen.contains("No messages yet"), "{screen}");
         assert!(screen.contains("  to <abababab…>"), "{screen}");
         assert!(screen.contains("Tab pane"), "{screen}");
     }

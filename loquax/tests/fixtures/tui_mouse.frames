@@ -1,6 +1,6 @@
 === click ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -19,13 +19,13 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: second conversation ---
-┌● Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────────────────┐
+┌● tui───────────────────┐┌  <5ec0ea2e…>───────────────────────────────────────┐
 │ <61ddb79a…>            ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -44,13 +44,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: typed ---
-┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────────────────┐
+┌  tui───────────────────┐┌  <5ec0ea2e…>───────────────────────────────────────┐
 │ <61ddb79a…>            ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -69,13 +69,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello by mouse                                      │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 4: sent by click ---
-┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
+┌  tui───────────────────┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -92,7 +92,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                           hello by mouse  12:00 ◷  │
 │                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
@@ -100,7 +100,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 5: message selected ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
+┌  tui───────────────────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -117,7 +117,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                          ▌hello by mouse  12:00 ◷  │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
@@ -125,7 +125,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: detail ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
+┌  tui───────────────────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -142,7 +142,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │ │12:00:00  queued                                                          │ │
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                          ▌hello by mouse  12:00 ◷  │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
@@ -150,7 +150,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: closed ---
-┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
+┌  tui───────────────────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
 │▌you: hello by mouse    ││                                                    │
 │                        ││                                                    │
@@ -167,7 +167,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                          ▌hello by mouse  12:00 ◷  │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
@@ -201,7 +201,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └──────────────────────────────────────────────────────────────────────────────┘
 === wheel ===
 --- frame 1: list focused ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                message 1  12:00 ◷  │
 │▌you: message 10        ││                                                    │
 │                        ││                                message 2  12:00 ◷  │
@@ -226,8 +226,8 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: wheeled up ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
-│▌<61ddb79a…>      12:00 ││           nothing earlier on this device           │
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: message 10        ││                    ── Today ──                     │
 │                        ││                                message 1  12:00 ◷  │
 │ <5ec0ea2e…>            ││                                                    │
@@ -251,7 +251,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: wheeled down ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                message 1  12:00 ◷  │
 │▌you: message 10        ││                                                    │
 │                        ││                                message 2  12:00 ◷  │
@@ -277,7 +277,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === drag ===
 --- frame 1: two sent ---
-┌  Loquax afbda7b3───────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
+┌  tui───────────────────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: second line       ││                                                    │
 │                        ││                                                    │
@@ -292,7 +292,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                               first line  12:00 ◷  │
 │                        ││                                                    │
@@ -303,7 +303,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- osc52 \e]52;c;Zmlyc3QgbGluZQpzZWNvbmQgbGluZQ==\e\ ---
 --- frame 2: dragged ---
-┌  Loquax afbda7b3───────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
+┌  tui───────────────────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: second line       ││                                                    │
 │                        ││                                                    │
@@ -318,7 +318,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                              ▌fi┌─────────────────┐│
 │                        ││                                 │✓ copied 22 chars││
@@ -328,7 +328,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: selected ---
-┌  Loquax afbda7b3───────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
+┌  tui───────────────────┐┌● <61ddb79a…>───────────────────────────── no relay ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
 │▌you: second line       ││                                                    │
 │                        ││                                                    │
@@ -343,7 +343,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                              ▌first line  12:00 ◷  │
 │                        ││                                                    │

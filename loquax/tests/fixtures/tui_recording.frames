@@ -18,7 +18,7 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├● to Anna Schulz ·abab───── Enter send · Esc cancel ┤
 │                        ││● REC 00:07  ▆▇▆▅▁▁▁▁▁▅▆▇▆▅▅▆▇  p pause · Enter send│
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -59,7 +59,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                 No messages yet                                  │
 │                                  │├● to Anna Schulz ·abab─────────────────────────────────── Enter send · Esc cancel ┤
 │                                  ││● REC 00:07  ▅▁▁▁▁▁▅▆▇▆▅▅▆▇▆▅▅▆▇▆▅▁▁▁▁▁▅▆▇▆▅▅▆▇  p pause · Esc cancel · Enter send│
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -83,7 +83,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├● to Anna Schulz ·abab───── Enter send · Esc cancel ┤
 │                        ││○ REC 00:03  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  p resume · Enter send│
 │                        ││Nothing heard. Is the microphone allowed? · allow   │
@@ -124,7 +124,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                 No messages yet                                  │
 │                                  │├● to Anna Schulz ·abab─────────────────────────────────── Enter send · Esc cancel ┤
 │                                  ││○ REC 00:03  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  Space play · p resume · Esc cancel · Enter send│
 │                                  ││Nothing heard. Is the microphone allowed? · allow                                 │
@@ -149,7 +149,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├● to Anna Schulz ·abab───── Enter send · Esc cancel ┤
 │                        ││○ REC 10:00  ▇▇▇▇▇▇▇▇▇▇▇▇▇▇  Space play · Enter send│
 │                        ││That is as long as a voice message can be           │
@@ -190,7 +190,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                 No messages yet                                  │
 │                                  │├● to Anna Schulz ·abab─────────────────────────────────── Enter send · Esc cancel ┤
 │                                  ││○ REC 10:00  ▆▇▇▇▆▇▇▇▅▇▇▇▅▇▇▇▅▇▇▇▆▇▇▇▆▇▇▇▆▇▇  Space play · Esc cancel · Enter send│
 │                                  ││That is as long as a voice message can be                                         │

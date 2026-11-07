@@ -1,5 +1,5 @@
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
+┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -10,13 +10,13 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: named ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd─────────────────────────────────────────┐
+┌● tui───────────────────┐┌  Bob ·61dd─────────────────────────────────────────┐
 │▌Bob ·61dd              ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -27,13 +27,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: collision ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
+┌● tui───────────────────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
 │▌Bob ·61dd ≈            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -44,13 +44,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to Bob ·61dd ≈──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: petname ---
-┌● Loquax afbda7b3───────┐┌  Carol ·8f77  known · announces Caroline───────────┐
+┌● tui───────────────────┐┌  Carol ·8f77  known · announces Caroline───────────┐
 │ Bob ·61dd ≈            ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -61,13 +61,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to Carol ·8f77──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: rename ---
-┌● Loquax afbda7b3───────┐┌  Carol ·8f77  known · announces Caroline───────────┐
+┌● tui───────────────────┐┌  Carol ·8f77  known · announces Caroline───────────┐
 │ Bob ·61dd ≈            ││                                                    │
 │                   ┌ commands ────────────────────────────┐                   │
 │                   │> Carol Meyer                         │                   │
@@ -78,13 +78,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  to Carol ·8f77──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- frame 6: renamed ---
-┌● Loquax afbda7b3───────┐┌  Carol Meyer ·8f77  known · announces Caroline─────┐
+┌● tui───────────────────┐┌  Carol Meyer ·8f77  known · announces Caroline─────┐
 │ Bob ·61dd ≈            ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -95,13 +95,13 @@ Enter run │ Esc close
 │▌                       ││                                                    │
 │                        ││                         ┌─────────────────────────┐│
 │                        ││                         │✓ named Carol Meyer ·8f77││
-│                        ││           nothing earlie└─────────────────────────┘│
+│                        ││                  No mess└─────────────────────────┘│
 │                        │├  to Carol Meyer ·8f Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: blocked ---
-┌● Loquax afbda7b3───────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
+┌● tui───────────────────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
 │▌Bob ·61dd ≈            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -129,7 +129,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                     ┌─────────────────────────────┐│
 │                        ││                     │✓ 1 blocked, :blocked returns││
-│                        ││           nothing ea└─────────────────────────────┘│
+│                        ││                  No └─────────────────────────────┘│
 │                        │├  to Carol Meyer ·8f Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

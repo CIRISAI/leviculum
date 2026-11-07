@@ -128,6 +128,7 @@ const EXPECTED: &str = include_str!("fixtures/tui_session.frames");
 const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
 const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
 const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
+const EXPECTED_CHAT_DE: &str = include_str!("fixtures/tui_chat_de.frames");
 const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
 const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
 const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
@@ -673,7 +674,7 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
         "{enhanced}"
     );
     assert!(
-        frame(&enhanced, "still here").contains("Loquax"),
+        frame(&enhanced, "still here").contains("● tui"),
         "{enhanced}"
     );
 
@@ -827,6 +828,12 @@ fn without_ids(frames: &str) -> String {
 /// the script's frames. The frames, and the style maps the script wrote
 /// beside them.
 async fn chat_session(size: &str) -> (String, String) {
+    chat_session_with(size, CHAT_SCRIPT).await
+}
+
+/// [`chat_session`] with its own script: the German set (1447) runs the
+/// same session after a `lang de` step.
+async fn chat_session_with(size: &str, chat_script: &str) -> (String, String) {
     let daemon = daemon(&format!("tui-chat-{size}"), |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     let ours = fixed_identity(0x11);
@@ -843,7 +850,7 @@ async fn chat_session(size: &str) -> (String, String) {
     };
     let script = home.path().join("chat.script");
     let frames = home.path().join("chat.frames");
-    std::fs::write(&script, CHAT_SCRIPT).expect("write the script");
+    std::fs::write(&script, chat_script).expect("write the script");
     // A second correspondent that never answers, so the list has two rows.
     let args: Vec<String> = vec![
         "--instance".into(),
@@ -955,6 +962,30 @@ fn styles_of<'a>(styles: &'a str, label: &str) -> &'a str {
         .find("--- styles:")
         .map_or(styles.len(), |end| start + end);
     &styles[start..end]
+}
+
+/// The chat session in German (1447, walk 1 finding 22): what a reader
+/// whose desktop runs `LANG=de_DE.UTF-8` sees, so the next walk reads
+/// German frames. A script plays its own terminal, English until a `lang`
+/// step, so the set runs the chat script after `lang de`, the step the
+/// locale takes for a real terminal. Pinned in
+/// `tests/fixtures/tui_chat_de.frames`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_chat_in_german_is_its_own_golden_set() {
+    let (frames, _) = chat_session_with("80x24", &format!("lang de\n{CHAT_SCRIPT}")).await;
+    let all = without_ids(&frames);
+    let attached = frame(&frames, "attached");
+    assert!(attached.contains("Noch keine Nachrichten"), "{attached}");
+    assert!(!attached.contains("nothing earlier"), "{attached}");
+    if all != EXPECTED_CHAT_DE {
+        let kept = std::env::temp_dir().join("loquax-tui-chat-de.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_chat_de.frames\n{all}",
+            kept.display()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1168,7 +1199,7 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
     // The wheel moved the conversation and nothing else.
     let up = frame(&wheel, "wheeled up");
     assert_ne!(up, frame(&wheel, "list focused"));
-    assert!(up.contains("● Loquax"), "the list kept the focus: {up}");
+    assert!(up.contains("● tui"), "the list kept the focus: {up}");
     assert!(!up.contains("message 10  12:00"), "{up}");
     assert_eq!(frame(&wheel, "wheeled down"), frame(&wheel, "list focused"));
 
@@ -1282,7 +1313,7 @@ async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
         // Closed: the list and its `/ search` back, nothing marked, the
         // conversation still the one the result opened.
         let closed = frame(&frames, "closed");
-        assert!(closed.contains("● Loquax"), "{size}: {closed}");
+        assert!(closed.contains("● tui"), "{size}: {closed}");
         assert!(closed.contains(" / search "), "{size}: {closed}");
         assert!(!closed.contains('«'), "{size}: {closed}");
         assert!(closed.contains("<61ddb79a…>──"), "{size}: {closed}");

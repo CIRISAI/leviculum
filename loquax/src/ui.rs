@@ -1427,9 +1427,10 @@ impl<B> UiModel<B> {
                     home_client: self.home_client,
                     receipts: self.reading.on,
                     tracks: Some(&self.voice_tracks),
+                    lang: self.lang,
                 },
             ),
-            None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
+            None => layout::Laid::empty(self.sizes().messages.0, self.tokens(), self.lang),
         }
     }
 
@@ -5867,7 +5868,18 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             (true, _) => SEARCH_TITLE.to_string(),
             (false, _) if model.show_blocked => BLOCKED_TITLE.to_string(),
             (false, _) if model.show_archived => ARCHIVED_TITLE.to_string(),
-            (false, Some(address)) => format!("Loquax {}", &to_hex(&address)[..8]),
+            // The own name, or "Loquax" alone while there is none (1447,
+            // walk 1 finding 22): never the address's hex.
+            (false, Some(address)) => {
+                let named = Some(model.profile.name.trim())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| model.names.shown(&address).map(str::trim))
+                    .filter(|n| !n.is_empty());
+                match named {
+                    Some(name) => name.to_string(),
+                    None => strings::StrId::AppName.text(model.lang).to_string(),
+                }
+            }
             (false, None) => "Loquax (attaching)".to_string(),
         },
         conversations_title_right: match (searching, model.show_blocked) {
@@ -8805,15 +8817,15 @@ pub(crate) mod tests {
     #[test]
     fn the_view_draws_the_glyph_and_says_nothing_is_earlier() {
         let mut model = UiModel::<Field>::new(&[PEER]);
-        assert_eq!(shown(&model), [layout::EARLIEST]);
+        assert_eq!(shown(&model), ["No messages yet"]);
         assert_eq!(view(&model).messages_title, "<abababab…>");
         sent(&mut model, "hi");
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
-        assert_eq!(shown(&model), [layout::EARLIEST, "hi  ◷"]);
+        assert_eq!(shown(&model), ["hi  ◷"]);
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(shown(&model)[1], "hi  ✓");
+        assert_eq!(shown(&model)[0], "hi  ✓");
         model.ascii = true;
-        assert_eq!(shown(&model)[1], "hi  v");
+        assert_eq!(shown(&model)[0], "hi  v");
         assert_eq!(
             text(&view(&model).conversations[0]).trim_end(),
             "▌<abababab…>"
@@ -8874,10 +8886,7 @@ pub(crate) mod tests {
                 verified: true,
             },
         );
-        assert_eq!(
-            shown(&model),
-            [layout::EARLIEST, "first", "second  ◷", "back", "again"]
-        );
+        assert_eq!(shown(&model), ["first", "second  ◷", "back", "again"]);
     }
 
     #[test]
@@ -8978,7 +8987,11 @@ pub(crate) mod tests {
         let rows = rows(&model);
         let text_rows: Vec<&String> = rows
             .iter()
-            .filter(|r| !r.trim().is_empty() && !r.contains(layout::EARLIEST) && !r.contains("──"))
+            .filter(|r| {
+                !r.trim().is_empty()
+                    && !r.contains(layout::EARLIEST.text(strings::Lang::En))
+                    && !r.contains("──")
+            })
             .collect();
         let (ours, theirs) = text_rows.split_at(text_rows.len() / 2);
         // The text within the cap; the time closing the last row may reach
@@ -9037,7 +9050,6 @@ pub(crate) mod tests {
         assert_eq!(
             shown(&model),
             [
-                layout::EARLIEST,
                 "── Sunday 25 October ──",
                 "late  23:59",
                 "── Today ──",
@@ -10629,11 +10641,7 @@ pub(crate) mod tests {
         announced(&mut model, PEER, "Ally");
         assert_eq!(
             shown(&model),
-            [
-                layout::EARLIEST,
-                "hi  ◷",
-                "── was Alice, now announces Ally ──"
-            ]
+            ["hi  ◷", "── was Alice, now announces Ally ──"]
         );
         assert_eq!(view(&model).messages_title, "Ally ·abab");
         // Our own address names nobody.
@@ -10778,7 +10786,11 @@ pub(crate) mod tests {
         assert_eq!(model.message_cursor, 2);
         assert_eq!(message_writes(&model.take_writes()), [7]);
         assert!(model.take_writes().is_empty(), "taken once");
-        assert!(shown(&model).contains(&layout::EARLIEST.to_string()));
+        assert!(
+            !shown(&model).iter().any(|r| r.contains("earlier")),
+            "{:?}",
+            shown(&model)
+        );
 
         model.focus = Pane::Compose;
         typed(&mut model, "after the restart");
@@ -10984,7 +10996,7 @@ pub(crate) mod tests {
         assert_eq!(model.messages_of_selected()[9].body, "ten");
         assert_eq!(
             text(&model.laid().rows[0]).trim(),
-            layout::EARLIEST,
+            "",
             "the top of the conversation is the top of the store now"
         );
         // Nothing more to ask for.
@@ -11146,7 +11158,6 @@ pub(crate) mod tests {
         assert_eq!(
             shown(&model),
             vec![
-                layout::EARLIEST.to_string(),
                 "── Today ──".to_string(),
                 "◎ position 43.77310 N 11.25600 E ·".to_string(),
                 "live · 4 min ago  14:00".to_string(),
@@ -12415,7 +12426,6 @@ pub(crate) mod tests {
         assert_eq!(
             shown(&model),
             vec![
-                layout::EARLIEST.to_string(),
                 "── Today ──".to_string(),
                 "at the bridge".to_string(),
                 "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
@@ -13532,7 +13542,8 @@ pub(crate) mod tests {
     fn a_reaction_before_its_target_attaches_when_the_target_arrives() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         reacted(&mut model, ID2, "columba", ID, THUMBS);
-        assert_eq!(shown(&model), [layout::EARLIEST]);
+        // The held reaction is a row of the conversation, drawn nowhere.
+        assert!(shown(&model).is_empty(), "{:?}", shown(&model));
         received(&mut model, ID, "lunch at noon?");
         let rows = shown(&model);
         assert_eq!(rows.last().unwrap(), THUMBS, "{rows:?}");

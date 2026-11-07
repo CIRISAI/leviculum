@@ -7,7 +7,7 @@
 │ ▌the «tripod» is with 4f4f4f4f   ││                                                                                  │
 │                                  ││                                                                                  │
 │  you to <4f4f4f4f…>        14:06 ││                                                                                  │
-│  the «tripod» fits               ││                          nothing earlier on this device                          │
+│  the «tripod» fits               ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │  <4f4f4f4f…>               14:05 ││ did the board come back from the soak?  19:40                                    │
 │  and the small «tripod» if it f… ││                                                                                  │
@@ -48,7 +48,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │  the «tripod» is with 4f4f4f4f   ││                                                                                  │
 │                                  ││                                                                                  │
 │  you to <4f4f4f4f…>        14:06 ││                                                                                  │
-│  the «tripod» fits               ││                          nothing earlier on this device                          │
+│  the «tripod» fits               ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │ ▌<4f4f4f4f…>               14:05 ││ did the board come back from the soak?  19:40                                    │
 │ ▌and the small «tripod» if it f… ││                                                                                  │
@@ -89,7 +89,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 │ ▌you: the tripod fits            ││                                                                                  │
 │                                  ││                                                                                  │
 │ MESSAGES                       1 ││                                                                                  │
-│  <b7b7b7b7…>               14:06 ││                          nothing earlier on this device                          │
+│  <b7b7b7b7…>               14:06 ││                                                                                  │
 │  the tripod is with «4f4f»4f4f   ││                             ── Friday 23 October ──                              │
 │                                  ││ did the board come back from the soak?  19:40                                    │
 │                                  ││                                                                                  │
@@ -122,7 +122,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- 120 x 40: closed ---
-┌● Loquax afafafaf─────────────────┐┌  <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
+┌● Loquax──────────────────────────┐┌  <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
 │ <b7b7b7b7…>                14:06 ││                                                propagation node 9c9c9c9c adopted │
 │ the tripod is with 4f4f4f4f  [1] ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -130,7 +130,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │▌you: the tripod fits             ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││ did the board come back from the soak?  19:40                                    │
 │                                  ││                                                                                  │
@@ -238,7 +238,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- 80 x 24: closed ---
-┌● Loquax afafafaf───────┐┌  <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
+┌● Loquax────────────────┐┌  <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
 │ <b7b7b7b7…>      14:06 ││                                                    │
 │ the tripod is wit… [1] ││              yes, from ten. Shall I bring the T114 │
 │                        ││              and the long antenna, or is the stick │

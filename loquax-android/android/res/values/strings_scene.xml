@@ -61,6 +61,8 @@
     <string name="position_marker">⌖</string>
     <string name="radar_note">No map loaded for this area · Rings %1$s</string>
     <string name="radar_note_on">No map loaded for this area · Rings %1$s around %2$s</string>
+    <string name="no_messages_yet">No messages yet</string>
+    <string name="app_name_title">Loquax</string>
     <string name="map_empty">Nobody shares a position with you yet</string>
     <string name="no_position">No position from this person yet</string>
     <string name="nearby_card">Nearby, not in your contacts</string>

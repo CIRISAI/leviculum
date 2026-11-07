@@ -16,7 +16,7 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  ┌────────────────────────────────┐│
-│                        ││           nothing│⚠ Not sent. Its details say why.││
+│                        ││                  │⚠ Not sent. Its details say why.││
 │                        ││                  └────────────────────────────────┘│
 │                        │├● to <abababab…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │

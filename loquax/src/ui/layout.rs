@@ -37,9 +37,10 @@ use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Sign
 use crate::telemetry;
 use crate::when::{date_label, list_time, WallTime};
 
-/// The top of what this device holds: the store's first message with the
-/// peer.
-pub const EARLIEST: &str = "nothing earlier on this device";
+/// What an empty conversation says (1447, walk 1 finding 22): "Noch keine
+/// Nachrichten", where it said "nothing earlier on this device", a sentence
+/// about the store and in English; over messages the top row is blank.
+pub const EARLIEST: StrId = StrId::NoMessagesYet;
 
 /// The top of what the screen loaded, when the store holds more: reaching it
 /// loads the next page.
@@ -79,6 +80,8 @@ pub struct Draw<'a> {
     /// The voice messages' level tracks the model holds (1276): a
     /// bubble's waveform is its track's where there is one.
     pub tracks: Option<&'a BTreeMap<([u8; 16], u64), LevelTrack>>,
+    /// The reader's language, for the pane's own words (1447).
+    pub lang: Lang,
 }
 
 /// A style drawn in a token's colours.
@@ -130,11 +133,11 @@ pub struct Laid {
 }
 
 impl Laid {
-    /// No conversation open: the pane says only where the device's memory
-    /// begins.
-    pub fn empty(width: usize, tokens: &Tokens) -> Self {
+    /// No conversation open, or one without messages: the pane says that
+    /// there are none yet.
+    pub fn empty(width: usize, tokens: &Tokens, lang: Lang) -> Self {
         Self {
-            rows: vec![centred(EARLIEST, width, painted(tokens.muted))],
+            rows: vec![centred(EARLIEST.text(lang), width, painted(tokens.muted))],
             texts: vec![None],
             spans: Vec::new(),
             links: Vec::new(),
@@ -160,13 +163,15 @@ enum Last {
 /// the blocks with a blank row between two of them.
 pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) -> Laid {
     let width = width.max(1);
-    let mut laid = Laid::empty(width, draw.tokens);
+    let mut laid = Laid::empty(width, draw.tokens, draw.lang);
     if conversation.earlier > 0 {
         laid.rows[0] = centred(
             &earlier_line(conversation.earlier),
             width,
             painted(draw.tokens.muted),
         );
+    } else if !conversation.messages.is_empty() {
+        laid.rows[0] = centred("", width, painted(draw.tokens.muted));
     }
     let mut last = Last::Separator;
     let mut day = None;
