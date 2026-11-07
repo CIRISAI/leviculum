@@ -117,7 +117,7 @@ jobs:
   # overrides the musl default for the native Apple-silicon target.
   macos:
     name: test darwin-aarch64
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       CARGO_BUILD_TARGET: aarch64-apple-darwin
     steps:

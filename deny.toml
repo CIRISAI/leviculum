@@ -44,6 +44,9 @@ ignore = [
     # reaches the graph only through upstream's iced GUI (fontdb, cosmic-text);
     # no fork crate parses fonts. Drop this when iced moves to skrifa.
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; only via upstream iced GUI, no fix exists" },
+    # Unmaintained, not a vulnerability, and no successor release exists. It is
+    # a small transitive dependency; drop this when its dependents move off it.
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; transitive only, no fix exists" },
 ]
 
 [bans]
