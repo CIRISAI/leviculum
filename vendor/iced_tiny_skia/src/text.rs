@@ -197,8 +197,6 @@ fn draw(
 
     let position = position * transformation;
 
-    let mut swash = cosmic_text::SwashCache::new();
-
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
             let physical_glyph = glyph.physical(
@@ -210,7 +208,6 @@ fn draw(
                 physical_glyph.cache_key,
                 glyph.color_opt.map(from_color).unwrap_or(color),
                 font_system,
-                &mut swash,
             ) {
                 let pixmap = tiny_skia::PixmapRef::from_bytes(
                     buffer,
@@ -271,14 +268,41 @@ fn from_color(color: cosmic_text::Color) -> Color {
     Color::from_rgba8(r, g, b, a as f32 / 255.0)
 }
 
-#[derive(Debug, Clone, Default)]
+/// Leviculum's patch (1468): a glyph that has no picture (a space, a
+/// glyph the font lacks) is kept as such, and the scaler's context lives
+/// as long as the cache. Upstream kept only glyphs with pixels and built
+/// a context per paragraph, so every space on the screen went to the
+/// scaler on every frame, and the first one of each paragraph rebuilt
+/// the font's hinting instance (its `prep` program run): callgrind over
+/// loquax's window bench, a touchpad scroll of the chat at 1527x2099,
+/// found 47 % of a frame's present in `HintingInstance::new`, 14 thousand
+/// of them for 204 glyphs actually hinted. skrifa runs a glyph's program
+/// on a copy of the instance's tables, so a context shared between
+/// glyphs draws each glyph as a fresh one did.
+#[derive(Debug, Default)]
 struct GlyphCache {
     entries: FxHashMap<
         (cosmic_text::CacheKey, [u8; 3]),
-        (Vec<u32>, cosmic_text::Placement),
+        Option<(Vec<u32>, cosmic_text::Placement)>,
     >,
     recently_used: FxHashSet<(cosmic_text::CacheKey, [u8; 3])>,
     trim_count: usize,
+    swash: Swash,
+}
+
+/// The scaler's context, kept between glyphs and frames (1468).
+struct Swash(cosmic_text::SwashCache);
+
+impl Default for Swash {
+    fn default() -> Self {
+        Self(cosmic_text::SwashCache::new())
+    }
+}
+
+impl std::fmt::Debug for Swash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 impl GlyphCache {
@@ -294,79 +318,26 @@ impl GlyphCache {
         cache_key: cosmic_text::CacheKey,
         color: Color,
         font_system: &mut cosmic_text::FontSystem,
-        swash: &mut cosmic_text::SwashCache,
     ) -> Option<(&[u8], cosmic_text::Placement)> {
         let [r, g, b, _a] = color.into_rgba8();
         let key = (cache_key, [r, g, b]);
 
         if let hash_map::Entry::Vacant(entry) = self.entries.entry(key) {
-            // TODO: Outline support
-            let image = swash.get_image_uncached(font_system, cache_key)?;
-
-            let glyph_size = image.placement.width as usize
-                * image.placement.height as usize;
-
-            if glyph_size == 0 {
-                return None;
-            }
-
-            let mut buffer = vec![0u32; glyph_size];
-
-            match image.content {
-                cosmic_text::SwashContent::Mask => {
-                    let mut i = 0;
-
-                    // TODO: Blend alpha
-
-                    for _y in 0..image.placement.height {
-                        for _x in 0..image.placement.width {
-                            buffer[i] = bytemuck::cast(
-                                tiny_skia::ColorU8::from_rgba(
-                                    b,
-                                    g,
-                                    r,
-                                    image.data[i],
-                                )
-                                .premultiply(),
-                            );
-
-                            i += 1;
-                        }
-                    }
-                }
-                cosmic_text::SwashContent::Color => {
-                    let mut i = 0;
-
-                    for _y in 0..image.placement.height {
-                        for _x in 0..image.placement.width {
-                            // TODO: Blend alpha
-                            buffer[i >> 2] = bytemuck::cast(
-                                tiny_skia::ColorU8::from_rgba(
-                                    image.data[i + 2],
-                                    image.data[i + 1],
-                                    image.data[i],
-                                    image.data[i + 3],
-                                )
-                                .premultiply(),
-                            );
-
-                            i += 4;
-                        }
-                    }
-                }
-                cosmic_text::SwashContent::SubpixelMask => {
-                    // TODO
-                }
-            }
-
-            let _ = entry.insert((buffer, image.placement));
+            let _ = entry.insert(rasterise(
+                &mut self.swash.0,
+                font_system,
+                cache_key,
+                [r, g, b],
+            ));
         }
 
         let _ = self.recently_used.insert(key);
 
-        self.entries.get(&key).map(|(buffer, placement)| {
-            (bytemuck::cast_slice(buffer.as_slice()), *placement)
-        })
+        self.entries.get(&key).and_then(Option::as_ref).map(
+            |(buffer, placement)| {
+                (bytemuck::cast_slice(buffer.as_slice()), *placement)
+            },
+        )
     }
 
     pub fn trim(&mut self) {
@@ -386,4 +357,69 @@ impl GlyphCache {
             self.trim_count += 1;
         }
     }
+}
+
+/// The picture of the glyph `cache_key` in the colour `[r, g, b]`, as
+/// upstream's cache made it; `None` for a glyph without one.
+fn rasterise(
+    swash: &mut cosmic_text::SwashCache,
+    font_system: &mut cosmic_text::FontSystem,
+    cache_key: cosmic_text::CacheKey,
+    [r, g, b]: [u8; 3],
+) -> Option<(Vec<u32>, cosmic_text::Placement)> {
+    // TODO: Outline support
+    let image = swash.get_image_uncached(font_system, cache_key)?;
+
+    let glyph_size =
+        image.placement.width as usize * image.placement.height as usize;
+
+    if glyph_size == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u32; glyph_size];
+
+    match image.content {
+        cosmic_text::SwashContent::Mask => {
+            let mut i = 0;
+
+            // TODO: Blend alpha
+
+            for _y in 0..image.placement.height {
+                for _x in 0..image.placement.width {
+                    buffer[i] = bytemuck::cast(
+                        tiny_skia::ColorU8::from_rgba(b, g, r, image.data[i])
+                            .premultiply(),
+                    );
+
+                    i += 1;
+                }
+            }
+        }
+        cosmic_text::SwashContent::Color => {
+            let mut i = 0;
+
+            for _y in 0..image.placement.height {
+                for _x in 0..image.placement.width {
+                    // TODO: Blend alpha
+                    buffer[i >> 2] = bytemuck::cast(
+                        tiny_skia::ColorU8::from_rgba(
+                            image.data[i + 2],
+                            image.data[i + 1],
+                            image.data[i],
+                            image.data[i + 3],
+                        )
+                        .premultiply(),
+                    );
+
+                    i += 4;
+                }
+            }
+        }
+        cosmic_text::SwashContent::SubpixelMask => {
+            // TODO
+        }
+    }
+
+    Some((buffer, image.placement))
 }
