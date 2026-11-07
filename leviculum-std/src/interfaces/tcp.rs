@@ -331,6 +331,12 @@ pub(crate) struct TcpClientConfig {
     /// Keepalive and user timeout of every connection this client makes
     /// (1176).
     pub liveness: TcpLiveness,
+    /// The automatic layer's server slot (#471 step 3): after
+    /// [`crate::auto_servers::FAILOVER_AFTER_FAILURES`] failed connects in a
+    /// row the client moves to the slot's next entry, its backoff running
+    /// on. `None` for a configured client, which dials its one target for
+    /// ever.
+    pub failover: Option<crate::auto_servers::ServerSlot>,
 }
 
 /// Default per-attempt connect timeout for reconnecting TCP clients.
@@ -846,6 +852,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
             config.shutdown,
             config.outbound_socket_hook,
             config.liveness,
+            config.failover,
         )
         .await;
     });
@@ -1013,6 +1020,7 @@ async fn tcp_client_reconnect_task(
     shutdown: Option<oneshot::Receiver<()>>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     liveness: TcpLiveness,
+    failover: Option<crate::auto_servers::ServerSlot>,
 ) {
     // A runtime-added interface carries a detach signal; racing the reconnect
     // loop against it stops the loop at whatever await it is parked on (connect,
@@ -1038,6 +1046,7 @@ async fn tcp_client_reconnect_task(
         socks_target,
         outbound_socket_hook,
         liveness,
+        failover,
     );
     match shutdown {
         Some(sd) => {
@@ -1134,7 +1143,7 @@ async fn dial(
 #[allow(clippy::too_many_arguments)]
 async fn tcp_client_reconnect_loop(
     id: InterfaceId,
-    target: TcpTarget,
+    mut target: TcpTarget,
     resolver: Option<crate::resolver::HostResolver>,
     name: String,
     incoming_tx: mpsc::Sender<IncomingPacket>,
@@ -1151,6 +1160,7 @@ async fn tcp_client_reconnect_loop(
     socks_target: Option<(String, u16)>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
     liveness: TcpLiveness,
+    failover: Option<crate::auto_servers::ServerSlot>,
 ) {
     // Backoff DELIBERATELY DEVIATES from Python `RNS/Interfaces/TCPInterface.py`,
     // which uses `RECONNECT_WAIT = 5` and `RECONNECT_MAX_TRIES = None`: a fixed
@@ -1306,6 +1316,17 @@ async fn tcp_client_reconnect_loop(
         if incoming_tx.is_closed() {
             tracing::debug!("{}: event loop shut down, stopping reconnect", name);
             return;
+        }
+        // An automatic server slot leaves an entry that failed
+        // FAILOVER_AFTER_FAILURES times in a row (#471 step 3). `attempt`
+        // runs on across the move, and with it the backoff: a list of dead
+        // entries is not dialled faster than one.
+        if let Some(slot) = &failover {
+            if attempt.is_multiple_of(crate::auto_servers::FAILOVER_AFTER_FAILURES) {
+                if let Some(next) = slot.fail_over() {
+                    target = TcpTarget::new(next.host, next.port);
+                }
+            }
         }
         let delay = backoff_jitter(
             &name,
@@ -1645,6 +1666,7 @@ mod tests {
                 probes: 3,
                 user_timeout: None,
             },
+            failover: None,
         });
         let (_peer, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
             .await
@@ -1724,6 +1746,7 @@ mod tests {
             shutdown: None,
             outbound_socket_hook: Some(hook),
             liveness: TcpLiveness::default(),
+            failover: None,
         });
 
         let closed = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv()).await;
@@ -2141,6 +2164,7 @@ mod tests {
             shutdown: None,
             outbound_socket_hook: None,
             liveness: TcpLiveness::default(),
+            failover: None,
         });
 
         // 3. Accept first connection, send an HDLC-framed packet
@@ -2219,6 +2243,7 @@ mod tests {
             shutdown: None,
             outbound_socket_hook: None,
             liveness: TcpLiveness::default(),
+            failover: None,
         });
 
         // Wait for the reconnect task to give up (2 attempts * 100ms + overhead)
@@ -2284,6 +2309,7 @@ mod tests {
             shutdown: None,
             outbound_socket_hook: None,
             liveness: TcpLiveness::default(),
+            failover: None,
         });
 
         let pkt = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv())
@@ -2318,6 +2344,7 @@ mod tests {
             shutdown: Some(shutdown_rx),
             outbound_socket_hook: None,
             liveness: TcpLiveness::default(),
+            failover: None,
         });
         let _ = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
         drop(shutdown_tx); // resolves the receiver -> loop stops -> incoming closes

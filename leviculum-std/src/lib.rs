@@ -14,6 +14,7 @@
 
 pub mod api;
 pub mod auto_layer;
+pub mod auto_servers;
 pub(crate) mod autoconnect;
 pub(crate) mod clock;
 pub mod config;

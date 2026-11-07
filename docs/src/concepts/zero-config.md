@@ -7,7 +7,8 @@ This page records the design as decided, the facts it rests on, the
 measurements the cells took before any of it was built, and the order it
 is built in.
 
-Steps 1 and 2 are built (below); nothing after them is. Citations into this tree are against
+Steps 1, 2 and 3 are built (below), and lnsd writes its first-start file
+(open question 1, decided); nothing after them is. Citations into this tree are against
 master at the commit that adds the page; citations into the Python
 reference are against the pinned `reference/Reticulum` (1.3.5). The
 cells live in periculum (`regression/`, periculum `cb51b8c`), so they
@@ -21,19 +22,19 @@ with lnsd started as `lnsd -c` on an empty directory:
 - **No interface.** Without a file lnsd took `Config::default()`, whose
   interface map is empty. It logged `Node started with 0 interface(s)`.
 - **No shared instance.** The default is `shared_instance: false`
-  (`shared_instance`, `leviculum-std/src/config.rs:630`), where rnsd
+  (`shared_instance`, `leviculum-std/src/config.rs:635`), where rnsd
   defaults to yes. No client could attach, so lnomad, lnstatus and the
   Python tools saw nothing at all. Every cell line therefore states
   `shared_instance=` first.
 - **Transport on.** The default is `enable_transport: true`
-  (`enable_transport`, `leviculum-std/src/config.rs:626`), and lnsd said
+  (`enable_transport`, `leviculum-std/src/config.rs:631`), and lnsd said
   so in its `CONFIG_DEFAULT` line (`value=true rnsd=false`). The stock
   file rnsd writes on its first start says `enable_transport = False`
   (`Reticulum.py:1879`).
 - **It writes nothing.** rnsd creates its default configuration on the
   first start (`__create_default_config`, `Reticulum.py:1196`), with one
-  AutoInterface (`Reticulum.py:1975-1977`). lnsd does not, before or
-  after step 1.
+  AutoInterface (`Reticulum.py:1975-1977`). lnsd did not, before or
+  after step 1; since 1510 it does (below).
 
 `Config::default()` itself is unchanged by step 1: it is what a program
 that builds a node in code starts from, and only the daemon's no-file
@@ -42,15 +43,15 @@ start moved.
 ## Step 1, as built
 
 Without a `config` file lnsd now runs the file rnsd would have written,
-from memory (`load_or_default`, `leviculum-std/src/config.rs:1551`). The
-text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:733`): not
+from memory (`load_or_default`, `leviculum-std/src/config.rs:1563`). The
+text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:738`): not
 the template literal of `Reticulum.py:1860` but what ConfigObj makes of
 it on `write()`, which indents every key by two spaces and drops the
 last empty line. Captured from the vendored ConfigObj of the pinned
 reference, 4013 bytes. Two tests hold it: its lines are the template's
 lines, and, where `python3` runs, the template through the reference's
 own ConfigObj is byte for byte the same file. lnsd parses it with its
-own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1537`), so
+own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1549`), so
 what it runs and what rnsd would write cannot drift apart. It means:
 transport off, a shared instance named `default`, log level 4,
 `discover_interfaces` at lnsd's default, and one AutoInterface,
@@ -59,10 +60,10 @@ transport off, a shared instance named `default`, log level 4,
 - `lnsd --writeconfig` writes the same text to `<dir>/config` and exits;
   it never replaces an existing file.
 - Every interface section carries an origin, `configured` or `default`
-  (`InterfaceOrigin`, `leviculum-std/src/config.rs:676`). lnsd logs one
+  (`InterfaceOrigin`, `leviculum-std/src/config.rs:681`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
   builds any (`leviculum-std/src/driver/mod.rs:2338`), and once
-  `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:195`).
+  `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:215`).
 - `interface_stats` serves the origin as the `origin` key
   (`leviculum-std/src/rpc/handlers.rs:674`), and `lnstatus` prints it,
   behind `--origin`, as an `Origin` line under `Status`. Without the flag
@@ -129,10 +130,64 @@ because the others have nothing to start yet.
   suites with adapters and boards in reach, in `--vm-mode` too. It uses
   `sudo -n` and warns with the command when it cannot.
 
-The page's open question 1 is sharper now: a Python tool pointed at a
-fresh lnsd's directory writes the same bytes `--writeconfig` writes, and
-from the next start lnsd reads them as a file, with every interface
-`configured`.
+Open question 1 was sharp after step 2: a Python tool pointed at a fresh
+lnsd's directory wrote rnsd's stock file there, and from the next start
+lnsd read it as a file without `[auto]`, every medium off. It is decided
+and built since 1510 (below).
+
+## The first-start file, as built
+
+lnsd writes its own configuration on a start without a file, the way rnsd
+does (`Reticulum.py:336`): the bytes `lnsd --writeconfig` writes, rnsd's
+first-start file with the `[auto]` section after it, every medium at its
+shipped default (`run`, `leviculum-cli/src/lnsd.rs`). That start keeps
+running what it loaded, so its interfaces are `default` and its
+`AUTO_LAYER` line reads `reason=default`; the next start reads the file,
+`reason=config`, the same media. A Python tool pointed at the directory
+afterwards finds a file and writes nothing. The write never replaces a
+file (`create_new`, so a tool's file that appeared in between stays), and
+a directory lnsd may not write into is a warning, not a failed start. The
+`CONFIG` line says which: `written=yes|no|failed`.
+
+The cell `zero_config_first_start_file` holds it: the file exists and
+equals `--writeconfig`'s output, `rnstatus` against the directory adds no
+path and leaves the file's bytes, and its control, `rnstatus` against an
+empty directory, writes RNS's stock file there.
+
+## Step 3, as built
+
+`[auto] servers = yes` is a shipped default now (`AutoMedia::SHIPPED`,
+`leviculum-std/src/auto_layer.rs`), and the medium is one module
+(`leviculum-std/src/auto_servers.rs`):
+
+- **The list.** `SHIPPED_SERVERS`, one entry today,
+  leviculum.network on port 4242. `[auto] server_list = host:port, ...` replaces
+  it, and `LEVICULUM_AUTO_SERVERS=host:port,...` in the environment
+  replaces both (set but empty is a list of none, which is how every
+  periculum subject starts). A pinned list is dialled in its order; the
+  shipped one is drawn at random.
+- **The slots.** Up to `BOOTSTRAP_ENTRIES` (two) entries, each a
+  `TCPClientInterface` section `[[Auto Server <n>]]`, `bootstrap_only`,
+  origin `default`, so the existing bootstrap lifecycle (#416) detaches
+  them once enough discovered interfaces stand. A configuration's
+  `autoconnect_discovered_interfaces = 0` is raised to `DISCOVERED_CEILING`
+  (two); a file's own nonzero value stays. Both constants are open
+  question 3's starting values, and a measurement moves them.
+- **Fail-over.** A slot's TCP client asks the shared pool for the next
+  entry no other slot holds after `FAILOVER_AFTER_FAILURES` (three) failed
+  connects in a row, its backoff running on (`tcp_client_reconnect_loop`,
+  `leviculum-std/src/interfaces/tcp.rs`). The fail-over is the
+  interface's business; the core sees a TCP client that reconnects. The
+  row keeps the section's first entry in its name after a move.
+- **Persisted and logged.** The slots' entries are kept in
+  `<storage>/auto_servers`, one `host:port` a line, and a start whose list
+  still names all of them takes them again. Every choice is one line,
+  `AUTO_SERVER slot= chosen=<host:port> reason=persisted|drawn|pinned|failover
+  from=<host:port|none>`, and a list of none `chosen=none reason=empty`.
+
+The cell `zero_config_server_list` holds it: a pinned list whose first
+entry never resolves, the slot's move to the third entry, both slots up, and
+a restart on the first start's own file that takes the kept choice.
 
 Two facts about the files decide the opt-out format:
 
@@ -146,7 +201,7 @@ Two facts about the files decide the opt-out format:
   `[auto] bluetooth = no` started, and lnsd logged `'bluetooth' is in
   section '[auto]', which lnsd does not read, and is ignored`, the
   warning it still gives for any other section it does not read
-  (`leviculum-std/src/ini_config.rs:192`). Measured in the cell
+  (`leviculum-std/src/ini_config.rs:199`). Measured in the cell
   `ble_room_auto_start`. Since step 2 lnsd reads the section.
 
 And one fact about the Python tools, which the cells ran into: **a Python
@@ -189,9 +244,10 @@ AUTO_LAYER state=on reason=default lan=yes servers=no bluetooth=no serial=no
 ```
 
 `lnsd --writeconfig` writes the file lnsd would otherwise hold in memory,
-`[auto]` section included, in a form rnsd can read. A file stays an
-explicit act: lnsd never writes one on its own, so a later change to the
-shipped server list reaches every install that did not ask for a copy.
+`[auto]` section included, in a form rnsd can read, and lnsd writes the
+same file on its first start (open question 1). The server list is not in
+the file, only the switch, so a later change to the shipped list reaches
+every install whose file does not pin one.
 
 ## The lab guard
 
@@ -226,11 +282,11 @@ random from a list shipped in the binary, each marked `bootstrap_only`
 (`bootstrap_only`, `leviculum-std/src/driver/builder.rs:645`): it exists
 to join the network and is detached once enough discovered connections
 stand. Discovery is already on by default (`default_discover_interfaces`,
-`leviculum-std/src/config.rs:583`); autoconnect is not
-(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:651`),
+`leviculum-std/src/config.rs:588`); autoconnect is not
+(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:656`),
 and the automatic layer raises it to a ceiling of two or three. The
-ceiling and the entry count are configuration keys with the defaults in
-the code, changed after a measurement, not before. Transport stays off
+ceiling and the entry count are constants in the code (step 3 as built,
+above), changed after a measurement, not before. Transport stays off
 on such a start, as rnsd's stock file has it, which is a change from
 today's default (above).
 
@@ -253,8 +309,11 @@ configuration line:
 - **fail-over** in the client, and the choice persisted and logged, as
   above.
 
-The entry ships only once these stand. Further operators join only with
-their consent.
+Fail-over, persistence and the log line are built (step 3, 1510), and the
+code dials the entry by default since then. Monitoring and the privacy
+statement are operating duties outside this tree and stay open (the last
+row of the step table); the entry is not announced to users as a default
+before they stand. Further operators join only with their consent.
 
 ## Serial: LNodes by their name, RNodes by silence, then a probe
 
@@ -333,19 +392,25 @@ line today and gaining its `expect` when its step lands. Their lines on
 | 0 | the cells | all five, and the corpus guard | |
 | 1 (built) | default configuration in memory with AutoInterface (what rnsd writes to disk), a shared instance, transport off, `lnsd --writeconfig`, origin in `lnstatus` behind `--origin` | `zero_config_lan_neighbour` | before: `shared_instance=no interfaces=0 neighbour=none neighbour_by=log`; since step 1: `shared_instance=yes interfaces=2 neighbour=found neighbour_by=path_request origin=default` (from `neighbour=` on asserted; `interfaces=` counts the two AutoInterface peers) |
 | 2 (built) | the `[auto]` section, the per-medium rule, the host marker and `LEVICULUM_NO_AUTO`, the `AUTO_LAYER` line | `config_present_means_only_config`; `periculum auto-layer` | `configured=1 running=1 extra=none serial_bytes=0` (asserted); `absent=115` |
-| 3 | the server list, choice persisted and logged, pinnable, fail-over, autoconnect ceiling | `zero_config_server_list` | `shared_instance=no connected=none discovered=0 failover=n/a` |
+| 3 (built) | the server list, choice persisted and logged, pinnable, fail-over, autoconnect ceiling | `zero_config_server_list` | before: `shared_instance=no connected=none discovered=0 failover=n/a`; since 1510: `config=default chosen=absent.invalid:4242,entry:4242 why=pinned failover=absent.invalid:4242tobackbone:4242 up=2`, after a restart `config=file ... why=persisted` (asserted) |
+| (built) | lnsd writes its first-start file (open question 1) | `zero_config_first_start_file` | `file=yes equals_writeconfig=yes rnstatus_wrote=none config_unchanged=yes control_wrote=yes` (asserted) |
 | 4 | "find the instance or start one" in `leviculum-std`, then lnomad and the other tools | none yet | |
 | 5 | serial: LNodes by string, RNodes by silence plus `CMD_DETECT`, `TIOCEXCL`, bootloader ids, hotplug | `serial_probe_writes_nothing_to_strangers` | `strangers=0 quiet=0 talker=0 rnode=0 rnode_probe=absent` (`strangers=0` asserted) |
 | 6 | BLE on when an adapter is present, the lab guard measured | `ble_room_auto_start` | `arm=no_config shared_instance=no interfaces=0 ble=absent`; `arm=auto_bluetooth_no ... ble=absent` (asserted) |
-| | the Debian package ships no stock configuration (or an `[auto]`-only file) | none yet | |
+| (built) | the Debian package ships no stock configuration | `just verify-deb` | `ships no /etc/reticulum/config` |
 | | the first server entry's monitoring, privacy statement and consent | none, an operating duty | |
 
-The Debian package ships `/etc/reticulum/config` today
-(`packaging/debian/reticulum-config`), Python's stock file line for line,
-and `lnsd.service` starts with `-c /etc/reticulum`
-(`packaging/debian/lnsd.service:22`). Under the rule above that file is a
-configuration present, so a package install is not zero-config until the
-package stops shipping it or ships an `[auto]`-only file.
+The Debian package shipped `/etc/reticulum/config` until 1510, Python's
+stock file line for line. Under the rule above that file was a
+configuration present, so a package install was not zero-config. The
+package ships none now ("goes", not an `[auto]`-only file: the first-start
+file makes a shipped one unnecessary), `lnsd.service` keeps starting
+`lnsd -c /etc/reticulum` (`packaging/debian/lnsd.service:22`), and
+postinst only provisions the directory, which the unit's `ReadWritePaths`
+needs. The first start writes the file. An upgrade from a package that
+shipped one leaves it to dpkg's obsolete-conffile rule: the file stays,
+byte for byte, edited or not, and keeps meaning what it meant (no
+`[auto]`, so no automatic medium); measured in a container on 2026-11-07.
 
 The cells run a second lnsd inside a periculum node, `-c` on an empty
 directory, because a node's own daemon is always rendered a file. Each of
@@ -360,17 +425,11 @@ daemon a controller without a configured BLE interface.
 
 ## Open questions
 
-1. **A Python tool writes the opt-out file.** Pointed at a zero-config
-   lnsd's directory, `rnstatus` creates rnsd's stock file there (above),
-   and the next lnsd start is "config present": the server list, BLE and
-   serial stop without the user having changed anything. Either lnsd
-   reads that exact stock file as "no file", or `lnsd --writeconfig` runs
-   on the first start after all, or the shared instance tells clients its
-   config directory. Step 2 was built without deciding it: the switches
-   change nothing a Python-written file means today (its AutoInterface is
-   a section of its own, and the other media start nothing yet), so the
-   question has to be answered before step 3, the first medium a stock
-   file would silently lose.
+1. **A Python tool writes the opt-out file.** Closed 2026-11-07, the
+   reviewer: lnsd writes its own first-start file (above). Pointed at a
+   zero-config lnsd's directory, `rnstatus` had created rnsd's stock file
+   there, and the next lnsd start was "config present": the server list,
+   BLE and serial stopped without the user having changed anything.
 2. **Which AutoInterface group.** A fresh install joins the default
    `group_id`, `reticulum`. The cells had to render their AutoInterface
    links with that group, because periculum derives one per cell by
@@ -394,6 +453,16 @@ daemon a controller without a configured BLE interface.
 - 2026-10-23, Lew: BLE on by default in the shipped builds; the lab is
   protected by configuration and a host marker, not by a test build.
 - 2026-10-23, Lew: further server operators only with their consent.
+- 2026-11-07, the reviewer (open question 1): lnsd writes its own
+  configuration on first start, the way rnsd does (`Reticulum.py:336`),
+  the exact bytes `lnsd --writeconfig` prints, `[auto]` fully populated at
+  its defaults. A Python tool pointed at that directory afterwards finds a
+  file and writes nothing, and lnsd reads its own file as what it is:
+  every medium at its default. The per-medium opt-out rule stays.
+  Rejected: recognising Python's stock file by its bytes (fragile across
+  rnsd versions), and the shared instance telling clients its directory
+  (the stock tools have no such request). The lab guard is unaffected:
+  periculum renders every node a file.
 - 2026-10-25, Lew: zero-config is the rule for every device, not only
   lnsd: switch on and it works for nine users in ten, radio and
   networking preset on every medium; the tenth configures. A board ships

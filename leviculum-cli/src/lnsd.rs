@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
-use tracing::info;
+use tracing::{info, warn};
 // (tracing-subscriber init goes through leviculum_std's
 // event_log::install_global_subscriber so the LEVICULUM_EVENT_LOG
 // env var is honoured for structured-event capture.  Codeberg #39
@@ -188,13 +188,34 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load and configure Reticulum. Without a file lnsd runs the
     // configuration rnsd would write on its first start, from memory: one
-    // AutoInterface, a shared instance, transport off (#471 step 1). The
-    // directory is left as it was; `--writeconfig` is how a file appears.
+    // AutoInterface, a shared instance, transport off (#471 step 1).
     let (mut config, source) = Config::load_or_default(&config_file)?;
+    // And writes it, the way rnsd does (`Reticulum.py:336`), the bytes
+    // `--writeconfig` writes (#471, open question 1): a Python tool pointed
+    // at this directory afterwards finds a file and writes its own stock
+    // file nowhere, and the next start reads this one, every medium at its
+    // shipped default in `[auto]`. This start keeps running what it loaded,
+    // origin `default`. A directory lnsd may not write into is a warning,
+    // not a failed start.
+    let written = match source {
+        leviculum_std::config::ConfigSource::File => "no",
+        leviculum_std::config::ConfigSource::Default => match write_default_config(&config_file) {
+            Ok(()) => "yes",
+            Err(e) => {
+                warn!(
+                    "Could not write the first-start configuration to {}: {}",
+                    config_file.display(),
+                    e
+                );
+                "failed"
+            }
+        },
+    };
     info!(
         event = "CONFIG",
         source = %source.as_str(),
         path = %leviculum_std::event_log::Scalar(&config_file.display().to_string()),
+        written = written,
     );
     // The automatic layer (#471 step 2): the file's `[auto]` section, or the
     // shipped defaults without a file, unless the host marker or
@@ -213,6 +234,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .storage
         .unwrap_or_else(|| config.reticulum.resolve_storage_path(&config_dir));
     info!("Storage: {}", storage_path.display());
+    // The servers medium (#471 step 3) keeps its choice in the storage
+    // directory, so it is applied once that is known.
+    let env_servers = std::env::var(leviculum_std::auto_servers::ENV_SERVERS).ok();
+    leviculum_std::auto_servers::apply(
+        &mut config,
+        auto_layer,
+        env_servers.as_deref(),
+        Some(&storage_path),
+    )?;
     config.reticulum.storage_path = Some(storage_path);
 
     // Resource receive-window policy (Codeberg #85): env var, not a config
@@ -406,7 +436,14 @@ fn write_default_config(path: &std::path::Path) -> Result<(), Box<dyn std::error
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, LNSD_DEFAULT_CONFIG)?;
+    // `create_new`: a file that appeared since the check above, a Python
+    // tool's on a first start, is not replaced either.
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(LNSD_DEFAULT_CONFIG.as_bytes())?;
     Ok(())
 }
 

@@ -2792,6 +2792,7 @@ impl ReticulumNode {
                 shutdown: Some(shutdown_rx),
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
                 liveness: TcpLiveness::default(),
+                failover: None,
             })
         };
 
@@ -5811,6 +5812,7 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             shutdown: None,
             outbound_socket_hook: self.outbound_socket_hook.clone(),
             liveness: TcpLiveness::default(),
+            failover: None,
         });
         // A discovered peer we dialled ourselves comes up as a gateway while
         // this node routes for others, and stays `Full` otherwise: Python

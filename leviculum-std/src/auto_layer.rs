@@ -3,9 +3,10 @@
 //! A fresh lnsd brings up what the machine offers; a configuration file is
 //! the opt-out, per medium, through its `[auto]` section. This module holds
 //! the four switches, the rule that turns a file, the host marker and the
-//! environment into one decision, and the one medium the decision moves
-//! today: the LAN (an AutoInterface). The other three keys are read and
-//! reported, and start nothing until their steps land.
+//! environment into one decision, and the medium it moves itself: the LAN
+//! (an AutoInterface). The servers medium is [`crate::auto_servers`] (step
+//! 3). Bluetooth and serial are read and reported, and start nothing until
+//! their steps land.
 //!
 //! The decision sits in front of the core. It edits the interface list a
 //! [`Config`] hands the builder, and the core never learns that an
@@ -34,7 +35,7 @@ pub const ENV_NO_AUTO: &str = "LEVICULUM_NO_AUTO";
 pub struct AutoMedia {
     /// An AutoInterface when the configuration names none.
     pub lan: bool,
-    /// The shipped server list (step 3; starts nothing yet).
+    /// The shipped server list (step 3, [`crate::auto_servers`]).
     pub servers: bool,
     /// BLE when an adapter is present (step 6; starts nothing yet).
     pub bluetooth: bool,
@@ -57,7 +58,7 @@ impl AutoMedia {
     /// step lands.
     pub const SHIPPED: Self = Self {
         lan: true,
-        servers: false,
+        servers: true,
         bluetooth: false,
         serial: false,
     };
@@ -373,7 +374,7 @@ mod tests {
         };
         assert_eq!(
             layer.summary(),
-            "on reason=default lan=yes servers=no bluetooth=no serial=no"
+            "on reason=default lan=yes servers=yes bluetooth=no serial=no"
         );
     }
 

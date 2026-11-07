@@ -1278,7 +1278,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["key", "value", "rnsd"],
     },
     // Which configuration lnsd runs (`lnsd.rs`, #471): the file at `path`,
-    // or the built-in default because there is none. Once at startup.
+    // or the built-in default because there is none, and whether lnsd wrote
+    // that default to `path` on this start (`written=yes|no|failed`, open
+    // question 1). Once at startup.
     EventSchema {
         name: "CONFIG",
         required_keys: &["source", "path"],
@@ -1296,6 +1298,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "AUTO_LAYER",
         required_keys: &["state", "reason", "lan", "servers", "bluetooth", "serial"],
+    },
+    // The servers medium's choice (`auto_servers.rs`, #471 step 3): which
+    // list entry slot `slot` dials (`chosen`, `host:port`), why
+    // (`persisted`, `drawn`, `pinned`, `failover`, or `empty` with
+    // `chosen=none` for a list of none), and the entry a fail-over left
+    // (`from`, else `none`). Once per slot at startup, again per fail-over.
+    EventSchema {
+        name: "AUTO_SERVER",
+        required_keys: &["slot", "chosen", "reason", "from"],
     },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
@@ -1758,7 +1769,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4933`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4934`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the
