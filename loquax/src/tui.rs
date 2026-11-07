@@ -22,7 +22,7 @@ use crossterm::event::{
     Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -299,7 +299,7 @@ async fn run_terminal(
     if log_input {
         tracing::info!("INPUT log=on");
     }
-    let mut events = EventStream::new();
+    let events = EventStream::new();
     shell.apply(UiEvent::Clock(local_now()));
     let size = terminal.size().map_err(|e| e.to_string())?;
     shell.apply(UiEvent::Resize {
@@ -321,6 +321,25 @@ async fn run_terminal(
     // A frame that panicked is drawn again on the next input, not on
     // every pump.
     let mut panicked = false;
+    // Three parts from here (1492): the input task only reads keys and
+    // the mouse into the model's queue, the engine's reader thread only
+    // reads the engine, and this loop folds both and draws when the
+    // stamp moved. Before, the engine was read on this loop between two
+    // reads of the keyboard, so a slow engine step held every key back.
+    let (inputs_tx, mut inputs) = tokio::sync::mpsc::unbounded_channel();
+    let input = read_input(events, inputs_tx);
+    let (reads_tx, reads_rx) = tokio::sync::mpsc::channel(READS_QUEUED);
+    let mut engine = None;
+    let mut reads = None;
+    if let Some(reader) = shell.lend_engine() {
+        match EngineThread::spawn(reader, reads_tx) {
+            Ok(thread) => {
+                engine = Some(thread);
+                reads = Some(reads_rx);
+            }
+            Err(reader) => shell.take_engine_back(reader),
+        }
+    }
 
     let result = loop {
         for output in std::mem::take(&mut shell.outputs) {
@@ -374,9 +393,10 @@ async fn run_terminal(
             }
             if let Some(ended) = wait(
                 shell,
-                &mut events,
+                &mut inputs,
                 log_input,
-                &mut painter,
+                &mut reads,
+                painter.ready(),
                 &mut pump,
                 &mut tick,
                 &mut clocks,
@@ -426,9 +446,10 @@ async fn run_terminal(
         }
         if let Some(ended) = wait(
             shell,
-            &mut events,
+            &mut inputs,
             log_input,
-            &mut painter,
+            &mut reads,
+            painter.ready(),
             &mut pump,
             &mut tick,
             &mut clocks,
@@ -440,6 +461,14 @@ async fn run_terminal(
             break ended;
         }
     };
+    input.abort();
+    // What the reader read before it stopped is folded, and the outbox is
+    // the shell's again for its settle.
+    if let Some(thread) = engine {
+        if let Some(reader) = thread.stop(shell, reads).await {
+            shell.take_engine_back(reader);
+        }
+    }
     // How many map pictures went up, beside the GRAPHICS line: a held key
     // that drew far fewer than it pressed was coalesced (1075).
     tracing::info!("GRAPHICS paints={}", painter.paints());
@@ -463,17 +492,182 @@ fn frame_stamp<B>(model: &loquax::ui::UiModel<B>) -> u64 {
     )
 }
 
+/// What the terminal's loop turns (1492): the shell, or a test's stand-in
+/// whose engine stalls.
+trait Turned {
+    /// Fold one event of the model's queue.
+    fn apply(&mut self, event: UiEvent);
+    /// Fold what the engine's reader thread read.
+    fn fold_read(&mut self, read: EngineRead);
+    /// The shell's own queues: runners, notices, the loader, the clock of
+    /// the schedule; the engine too while it is not lent.
+    fn poll(&mut self);
+    /// The clock's tick.
+    fn tick(&mut self, clocks: &mut (i64, u64));
+}
+
+impl Turned for Shell {
+    fn apply(&mut self, event: UiEvent) {
+        Shell::apply(self, event);
+    }
+
+    fn fold_read(&mut self, read: EngineRead) {
+        Shell::fold_read(self, read);
+    }
+
+    fn poll(&mut self) {
+        Shell::poll(self);
+    }
+
+    fn tick(&mut self, clocks: &mut (i64, u64)) {
+        Shell::tick(self, clocks);
+    }
+}
+
+/// One read of the terminal's input: what crossterm's stream yielded,
+/// `None` once it ended.
+type InputRead = Option<std::io::Result<Event>>;
+
+/// One read of the engine's reader thread.
+type EngineRead = Result<Vec<loquax::outbox::OutboxEvent>, loquax::outbox::OutboxGone>;
+
+/// How many reads the engine's thread may have queued before it waits for
+/// the loop to fold them: a first pull's thousands stay in the engine's
+/// queue, and a tap holds no event the screen has not folded (1446).
+const READS_QUEUED: usize = 64;
+
+/// The input task (1492): reads the terminal's keys, mouse and resizes into
+/// the model's queue and does nothing else, so no engine step and no
+/// frame stands between a key and its read. Ends with the stream.
+fn read_input(
+    mut events: EventStream,
+    queue: tokio::sync::mpsc::UnboundedSender<InputRead>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let item = events.next().await;
+            let last = !matches!(item, Some(Ok(_)));
+            if queue.send(item).is_err() || last {
+                return;
+            }
+        }
+    })
+}
+
+/// The engine's reader on a thread of its own (1492): it hands the taps'
+/// commands to the engine and reads the engine's events into the loop's
+/// queue, one slice at a time ([`loquax::fanout::SLICE`]), so an engine
+/// step that stalls stalls only this thread.
+struct EngineThread<O> {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<Option<loquax::fanout::Reader<O>>>,
+}
+
+impl<O: loquax::outbox::Outbox + Send + 'static> EngineThread<O> {
+    /// The thread started with `reader`, or the reader back when no thread
+    /// would start.
+    fn spawn(
+        reader: loquax::fanout::Reader<O>,
+        reads: tokio::sync::mpsc::Sender<EngineRead>,
+    ) -> Result<Self, loquax::fanout::Reader<O>> {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        // Handed over once the thread runs, so a thread that would not
+        // start leaves the reader here.
+        let (hand, handed) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("loquax-engine".to_string())
+            .spawn(move || {
+                let reader = handed.recv().ok()?;
+                Some(read_engine(reader, &stopping, &reads))
+            });
+        match spawned {
+            Ok(thread) => match hand.send(reader) {
+                Ok(()) => Ok(Self { stop, thread }),
+                Err(back) => Err(back.0),
+            },
+            Err(error) => {
+                tracing::warn!("ENGINE reader thread not started, read on the loop: {error}");
+                Err(reader)
+            }
+        }
+    }
+
+    /// Stop the thread: every read it queued is folded into `turned`
+    /// first, then the reader comes back.
+    async fn stop<T: Turned>(
+        self,
+        turned: &mut T,
+        mut reads: Option<tokio::sync::mpsc::Receiver<EngineRead>>,
+    ) -> Option<loquax::fanout::Reader<O>> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(reads) = reads.as_mut() {
+            // Ends when the thread returned and dropped its sender.
+            while let Some(read) = reads.recv().await {
+                turned.fold_read(read);
+            }
+        }
+        match self.thread.join() {
+            Ok(reader) => reader,
+            Err(_) => {
+                tracing::error!("ENGINE reader thread panicked");
+                None
+            }
+        }
+    }
+}
+
+/// The reader thread's loop: a slice read and queued, or a pump's wait when
+/// the engine had nothing, until stopped, the loop gone, or the engine.
+fn read_engine<O: loquax::outbox::Outbox>(
+    mut reader: loquax::fanout::Reader<O>,
+    stop: &std::sync::atomic::AtomicBool,
+    reads: &tokio::sync::mpsc::Sender<EngineRead>,
+) -> loquax::fanout::Reader<O> {
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        match reader.read_at_most(loquax::fanout::SLICE.chunk) {
+            Ok(events) if events.is_empty() => {
+                std::thread::sleep(Duration::from_millis(PUMP_MS));
+            }
+            Ok(events) => {
+                if reads.blocking_send(Ok(events)).is_err() {
+                    break;
+                }
+            }
+            Err(gone) => {
+                let _ = reads.blocking_send(Err(gone));
+                break;
+            }
+        }
+    }
+    reader
+}
+
+/// The next read of the engine's thread; never, when there is none.
+async fn next_read(
+    reads: &mut Option<tokio::sync::mpsc::Receiver<EngineRead>>,
+) -> Option<EngineRead> {
+    match reads {
+        Some(reads) => reads.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The loop's wait for what comes next: input, a map picture painted, the
-/// engine's pump or the clock. Input and a picture owe a frame whatever
-/// the revision says; the pump and the clock fold, and the revision says
-/// whether that changed anything shown. `Some` when the input ended the
-/// run.
+/// engine's reads, the shell's pump or the clock. Input and a picture owe
+/// a frame whatever the revision says; the rest fold, and the revision
+/// says whether that changed anything shown. None of the branches waits
+/// on the engine: its reads come from its own thread, a slice's budget
+/// folded at a time and stopped at once when input waits (1464, 1492).
+/// Not biased: a drag's stream of motions does not starve the clock.
+/// `Some` when the input ended the run.
 #[allow(clippy::too_many_arguments)]
-async fn wait(
-    shell: &mut Shell,
-    events: &mut EventStream,
+async fn wait<T: Turned>(
+    shell: &mut T,
+    inputs: &mut tokio::sync::mpsc::UnboundedReceiver<InputRead>,
     log_input: bool,
-    painter: &mut map::MapPainter,
+    reads: &mut Option<tokio::sync::mpsc::Receiver<EngineRead>>,
+    painted: impl std::future::Future<Output = ()>,
     pump: &mut tokio::time::Interval,
     tick: &mut tokio::time::Interval,
     clocks: &mut (i64, u64),
@@ -481,17 +675,34 @@ async fn wait(
     panicked: &mut bool,
 ) -> Option<Result<(), String>> {
     tokio::select! {
-        item = events.next() => {
+        item = inputs.recv() => {
             // A held key's repeats and a drag's motions that queued
             // while the last frame was drawn are one frame at the
-            // newest view, not a frame each (1075).
-            let ended = apply_waiting(item, events, log_input, |event| shell.apply(event));
+            // newest view, not a frame each (1075). A queue whose task
+            // is gone is the stream's end.
+            let ended = apply_waiting(
+                item.flatten(),
+                || inputs.try_recv().ok(),
+                log_input,
+                |event| shell.apply(event),
+            );
             *panicked = false;
             presented.owe();
             ended
         }
-        _ = painter.ready() => {
+        _ = painted => {
             presented.owe();
+            None
+        }
+        Some(read) = next_read(reads) => {
+            shell.fold_read(read);
+            let began = std::time::Instant::now();
+            while inputs.is_empty() && began.elapsed() < loquax::fanout::SLICE.budget {
+                match reads.as_mut().map(|r| r.try_recv()) {
+                    Some(Ok(read)) => shell.fold_read(read),
+                    _ => break,
+                }
+            }
             None
         }
         _ = pump.tick() => {
@@ -586,18 +797,16 @@ fn unwound<R>(f: impl FnOnce() -> R) -> Result<R, String> {
     })
 }
 
-/// `first` and every event already waiting behind it on `events`, applied
-/// in order without waiting for more; `Some` when the stream ended. With
-/// `log_input` each is an `INPUT` line in `tui.log` first, as it came.
-fn apply_waiting<S>(
-    first: Option<std::io::Result<Event>>,
-    events: &mut S,
+/// `first` and every event already waiting behind it in the model's queue
+/// (`waiting`), applied in order without waiting for more; `Some` when the
+/// stream ended. With `log_input` each is an `INPUT` line in `tui.log`
+/// first, as it came.
+fn apply_waiting(
+    first: InputRead,
+    mut waiting: impl FnMut() -> Option<InputRead>,
     log_input: bool,
     mut apply: impl FnMut(UiEvent),
-) -> Option<Result<(), String>>
-where
-    S: futures::Stream<Item = std::io::Result<Event>> + Unpin,
-{
+) -> Option<Result<(), String>> {
     let mut item = first;
     loop {
         if let (true, Some(Ok(event))) = (log_input, &item) {
@@ -608,7 +817,7 @@ where
             EventStep::Ignore => {}
             EventStep::End(result) => return Some(result.map_err(|e| e.to_string())),
         }
-        item = events.next().now_or_never()?;
+        item = waiting()?;
     }
 }
 
@@ -3984,13 +4193,17 @@ mod tests {
         };
         // Nine waiting behind the first, then nothing more: the drain must
         // not wait for an eleventh.
-        let mut events =
-            futures::stream::iter((0..9).map(|_| right())).chain(futures::stream::pending());
+        let mut events = (0..9).map(|_| Some(right()));
         let mut applied = 0;
-        let ended = apply_waiting(Some(right()), &mut events, false, |event| {
-            applied += 1;
-            update(&mut model, event);
-        });
+        let ended = apply_waiting(
+            Some(right()),
+            || events.next(),
+            false,
+            |event| {
+                applied += 1;
+                update(&mut model, event);
+            },
+        );
         assert!(ended.is_none(), "the stream goes on");
         assert_eq!(applied, 10);
         let state = model.map.expect("open");
@@ -4067,5 +4280,169 @@ mod tests {
         assert!(!on(Some("0")));
         assert!(!on(Some("")));
         assert!(!on(None));
+    }
+
+    /// An engine whose first read stalls for `stall`, saying on `entered`
+    /// when it began: the slow engine step of 1492.
+    struct Stalling {
+        stall: Duration,
+        entered: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl loquax::outbox::Outbox for Stalling {
+        fn submit(
+            &self,
+            _command: loquax::outbox::Command,
+        ) -> Result<(), loquax::outbox::OutboxGone> {
+            Ok(())
+        }
+
+        fn try_next_event(
+            &mut self,
+        ) -> Result<Option<loquax::outbox::OutboxEvent>, loquax::outbox::OutboxGone> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+                std::thread::sleep(self.stall);
+            }
+            Ok(None)
+        }
+    }
+
+    /// The loop's stand-in for the shell: when each event was applied, and
+    /// in the old layout the engine read on the loop's own task.
+    struct Stand {
+        applied: Vec<(std::time::Instant, UiEvent)>,
+        inline: Option<(loquax::fanout::Fanout, Stalling)>,
+    }
+
+    impl Turned for Stand {
+        fn apply(&mut self, event: UiEvent) {
+            self.applied.push((std::time::Instant::now(), event));
+        }
+
+        fn fold_read(&mut self, _read: EngineRead) {}
+
+        fn poll(&mut self) {
+            if let Some((fanout, engine)) = &mut self.inline {
+                let _ = fanout.pump(engine);
+            }
+        }
+
+        fn tick(&mut self, _clocks: &mut (i64, u64)) {}
+    }
+
+    /// The stall the key is typed into (1492).
+    const STALL: Duration = Duration::from_secs(2);
+
+    /// Turn the loop as the terminal does while a key is typed into the
+    /// engine's stall; how long after the key the model had it.
+    async fn key_into_a_stall(
+        stand: &mut Stand,
+        mut reads: Option<tokio::sync::mpsc::Receiver<EngineRead>>,
+        entered: std::sync::mpsc::Receiver<()>,
+    ) -> (Duration, Option<tokio::sync::mpsc::Receiver<EngineRead>>) {
+        let (inputs_tx, mut inputs) = tokio::sync::mpsc::unbounded_channel();
+        // The key comes from another thread, as the input task's read
+        // does, once the engine is inside its stall.
+        let typist = std::thread::spawn(move || {
+            entered.recv().expect("the engine stalls");
+            std::thread::sleep(Duration::from_millis(100));
+            let typed = std::time::Instant::now();
+            let key = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            );
+            inputs_tx.send(Some(Ok(Event::Key(key)))).expect("the loop");
+            // Held until the loop is done: a dropped queue is an end.
+            (typed, inputs_tx)
+        });
+        let mut pump = tokio::time::interval(Duration::from_millis(PUMP_MS));
+        pump.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut clocks = (0, 0);
+        let mut presented = ui::Presented::default();
+        let mut panicked = false;
+        let deadline = std::time::Instant::now() + STALL * 5;
+        let applied = loop {
+            let key = stand
+                .applied
+                .iter()
+                .find(|(_, e)| matches!(e, UiEvent::Key(k) if k.code == KeyCode::Char('x')));
+            if let Some((at, _)) = key {
+                break *at;
+            }
+            assert!(std::time::Instant::now() < deadline, "the key never came");
+            let ended = wait(
+                stand,
+                &mut inputs,
+                false,
+                &mut reads,
+                std::future::pending::<()>(),
+                &mut pump,
+                &mut tick,
+                &mut clocks,
+                &mut presented,
+                &mut panicked,
+            )
+            .await;
+            assert!(ended.is_none(), "the input goes on");
+        };
+        let (typed, _inputs_tx) = typist.join().expect("the typist");
+        (applied.saturating_duration_since(typed), reads)
+    }
+
+    /// 1492: a key typed while the engine's step stalls for 2 s is in the
+    /// model within one tick, because the engine is read on its own
+    /// thread; the control, the engine read on the loop's task as before
+    /// 1492, has it only once the stall is over.
+    #[tokio::test]
+    async fn a_key_typed_into_a_stalled_engine_step_is_applied_within_one_tick() {
+        // The old layout: the pump reads the engine on the loop's task.
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let mut stand = Stand {
+            applied: Vec::new(),
+            inline: Some((
+                loquax::fanout::Fanout::default(),
+                Stalling {
+                    stall: STALL,
+                    entered: Some(entered_tx),
+                },
+            )),
+        };
+        let (old, _) = key_into_a_stall(&mut stand, None, entered).await;
+        eprintln!("STALL_KEY layout=inline key_ms={}", old.as_millis());
+        assert!(
+            old >= STALL - Duration::from_millis(400),
+            "the control holds the key behind the stall: {old:?}"
+        );
+
+        // The terminal's layout: the engine read on its own thread.
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let mut fanout = loquax::fanout::Fanout::default();
+        let Ok(reader) = fanout.lend(Stalling {
+            stall: STALL,
+            entered: Some(entered_tx),
+        }) else {
+            panic!("lent once")
+        };
+        let (reads_tx, reads_rx) = tokio::sync::mpsc::channel(READS_QUEUED);
+        let Ok(thread) = EngineThread::spawn(reader, reads_tx) else {
+            panic!("the reader thread starts")
+        };
+        let mut stand = Stand {
+            applied: Vec::new(),
+            inline: None,
+        };
+        let (new, reads) = key_into_a_stall(&mut stand, Some(reads_rx), entered).await;
+        eprintln!("STALL_KEY layout=thread key_ms={}", new.as_millis());
+        assert!(
+            new < Duration::from_millis(TICK_MS),
+            "the key waits for no engine step: {new:?}"
+        );
+        // Stopping waits out the stall and hands the reader back.
+        let reader = thread.stop(&mut stand, reads).await;
+        assert!(reader.is_some(), "the reader comes back");
+        fanout.take_back(reader.expect("back"));
     }
 }

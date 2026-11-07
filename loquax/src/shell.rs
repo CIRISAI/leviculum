@@ -204,6 +204,10 @@ pub(crate) struct Shell {
     store_failed: bool,
     attached: Attached,
     fanout: Fanout,
+    /// The engine's outbox is lent to the terminal's reader thread
+    /// ([`Shell::lend_engine`], 1492): the reads come in through
+    /// [`Shell::fold_read`], and [`Shell::poll`] reads none itself.
+    lent: bool,
     context: RunContext,
     /// Sends not yet started, oldest first. They run one at a time: the
     /// model names a queued message after the oldest running send.
@@ -790,16 +794,12 @@ impl Shell {
     /// 4000 entries, the phone's measure (1446).
     pub(crate) fn poll(&mut self) {
         let mut slicing = loquax::fanout::Slicing::new(loquax::fanout::SLICE);
-        loop {
+        while !self.lent {
             match slicing.next(&mut self.fanout, &mut self.attached.outbox, false) {
                 Ok(Some(events)) => self.fold(events),
                 Ok(None) => break,
                 Err(gone) => {
-                    if !self.gone {
-                        self.gone = true;
-                        self.apply(UiEvent::Notice(gone.to_string()));
-                        self.afterwards.push(gone.to_string());
-                    }
+                    self.engine_gone(gone);
                     break;
                 }
             }
@@ -838,6 +838,62 @@ impl Shell {
         self.fold_browsed(browsed);
         for told in self.rooming.told() {
             self.apply(told);
+        }
+    }
+
+    /// The engine stopped answering: said once, on screen and after it.
+    fn engine_gone(&mut self, gone: OutboxGone) {
+        if !self.gone {
+            self.gone = true;
+            self.apply(UiEvent::Notice(gone.to_string()));
+            self.afterwards.push(gone.to_string());
+        }
+    }
+
+    /// Lend the engine's outbox to a reader on a thread of its own (1492):
+    /// the terminal reads the engine there, so an engine step that stalls
+    /// never holds a key back. `None` when it is lent already.
+    #[cfg(feature = "tui")]
+    pub(crate) fn lend_engine(
+        &mut self,
+    ) -> Option<loquax::fanout::Reader<loquax::engine::InProcessOutbox>> {
+        let outbox = std::mem::replace(
+            &mut self.attached.outbox,
+            loquax::engine::InProcessOutbox::severed(),
+        );
+        match self.fanout.lend(outbox) {
+            Ok(reader) => {
+                self.lent = true;
+                Some(reader)
+            }
+            Err(outbox) => {
+                self.attached.outbox = outbox;
+                None
+            }
+        }
+    }
+
+    /// The engine's outbox back from the reader: [`Shell::poll`] and
+    /// [`Shell::settle`] read it again.
+    #[cfg(feature = "tui")]
+    pub(crate) fn take_engine_back(
+        &mut self,
+        reader: loquax::fanout::Reader<loquax::engine::InProcessOutbox>,
+    ) {
+        self.attached.outbox = self.fanout.take_back(reader);
+        self.lent = false;
+    }
+
+    /// What the reader read, handed to the taps and folded as
+    /// [`Shell::poll`] folds what it reads itself.
+    #[cfg(feature = "tui")]
+    pub(crate) fn fold_read(&mut self, read: Result<Vec<OutboxEvent>, OutboxGone>) {
+        match read {
+            Ok(events) => {
+                self.fanout.deliver(&events);
+                self.fold(events);
+            }
+            Err(gone) => self.engine_gone(gone),
         }
     }
 
@@ -1692,6 +1748,7 @@ pub(crate) async fn start(
         store_failed: false,
         attached,
         fanout: Fanout::default(),
+        lent: false,
         context: RunContext {
             home,
             config_dir,
