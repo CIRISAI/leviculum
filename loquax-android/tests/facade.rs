@@ -7368,3 +7368,214 @@ fn a_relayed_group_is_the_phones_golden() {
         "relay-group.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
     );
 }
+
+/// The read receipts of the messages Python's router handed its delivery
+/// callback (`umsgpack.packb(message.fields)`): every id a `lev` receipt
+/// names.
+fn python_receipts(received: &[serde_json::Value]) -> Vec<[u8; 32]> {
+    let mut ids = Vec::new();
+    for message in received {
+        let Some(packed) = message.get("fields").and_then(|f| f.as_str()) else {
+            continue;
+        };
+        let Some(packed): Option<Vec<u8>> = (0..packed.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+            .collect()
+        else {
+            continue;
+        };
+        use leviculum_lxmf::msgpack;
+        let mut at = 0;
+        let Ok(entries) = msgpack::map_len(&packed, &mut at) else {
+            continue;
+        };
+        let mut fields = Vec::new();
+        for _ in 0..entries {
+            let Ok(key) = msgpack::read_int(&packed, &mut at) else {
+                break;
+            };
+            let start = at;
+            if msgpack::skip(&packed, &mut at).is_err() {
+                break;
+            }
+            fields.push((key, packed[start..at].to_vec()));
+        }
+        if let Some(receipt) =
+            leviculum_lxmf::lev::Lev::from_fields(&fields).and_then(|lev| lev.receipt)
+        {
+            ids.extend(receipt.ids);
+        }
+    }
+    ids
+}
+
+/// The phone sends a read receipt a Python peer sees (1496, structure
+/// review 2026-11-07 finding 10). A Python LXMF client that marks its
+/// message as one that wants receipts (`lev` `{0x00: 1}`) sends DIRECT to
+/// the mailbox on the phone; the chat opens in front. Negative first: open
+/// and in front, without a viewport, as the phone was before 1496 (no Java
+/// said one), Python gets no receipt in twice the batch time. Then the
+/// viewport `ChatActivity` says, with the bubble's key: Python receives a
+/// `lev` receipt that names its message's id, signed by the mailbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_python_writer_sees_the_read_once_the_phone_says_its_viewport() {
+    use leviculum_lxmf::lev::{Lev, CAP_READ_RECEIPTS};
+    use loquax::ui::receipts::BATCH_MS;
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        lang: Some("en".to_string()),
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    let mark = Lev::mark();
+    assert_eq!(mark.capabilities, Some(CAP_READ_RECEIPTS));
+    let mut fields = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut fields, 2);
+    for (key, value) in mark.fields() {
+        leviculum_lxmf::msgpack::int(&mut fields, key);
+        fields.extend_from_slice(&value);
+    }
+    let body = "lies mich";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": hex(body.as_bytes()),
+                "fields": hex(&fields),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let id: [u8; 32] = (0..32)
+        .map(|i| u8::from_str_radix(&message_hash[2 * i..2 * i + 2], 16).expect("hex"))
+        .collect::<Vec<u8>>()
+        .try_into()
+        .expect("32 bytes");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // The bubble on the screens, the chat open and in front.
+    let shown = python.clone();
+    let (session, key) = tokio::task::spawn_blocking(move || {
+        let messages: schema::Messages = wait_for(
+            &session,
+            schema::Query::Messages {
+                peer: shown.clone(),
+            },
+            30,
+            |m: &schema::Messages| m.messages.iter().any(|b| b.body == body),
+        );
+        let key = messages
+            .messages
+            .iter()
+            .find(|b| b.body == body)
+            .expect("the bubble")
+            .key;
+        session
+            .request(Request::Open {
+                peer: shown.clone(),
+            })
+            .expect("open");
+        session
+            .request(Request::Front { front: true })
+            .expect("front");
+        (session, key)
+    })
+    .await
+    .expect("the open chat");
+
+    // Negative: no viewport, no receipt.
+    let quiet = tokio::time::Instant::now() + Duration::from_millis(2 * BATCH_MS + 1_000);
+    while tokio::time::Instant::now() < quiet {
+        assert!(
+            !python_receipts(&peer.received()).contains(&id),
+            "a receipt without a viewport"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // The viewport, as ChatActivity says it: Python sees the read.
+    let shown = python.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        session
+            .request(Request::Viewport {
+                peer: shown,
+                keys: vec![key],
+            })
+            .expect("viewport");
+        session
+    })
+    .await
+    .expect("the viewport");
+    let said = tokio::time::Instant::now();
+    let deadline = said + Duration::from_secs(60);
+    loop {
+        if python_receipts(&peer.received()).contains(&id) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python never saw the read: {:?}",
+            peer.received()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    println!(
+        "COUNTS phone.receipt python_saw_read_after_ms={}",
+        said.elapsed().as_millis()
+    );
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+}
