@@ -115,6 +115,16 @@ pub struct Restored {
     pub listing: Option<super::listing::Listing>,
 }
 
+/// What [`UiModel::take_touched`] hands a store that keeps rows, not
+/// messages (1521b).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Touched {
+    /// The conversations whose row changed, deleted ones left out.
+    pub peers: alloc::collections::BTreeSet<[u8; 16]>,
+    /// The conversations deleted, in the order they went.
+    pub gone: Vec<[u8; 16]>,
+}
+
 /// One change for the store to make.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreWrite {
@@ -358,6 +368,7 @@ impl<B> UiModel<B> {
                 .and_then(|c| c.messages.iter().find(|m| m.activity == key));
             if let Some(message) = found {
                 touched.insert(peer);
+                self.ops.add(super::counters::Op::Copied, 1);
                 writes.push(StoreWrite::Message {
                     peer,
                     message: message.clone(),
@@ -426,6 +437,40 @@ impl<B> UiModel<B> {
         }
         writes.append(&mut self.forgotten);
         writes
+    }
+
+    /// What a fold changed, by conversation, for a shell whose store
+    /// keeps its own entries and only a row per conversation (1521b, the
+    /// M9): the queues [`Self::take_writes`] drains, drained alike, with
+    /// no message copied and no listing built. The board wants the peers
+    /// whose rows changed and the conversations deleted; [`Self::take_writes`]
+    /// cloned every changed message to hand it that, and on a restore
+    /// that is every message the store holds (1521b: the clones and their
+    /// drop under the board's first-fit heap were 56 s of window 7's
+    /// boot).
+    pub fn take_touched(&mut self) -> Touched {
+        let mut peers = core::mem::take(&mut self.listing_owed);
+        let mut changed = core::mem::take(&mut self.owed_changed);
+        changed.append(&mut self.changed);
+        peers.extend(changed.into_iter().map(|(peer, _)| peer));
+        peers.append(&mut self.owed_peers);
+        peers.append(&mut self.changed_peers);
+        self.fixes_received.clear();
+        let now = self.elapsed_ms;
+        let quit = self.quit;
+        self.drafts_due.retain(|_, &mut at| !(quit || at <= now));
+        let _ = self.take_share_writes();
+        self.owed_groups.clear();
+        self.groups_changed.clear();
+        let _ = self.pn_asker.take_changed();
+        let mut gone = Vec::new();
+        for write in core::mem::take(&mut self.forgotten) {
+            if let StoreWrite::ForgetConversation { peer } = write {
+                peers.remove(&peer);
+                gone.push(peer);
+            }
+        }
+        Touched { peers, gone }
     }
 
     /// Make every draft not yet written due now: the shell is about to end

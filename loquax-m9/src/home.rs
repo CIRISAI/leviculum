@@ -14,7 +14,7 @@ use loquax::home::board;
 use loquax::home::board::rows::{self, Index, RowLog, State, Window};
 use loquax::home::board::store::{self, Appended, PendingAsk, Restored, Sectors, Store};
 use loquax::home::wire::{Entry, Mark, Submission};
-use loquax::ui::history::{StoreRead, StoreWrite};
+use loquax::ui::history::StoreRead;
 use loquax::ui::listing::Row;
 use loquax::ui::{groups, update, Batch, Pane, UiEffect, UiEvent, UiModel};
 
@@ -328,7 +328,7 @@ pub fn restore_timed<S: Sectors>(
                 shown.selected = top(&shown);
                 shown.keys_above(rows::live_floor(state.cursor));
                 let _ = shown.take_marks();
-                let _ = shown.take_writes();
+                let _ = shown.take_touched();
                 let restored = Restored {
                     entries: state.entries,
                     sectors: ring.used(),
@@ -411,7 +411,7 @@ fn rebuild<S: Sectors>(
     // The fold just said marks for what it restored as read; they are the
     // store's own entries played back, nothing the home still owes.
     let _ = shown.take_marks();
-    let _ = shown.take_writes();
+    let _ = shown.take_touched();
     shown.keys_above(rows::live_floor(ring.cursor()));
     let peers: Vec<[u8; 16]> = shown.conversations.iter().map(|c| c.peer).collect();
     for peer in peers {
@@ -533,8 +533,8 @@ pub struct Routed {
 
 /// Route everything a fold left behind (1493): `effects` as [`update`]
 /// returned them, and the queues the desktop's shell drains each fold
-/// (`take_marks`, `take_writes`, petnames, peer states), which grew until
-/// reboot on a board that never drained them. Marks become `/mark` asks;
+/// (`take_marks`, the store writes as `take_touched`, petnames, peer
+/// states), which grew until reboot on a board that never drained them. Marks become `/mark` asks;
 /// a send and a group verb their asks, each under a fresh id from `ids`
 /// (the same id asked again is the same message at the home). Store
 /// writes are drained and dropped: the message store in flash already
@@ -552,23 +552,15 @@ pub fn route(
     }
     // What the store would write (1521): the conversations the fold
     // changed, each as its row, for the summary log; the messages
-    // themselves are in the ring already, entry by entry.
-    let mut changed: alloc::collections::BTreeSet<[u8; 16]> = alloc::collections::BTreeSet::new();
-    for write in model.take_writes() {
-        match write {
-            StoreWrite::Listing { peer, .. }
-            | StoreWrite::Conversation { peer, .. }
-            | StoreWrite::Message { peer, .. } => {
-                changed.insert(peer);
-            }
-            StoreWrite::ForgetConversation { peer } => {
-                changed.remove(&peer);
-                out.gone.push(peer);
-            }
-            _ => {}
-        }
-    }
-    out.rows = changed.iter().filter_map(|peer| model.row(peer)).collect();
+    // themselves are in the ring already, entry by entry, so none is
+    // copied to say which rows changed (1521b, `take_touched`).
+    let touched = model.take_touched();
+    out.gone = touched.gone;
+    out.rows = touched
+        .peers
+        .iter()
+        .filter_map(|peer| model.row(peer))
+        .collect();
     if !model.take_petnames().is_empty() {
         out.unrouted.push("petnames");
     }

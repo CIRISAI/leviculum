@@ -51,6 +51,12 @@ pub struct Counters {
     /// was behind them (1521): a batch's folds before its note did, every
     /// message of the conversation per entry.
     pub walked: u32,
+    /// Messages copied into store writes ([`super::history::StoreWrite::Message`]),
+    /// each a whole message cloned for a store that keeps it (1521b). A
+    /// board's store keeps its entries, not the model's copies: there it
+    /// is waste, and under the board's first-fit heap the copies' drop
+    /// cost the M9 a minute of its restore.
+    pub copied: u32,
 }
 
 impl Add for Counters {
@@ -68,6 +74,7 @@ impl Add for Counters {
             store_rows_read: self.store_rows_read + other.store_rows_read,
             commits: self.commits + other.commits,
             walked: self.walked + other.walked,
+            copied: self.copied + other.copied,
         }
     }
 }
@@ -79,7 +86,7 @@ impl fmt::Display for Counters {
         write!(
             f,
             "scenes={} scene_nodes={} rows_built={} bubbles_built={} rows_laid={} \
-             sorts={} sorted={} store_rows_read={} commits={} walked={}",
+             sorts={} sorted={} store_rows_read={} commits={} walked={} copied={}",
             self.scenes,
             self.scene_nodes,
             self.rows_built,
@@ -89,7 +96,8 @@ impl fmt::Display for Counters {
             self.sorted,
             self.store_rows_read,
             self.commits,
-            self.walked
+            self.walked,
+            self.copied
         )
     }
 }
@@ -107,10 +115,11 @@ pub enum Op {
     StoreRowsRead,
     Commits,
     Walked,
+    Copied,
 }
 
 #[cfg(any(debug_assertions, feature = "counters"))]
-const SLOTS: usize = 10;
+const SLOTS: usize = 11;
 
 /// The counters' cells, one set in the model and one in the store.
 /// Atomics, so the store's commit hook (a `'static` closure) and a
@@ -181,6 +190,7 @@ impl Ops {
             store_rows_read: at(Op::StoreRowsRead),
             commits: at(Op::Commits),
             walked: at(Op::Walked),
+            copied: at(Op::Copied),
         }
     }
 }

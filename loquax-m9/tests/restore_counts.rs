@@ -124,6 +124,7 @@ fn since(before: Counters, model: &loquax::ui::UiModel<loquax_m9::field::Field>)
         store_rows_read: now.store_rows_read - before.store_rows_read,
         commits: now.commits - before.commits,
         walked: now.walked - before.walked,
+        copied: now.copied - before.copied,
     }
 }
 
@@ -176,6 +177,10 @@ fn a_restore_sorts_and_builds_once() {
     // the per-entry folds did; before, the summary stood behind until the
     // note and each entry walked its conversation (2,194,736 messages).
     assert_eq!(counts.walked, 0, "a restore walked: {counts}");
+    // 1521b: the boot drains what the fold queued for a store without
+    // copying a message: window 7's restore cloned all 4068 into store
+    // writes and dropped them, 56 s under the board's first-fit heap.
+    assert_eq!(counts.copied, 0, "a restore copied: {counts}");
 
     // The control: per entry, the cost is a sort and a window each.
     // Folded with no chat open, as the restore folds (1493): the boot
@@ -191,6 +196,19 @@ fn a_restore_sorts_and_builds_once() {
     each.selected = each.order()[0];
     let sum = each.total_counters().expect("this build counts");
     println!("COUNTS m9.restore_per_entry {sum}");
+    // The control for `copied` (1521b): the desktop's drain, which the
+    // board used until 1521b, copies every message the fold changed.
+    let before = each.total_counters().expect("this build counts");
+    let writes = each.take_writes();
+    let copies = since(before, &each).copied;
+    println!(
+        "COUNTS m9.take_writes copied={copies} writes={}",
+        writes.len()
+    );
+    assert!(
+        u64::from(copies) >= MESSAGES * 4 / 5,
+        "the control copied {copies} of {MESSAGES}"
+    );
     assert!(
         sum.sorts as u64 >= MESSAGES / 2,
         "the control sorted {} times",
@@ -252,7 +270,11 @@ fn a_pulled_page_sorts_and_builds_once() {
     let mut model = home::model(archive.address);
     home::take(&mut model, page, &archive.address);
     let before = model.total_counters().expect("this build counts");
-    assert_eq!(home::take(&mut model, rest, &archive.address).0, 72);
+    let (taken, effects) = home::take(&mut model, rest, &archive.address);
+    assert_eq!(taken, 72);
+    // The loop routes what the page left (1493); the rows it hands the
+    // summary log are named without a message copied (1521b).
+    let routed = home::route(&mut model, effects, &mut || [7; 16]);
     let counts = since(before, &model);
     println!("COUNTS m9.pulled_page {counts}");
     assert!(
@@ -260,6 +282,8 @@ fn a_pulled_page_sorts_and_builds_once() {
         "a page of 72: {counts} (bar sorts 1, rows_built {})",
         window()
     );
+    assert_eq!(counts.copied, 0, "a pulled page copied: {counts}");
+    assert!(!routed.rows.is_empty(), "the page's conversations owe rows");
 }
 
 /// The fixture kept, then booted once: the boot that finds no summary
