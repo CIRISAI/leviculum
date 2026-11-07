@@ -94,6 +94,12 @@ pub struct Board {
     /// Resource parts from the line the board loses, the first ones,
     /// as a UART that dropped them (1459).
     pub lose_parts: usize,
+    /// Every resource part from the line the board loses, retransmissions
+    /// too, until the board cancels the answer they belong to (its RCL):
+    /// a resource answer the line lost whole, the link up (1461).
+    pub vanish_answer: bool,
+    /// Run the executor without 1461's rule, the control.
+    pub answer_watch_off: bool,
     /// Resource parts the board took off the line, and lost.
     pub parts: usize,
     pub parts_lost: usize,
@@ -134,6 +140,8 @@ impl Board {
             paged: None,
             after_cut: Vec::new(),
             lose_parts: 0,
+            vanish_answer: false,
+            answer_watch_off: false,
             parts: 0,
             parts_lost: 0,
             refusals: 0,
@@ -168,6 +176,7 @@ impl Board {
         for packet in std::mem::take(&mut self.line.0) {
             if context(&packet) == Some(PacketContext::ResourceRcl) {
                 self.refusals += 1;
+                self.vanish_answer = false;
             }
             let line = format!("KBRAW {} 0000000000000000\r\n", self.now());
             self.stream.write_all(line.as_bytes()).expect("write");
@@ -210,6 +219,9 @@ impl Board {
         budget: Duration,
     ) -> (Ran, Option<(LinkClass, u64)>) {
         let mut exec = Executor::fitted(ask, batch);
+        if self.answer_watch_off {
+            exec = exec.without_answer_watch();
+        }
         let ran = self.perform(device, &mut exec, budget);
         (ran, exec.fit())
     }
@@ -227,6 +239,10 @@ impl Board {
                         if let DeframeResult::Frame(frame) = result {
                             if context(&frame) == Some(PacketContext::Resource) {
                                 self.parts += 1;
+                                if self.vanish_answer {
+                                    self.parts_lost += 1;
+                                    continue;
+                                }
                                 if self.lose_parts > 0 {
                                     self.lose_parts -= 1;
                                     self.parts_lost += 1;

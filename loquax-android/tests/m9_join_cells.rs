@@ -659,3 +659,89 @@ async fn m9_cell_long_entry_parts_lost_mid_way() {
     );
     mailbox.stop().await;
 }
+
+/// 1461, unhappy: the line loses every part of the resource that answers
+/// the board's `/sync`, retransmissions too, while the link stays up, as
+/// 1459 measured on the bench. The resource's watchdog keeps asking for
+/// the parts and would run past the pull's budget; the board cancels the
+/// silent answer within the request bound of 1440 (one RCL) and asks the
+/// page again on the same link, where it arrives once.
+#[tokio::test(flavor = "multi_thread")]
+async fn m9_cell_long_entry_answer_lost_whole() {
+    logs();
+    let relay = Relay::start(&[]).await;
+    let mailbox = long_entry_mailbox(&relay).await;
+    let code = code(&mailbox, PHONE);
+    let peer = relay.peer;
+    let (ran, fit, pull_ms, lost, refusals) = tokio::task::spawn_blocking(move || {
+        let mut board = Board::connect(peer);
+        board.vanish_answer = true;
+        let (ran, fit, pull_ms) = pull_after_short(&mut board, &code);
+        (ran, fit, pull_ms, board.parts_lost, board.refusals)
+    })
+    .await
+    .expect("board");
+    let (pulled, pages) = ran;
+    let (seqs, _) = counted(&pages);
+    let bound = leviculum_core::node::request::request_timeout_ms(
+        leviculum_core::constants::CHANNEL_DEFAULT_RTT_MS,
+    );
+    println!(
+        "[CELL] m9_long_entry_answer_lost_whole fit={fit:?} pulled={pulled:?} seqs={seqs:?} lost={lost} refusals={refusals} pull_ms={pull_ms} bound_ms={bound}"
+    );
+    assert_eq!(fit, Some((LinkClass::Serial, 11_520)));
+    assert!(lost >= 2, "the line lost the answer's parts: {lost}");
+    assert!(
+        matches!(
+            pulled,
+            Some(Ok(Outcome::Pulled {
+                cursor: 2,
+                entries: 1,
+                ..
+            }))
+        ),
+        "{pulled:?}"
+    );
+    assert_eq!(seqs, vec![2], "the entry once");
+    assert_eq!(refusals, 1, "the board cancelled the silent answer, once");
+    assert!(
+        pull_ms < u128::from(bound) + 5_000,
+        "took {pull_ms} ms, the bound is {bound} ms"
+    );
+    mailbox.stop().await;
+}
+
+/// 1461, the control: the same loss without the rule. The watchdog asks
+/// for the parts again and again; when its retries run out (about 67 s on
+/// this line, measured 2026-11-07) the request fails and 1440 asks the
+/// page again, but the home's sender still holds the abandoned answer and
+/// refuses every new one ("resource transfer already in progress"), so
+/// the pull's 120 s run out: no page, no cancel. The rule's RCL is what
+/// frees the home's sender.
+#[tokio::test(flavor = "multi_thread")]
+async fn m9_cell_long_entry_answer_lost_whole_without_the_rule() {
+    logs();
+    let relay = Relay::start(&[]).await;
+    let mailbox = long_entry_mailbox(&relay).await;
+    let code = code(&mailbox, PHONE);
+    let peer = relay.peer;
+    let (ran, pull_ms, lost, refusals) = tokio::task::spawn_blocking(move || {
+        let mut board = Board::connect(peer);
+        board.vanish_answer = true;
+        board.answer_watch_off = true;
+        let (ran, _, pull_ms) = pull_after_short(&mut board, &code);
+        (ran, pull_ms, board.parts_lost, board.refusals)
+    })
+    .await
+    .expect("board");
+    let (pulled, pages) = ran;
+    println!(
+        "[CELL] m9_long_entry_answer_lost_whole_control pulled={pulled:?} pages={} lost={lost} refusals={refusals} pull_ms={pull_ms}",
+        pages.len()
+    );
+    assert_eq!(pulled, Some(Err(HomeError::Timeout)), "after {pull_ms} ms");
+    assert!(pages.is_empty());
+    assert_eq!(refusals, 0);
+    assert!(pull_ms >= 120_000, "took {pull_ms} ms");
+    mailbox.stop().await;
+}
