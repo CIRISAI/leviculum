@@ -60,6 +60,26 @@ pub fn covered(bounds: Rectangle, width: u32, height: u32) -> Option<Px> {
     (x0 < x1 && y0 < y1).then_some(Px { x0, y0, x1, y1 })
 }
 
+/// The pixels an anti-aliased fill of the rectangle `bounds` changes
+/// within `clip` on a `width` by `height` target, when `bounds` lies on
+/// whole pixels (1468): each of them it covers whole, so an opaque colour
+/// there is the colour's bytes, and the clip, tiny-skia's mask of the
+/// clip's rectangle filled without anti-aliasing, keeps the pixels whose
+/// centres it holds. `None` when `bounds` is not on whole pixels or
+/// nothing is left.
+pub fn whole_rect(
+    bounds: Rectangle,
+    clip: Rectangle,
+    width: u32,
+    height: u32,
+) -> Option<Px> {
+    let edges = [bounds.x, bounds.y, bounds.width, bounds.height];
+    if !edges.iter().all(|v| v.is_finite() && v.fract() == 0.0) {
+        return None;
+    }
+    covered(bounds, width, height)?.intersect(covered(clip, width, height)?)
+}
+
 /// The four bytes tiny-skia stores for `color` filled with the `Source`
 /// blend and no anti-aliasing: the same pipeline run on one pixel.
 pub fn solid_pixel(color: tiny_skia::Color) -> [u8; 4] {

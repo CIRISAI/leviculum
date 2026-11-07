@@ -45,6 +45,32 @@ impl Engine {
             return;
         }
 
+        // Leviculum's patch (1468): an opaque quad of one colour without
+        // corners, border or shadow on whole pixels is a row fill of the
+        // colour's bytes, clipped by rectangle. tiny-skia ran it through
+        // its pipeline, and when it crossed the clip through the mask
+        // over all of its area: a strip redrawn after a scroll's shift
+        // crossed the chat's background and paid for the whole of it
+        // (90 % of such a frame in callgrind). `fast_paths` holds it to
+        // tiny-skia's fill, with and without the mask.
+        if let Background::Color(color) = background
+            && color.a >= 1.0
+            && quad.border.width <= 0.0
+            && quad.shadow.color.a <= 0.0
+            && <[f32; 4]>::from(quad.border.radius)
+                .into_iter()
+                .all(|r| r <= 0.0)
+        {
+            let (w, h) = (pixels.width(), pixels.height());
+            if let Some(px) =
+                crate::fast::whole_rect(physical_bounds, clip_bounds, w, h)
+            {
+                let solid = crate::fast::solid_pixel(into_color(*color));
+                crate::fast::fill(pixels.data_mut(), w, px, solid);
+                return;
+            }
+        }
+
         let clip_mask = (!physical_bounds.is_within(&clip_bounds))
             .then(|| self.clip.mask(clip_mask));
 

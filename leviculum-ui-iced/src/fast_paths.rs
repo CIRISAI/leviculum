@@ -398,3 +398,74 @@ fn the_blends_rounding_is_round_ties_even() {
         );
     }
 }
+
+/// An opaque quad without corners on whole pixels (1468) is the bytes
+/// tiny-skia's anti-aliased fill of its rectangle stores, with the clip's
+/// mask and without: `whole_rect`'s pixels filled with `solid_pixel`.
+#[test]
+fn an_opaque_square_quad_is_the_fill_tiny_skia_draws() {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    for _ in 0..2000 {
+        let whole = |rng: &mut Rng, max: u32| rng.below(u64::from(max) + 8) as f32 - 4.0;
+        let x = whole(&mut rng, W);
+        let y = whole(&mut rng, H);
+        let r = Rectangle {
+            x,
+            y,
+            width: 1.0 + rng.below(u64::from(W)) as f32,
+            height: 1.0 + rng.below(u64::from(H)) as f32,
+        };
+        let clip = match rng.below(3) {
+            0 => Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: W as f32,
+                height: H as f32,
+            },
+            _ => rng.rect(W, H),
+        };
+        let masked = rng.below(2) == 0;
+        let color = tiny_skia::Color::from_rgba(
+            rng.below(256) as f32 / 255.0,
+            rng.below(256) as f32 / 255.0,
+            rng.below(256) as f32 / 255.0,
+            1.0,
+        )
+        .expect("colour");
+        let ground: Vec<u8> = (0..W * H * 4).map(|_| rng.below(256) as u8).collect();
+        let mut reference = ground.clone();
+        let mut mask = tiny_skia::Mask::new(W, H).expect("mask");
+        reference_mask(&mut mask, clip);
+        {
+            let mut pixmap =
+                tiny_skia::PixmapMut::from_bytes(&mut reference, W, H).expect("pixmap");
+            if let Some(path) = path(r) {
+                pixmap.fill_path(
+                    &path,
+                    &tiny_skia::Paint {
+                        shader: tiny_skia::Shader::SolidColor(color),
+                        anti_alias: true,
+                        ..Default::default()
+                    },
+                    tiny_skia::FillRule::EvenOdd,
+                    tiny_skia::Transform::identity(),
+                    masked.then_some(&mask),
+                );
+            }
+        }
+        let mut ours = ground;
+        let all = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: W as f32,
+            height: H as f32,
+        };
+        if let Some(px) = fast::whole_rect(r, if masked { clip } else { all }, W, H) {
+            fast::fill(&mut ours, W, px, fast::solid_pixel(color));
+        }
+        assert_eq!(
+            reference, ours,
+            "{r:?} clip {clip:?} masked {masked} {color:?}"
+        );
+    }
+}
