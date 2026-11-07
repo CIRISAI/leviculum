@@ -156,6 +156,11 @@ const EXTERNAL_PREFIXES: &[&str] = &[
     // (1222): cited from a clone of github.com/markqvist/Sideband at
     // ef572b5 (2026-10-01), which no host keeps beside this tree.
     "Sideband/",
+    // SebastianObi's LXMF-Tools, whose distribution-group bot the relayed
+    // posts of 1482 are read after: cited from a clone of
+    // github.com/SebastianObi/LXMF-Tools at 6ec9528 (2025-03-19), which no
+    // host keeps beside this tree.
+    "LXMF-Tools/",
     // A crates.io dependency, cited by the nRF gate scripts. Its source is
     // under `~/.cargo`, never in this tree, so it can only be counted.
     "nrf-softdevice/",

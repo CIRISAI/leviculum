@@ -5,8 +5,9 @@
 //! seen on the network ("ReticulumNet NL"). On its default configuration a
 //! member writes it a plain 1:1 message; it puts
 //! `send_prefix = !source_name!!n!<!source_address!>!n!` in front of the
-//! text (`lxmf_distribution_group_extended.py:4766`, replaced in
-//! `replace()` at `:3373-3377`), keeps the writer's timestamp and fields
+//! text (LXMF-Tools at 6ec9528,
+//! `LXMF-Tools/lxmf_distribution_group_extended/lxmf_distribution_group_extended.py:4766`,
+//! replaced in `replace()` at `:3373-3377`), keeps the writer's timestamp and fields
 //! and signs one copy to every member itself. With `fields_message` on
 //! (off by default, `:4561`) the copy carries the writer as field `0xB5`,
 //! `[bin16 source, str name]`, and the original's hash as `0xA9`
