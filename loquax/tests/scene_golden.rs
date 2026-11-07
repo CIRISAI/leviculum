@@ -549,3 +549,44 @@ fn the_ladder_is_the_golden_scene() {
     );
     check("scene-ladder.json", &scene);
 }
+
+mod group_ticks {
+    include!("support/group_ticks.rs");
+}
+
+/// 1466, the group's ticks tell the truth too: a group's chat with a line
+/// of ours every member's device has (two ticks, `delivered`, its words
+/// "On the devices") and one Ben's device has not said yet (one tick,
+/// `arrived`, "Arrived"). Every target draws what this scene says.
+#[test]
+fn a_groups_one_and_two_ticks_are_the_golden_scene() {
+    use loquax::ui::strings::{Lang, StrId, Text};
+
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    group_ticks::group_ticks(&mut model, now().unix_secs, now().offset_secs);
+    let scene = model.scene(LayoutClass::Compact);
+    let marks: Vec<(String, String)> = scene
+        .chat
+        .as_ref()
+        .expect("the chat")
+        .groups
+        .iter()
+        .flat_map(|g| &g.bubbles)
+        .filter_map(|b| {
+            b.mark
+                .as_ref()
+                .map(|m| (m.mark.word().to_string(), m.words.resolve(Lang::De)))
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("delivered".to_string(), "Auf den Geräten".to_string()),
+            ("arrived".to_string(), "Angekommen".to_string()),
+        ]
+    );
+    let words = Text::key(StrId::StateGroupDelivered);
+    assert_eq!(words.resolve(Lang::En), "On the devices");
+    check("scene-group-ticks.json", &scene);
+}

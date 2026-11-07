@@ -579,3 +579,474 @@ fn a_stock_recipient_shows_one_tick_on_its_proof_and_never_two() {
         (Some(DeliveryState::Arrived), Ticks::Arrived)
     );
 }
+
+// ---------------------------------------------------------------------
+// 1466: the group's ticks tell the truth too. A member's mailbox proves
+// the group's copy with the member's identity as soon as it archived it,
+// so every copy proven is one tick, "Arrived"; two ticks, "On the
+// devices", come only once every member's device said it has its copy
+// (`0x07`, which the group's home books and counts in the writer's
+// `0x03`), and the Info names each member's rung and since when.
+// ---------------------------------------------------------------------
+
+use leviculum_lxmf::lev::{CAP_GROUPS, CAP_READ_RECEIPTS};
+use loquax::home::group::{self, Hosted, Outgoing};
+use loquax::home::outgoing::Change;
+use loquax::home::KIND_GROUP;
+use loquax::store::groups::{MEMBER_DEVICES, MEMBER_GROUPS, MEMBER_JOINED, MEMBER_RECEIPTS};
+use loquax::ui::groups::{GroupInfo, GroupMember, Standing};
+
+/// A group's home: the admin's store with the group, its key, and what it
+/// sent.
+struct GroupHome {
+    _dir: tempfile::TempDir,
+    store: Store,
+    hosted: Hosted,
+}
+
+impl GroupHome {
+    /// "Familie", hosted by `admin`'s home, with `members` named.
+    fn new(admin: [u8; 16], members: &[([u8; 16], &str)]) -> Self {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut store = Store::open_in(dir.path(), admin).expect("store");
+        let named: Vec<([u8; 16], String)> =
+            members.iter().map(|(a, n)| (*a, n.to_string())).collect();
+        let hosted = group::create(
+            dir.path(),
+            &mut store,
+            "Familie",
+            (admin, "Alice"),
+            &named,
+            RT,
+        )
+        .expect("the group");
+        Self {
+            _dir: dir,
+            store,
+            hosted,
+        }
+    }
+
+    fn address(&self) -> [u8; 16] {
+        self.hosted.group.address
+    }
+
+    /// A message to the group came: archived, as the daemon keeps it before
+    /// it proves it, and taken in. What the home sends for it.
+    fn takes(&mut self, message: &Lxm) -> Vec<Outgoing> {
+        let opened =
+            Lxm::unpack(&message.pack(), None, None, DeliveryMethod::Direct).expect("unpack");
+        self.store
+            .archive_append(KIND_GROUP, &opened.message_id, &opened.pack(), RT, u64::MAX)
+            .expect("archive");
+        group::accept(&mut self.store, &self.hosted, &opened, RT as f64 + 1.0)
+            .expect("accept")
+            .outgoing()
+    }
+
+    /// A member's identity proved `copy`, its mailbox or its device: the
+    /// statuses that made due, as the daemon sends them.
+    fn proven(&mut self, copy: &Outgoing, at: i64) -> Vec<Outgoing> {
+        let (_, fresh) = group::book(&mut self.store, &copy.id, Change::Delivered, at)
+            .expect("book")
+            .expect("a copy");
+        fresh
+            .iter()
+            .filter_map(|original| {
+                group::status_after_proof(&self.store, &self.hosted, original, at as f64)
+                    .expect("status")
+            })
+            .collect()
+    }
+
+    /// The member's flags as the home keeps them.
+    fn flags(&self, member: &[u8; 16]) -> i64 {
+        self.store
+            .group_members(&self.address())
+            .expect("members")
+            .iter()
+            .find(|m| m.address == *member)
+            .map_or(0, |m| m.flags)
+    }
+}
+
+/// What the home sends `to`, as `to` receives it.
+fn opened_for(out: &[Outgoing], to: [u8; 16]) -> Lxm {
+    let one = out
+        .iter()
+        .find(|o| o.destination == to)
+        .unwrap_or_else(|| panic!("nothing for {to:02x?}: {out:?}"));
+    Lxm::unpack(&one.packed, None, None, DeliveryMethod::Direct).expect("unpack")
+}
+
+/// A member's Join, as its client sends it: an empty message to the group
+/// with its capabilities.
+fn join(identity: &Identity, group: [u8; 16], caps: u64) -> Lxm {
+    let address = delivery_address(identity).expect("address");
+    Lxm::create(
+        group,
+        address,
+        identity,
+        RT as f64 - 60.0,
+        Vec::new(),
+        Vec::new(),
+        Lev {
+            capabilities: Some(caps),
+            ..Lev::default()
+        }
+        .fields()
+        .to_vec(),
+        DeliveryMethod::Direct,
+    )
+    .expect("join")
+}
+
+/// The writer's device knows "Familie" and its members, as the admin's
+/// devices learn it from the membership.
+fn knows_the_group(model: &mut UiModel<Line>, group: [u8; 16], members: &[([u8; 16], &str)]) {
+    model.groups.insert(
+        group,
+        GroupInfo {
+            name: "Familie".into(),
+            ours: true,
+            standing: Standing::Joined,
+            epoch: 1,
+            members: members
+                .iter()
+                .map(|(address, name)| GroupMember {
+                    address: *address,
+                    name: name.to_string(),
+                    admin: false,
+                    joined: true,
+                    left: false,
+                })
+                .collect(),
+            ..GroupInfo::new(group)
+        },
+    );
+}
+
+impl Side {
+    /// The Info sheet's rows for our message `id` to `peer`, in English.
+    fn info(&self, peer: [u8; 16], id: &[u8; 32]) -> Vec<(String, String)> {
+        let key = self
+            .model
+            .conversations
+            .iter()
+            .find(|c| c.peer == peer)
+            .and_then(|c| c.messages.iter().find(|m| m.id == Some(*id)))
+            .expect("our message")
+            .activity;
+        loquax::ui::info::message_info(&self.model, peer, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| row.resolve(Lang::En))
+            .collect()
+    }
+
+    /// The words the chat's scene gives our bubble `id`'s mark, in English.
+    fn mark_words(&self, peer: [u8; 16], id: &[u8; 32]) -> String {
+        let c = self
+            .model
+            .conversations
+            .iter()
+            .position(|c| c.peer == peer)
+            .expect("the chat");
+        let key = self.model.conversations[c]
+            .messages
+            .iter()
+            .find(|m| m.id == Some(*id))
+            .expect("our message")
+            .activity;
+        let chat = loquax::ui::scene::chat(&self.model, c);
+        chat.groups
+            .iter()
+            .flat_map(|g| &g.bubbles)
+            .find(|b| b.bubble.key == key)
+            .and_then(|b| b.mark.as_ref())
+            .expect("our mark")
+            .words
+            .resolve(Lang::En)
+    }
+}
+
+/// The Info's row of `name`.
+fn rung_of<'a>(info: &'a [(String, String)], name: &str) -> &'a str {
+    info.iter()
+        .find(|(label, _)| label == name)
+        .map(|(_, value)| value.as_str())
+        .unwrap_or_else(|| panic!("no row for {name}: {info:?}"))
+}
+
+/// A recipient's phone, a client of its mailbox, pulls `copy`: the arrived
+/// marks it hands its mailbox once the batch window passed.
+fn phone_pulls(copy: &Lxm) -> Vec<Mark> {
+    let mut phone = screen(RT + 300, true);
+    update(
+        &mut phone,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: copy.timestamp as i64,
+            message_id: copy.message_id,
+            source: copy.source_hash,
+            title: copy.title.clone(),
+            body: copy.content.clone(),
+            fields: copy.fields.clone(),
+            verified: true,
+        }),
+    );
+    update(&mut phone, UiEvent::Elapsed(BATCH_MS));
+    arrived_marks(&mut phone)
+}
+
+/// Group cell 1, happy: Anna is a client of her mailbox and says device
+/// receipts, Ben runs his own node and says them too. Every copy proven is
+/// one tick, "Arrived", and the Info names both at arrived; Ben's device
+/// receipt alone makes no status (Anna's copy is only in her mailbox) and
+/// the writer stays at one, a week later too. Anna's phone pulls, her mailbox signs
+/// the `0x07` to the group, the home counts it, and the writer shows two
+/// ticks, "On the devices", both members on their device with the times.
+/// Controls: a device receipt alone (no capability mark) leaves Ben's
+/// read-receipt flag alone; a second mark of Anna's signs nothing.
+#[test]
+fn a_group_shows_two_ticks_only_once_every_members_device_has_it() {
+    let mut alice = Side::new(false);
+    let anna = leviculum_std::generate_identity();
+    let mut annas_mailbox = Mailbox::of(anna);
+    let mut ben = Side::new(false);
+    let members = [(annas_mailbox.address, "Anna"), (ben.address, "Ben")];
+    let mut home = GroupHome::new(alice.address, &members);
+    let familie = home.address();
+    knows_the_group(&mut alice.model, familie, &members);
+    let all = CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS;
+    home.takes(&join(&annas_mailbox.identity, familie, all));
+    home.takes(&join(&ben.identity, familie, all));
+    for member in [annas_mailbox.address, ben.address] {
+        let flags = home.flags(&member);
+        assert_eq!(
+            flags & (MEMBER_GROUPS | MEMBER_JOINED | MEMBER_RECEIPTS | MEMBER_DEVICES),
+            MEMBER_GROUPS | MEMBER_JOINED | MEMBER_RECEIPTS | MEMBER_DEVICES,
+            "the Join's mark"
+        );
+    }
+
+    let message = alice.write(familie, "Brot ist da", |_| {});
+    let copies = home.takes(&message);
+    assert_eq!(copies.len(), 2, "{copies:?}");
+    alice.proven(&message);
+    assert_eq!(
+        alice.ticks(&message.message_id),
+        (Some(DeliveryState::InMailbox), Ticks::Mailbox),
+        "the group has it"
+    );
+    let annas_copy = opened_for(&copies, annas_mailbox.address);
+    let bens_copy = opened_for(&copies, ben.address);
+    let copy_lev = Lev::from_fields(&annas_copy.fields).expect("Anna understands groups");
+    assert!(
+        copy_lev.supports_propagation_receipts(),
+        "the writer's bit 2 rides on the copy"
+    );
+
+    // Anna's mailbox archives her copy and proves it; Ben's device takes
+    // his and proves it.
+    annas_mailbox.archive(&annas_copy);
+    let effects = ben.takes(&bens_copy, &home.hosted.identity);
+    assert!(
+        device_receipts(&effects, &ben).is_empty(),
+        "the batch waits"
+    );
+    let mut statuses = Vec::new();
+    for copy in &copies {
+        statuses.extend(home.proven(copy, RT + 5));
+    }
+    let status = opened_for(&statuses, alice.address);
+    alice.takes(&status, &home.hosted.identity);
+    assert_eq!(
+        alice.ticks(&message.message_id),
+        (Some(DeliveryState::Arrived), Ticks::Arrived),
+        "every copy proven is one tick"
+    );
+    assert_eq!(alice.mark_words(familie, &message.message_id), "Arrived");
+
+    // Ben's device says it has his copy.
+    let receipts = device_receipts(&update(&mut ben.model, UiEvent::Elapsed(BATCH_MS)), &ben);
+    assert_eq!(receipts.len(), 1, "Ben's device answers the group");
+    assert_eq!(receipts[0].destination_hash, familie);
+    let out = home.takes(&receipts[0]);
+    assert_ne!(
+        home.flags(&ben.address) & MEMBER_RECEIPTS,
+        0,
+        "control: a receipt alone says nothing of read receipts"
+    );
+    assert!(
+        out.iter().all(|o| o.destination != alice.address),
+        "Anna's device has not said it: no status yet {out:?}"
+    );
+    update(&mut alice.model, UiEvent::Elapsed(WEEK_MS));
+    assert_eq!(
+        alice.ticks(&message.message_id),
+        (Some(DeliveryState::Arrived), Ticks::Arrived),
+        "Anna's copy is only in her mailbox"
+    );
+    let info = alice.info(familie, &message.message_id);
+    assert_eq!(rung_of(&info, "Status"), "Arrived", "{info:?}");
+    for name in ["Anna", "Ben"] {
+        assert!(rung_of(&info, name).starts_with("Arrived · "), "{info:?}");
+    }
+
+    // Anna's phone pulls; her mailbox signs the device receipt to the group.
+    let marks = phone_pulls(&annas_copy);
+    assert_eq!(marks.len(), 1);
+    let signed = annas_mailbox.marks(&marks);
+    assert_eq!(signed.len(), 1);
+    assert_eq!(signed[0].destination_hash, familie);
+    assert_eq!(signed[0].source_hash, annas_mailbox.address);
+    let out = home.takes(&signed[0]);
+    let status = opened_for(&out, alice.address);
+    alice.takes(&status, &home.hosted.identity);
+    assert_eq!(
+        alice.ticks(&message.message_id),
+        (Some(DeliveryState::Delivered), Ticks::Delivered),
+        "every member's device"
+    );
+    assert_eq!(
+        alice.mark_words(familie, &message.message_id),
+        "On the devices"
+    );
+    let info = alice.info(familie, &message.message_id);
+    assert_eq!(rung_of(&info, "Status"), "On the devices", "{info:?}");
+    for name in ["Anna", "Ben"] {
+        assert!(
+            rung_of(&info, name).starts_with("On the device · "),
+            "{name}: {info:?}"
+        );
+    }
+    assert!(annas_mailbox.marks(&marks).is_empty(), "control: once");
+}
+
+/// Group cell 2, unhappy: Anna (mailbox, says device receipts), Ben (a
+/// Loquax whose mark lacks bit 2, an older one that never says it) and
+/// Carl, a stock client (no `lev` on his copy, so nothing for him to
+/// answer). Every copy proven is one tick; Anna's device makes the home
+/// tell the writer, who stays at one tick, a week later too, and the Info
+/// says Ben and Carl hold it at arrived and Anna on her device.
+#[test]
+fn a_group_with_a_member_that_never_says_its_device_stays_at_one_tick() {
+    let mut alice = Side::new(false);
+    let mut annas_mailbox = Mailbox::of(leviculum_std::generate_identity());
+    let ben = leviculum_std::generate_identity();
+    let ben_address = delivery_address(&ben).expect("address");
+    let carl = leviculum_std::generate_identity();
+    let carl_address = delivery_address(&carl).expect("address");
+    let members = [
+        (annas_mailbox.address, "Anna"),
+        (ben_address, "Ben"),
+        (carl_address, "Carl"),
+    ];
+    let mut home = GroupHome::new(alice.address, &members);
+    let familie = home.address();
+    knows_the_group(&mut alice.model, familie, &members);
+    home.takes(&join(
+        &annas_mailbox.identity,
+        familie,
+        CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS,
+    ));
+    home.takes(&join(&ben, familie, CAP_READ_RECEIPTS | CAP_GROUPS));
+    assert_eq!(home.flags(&ben_address) & MEMBER_DEVICES, 0, "no bit 2");
+    assert_eq!(home.flags(&carl_address), 0, "a stock member never wrote");
+
+    let message = alice.write(familie, "Wer kommt mit?", |_| {});
+    let copies = home.takes(&message);
+    assert_eq!(copies.len(), 3);
+    alice.proven(&message);
+    let carls_copy = opened_for(&copies, carl_address);
+    assert_eq!(
+        Lev::from_fields(&carls_copy.fields),
+        None,
+        "a stock member's copy has no lev, nothing to answer"
+    );
+    let annas_copy = opened_for(&copies, annas_mailbox.address);
+    annas_mailbox.archive(&annas_copy);
+    let mut statuses = Vec::new();
+    for (n, copy) in copies.iter().enumerate() {
+        statuses.extend(home.proven(copy, RT + 10 + n as i64));
+    }
+    let status = opened_for(&statuses, alice.address);
+    alice.takes(&status, &home.hosted.identity);
+    assert_eq!(alice.ticks(&message.message_id).1, Ticks::Arrived);
+
+    let signed = annas_mailbox.marks(&phone_pulls(&annas_copy));
+    let out = home.takes(&signed[0]);
+    let status = opened_for(&out, alice.address);
+    let said = Lev::from_fields(&status.fields)
+        .and_then(|l| l.status)
+        .expect("0x03");
+    assert_eq!((said.on_device, said.members), (Some(1), 3));
+    alice.takes(&status, &home.hosted.identity);
+    for ms in [BATCH_MS, 3_600_000, WEEK_MS] {
+        update(&mut alice.model, UiEvent::Elapsed(ms));
+        assert_eq!(
+            alice.ticks(&message.message_id),
+            (Some(DeliveryState::Arrived), Ticks::Arrived),
+            "{ms} ms on"
+        );
+    }
+    let info = alice.info(familie, &message.message_id);
+    assert_eq!(rung_of(&info, "Status"), "Arrived", "{info:?}");
+    assert!(
+        rung_of(&info, "Anna").starts_with("On the device · "),
+        "{info:?}"
+    );
+    for name in ["Ben", "Carl"] {
+        assert!(
+            rung_of(&info, name).starts_with("Arrived · "),
+            "{name} holds it at one: {info:?}"
+        );
+    }
+}
+
+/// Group cell 3, unhappy: Ben's device receipt is lost on the way. Anna's
+/// comes, the writer hears it (Anna on her device, Ben at arrived) and
+/// stays at one tick: nothing flips it by time.
+#[test]
+fn a_groups_lost_device_receipt_stays_at_one_tick() {
+    let mut alice = Side::new(false);
+    let mut annas_mailbox = Mailbox::of(leviculum_std::generate_identity());
+    let mut ben = Side::new(false);
+    let members = [(annas_mailbox.address, "Anna"), (ben.address, "Ben")];
+    let mut home = GroupHome::new(alice.address, &members);
+    let familie = home.address();
+    knows_the_group(&mut alice.model, familie, &members);
+    let all = CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS;
+    home.takes(&join(&annas_mailbox.identity, familie, all));
+    home.takes(&join(&ben.identity, familie, all));
+    let message = alice.write(familie, "Verloren?", |_| {});
+    let copies = home.takes(&message);
+    alice.proven(&message);
+    let annas_copy = opened_for(&copies, annas_mailbox.address);
+    annas_mailbox.archive(&annas_copy);
+    ben.takes(&opened_for(&copies, ben.address), &home.hosted.identity);
+    let mut statuses = Vec::new();
+    for copy in &copies {
+        statuses.extend(home.proven(copy, RT + 10));
+    }
+    alice.takes(&opened_for(&statuses, alice.address), &home.hosted.identity);
+    let lost = device_receipts(&update(&mut ben.model, UiEvent::Elapsed(BATCH_MS)), &ben);
+    assert_eq!(lost.len(), 1, "sent, and lost");
+    let signed = annas_mailbox.marks(&phone_pulls(&annas_copy));
+    let out = home.takes(&signed[0]);
+    assert!(
+        out.iter().all(|o| o.destination != alice.address),
+        "not every device said it: no status yet {out:?}"
+    );
+    for ms in [BATCH_MS, 3_600_000, WEEK_MS] {
+        update(&mut alice.model, UiEvent::Elapsed(ms));
+        assert_eq!(
+            alice.ticks(&message.message_id),
+            (Some(DeliveryState::Arrived), Ticks::Arrived),
+            "{ms} ms on"
+        );
+    }
+    let info = alice.info(familie, &message.message_id);
+    assert!(rung_of(&info, "Ben").starts_with("Arrived · "), "{info:?}");
+}

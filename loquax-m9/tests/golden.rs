@@ -522,6 +522,60 @@ fn group_look(model: &UiModel<Field>) -> Look {
     }
 }
 
+mod group_ticks {
+    include!("../../loquax/tests/support/group_ticks.rs");
+}
+
+/// 1466, the group's ticks tell the truth too: the M9 draws the group's
+/// chat of `scene-group-ticks.json`, our line every member's device has on
+/// the two-tick rung (`vv`) and the one Ben's device has not said yet on
+/// the one-tick rung (`v `). The control: the frame with the second line
+/// at two ticks differs.
+#[test]
+fn a_groups_one_and_two_ticks_are_the_golden_frame() {
+    let mut model = UiModel::<Field>::new(&[]);
+    model.address = Some([0x30; 16]);
+    group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+    model.focus = Pane::Messages;
+    let scene = model.scene(LayoutClass::Compact);
+    let look = group_look(&model);
+    let rows: Vec<String> = screen::lines(&scene, &look, COLS, ROWS)
+        .iter()
+        .map(row_text)
+        .collect();
+    let row = |words: &str| {
+        rows.iter()
+            .rfind(|r| r.contains(words))
+            .unwrap_or_else(|| panic!("{words:?} is not on the screen: {rows:#?}"))
+            .trim_end()
+            .to_string()
+    };
+    assert!(row("Brot ist da").ends_with("vv"), "{rows:#?}");
+    let one = row("Wer kommt mit?");
+    assert!(one.ends_with('v') && !one.ends_with("vv"), "{rows:#?}");
+    let frame = draw_in(&scene, &look);
+    check("m9-group-ticks.png", &frame);
+
+    let mut both = scene.clone();
+    for node in both
+        .chat
+        .as_mut()
+        .expect("the chat")
+        .groups
+        .iter_mut()
+        .flat_map(|g| g.bubbles.iter_mut())
+    {
+        if let Some(mark) = node.mark.as_mut() {
+            mark.mark = loquax::ui::chat::Mark::Delivered;
+        }
+        node.bubble.mark = Some(loquax::ui::chat::Mark::Delivered);
+    }
+    assert!(
+        changed_rows(&frame, &draw_in(&both, &look)).is_some(),
+        "the one tick is in the frame"
+    );
+}
+
 /// Slice two: a group's chat. The writers' names over their bubbles, the
 /// digest's lines a bubble each, the late line saying so under it, Bob
 /// leaving a centred note, ours flush right on its rung. The positive

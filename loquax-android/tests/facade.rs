@@ -7152,3 +7152,80 @@ async fn a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer()
         .expect("stopped");
     node.stop().await;
 }
+
+mod group_ticks {
+    include!("../../loquax/tests/support/group_ticks.rs");
+}
+
+/// 1466, the group's ticks tell the truth too, on the phone: the group's
+/// chat of `scene-group-ticks.json` as Java reads its rows (our line every
+/// member's device has `delivered`, the one Ben's device has not said yet
+/// `arrived`) and each line's Info in German, a row per member with its
+/// rung and since when. Pinned as `golden/group-ticks.json`;
+/// `LOQUAX_WRITE_GOLDEN=1` writes it again.
+#[test]
+fn a_groups_one_and_two_ticks_are_the_phones_golden() {
+    use loquax_android::session;
+    let mut model = loquax::ui::UiModel::<session::Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    let c = group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+    let rows = session::rows(&model, c, Lang::De);
+    let states: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.ours)
+        .map(|r| (r.body.as_str(), r.state.as_str()))
+        .collect();
+    assert_eq!(
+        states,
+        [("Brot ist da", "delivered"), ("Wer kommt mit?", "arrived")]
+    );
+    let info = |id: [u8; 32]| -> Vec<schema::InfoRow> {
+        let key = model.conversations[c]
+            .messages
+            .iter()
+            .find(|m| m.id == Some(id))
+            .expect("our line")
+            .activity;
+        loquax::ui::info::message_info(&model, group_ticks::TICKS_GROUP, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| {
+                let (label, value) = row.resolve(Lang::De);
+                schema::InfoRow { label, value }
+            })
+            .collect()
+    };
+    let two = info(group_ticks::TICKS_TWO);
+    let one = info(group_ticks::TICKS_ONE);
+    let value = |rows: &[schema::InfoRow], label: &str| {
+        rows.iter()
+            .find(|r| r.label == label)
+            .map(|r| r.value.clone())
+            .unwrap_or_else(|| panic!("no {label}: {rows:?}"))
+    };
+    assert_eq!(value(&two, "Status"), "Auf den Geräten");
+    assert_eq!(value(&one, "Status"), "Angekommen");
+    assert!(
+        value(&one, "Anna").starts_with("Auf dem Gerät · "),
+        "{one:?}"
+    );
+    assert!(value(&one, "Ben").starts_with("Angekommen · "), "{one:?}");
+    let mut got = serde_json::to_string_pretty(&serde_json::json!({
+        "rows": rows,
+        "info_two_ticks": two,
+        "info_one_tick": one,
+    }))
+    .expect("json");
+    got.push('\n');
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/group-ticks.json");
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "group-ticks.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
+}

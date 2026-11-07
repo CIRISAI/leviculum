@@ -65,6 +65,15 @@
 //!   for each late copy a digest proves, and once every reader read it;
 //! - a copy a propagation node took is kept so (`propagated`), and a
 //!   restart does not upload it again;
+//! - 1466: a proof is no device's word in a group either, a member's
+//!   mailbox signs it with the member's identity. A copy carries the
+//!   writer's capability bit 2, so a member's device that says it (its own
+//!   mark, [`MEMBER_DEVICES`]) answers the group with `0x07` once the copy
+//!   is on it, itself or through its mailbox; the home books it
+//!   (`group_fanout.device_at`, [`device_receipts`]), a read receipt too,
+//!   and the status carries how many copies are on a device and each
+//!   member's rungs with their times. The writer's one tick is every copy
+//!   proven, its two every copy on a device ([`status_after_device`]);
 //! - the admin deletes the group ([`delete`]): every present member is
 //!   told it ended, and the home forgets it.
 
@@ -76,8 +85,9 @@ use leviculum_lxmf::constants::{
     FIELD_REACTION, FIELD_REPLY_TO,
 };
 use leviculum_lxmf::lev::{
-    DigestLine, GroupCopy, GroupStatus, Invite, Lev, Member, Members, StandIn, CAP_GROUPS,
-    CAP_READ_RECEIPTS, LEFT_OUT_FILE, LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_LEFT,
+    DigestLine, GroupCopy, GroupStatus, Invite, Lev, Member, MemberRung, Members, StandIn,
+    CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS, LEFT_OUT_FILE, LEFT_OUT_GONE,
+    LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_LEFT,
 };
 use leviculum_lxmf::message::Field;
 use leviculum_lxmf::reaction::Reaction;
@@ -85,8 +95,8 @@ use leviculum_lxmf::reply::Reply;
 use leviculum_lxmf::{DeliveryMethod, Message};
 
 use crate::store::groups::{
-    Copy, Counts, Group, GroupMember, COPY_PROVEN, MEMBER_ADMIN, MEMBER_GROUPS, MEMBER_JOINED,
-    MEMBER_RECEIPTS, MEMBER_SLOW,
+    Copy, Counts, Group, GroupMember, COPY_PROVEN, MEMBER_ADMIN, MEMBER_DEVICES, MEMBER_GROUPS,
+    MEMBER_JOINED, MEMBER_RECEIPTS, MEMBER_SLOW,
 };
 use crate::store::Store;
 
@@ -254,6 +264,29 @@ pub fn status_after_read(
     }
 }
 
+/// The status `original`'s writer gets after a member's device first said
+/// it has its copy (1466): due once every copy is on a device, the two
+/// ticks, or once every member whose device says so said it, so the Info
+/// names who holds it at one tick and since when. A member whose device
+/// never says it (a stock client, a Loquax without bit 2) keeps the writer
+/// at one tick; a lost `0x07` too, and nothing flips it by time.
+pub fn status_after_device(
+    store: &Store,
+    hosted: &Hosted,
+    original: &[u8; 32],
+    now: f64,
+) -> Result<Option<Outgoing>, String> {
+    let counts = store
+        .group_counts(&hosted.group.address, original)
+        .map_err(|e| e.to_string())?;
+    let all = counts.members > 0 && counts.on_device >= counts.members;
+    let every_device = counts.devices > 0 && counts.on_device >= counts.devices;
+    match all || every_device {
+        true => status(store, hosted, original, counts, now),
+        false => Ok(None),
+    }
+}
+
 /// The `0x03` for the writer of `original` with `counts`: an empty message
 /// from the group with the `lev` pair alone, which a Loquax keeps and does
 /// not draw. Only a present writer that understands groups gets one (an
@@ -286,6 +319,7 @@ fn status(
     else {
         return Ok(None);
     };
+    let rungs = rungs(store, hosted, &members, original)?;
     let mut fields = Vec::new();
     Lev {
         capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
@@ -295,15 +329,19 @@ fn status(
             read: counts.read,
             members: counts.members,
             readers: counts.readers,
+            on_device: Some(counts.on_device),
+            rungs,
         }),
         ..Lev::default()
     }
     .put_into(&mut fields);
     tracing::info!(
-        "GROUP {} status message={} delivered={}/{} read={}/{}",
+        "GROUP {} status message={} delivered={}/{} on_device={}/{} read={}/{}",
         hosted.group.name,
         crate::address::to_hex(original),
         counts.delivered,
+        counts.members,
+        counts.on_device,
         counts.members,
         counts.read,
         counts.readers
@@ -317,6 +355,102 @@ fn status(
         fields,
     )
     .map(Some)
+}
+
+/// Each counted member's rungs of `original` (1466), as
+/// [`crate::store::Store::group_counts`] counts them: a member present, or
+/// one that proved its copy before it left. Times in unix seconds, 0 for
+/// not yet.
+fn rungs(
+    store: &Store,
+    hosted: &Hosted,
+    members: &[GroupMember],
+    original: &[u8; 32],
+) -> Result<Vec<MemberRung>, String> {
+    let at = |t: Option<i64>| t.map_or(0, |t| u32::try_from(t.max(0)).unwrap_or(u32::MAX));
+    Ok(store
+        .group_copies(&hosted.group.address, original)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|copy| {
+            members
+                .iter()
+                .any(|m| m.address == copy.member && (m.present() || copy.state == COPY_PROVEN))
+        })
+        .map(|copy| MemberRung {
+            member: copy.member,
+            proven_at: match copy.state == COPY_PROVEN {
+                true => at(copy.proven_at.or(Some(copy.sent_at))),
+                false => 0,
+            },
+            on_device_at: at(copy.device_at),
+            read_at: at(copy.read_at),
+        })
+        .collect())
+}
+
+/// Book the device receipt (`0x07`) `original` carries, from a present
+/// member, against that member's copies (1466), and the `0x03` each first
+/// word of a device made due ([`status_after_device`]). The member's device
+/// says it, so it is marked [`MEMBER_DEVICES`] if its last mark did not.
+/// An id that is no copy of this member's in this group is passed over.
+fn device_receipts(
+    store: &mut Store,
+    hosted: &Hosted,
+    original: &Message,
+    lev: &Lev,
+    now: f64,
+) -> Result<Vec<Outgoing>, String> {
+    let failed = |e: crate::store::StoreError| e.to_string();
+    let Some(receipt) = &lev.propagation_receipt else {
+        return Ok(Vec::new());
+    };
+    let group = hosted.group.address;
+    let member = original.source_hash;
+    let mut on_device = Vec::new();
+    for id in &receipt.ids {
+        let ours = store
+            .group_copy(id)
+            .map_err(failed)?
+            .is_some_and(|copy| copy.group == group && copy.member == member);
+        if !ours {
+            continue;
+        }
+        if let Some(copy) = store
+            .group_copy_on_device(id, &member, i64::from(receipt.received_at))
+            .map_err(failed)?
+        {
+            if !on_device.contains(&copy.original) {
+                on_device.push(copy.original);
+            }
+        }
+    }
+    if on_device.is_empty() {
+        return Ok(Vec::new());
+    }
+    let says = store
+        .group_members(&group)
+        .map_err(failed)?
+        .iter()
+        .any(|m| m.address == member && m.flags & MEMBER_DEVICES != 0);
+    if !says {
+        store
+            .group_flag(&group, &member, MEMBER_DEVICES)
+            .map_err(failed)?;
+    }
+    tracing::info!(
+        "GROUP {} device receipt member={} messages={}",
+        hosted.group.name,
+        crate::address::to_hex(&member),
+        on_device.len()
+    );
+    let mut out = Vec::new();
+    for original in on_device {
+        if let Some(status) = status_after_device(store, hosted, &original, now)? {
+            out.push(status);
+        }
+    }
+    Ok(out)
 }
 
 /// Book the read receipt `original` carries, from a present member, against
@@ -745,7 +879,15 @@ pub fn accept(
         return Ok(arrival);
     }
     let lev = Lev::from_fields(&original.fields).unwrap_or_default();
-    let statuses = read_receipts(store, hosted, original, &lev, accepted_at)?;
+    let mut statuses = device_receipts(store, hosted, original, &lev, accepted_at)?;
+    for status in read_receipts(store, hosted, original, &lev, accepted_at)? {
+        if !statuses
+            .iter()
+            .any(|s| s.destination == status.destination && s.id == status.id)
+        {
+            statuses.push(status);
+        }
+    }
     Ok(arrival.and(statuses))
 }
 
@@ -776,15 +918,21 @@ fn accept_message(
         flags |= MEMBER_GROUPS;
     }
     // Whether it sends read receipts, as its newest mark says (1307 pass
-    // four); a message without the pair (a stock client's) says nothing.
-    let reads = writer.flags & MEMBER_RECEIPTS != 0;
-    if said.is_some() && lev.supports_receipts() && !reads {
-        flags |= MEMBER_RECEIPTS;
-    }
-    if said.is_some() && !lev.supports_receipts() && reads {
-        store
-            .group_unflag(&group, &sender, MEMBER_RECEIPTS)
-            .map_err(failed)?;
+    // four), and whether its device says when a copy is on it (1466); a
+    // message without a mark (a stock client's, or a device receipt alone,
+    // which carries none) says nothing.
+    let marked = lev.capabilities.is_some();
+    for (says, flag) in [
+        (lev.supports_receipts(), MEMBER_RECEIPTS),
+        (lev.supports_propagation_receipts(), MEMBER_DEVICES),
+    ] {
+        let had = writer.flags & flag != 0;
+        if marked && says && !had {
+            flags |= flag;
+        }
+        if marked && !says && had {
+            store.group_unflag(&group, &sender, flag).map_err(failed)?;
+        }
     }
     if writer.flags & MEMBER_JOINED == 0 {
         flags |= MEMBER_JOINED;
@@ -1281,8 +1429,13 @@ pub fn copy(
         let writer_caps = Lev::from_fields(&original.fields)
             .and_then(|lev| lev.capabilities)
             .unwrap_or(0);
+        // The writer's bit 2 too (1466): a member's device answers the
+        // group with `0x07` once the copy is on it, and the writer's two
+        // ticks count those.
         Lev {
-            capabilities: Some(CAP_GROUPS | (writer_caps & CAP_READ_RECEIPTS)),
+            capabilities: Some(
+                CAP_GROUPS | (writer_caps & (CAP_READ_RECEIPTS | CAP_PROPAGATION_RECEIPTS)),
+            ),
             group_copy: Some(GroupCopy {
                 sender: original.source_hash,
                 sent_ms: sent_ms(original.timestamp),
@@ -2845,16 +2998,28 @@ mod tests {
             .expect("s")
             .expect("due");
         assert_eq!(two.destination, scene.anna.1, "to the writer");
+        let said = status_of(&scene, &two);
         assert_eq!(
-            status_of(&scene, &two),
-            GroupStatus {
-                original: original.message_id,
-                delivered: 2,
-                read: 0,
-                members: 2,
-                readers: 0,
-            }
+            (
+                said.original,
+                said.delivered,
+                said.read,
+                said.members,
+                said.readers
+            ),
+            (original.message_id, 2, 0, 2, 0)
         );
+        // 1466: no device said it yet; each member's proof with its time.
+        assert_eq!(said.on_device, Some(0));
+        let mut proven: Vec<([u8; 16], u32, u32)> = said
+            .rungs
+            .iter()
+            .map(|r| (r.member, r.proven_at, r.on_device_at))
+            .collect();
+        proven.sort();
+        let mut want = vec![(scene.lew.1, 200, 0), (scene.bob.1, 202, 0)];
+        want.sort();
+        assert_eq!(proven, want);
 
         // Lew reads it: his client's receipt to the group names his copy.
         let mut fields = Vec::new();

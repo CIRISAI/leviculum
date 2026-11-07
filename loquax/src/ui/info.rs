@@ -57,6 +57,7 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     let message = &conversation.messages[m];
     let who = model.names.label(&conversation.peer);
     let name = || Arg::Str(who.clone());
+    let group = model.groups.contains_key(&conversation.peer);
     let mut rows = Vec::new();
     rows.push(match message.outbound {
         true => InfoRow::new(StrId::InfoTo, Text::Raw(who.clone())),
@@ -82,6 +83,11 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
                 offset_secs: message.at.or(model.now).map_or(0, |n| n.offset_secs),
             }),
             _ => None,
+        };
+        // In a group each member has its own rungs (1466), its rows below.
+        let (arrived, on_device) = match group {
+            true => (None, None),
+            false => (arrived, on_device),
         };
         for (label, at) in [
             (StrId::InfoArrived, arrived),
@@ -124,6 +130,7 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
                     }
                     _ => Text::key(StrId::StateArrived),
                 },
+                DeliveryState::Delivered if group => Text::key(StrId::StateGroupDelivered),
                 DeliveryState::Delivered => Text::Key(StrId::InfoDelivered, Vec::from([name()])),
                 DeliveryState::Read { at } => {
                     let at = WallTime {
@@ -166,7 +173,9 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     })
 }
 
-/// The group's counts of our message `id`: none where `peer` is no group.
+/// The group's counts of our message `id`, and since 1466 a row per member
+/// with its rung and since when (proof, device, read): none where `peer` is
+/// no group.
 fn group_rows<B>(model: &UiModel<B>, peer: &[u8; 16], id: &[u8; 32]) -> Vec<InfoRow> {
     if !model.groups.contains_key(peer) {
         return Vec::new();
@@ -202,6 +211,32 @@ fn group_rows<B>(model: &UiModel<B>, peer: &[u8; 16], id: &[u8; 32]) -> Vec<Info
         }
     };
     rows.push(InfoRow::new(StrId::InfoRead, read));
+    let offset = model.now.map_or(0, |n| n.offset_secs);
+    for (name, rung) in model.group_rungs(peer, id) {
+        let at = |t: u32| WallTime {
+            unix_secs: i64::from(t),
+            offset_secs: offset,
+        };
+        let value = match (rung.read_at, rung.on_device_at, rung.proven_at) {
+            (r, _, _) if r > 0 => Text::Join(Vec::from([
+                Text::key(StrId::InfoReadAt),
+                when(&at(r), model.now.as_ref()),
+            ])),
+            (_, d, _) if d > 0 => Text::Join(Vec::from([
+                Text::key(StrId::InfoOnDevice),
+                when(&at(d), model.now.as_ref()),
+            ])),
+            (_, _, p) if p > 0 => Text::Join(Vec::from([
+                Text::key(StrId::InfoArrived),
+                when(&at(p), model.now.as_ref()),
+            ])),
+            _ => Text::key(StrId::InfoMemberWaiting),
+        };
+        rows.push(InfoRow {
+            label: Text::Raw(name),
+            value,
+        });
+    }
     rows
 }
 

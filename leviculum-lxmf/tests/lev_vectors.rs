@@ -126,6 +126,8 @@ fn expected(id: &str) -> Lev {
                 read: 1,
                 members: 2,
                 readers: 1,
+                on_device: None,
+                rungs: Vec::new(),
             }),
             ..Lev::default()
         }),

@@ -169,15 +169,16 @@ pub fn rung_times(message: &Message) -> (Option<WallTime>, Option<WallTime>) {
 
 /// The acknowledgement rule (1462): a message on this device is
 /// acknowledged, however it came, when its own `lev` mark carries bit 2 and
-/// it is a message, not a receipt of either kind (no receipt of a receipt)
-/// nor a group's copy (the group's home strips bit 2, so this is belt and
-/// braces). A stock sender's message has no mark and gets none.
+/// it is a message, not a receipt of either kind (no receipt of a receipt).
+/// A group's copy is one too since 1466: its home passes the writer's bit 2
+/// on, and the receipt goes to the group, which counts it for the writer's
+/// two ticks. A group's status, membership or digest carries no bit 2. A
+/// stock sender's message has no mark and gets none.
 pub fn acknowledges(lev: Option<&Lev>) -> bool {
     lev.is_some_and(|lev| {
         lev.supports_propagation_receipts()
             && lev.receipt.is_none()
             && lev.propagation_receipt.is_none()
-            && lev.group_copy.is_none()
     })
 }
 
@@ -517,9 +518,10 @@ mod tests {
         }
     }
 
-    /// The acknowledgement rule, case by case: propagated and bit 2 is a
-    /// receipt; direct, bit unset, no mark, a receipt of either kind and a
-    /// group's copy are none.
+    /// The acknowledgement rule, case by case: bit 2 is a receipt, a
+    /// group's copy with it too (1466); bit unset, no mark, a receipt of
+    /// either kind are none, and a group's copy without bit 2 (its writer
+    /// did not ask) is none.
     #[test]
     fn the_acknowledgement_rule() {
         let asks = caps(CAP_PROPAGATION_RECEIPTS);
@@ -553,7 +555,12 @@ mod tests {
             }),
             ..asks
         };
-        assert!(!acknowledges(Some(&copy)));
+        assert!(acknowledges(Some(&copy)), "1466: a group's copy");
+        let unasked = Lev {
+            capabilities: Some(CAP_GROUPS),
+            ..copy
+        };
+        assert!(!acknowledges(Some(&unasked)));
     }
 
     /// 1462: a stored message at two ticks loads at one when its ledger

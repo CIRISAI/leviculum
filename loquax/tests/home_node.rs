@@ -3013,6 +3013,67 @@ async fn a_group_on_the_home_reaches_a_stock_member_with_names_and_replies() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
+    // 1466: the group's ticks tell the truth too. Both copies of Lew's
+    // line are proven (Anna's by her home, which archived it; Bob's by
+    // Python), and the group tells Lew so; but Bob is a stock client, his
+    // copy carries no `lev` and he never says it is on his device, and
+    // Anna's phone has not pulled hers. The status Lew's home holds says
+    // both arrived and fewer than both on a device: his line is one tick,
+    // "Arrived", and the row of Bob's copy has no device time.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        let said = store
+            .archive_since(0, usize::MAX)
+            .expect("archive")
+            .entries
+            .iter()
+            .filter_map(|e| {
+                leviculum_lxmf::Message::unpack(
+                    &e.packed,
+                    None,
+                    None,
+                    leviculum_lxmf::DeliveryMethod::Direct,
+                )
+                .ok()
+            })
+            .filter(|m| m.source_hash == hosted.group.address)
+            .filter_map(|m| leviculum_lxmf::lev::Lev::from_fields(&m.fields)?.status)
+            .rfind(|status| status.original == lews_line && status.delivered >= 2);
+        if let Some(status) = said {
+            break status;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no status of Lew's line with both copies proven:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!((status.delivered, status.members), (2, 2), "{status:?}");
+    assert!(status.on_device.is_some_and(|n| n < 2), "{status:?}");
+    assert!(!status.on_devices_of_all(), "{status:?}");
+    assert_eq!(
+        loquax::ui::groups::status_rung(&status, 0),
+        Some(leviculum_ui::delivery::DeliveryState::Arrived),
+        "one tick"
+    );
+    let bob_rung = status
+        .rungs
+        .iter()
+        .find(|r| r.member == bob_address)
+        .expect("Bob's rung");
+    assert!(
+        bob_rung.proven_at > 0 && bob_rung.on_device_at == 0,
+        "{bob_rung:?}"
+    );
+    let bobs_row = Store::open_in(&home, owner)
+        .expect("the owner's store")
+        .group_copy_for(&hosted.group.address, &lews_line, &bob_address)
+        .expect("row")
+        .expect("Bob's copy");
+    assert_eq!(bobs_row.device_at, None, "a stock member never says it");
+
     // 1387: Lew reacts from his laptop to the newest line of the group
     // (the palette's `react`, then 1 for the thumb). The home copies the
     // reaction to Bob as well, stock as he is: from the group, field 0x40

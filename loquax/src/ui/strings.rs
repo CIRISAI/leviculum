@@ -135,6 +135,8 @@ leviculum_ui::catalogue! {
     // device, the word is neutral; two ticks are the device's own word.
     StateArrived = "state_arrived", "Arrived", "Angekommen";
     StateDelivered = "state_delivered", "On the recipient's device", "Auf dem Gerät";
+    // A group's two ticks (1466): every member's device said it has it.
+    StateGroupDelivered = "state_group_delivered", "On the devices", "Auf den Geräten";
     StateRead = "state_read", "Read at %1$s", "Gelesen um %1$s";
     // The arrived rung's words when the propagation node, not a proof,
     // witnessed it (1395, 1462, loquax-propagation-receipts.md).
@@ -181,6 +183,9 @@ leviculum_ui::catalogue! {
     InfoGroupRead = "info_group_read", "Read by %1$d of %2$d", "Von %1$d von %2$d gelesen";
     InfoGroupNoReaders = "info_group_no_readers", "Nobody in it sends read receipts", "Niemand darin sendet Lesebestätigungen";
     InfoGroupQuiet = "info_group_quiet", "%1$d send no read receipts and are not counted", "%1$d senden keine Lesebestätigungen und zählen nicht mit";
+    // A member's row in a group line's Info (1466): its rung and since
+    // when; a copy nobody proved yet says so.
+    InfoMemberWaiting = "info_member_waiting", "Not arrived yet", "Noch nicht angekommen";
     InfoSize = "info_size", "Size", "Größe";
     InfoKb = "info_kb", "%1$d.%2$d KB", "%1$d,%2$d KB";
     // The verbs no Android string named yet: each intent's label
@@ -283,6 +288,7 @@ leviculum_ui::catalogue! {
     GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für die Funkstrecke)";
     GroupLeftOutGone = "group_left_out_gone", "a message (no longer here)", "eine Nachricht (nicht mehr da)";
     // A group's status of our message in its ledger (1381): kept as numbers, said in the reader's language.
+    GroupStatusDevicesNote = "group_status_devices_note", "Group: arrived at %1$d of %2$d, on the devices of %3$d, read by %4$d of %5$d", "Gruppe: bei %1$d von %2$d angekommen, auf den Geräten von %3$d, von %4$d von %5$d gelesen";
     GroupStatusNote = "group_status_note", "Group: delivered to %1$d of %2$d, read by %3$d of %4$d", "Gruppe: bei %1$d von %2$d angekommen, von %3$d von %4$d gelesen";
     MyCode = "scene_my_code", "My code", "Mein Code";
     // The profile behind the avatar (1443): one scene on every target; the keys are the phone's as they were.

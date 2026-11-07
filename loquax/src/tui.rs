@@ -1819,6 +1819,34 @@ mod tests {
         frame_text(drawn.buffer)
     }
 
+    mod group_ticks {
+        include!("../tests/support/group_ticks.rs");
+    }
+
+    /// 1466, the group's ticks tell the truth too: the terminal draws the
+    /// group's chat of `scene-group-ticks.json`, our line every member's
+    /// device has with two ticks and the one Ben's device has not said yet
+    /// with one; the golden is the screen, 80 by 24.
+    #[test]
+    fn a_groups_one_and_two_ticks_are_the_terminals_golden() {
+        let mut model = Model::new(&[]);
+        model.address = Some([0x30; 16]);
+        group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+        model.focus = loquax::ui::Pane::Messages;
+        let screen = whole_screen(&model);
+        let line = |words: &str| {
+            screen
+                .lines()
+                .rfind(|l| l.contains(words))
+                .unwrap_or_else(|| panic!("{words:?} is not on the screen:\n{screen}"))
+                .to_string()
+        };
+        assert!(line("Brot ist da").contains("✓✓"), "{screen}");
+        let one = line("Wer kommt mit?");
+        assert!(one.contains("✓") && !one.contains("✓✓"), "{screen}");
+        same_text("tui-group-ticks.txt", &screen);
+    }
+
     /// 1379: the Rooms tab in the terminal: `R` brings it and asks the
     /// shell to link to the hub; the hub's welcome, a join, Bob's line, his
     /// action, the hub's notice and the echo of our own line make the

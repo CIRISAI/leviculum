@@ -4801,6 +4801,50 @@ mod tests {
         assert_eq!(create.intent, Intent::Group(Verb::Create));
     }
 
+    mod group_ticks {
+        include!("../tests/support/group_ticks.rs");
+    }
+
+    /// 1466, the group's ticks tell the truth too: the window draws the
+    /// group's chat of `scene-group-ticks.json`, our line every member's
+    /// device has with two ticks and the one Ben's device has not said yet
+    /// with one; pixel for pixel the golden, light, 900 x 560.
+    #[test]
+    fn a_groups_one_and_two_ticks_are_the_windows_golden() {
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+        update(
+            &mut model,
+            UiEvent::Open {
+                peer: group_ticks::TICKS_GROUP,
+            },
+        );
+        let (w, h) = (900, 560);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let marks: Vec<_> = app
+            .scene
+            .chat
+            .as_ref()
+            .expect("the chat")
+            .groups
+            .iter()
+            .flat_map(|g| &g.bubbles)
+            .filter_map(|b| b.mark.as_ref().map(|m| m.mark))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                loquax::ui::chat::Mark::Delivered,
+                loquax::ui::chat::Mark::Arrived
+            ]
+        );
+        map::tests::same_as("gui-group-ticks.png", &shoot(&app, w, h), w, h);
+    }
+
     /// `pcm` as the microphone's levels for Anna's recording, a window
     /// every 50 ms from `from` on; the time after the last.
     fn levels_of(model: &mut crate::shell::Model, pcm: &[i16], from: u64) -> u64 {

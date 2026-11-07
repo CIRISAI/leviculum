@@ -144,3 +144,17 @@ and the title "Map"; the map's menu open over the map's corner, "Time
 window" with the six windows, the current movement marked, and "Fit all";
 the bar's title "Map · This week" once that window is chosen. Drawn by
 `gui::tests::the_time_window_is_in_the_maps_menu`.
+
+`scene-group-ticks.json`, `tui-group-ticks.txt`, `gui-group-ticks.png`:
+the group's ticks tell the truth too (1466). "Familie" with Anna and Ben
+and two lines of ours, from one fixture (`tests/support/group_ticks.rs`,
+included by every target): "Brot ist da", which every member's device
+said it has (two ticks, `delivered`, "On the devices"), and "Wer kommt
+mit?", every copy proven but Ben's device silent (one tick, `arrived`).
+Drawn by `scene_golden::a_groups_one_and_two_ticks_are_the_golden_scene`
+(the Compact scene, as JSON),
+`tui::tests::a_groups_one_and_two_ticks_are_the_terminals_golden` (80 x 24,
+as text) and `gui::tests::a_groups_one_and_two_ticks_are_the_windows_golden`
+(900 x 560, light, pixel for pixel). The M9's frame of the same scene is
+`loquax-m9/tests/golden/m9-group-ticks.png`, the phone's rows and Info
+`loquax-android/tests/golden/group-ticks.json`.

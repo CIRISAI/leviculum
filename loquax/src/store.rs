@@ -129,7 +129,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -416,6 +416,15 @@ CREATE TABLE pn_nodes(
     PRIMARY KEY (identity, node));
 ";
 
+/// What schema 16 adds to schema 15 (1466): when a group copy's member's
+/// device said it has it (`group_fanout.device_at`, unix seconds, null
+/// until then): its `0x07`, or its read receipt, which includes it. The
+/// writer's two ticks count these, not the proofs, which a member's
+/// mailbox signs too.
+const SCHEMA_V16: &str = "
+ALTER TABLE group_fanout ADD COLUMN device_at INTEGER;
+";
+
 pub mod groups;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -597,7 +606,8 @@ impl Store {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
-             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} \
+             PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -758,7 +768,10 @@ impl Store {
                 if version < 14 {
                     batch.push_str(SCHEMA_V14);
                 }
-                batch.push_str(SCHEMA_V15);
+                if version < 15 {
+                    batch.push_str(SCHEMA_V15);
+                }
+                batch.push_str(SCHEMA_V16);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -1013,6 +1026,7 @@ impl Store {
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
                 .map_err(|e| self.failed(e))?;
             crate::ui::arrival::before_1462(message);
+            crate::ui::groups::before_1466(message);
         }
         let first = messages.first().map_or(before, |m| seq_of(m.activity));
         let earlier: i64 = self

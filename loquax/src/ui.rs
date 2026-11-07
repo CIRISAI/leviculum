@@ -4866,8 +4866,9 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
     let groups = &model.groups;
     for (c, conversation) in model.conversations.iter_mut().enumerate() {
         // In a group (1307 pass four) the group's proof is one tick: the
-        // group has it. The two come with its status, once every member's
-        // copy is proven, and a late proof does not take them back.
+        // group has it. Its status moves it on (1466: arrived once every
+        // member's copy is proven, two ticks once every copy is on a
+        // device), and a late proof takes neither back.
         let group = groups.contains_key(&conversation.peer);
         let shown = match delivered {
             DeliveryState::Arrived if group => DeliveryState::InMailbox,
@@ -4877,7 +4878,12 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
             if !message.outbound || message.id != Some(id) {
                 continue;
             }
-            if group && message.delivery == Some(DeliveryState::Delivered) {
+            if group
+                && matches!(
+                    message.delivery,
+                    Some(DeliveryState::Arrived | DeliveryState::Delivered)
+                )
+            {
                 continue;
             }
             if gives_up(shown) && running.contains(&(c, m)) {

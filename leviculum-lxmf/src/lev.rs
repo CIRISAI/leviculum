@@ -9,7 +9,7 @@
 //! | `0x00` | uint | capabilities; bit 0: "I send read receipts and want them" |
 //! | `0x01` | `[uint32 read_at, [bin32 message id, ...]]` | a read receipt |
 //! | `0x02` | `[bin16 sender, uint64 sent_ms, uint epoch]` | a group copy: who wrote it, when by their clock, the membership it was sent under |
-//! | `0x03` | `[bin32 original, uint delivered, uint read, uint members, uint readers]` | a group's status of one message, home to its writer: how many copies are proven and read, of how many, and how many members send receipts |
+//! | `0x03` | `[bin32 original, uint delivered, uint read, uint members, uint readers, uint on_device?, [[bin16 member, uint proven_at, uint on_device_at, uint read_at], ...]?]` | a group's status of one message, home to its writer: how many copies are proven and read, of how many, and how many members send receipts; since 1466 how many are on their member's device, and each member's rungs with their times (0: not yet) |
 //! | `0x04` | `[bin16 group, bin64 public key, str name, str admin's name, uint epoch]` | an invitation to a group |
 //! | `0x05` | `[uint epoch, [[bin16 address, str name, uint flags], ...], uint standing]` | a group's membership; a member leaving sends itself alone, flagged [`MEMBER_LEFT`]; the third element is there only when the group [`GROUP_ENDED`] |
 //! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text, uint left_out?], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them; `left_out` only on a line that stands for what was not sent ([`LEFT_OUT_PHOTO`] and its siblings) |
@@ -38,6 +38,15 @@
 //! element appended, `readers`: the members whose newest message said bit
 //! 0. The writer's "read by N of M" counts only those, so a member with
 //! receipts off is never waited for.
+//!
+//! 1466 appends two more: `on_device`, the copies whose member's device
+//! said it has them (its `0x07`, or its read receipt, which includes it),
+//! and each counted member's rungs, so the writer's Info names who holds
+//! the message at which rung and since when. A proof is no device's word in
+//! a group either: a member's mailbox signs it with the member's identity.
+//! The writer's two ticks are `on_device` of every copy; a status of five
+//! elements (a home before 1466) never says it, so its writer stays at one
+//! tick. A reader before 1466 reads the first five and skips the rest.
 //!
 //! Versions move by keys, never by the type: a reader skips a key it does
 //! not know, and a later key never changes what an earlier one means. The
@@ -306,9 +315,20 @@ pub struct Members {
     pub ended: bool,
 }
 
+/// One member's rungs of one copy in a group's status (1466): when the
+/// home booked its proof, its device's word and its read receipt, unix
+/// seconds, 0 for not yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberRung {
+    pub member: [u8; 16],
+    pub proven_at: u32,
+    pub on_device_at: u32,
+    pub read_at: u32,
+}
+
 /// What a group's home tells a writer of one message (study 2.3): its
 /// copies' proofs and receipts, counted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupStatus {
     /// The LXMF id of the writer's own message.
     pub original: [u8; 32],
@@ -320,12 +340,23 @@ pub struct GroupStatus {
     pub members: u64,
     /// Of those, the members that send read receipts.
     pub readers: u64,
+    /// Copies whose member's device said it has them (1466); `None` from
+    /// a home before 1466, which never says it.
+    pub on_device: Option<u64>,
+    /// Each counted member's rungs (1466); empty from a home before it.
+    pub rungs: Vec<MemberRung>,
 }
 
 impl GroupStatus {
-    /// Every copy is proven: the writer's two ticks.
+    /// Every copy is proven: the writer's one tick, "Arrived" (1466; two
+    /// before it). A member's mailbox proves with the member's identity.
     pub fn delivered_to_all(&self) -> bool {
         self.members > 0 && self.delivered >= self.members
+    }
+
+    /// Every copy is on its member's device: the writer's two ticks (1466).
+    pub fn on_devices_of_all(&self) -> bool {
+        self.members > 0 && self.on_device.is_some_and(|n| n >= self.members)
     }
 
     /// Every member that sends receipts read it: the writer's read mark.
@@ -442,12 +473,23 @@ impl Lev {
         }
         if let Some(status) = &self.status {
             msgpack::int(&mut data, KEY_GROUP_STATUS);
-            msgpack::array(&mut data, 5);
+            msgpack::array(&mut data, if status.on_device.is_some() { 7 } else { 5 });
             msgpack::bin(&mut data, &status.original);
             msgpack::uint(&mut data, status.delivered);
             msgpack::uint(&mut data, status.read);
             msgpack::uint(&mut data, status.members);
             msgpack::uint(&mut data, status.readers);
+            if let Some(on_device) = status.on_device {
+                msgpack::uint(&mut data, on_device);
+                msgpack::array(&mut data, status.rungs.len());
+                for rung in &status.rungs {
+                    msgpack::array(&mut data, 4);
+                    msgpack::bin(&mut data, &rung.member);
+                    msgpack::uint(&mut data, u64::from(rung.proven_at));
+                    msgpack::uint(&mut data, u64::from(rung.on_device_at));
+                    msgpack::uint(&mut data, u64::from(rung.read_at));
+                }
+            }
         }
         if let Some(invite) = &self.invite {
             msgpack::int(&mut data, KEY_GROUP_INVITE);
@@ -595,16 +637,48 @@ fn group_copy(d: &[u8]) -> Option<GroupCopy> {
 
 fn status(d: &[u8]) -> Option<GroupStatus> {
     let mut p = 0;
-    if msgpack::array_len(d, &mut p).ok()? < 5 {
+    let len = msgpack::array_len(d, &mut p).ok()?;
+    if len < 5 {
         return None;
     }
-    Some(GroupStatus {
+    let mut status = GroupStatus {
         original: fixed(d, &mut p)?,
         delivered: msgpack::read_uint(d, &mut p).ok()?,
         read: msgpack::read_uint(d, &mut p).ok()?,
         members: msgpack::read_uint(d, &mut p).ok()?,
         readers: msgpack::read_uint(d, &mut p).ok()?,
-    })
+        on_device: None,
+        rungs: Vec::new(),
+    };
+    // 1466: the device count and the rungs, both or neither; a damaged
+    // tail leaves the five counts as an older home's.
+    if len >= 7 {
+        if let Some((on_device, rungs)) = status_tail(d, &mut p) {
+            status.on_device = Some(on_device);
+            status.rungs = rungs;
+        }
+    }
+    Some(status)
+}
+
+fn status_tail(d: &[u8], p: &mut usize) -> Option<(u64, Vec<MemberRung>)> {
+    let on_device = msgpack::read_uint(d, p).ok()?;
+    let n = msgpack::array_len(d, p).ok()?;
+    let mut rungs = Vec::new();
+    for _ in 0..n {
+        if msgpack::array_len(d, p).ok()? < 4 {
+            return None;
+        }
+        let at =
+            |p: &mut usize| -> Option<u32> { u32::try_from(msgpack::read_uint(d, p).ok()?).ok() };
+        rungs.push(MemberRung {
+            member: fixed(d, p)?,
+            proven_at: at(p)?,
+            on_device_at: at(p)?,
+            read_at: at(p)?,
+        });
+    }
+    Some((on_device, rungs))
 }
 
 fn invite(d: &[u8]) -> Option<Invite> {
@@ -1040,10 +1114,12 @@ mod tests {
             read: 1,
             members: 3,
             readers: 2,
+            on_device: None,
+            rungs: Vec::new(),
         };
         let lev = Lev {
             capabilities: Some(CAP_GROUPS),
-            status: Some(status),
+            status: Some(status.clone()),
             ..Lev::default()
         };
         let [_, (_, data)] = lev.fields();
@@ -1053,6 +1129,7 @@ mod tests {
         );
         assert_eq!(Lev::from_fields(&lev.fields()), Some(lev));
         assert!(status.delivered_to_all() && !status.read_by_all());
+        assert!(!status.on_devices_of_all(), "five counts never say device");
         let none = GroupStatus {
             readers: 0,
             read: 0,
@@ -1073,6 +1150,61 @@ mod tests {
         let read = Lev::from_fields(&[(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)])
             .expect("ours");
         assert_eq!(read.status, None);
+    }
+
+    /// 1466: the status with the device count and one member's rungs, by
+    /// hand: `97` an array of seven, the five counts, `02` on_device, `91`
+    /// one rung, `94` its four elements, `c4 10` and the member's 16
+    /// bytes, `ce ..` proven_at, `ce ..` on_device_at, `00` read_at not
+    /// yet. It reads back as written; a reader that knows only five reads
+    /// the five (the first five elements are the bytes of before 1466);
+    /// two ticks only once every copy is on a device.
+    #[test]
+    fn a_status_since_1466_carries_the_device_count_and_each_members_rungs() {
+        let status = GroupStatus {
+            original: [0x77; 32],
+            delivered: 3,
+            read: 0,
+            members: 3,
+            readers: 2,
+            on_device: Some(2),
+            rungs: alloc::vec![MemberRung {
+                member: [0x11; 16],
+                proven_at: 1_700_000_100,
+                on_device_at: 1_700_000_160,
+                read_at: 0,
+            }],
+        };
+        let lev = Lev {
+            capabilities: Some(CAP_GROUPS),
+            status: Some(status.clone()),
+            ..Lev::default()
+        };
+        let [_, (_, data)] = lev.fields();
+        assert_eq!(
+            hex(&data),
+            "8200020397c420".to_owned()
+                + &"77".repeat(32)
+                + "0300030202"
+                + "9194c410"
+                + &"11".repeat(16)
+                + "ce6553f164ce6553f1a000"
+        );
+        assert_eq!(Lev::from_fields(&lev.fields()), Some(lev));
+        assert!(status.delivered_to_all());
+        assert!(!status.on_devices_of_all(), "two of three on a device");
+        let all = GroupStatus {
+            on_device: Some(3),
+            ..status.clone()
+        };
+        assert!(all.on_devices_of_all());
+        // An empty group is never on every device.
+        let empty = GroupStatus {
+            members: 0,
+            on_device: Some(0),
+            ..status
+        };
+        assert!(!empty.on_devices_of_all());
     }
 
     /// 1393: a propagation receipt by hand. `82` a map of two, `00 05` the

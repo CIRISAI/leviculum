@@ -1556,6 +1556,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
     let bubbles = chat::bubbles(model, c);
     let places = chat::placements(&bubbles);
     let now = model.now;
+    let in_group = model.groups.contains_key(&peer);
     let mut groups: Vec<Group> = Vec::new();
     for (bubble, place) in bubbles.into_iter().zip(places) {
         let playing = model.playing
@@ -1567,7 +1568,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         let invite = bubble
             .invite
             .and_then(|group| super::group_scene::invite(model, &group, bubble.ours));
-        let mut node = bubble_node(peer, bubble, place, now, playing, track);
+        let mut node = bubble_node(peer, bubble, place, now, playing, track, in_group);
         node.invite = invite;
         match groups.last_mut() {
             Some(group) if place.joins_before => group.bubbles.push(node),
@@ -1790,6 +1791,7 @@ fn bubble_node(
     now: Option<WallTime>,
     playing: bool,
     track: Option<&LevelTrack>,
+    in_group: bool,
 ) -> BubbleNode {
     let id = NodeId::Bubble(bubble.key);
     let now_secs = now.map(|now| now.unix_secs);
@@ -1881,7 +1883,12 @@ fn bubble_node(
     };
     let mark = bubble.mark.map(|mark| MarkNode {
         mark,
-        words: mark_words(mark, bubble.read_at, bubble.witness, now),
+        // A group's two ticks are every member's device (1466): the
+        // devices, not one recipient's.
+        words: match (in_group, mark) {
+            (true, chat::Mark::Delivered) => Text::key(StrId::StateGroupDelivered),
+            _ => mark_words(mark, bubble.read_at, bubble.witness, now),
+        },
         activate: (mark == chat::Mark::Failed).then(|| {
             Action::of(Intent::SendAgain {
                 peer,

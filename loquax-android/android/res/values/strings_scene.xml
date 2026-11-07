@@ -81,6 +81,7 @@
     <string name="state_mailbox">Waiting in the mailbox</string>
     <string name="state_arrived">Arrived</string>
     <string name="state_delivered">On the recipient\'s device</string>
+    <string name="state_group_delivered">On the devices</string>
     <string name="state_read">Read at %1$s</string>
     <string name="state_collected">Collected from the propagation network</string>
     <string name="state_failed">Not sent. Double tap to send again</string>
@@ -121,6 +122,7 @@
     <string name="info_group_read">Read by %1$d of %2$d</string>
     <string name="info_group_no_readers">Nobody in it sends read receipts</string>
     <string name="info_group_quiet">%1$d send no read receipts and are not counted</string>
+    <string name="info_member_waiting">Not arrived yet</string>
     <string name="info_size">Size</string>
     <string name="info_kb">%1$d.%2$d KB</string>
     <string name="scene_back">Back</string>
@@ -217,6 +219,7 @@
     <string name="group_left_out_voice">sent a voice message (too large for the radio)</string>
     <string name="group_left_out_file">sent a file (too large for the radio)</string>
     <string name="group_left_out_gone">a message (no longer here)</string>
+    <string name="group_status_devices_note">Group: arrived at %1$d of %2$d, on the devices of %3$d, read by %4$d of %5$d</string>
     <string name="group_status_note">Group: delivered to %1$d of %2$d, read by %3$d of %4$d</string>
     <string name="scene_my_code">My code</string>
     <string name="profile_title">Your profile</string>
