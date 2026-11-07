@@ -90,6 +90,9 @@ pub mod name;
 #[cfg(feature = "softdevice")]
 pub mod pn;
 pub mod position;
+// The 8 s off and the boot-time factory reset (order 1511).
+#[cfg(feature = "softdevice")]
+pub mod power;
 pub mod qspi;
 // The LoRa transceiver driver this build links, behind one set of names
 // for `lora`. Documented inside, where its links resolve.
@@ -650,6 +653,10 @@ pub fn log_boot_diagnostics(
     log_panic_count();
     leviculum_firmware::boot_trace::log_prev(boot);
     log_reset_reason(boot.reset_reason);
+    // `WAKE reason=` and, on a boot that found the button held,
+    // `FACTORY_RESET done=` (order 1511).
+    #[cfg(feature = "softdevice")]
+    power::log_banner(boot.reset_reason);
     boot_count::log_banner(boot_count);
     log_irq_priorities();
     // Shared boot/query formatter: the same block is retrievable at any

@@ -206,3 +206,38 @@ pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
 pub const PANIC_LED_PORT: u8 = 1;
 pub const PANIC_LED_PIN: u8 = 3;
 pub const PANIC_LED_ACTIVE_LOW: bool = false;
+
+/// The button, LED and off pins of the 8 s off and the boot-time factory
+/// reset (order 1511, `crate::power`). Off: the 3V3-S rail
+/// ([`Periph3V3En`], P1.02) that feeds the OLED, the GNSS and the sensors
+/// goes low, as Meshtastic drives it at shutdown
+/// (`src/platform/nrf52/main-nrf52.cpp:453`); the SX1262 front-end power
+/// ([`LoRaPowerEn`], P1.05) goes low; both LEDs (P1.03, P1.04, active high)
+/// go low. The OLED has no backlight of its own: its rail is 3V3-S.
+#[cfg(feature = "softdevice")]
+pub const POWER: crate::power::PowerFacts = crate::power::PowerFacts {
+    button_active_high: false,
+    led: (PANIC_LED_PORT, PANIC_LED_PIN, PANIC_LED_ACTIVE_LOW),
+    off_pins: &[
+        crate::power::OffPin {
+            port: 1,
+            pin: 2,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 5,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 3,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 4,
+            high: false,
+        },
+    ],
+};

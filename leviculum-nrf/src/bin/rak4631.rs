@@ -80,6 +80,17 @@ async fn main(spawner: Spawner) {
     // Set NVIC priorities before SoftDevice enable. S140 reserves
     // P0/P1/P4; everything else goes to P5 (RNG, USBD, TWISPI0, SAADC,
     // SPI2, UARTE0). GPIOTE + RTC1 stay P2 per embassy_nrf::config.
+    // A button held through the boot is the factory reset (order 1511):
+    // watched here, before any persisted page is read and before the
+    // SoftDevice, so the erase is a direct one and nothing below reads a
+    // page it is about to lose. Returns at once when nothing is held.
+    leviculum_nrf::power::factory_reset_at_boot(
+        p.P0_09.reborrow(),
+        &rak4631::POWER,
+        p.NVMC.reborrow(),
+        &rak4631::CONFIG,
+    )
+    .await;
     leviculum_nrf::set_irq_priorities();
     leviculum_firmware::iface_bytes::set_names(&rak4631::IFACE_NAMES);
     leviculum_firmware::entropy::set_source(leviculum_nrf::rng::fill_entropy);
@@ -529,7 +540,7 @@ async fn main(spawner: Spawner) {
             &spawner,
             leviculum_nrf::button::ButtonWiring {
                 pin: p.P0_09.into(),
-                active_high: false,
+                power: &rak4631::POWER,
                 board: "rak4631",
             },
         );

@@ -426,7 +426,7 @@ const SERIAL_HW_MTU: usize = 564;
 
 /// Whether the S140 SoftDevice is enabled. `sd_softdevice_is_enabled` is
 /// legal in every SoftDevice state and always returns `NRF_SUCCESS`.
-fn softdevice_enabled() -> bool {
+pub(crate) fn softdevice_enabled() -> bool {
     let mut enabled: u8 = 0;
     unsafe {
         nrf_softdevice_s140::sd_softdevice_is_enabled(&mut enabled);

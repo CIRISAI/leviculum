@@ -93,6 +93,17 @@ async fn main(spawner: Spawner) {
     // the room, before the first serial line exists. Same reasoning as
     // the Pocket V2's (`bin/rak4631.rs`).
     leviculum_nrf::set_hardfault_led(0, 15, false);
+    // A button held through the boot is the factory reset (order 1511):
+    // watched here, before any persisted page is read and before the
+    // SoftDevice, so the erase is a direct one and nothing below reads a
+    // page it is about to lose. Returns at once when nothing is held.
+    leviculum_nrf::power::factory_reset_at_boot(
+        p.P1_01.reborrow(),
+        &solarnode::POWER,
+        p.NVMC.reborrow(),
+        &solarnode::CONFIG,
+    )
+    .await;
     leviculum_nrf::set_irq_priorities();
     leviculum_firmware::iface_bytes::set_names(&solarnode::IFACE_NAMES);
     leviculum_firmware::entropy::set_source(leviculum_nrf::rng::fill_entropy);
@@ -572,7 +583,7 @@ async fn main(spawner: Spawner) {
         &spawner,
         leviculum_nrf::button::ButtonWiring {
             pin: p.P1_01.into(),
-            active_high: false,
+            power: &solarnode::POWER,
             board: "solarnode",
         },
     );

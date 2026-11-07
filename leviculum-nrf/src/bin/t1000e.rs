@@ -90,6 +90,17 @@ async fn main(spawner: Spawner) {
     );
     // No HardFault LED: this board has one LED and the panic path owns it,
     // as on the T114.
+    // A button held through the boot is the factory reset (order 1511):
+    // watched here, before any persisted page is read and before the
+    // SoftDevice, so the erase is a direct one and nothing below reads a
+    // page it is about to lose. Returns at once when nothing is held.
+    leviculum_nrf::power::factory_reset_at_boot(
+        p.P0_06.reborrow(),
+        &t1000e::POWER,
+        p.NVMC.reborrow(),
+        &t1000e::CONFIG,
+    )
+    .await;
     leviculum_nrf::set_irq_priorities();
     leviculum_firmware::iface_bytes::set_names(&t1000e::IFACE_NAMES);
     leviculum_firmware::entropy::set_source(leviculum_nrf::rng::fill_entropy);
@@ -518,7 +529,7 @@ async fn main(spawner: Spawner) {
         &spawner,
         leviculum_nrf::button::ButtonWiring {
             pin: p.P0_06.into(),
-            active_high: true,
+            power: &t1000e::POWER,
             board: "t1000e",
         },
     );
