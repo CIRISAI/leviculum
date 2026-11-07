@@ -13,6 +13,15 @@
 //! run that rule again ([`Rule::EveryChange`]) and a shell that changes
 //! a word on the map every second ([`Rule::Loading`]).
 //!
+//! The five seconds start when the window has settled, by its events and
+//! not by the clock (1473): its first frames drawn, the map's worker done
+//! painting (the window idle, as `drive` asks it), and no message of the
+//! window's own for a whole tick, at the earliest after [`SETTLE`] and at
+//! the latest after [`SETTLE_MAX`]. Before 1473 it settled for a fixed
+//! 1.5 s, and a debug-build worker still painting under a loaded host
+//! put its `Painted` into the five seconds (red once in 1468's run:
+//! `messages: [("Painted", 5)], presents: 4`).
+//!
 //! `LOQUAX_IDLE_FPS=1` runs it with the frame meter's overlay on (a
 //! switch for the whole process: run the test alone, `--exact`).
 
@@ -22,12 +31,18 @@ use super::tests::chat_model;
 use super::*;
 use leviculum_ui_iced::headless::{self, Program};
 use loquax::ui::update;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 /// How long the window is left alone, and how long before that it may
-/// settle (its first frames, the map's first picture).
+/// settle at the earliest (its first frames, the map's first picture).
 const IDLE: Duration = Duration::from_secs(5);
 const SETTLE: Duration = Duration::from_millis(1500);
+/// How long it may take to settle at the most: a debug build's map
+/// worker on a loaded host paints its first picture in a few seconds.
+const SETTLE_MAX: Duration = Duration::from_secs(20);
+/// How long the window's own messages must have been quiet to settle.
+const QUIET: Duration = Duration::from_millis(TICK_MS);
 
 /// The window size: the goldens', so the debug build stays quick.
 const SIZE: (u32, u32) = (900, 560);
@@ -106,6 +121,16 @@ impl Shell {
     }
 }
 
+/// How the window settles before its idle seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Settle {
+    /// By its events (1473), the rule.
+    Events,
+    /// For [`SETTLE`] by the clock, as before 1473: the control a late
+    /// worker makes red.
+    Clock,
+}
+
 /// The window with the shell's half beside it.
 struct Idle {
     window: Window,
@@ -113,10 +138,50 @@ struct Idle {
     /// Every message the window was handed: when, seconds since the
     /// start, and its kind.
     handed: Vec<(f64, String)>,
-    /// When the drive is let end though the window still waits on its
-    /// worker, and whether it had to be.
-    deadline: Duration,
-    forced: std::cell::Cell<bool>,
+    /// When the window last was handed a message of its own (not the
+    /// shell's state), since the start.
+    own: Cell<Duration>,
+    /// When the window settled, since the start, shared with the script
+    /// that ends the run [`IDLE`] after it; and whether it had to be
+    /// settled at [`SETTLE_MAX`].
+    settled: Rc<Cell<Option<Duration>>>,
+    timed_out: Cell<bool>,
+    settle: Settle,
+    /// A worker that paints late (the positive control): its pictures
+    /// are handed to the window only from this long after the start.
+    late: Option<Duration>,
+    held: RefCell<Vec<Message>>,
+    /// Whether the drive was let end though the window still waited on
+    /// its worker, [`IDLE`] and two seconds after it settled.
+    forced: Cell<bool>,
+}
+
+impl Idle {
+    fn elapsed(&self) -> Duration {
+        self.shell.borrow().start.elapsed()
+    }
+
+    /// Settled once, when `out`, the window's own messages of this pump,
+    /// are none.
+    fn settle(&self, out: &[Message]) {
+        if self.settled.get().is_some() {
+            return;
+        }
+        let now = self.elapsed();
+        if now < SETTLE {
+            return;
+        }
+        let quiet = out.is_empty()
+            && self.held.borrow().is_empty()
+            && now.saturating_sub(self.own.get()) >= QUIET
+            && self.window.idle();
+        if self.settle == Settle::Clock || quiet {
+            self.settled.set(Some(now));
+        } else if now >= SETTLE_MAX {
+            self.timed_out.set(true);
+            self.settled.set(Some(now));
+        }
+    }
 }
 
 impl Program for Idle {
@@ -131,6 +196,9 @@ impl Program for Idle {
         let kind = format!("{message:?}");
         let kind = kind.split(['(', ' ', '{']).next().unwrap_or("").to_string();
         self.handed.push((at, kind));
+        if !matches!(message, Message::Seen(_)) {
+            self.own.set(self.elapsed());
+        }
         // The shell's state as the window's update folds it, the map's
         // worker handed what it asks for then: the bench hands it only
         // the map's own messages, and would leave it waiting (1455).
@@ -146,6 +214,20 @@ impl Program for Idle {
 
     fn pump(&self, drawn: bool) -> Vec<Message> {
         let mut out = self.window.pump(drawn);
+        if let Some(late) = self.late {
+            let mut held = self.held.borrow_mut();
+            match self.elapsed() >= late {
+                true => out.append(&mut held),
+                false => {
+                    let (painted, rest) = out
+                        .into_iter()
+                        .partition(|m| matches!(m, Message::Painted(_)));
+                    held.extend::<Vec<_>>(painted);
+                    out = rest;
+                }
+            }
+        }
+        self.settle(&out);
         if let Some(seen) = self.shell.borrow_mut().pump() {
             out.push(Message::Seen(Box::new(seen)));
         }
@@ -153,10 +235,13 @@ impl Program for Idle {
     }
 
     fn idle(&self) -> bool {
-        if self.window.idle() {
+        if self.window.idle() && self.held.borrow().is_empty() {
             return true;
         }
-        let late = self.shell.borrow().start.elapsed() >= self.deadline;
+        let late = self
+            .settled
+            .get()
+            .is_some_and(|at| self.elapsed() >= at + IDLE + Duration::from_secs(2));
         if late && !self.forced.get() {
             let app = &self.window.app;
             println!(
@@ -188,6 +273,10 @@ enum Screen1455 {
 /// What five idle seconds did, after the settle.
 #[derive(Debug)]
 struct Quiet {
+    /// When the window settled, seconds since the start, and whether
+    /// only [`SETTLE_MAX`] settled it.
+    settled: f64,
+    timed_out: bool,
     /// States the shell handed the window.
     wakes: usize,
     /// Every message the window was handed, by kind.
@@ -208,8 +297,10 @@ struct Quiet {
 impl Quiet {
     fn line(&self, screen: Screen1455, rule: Rule) -> String {
         format!(
-            "IDLE_WINDOW screen={screen:?} rule={rule:?} seconds={} wakes={} messages={:?} busy={} redraws_unpresented={} presents={} max_damage={:.4} last_rects={}",
+            "IDLE_WINDOW screen={screen:?} rule={rule:?} seconds={} settled={:.2} timed_out={} wakes={} messages={:?} busy={} redraws_unpresented={} presents={} max_damage={:.4} last_rects={}",
             IDLE.as_secs(),
+            self.settled,
+            self.timed_out,
             self.wakes,
             self.messages,
             self.busy,
@@ -226,6 +317,12 @@ impl Quiet {
 }
 
 fn idle(screen: Screen1455, rule: Rule) -> Quiet {
+    idle_with(screen, rule, Settle::Events, None)
+}
+
+/// [`idle`], settled as `settle` says, the map's worker handing its
+/// pictures over no earlier than `late` after the start.
+fn idle_with(screen: Screen1455, rule: Rule, settle: Settle, late: Option<Duration>) -> Quiet {
     let (w, h) = SIZE;
     let (app, model) = match screen {
         Screen1455::Chat | Screen1455::Typing => {
@@ -256,10 +353,16 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
             wakes: Vec::new(),
         }),
         handed: Vec::new(),
-        deadline: SETTLE + IDLE + Duration::from_secs(2),
-        forced: std::cell::Cell::new(false),
+        own: Cell::new(Duration::ZERO),
+        settled: Rc::new(Cell::new(None)),
+        timed_out: Cell::new(false),
+        settle,
+        late,
+        held: RefCell::new(Vec::new()),
+        forced: Cell::new(false),
     };
-    let end = SETTLE + IDLE;
+    let settled = program.settled.clone();
+    let end = move || settled.get().map(|at| at + IDLE);
     // Typing: a press into the compose field while the window settles,
     // and one on the list's empty foot after the idle seconds, which
     // takes the focus and ends the blink, as the bench's idle case does.
@@ -268,32 +371,32 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
     let at = |p| iced::Event::Mouse(mouse::Event::CursorMoved { position: p });
     let down = iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
     let up = iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
-    let mut steps: Vec<(Duration, iced::Event)> = match screen {
-        Screen1455::Typing => vec![
-            (SETTLE / 3, at(field)),
-            (SETTLE / 3, down.clone()),
-            (SETTLE / 3, up.clone()),
-            (end, at(list)),
-            (end, down),
-            (end, up),
-        ],
-        _ => Vec::new(),
+    // The press into the field at a third of the settle; the one on
+    // the list when the idle seconds end, whenever that is.
+    let (mut early, mut after): (Vec<iced::Event>, Vec<iced::Event>) = match screen {
+        Screen1455::Typing => (
+            vec![at(field), down.clone(), up.clone()],
+            vec![at(list), down, up],
+        ),
+        _ => (Vec::new(), Vec::new()),
     };
-    steps.reverse();
     let mut script = |now: Duration| -> Option<Vec<iced::Event>> {
         let mut events = Vec::new();
-        while steps.last().is_some_and(|(t, _)| *t <= now) {
-            if let Some((_, event)) = steps.pop() {
-                events.push(event);
-            }
+        if now >= SETTLE / 3 {
+            events.append(&mut early);
         }
-        match now >= end && steps.is_empty() && events.is_empty() {
+        let over = end().is_some_and(|end| now >= end);
+        if over {
+            events.append(&mut after);
+        }
+        match over && events.is_empty() {
             true => None,
             false => Some(events),
         }
     };
     let run = headless::drive(&mut program, w, h, &mut script, SETTLE).expect("a renderer");
-    let (from, until) = (SETTLE.as_secs_f64(), end.as_secs_f64());
+    let settled = program.settled.get().unwrap_or(SETTLE_MAX);
+    let (from, until) = (settled.as_secs_f64(), (settled + IDLE).as_secs_f64());
     let shell = program.shell.borrow();
     let inside = |t: f64| t >= from && t < until;
     let presented: Vec<_> = run.frames.iter().filter(|f| inside(f.at)).collect();
@@ -313,6 +416,8 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
         }
     }
     Quiet {
+        settled: from,
+        timed_out: program.timed_out.get(),
         wakes: shell.wakes.iter().filter(|&&t| inside(t)).count(),
         messages,
         busy: program.forced.get(),
@@ -376,13 +481,14 @@ fn an_idle_window_draws_nothing() {
             }
             (_, Rule::Shown) => assert_eq!(
                 (
+                    quiet.timed_out,
                     quiet.wakes,
                     quiet.messages.len(),
                     quiet.busy,
                     quiet.unpresented,
                     quiet.presents
                 ),
-                (0, 0, false, 0, 0),
+                (false, 0, 0, false, 0, 0),
                 "{screen:?} idle: {quiet:?}"
             ),
             (_, Rule::EveryChange) => assert!(
@@ -394,4 +500,37 @@ fn an_idle_window_draws_nothing() {
             }
         }
     }
+}
+
+/// The settle waits for a worker that paints late (1473): the map's
+/// pictures handed over four seconds after the start, long past
+/// [`SETTLE`], as a debug build's worker on a loaded host hands them.
+/// Settled by its events the window starts its idle seconds after the
+/// last picture and they stay quiet; settled by the clock, as before
+/// 1473, the late pictures land in them (the control).
+#[test]
+fn a_worker_that_paints_late_is_waited_for() {
+    let late = Duration::from_secs(4);
+    let waited = idle_with(Screen1455::Map, Rule::Shown, Settle::Events, Some(late));
+    println!("{}", waited.line(Screen1455::Map, Rule::Shown));
+    let clocked = idle_with(Screen1455::Map, Rule::Shown, Settle::Clock, Some(late));
+    println!("{}", clocked.line(Screen1455::Map, Rule::Shown));
+    assert!(
+        waited.settled >= late.as_secs_f64() && !waited.timed_out,
+        "settled before the late worker: {waited:?}"
+    );
+    assert_eq!(
+        (
+            waited.wakes,
+            waited.messages.len(),
+            waited.busy,
+            waited.presents
+        ),
+        (0, 0, false, 0),
+        "the late worker was counted: {waited:?}"
+    );
+    assert!(
+        clocked.messages.iter().any(|(kind, _)| kind == "Painted") && clocked.presents > 0,
+        "the clock's settle did not count the late worker: {clocked:?}"
+    );
 }
