@@ -427,8 +427,9 @@ pub const HOME_CODE_MAX: usize = 512;
 /// interrupt enqueues a polled answer, so everything from the queue to the
 /// panel is the path a finger takes. Code 0 (an idle answer) is refused
 /// [`REFUSE_VALUE`]. Only an image built for the bench accepts it (the
-/// M9's `bench` feature, banner `[BENCH] inject=on`); every release image
-/// refuses it as an unknown type.
+/// M9's bench image, `scripts/build-m9-image.sh --bench`, banner
+/// `[BENCH] inject=on`); every release image refuses it as an unknown
+/// type.
 pub const TYPE_KEY_INJECT: u8 = 0x1A;
 
 /// The longest hold a [`TYPE_KEY_INJECT`] asks for: ten seconds, longer

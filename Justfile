@@ -349,7 +349,7 @@ nrf-shellcheck:
         scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
-        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh \
+        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh scripts/check-m9-bench-off.sh \
         scripts/nrf-flash.sh scripts/check-nrf-reproducible.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \

@@ -55,8 +55,19 @@
 # Justfile): without ~/export-esp.sh this says SKIP, unless
 # M9_IMAGE_REQUIRE_ESP=1 makes that a failure.
 #
+# The bench image (order 1533) is the same build with LEVICULUM_M9_BENCH=1,
+# which leviculum-esp/build.rs turns into `cfg(m9_bench)` (its comment says
+# why that is no cargo feature):
+# a TYPE_KEY_INJECT control frame presses a key, and the boot says
+# `[BENCH] inject=on`. It is built into its own target directory,
+# `<target>/bench/`, so the release image `just flash-m9` writes is never
+# a bench one, and it is packaged as `thinknode_m9-bench.bin` beside its
+# ELF. Its sha256 is printed as `M9_IMAGE_SHA kind=bench sha256=<hex>`,
+# the release image's as `kind=release`.
+#
 # Usage:
 #   bash scripts/build-m9-image.sh             # build, package, measure
+#   bash scripts/build-m9-image.sh --bench     # the same, the bench image
 #   bash scripts/build-m9-image.sh --selftest  # the verdicts on fake numbers
 
 set -uo pipefail
@@ -130,20 +141,53 @@ source "$ROOT/scripts/cargo-target-dir.sh"
 # shellcheck source=scripts/nrf-rustflags.sh
 source "$ROOT/scripts/nrf-rustflags.sh"
 
+# The bench image's name and cargo arguments (1533), from M9_BENCH=1, which
+# --bench sets for this script and the namespace hop below.
+BENCH="${M9_BENCH:-0}"
+if [ "${1:-}" = "--bench" ]; then
+    BENCH=1
+    shift
+fi
+export M9_BENCH="$BENCH"
+NAME=thinknode_m9
+KIND=release
+if [ "$BENCH" = 1 ]; then
+    NAME=thinknode_m9-bench
+    KIND=bench
+    export LEVICULUM_M9_BENCH=1
+else
+    unset LEVICULUM_M9_BENCH
+fi
+
+# target_of: where cargo writes this kind's build; the bench image's own
+# directory under the release one.
+target_of() {
+    local target
+    target="$(cargo_target_dir "$ESP")" || return 1
+    if [ "$BENCH" = 1 ]; then
+        target="$target/bench"
+    fi
+    echo "$target"
+}
+
 # build_here: build and package the image from the tree this script lies in,
 # with the remap for that path. In the namespace that tree is $CANON.
 build_here() {
-    local out
+    local target out
     # shellcheck disable=SC1091
     source "$HOME/export-esp.sh" >/dev/null || return 1
     export PATH="$HOME/.cargo/bin:$PATH"
     esp_rustflags_export || return 1
-    out="$(cargo_target_dir "$ESP")/xtensa-esp32s3-none-elf/release" || return 1
-    (cd "$ESP" && cargo build --release --locked --bin thinknode_m9) &&
+    target="$(target_of)" || return 1
+    out="$target/xtensa-esp32s3-none-elf/release"
+    # The release build is cargo's own default target, as before 1533.
+    local where=()
+    [ "$BENCH" = 1 ] && where=(--target-dir "$target")
+    (cd "$ESP" && cargo build --release --locked "${where[@]}" --bin thinknode_m9) &&
         espflash save-image --chip esp32s3 --flash-size 16mb \
             --flash-mode dio --flash-freq 80mhz \
             --partition-table "$ESP/partitions-m9.csv" \
-            "$out/thinknode_m9" "$out/thinknode_m9.bin"
+            "$out/thinknode_m9" "$out/$NAME.bin"
 }
 
 # Internal: the second half of the namespace hop below.
@@ -153,12 +197,12 @@ if [ "${1:-}" = "--build-here" ]; then
 fi
 
 selftest || exit 1
-target="$(cargo_target_dir "$ESP")" || { echo "$TAG FAIL no target directory for $ESP"; exit 1; }
+target="$(target_of)" || { echo "$TAG FAIL no target directory for $ESP"; exit 1; }
 OUT="$target/xtensa-esp32s3-none-elf/release"
 firmware_epoch_export "$ROOT" ||
     echo "$TAG note: no git commit date here, the image carries the build clock"
 mkdir -p "$ROOT/target/tmp"
-log="$ROOT/target/tmp/m9-image.log"
+log="$ROOT/target/tmp/m9-image-$KIND.log"
 if unshare --user --map-root-user --mount true 2>/dev/null; then
     # shellcheck disable=SC2016 # expanded by the inner shell
     RUSTC_WRAPPER="" unshare --user --map-root-user --mount bash -c '
@@ -189,14 +233,15 @@ stack="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-size -A "
 # shellcheck disable=SC1091
 ui_stack="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-nm -S "$OUT/thinknode_m9" \
     | awk '/APP_CORE_STACK/ { print strtonum("0x" $2) }' | head -1)"
-echo "$TAG image $OUT/thinknode_m9.bin ($(stat -c %s "$OUT/thinknode_m9.bin") B), elf $OUT/thinknode_m9"
+echo "$TAG image $OUT/$NAME.bin ($(stat -c %s "$OUT/$NAME.bin") B), elf $OUT/thinknode_m9"
+echo "M9_IMAGE_SHA kind=$KIND sha256=$(sha256sum "$OUT/$NAME.bin" | cut -d' ' -f1)"
 rc=0
 verdict "$used" "$partition" "${stack:-0}" "${ui_stack:-0}" || rc=1
 # The cheap half of check-m9-reproducible.sh, on every build: the shipped
 # image names no path of this host (the remap above, order 1458).
 for p in "$ROOT/" "$HOME/" "$CANON/"; do
-    if grep -qaF -- "$p" "$OUT/thinknode_m9.bin"; then
-        echo "$TAG FAIL the image names the host path $p ($(grep -caF -- "$p" "$OUT/thinknode_m9.bin") lines); the path remap did not reach it"
+    if grep -qaF -- "$p" "$OUT/$NAME.bin"; then
+        echo "$TAG FAIL the image names the host path $p ($(grep -caF -- "$p" "$OUT/$NAME.bin") lines); the path remap did not reach it"
         rc=1
     fi
 done

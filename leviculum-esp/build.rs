@@ -2,6 +2,24 @@ use std::process::Command;
 
 fn main() {
     emit_build_sha();
+    emit_bench_cfg();
+}
+
+// The M9's bench image (order 1533): `LEVICULUM_M9_BENCH=1` at build time
+// compiles in the key injection (`cfg(m9_bench)`, `thinknode_m9.rs`, module
+// `bench`); `scripts/build-m9-image.sh --bench` sets it. A cfg from here and
+// not a cargo feature, because cargo hashes a manifest's `[features]` table
+// into the crate's `-C metadata`: with `bench = []` declared and off, the
+// release image's crate ids moved and LTO folded 8 B of code differently
+// (2026-11-07, scripts/check-m9-bench-off.sh). A build script's output is
+// no part of that hash, so the release image is the same code with the
+// hook in the source as without it.
+fn emit_bench_cfg() {
+    println!("cargo:rustc-check-cfg=cfg(m9_bench)");
+    println!("cargo:rerun-if-env-changed=LEVICULUM_M9_BENCH");
+    if std::env::var("LEVICULUM_M9_BENCH").as_deref() == Ok("1") {
+        println!("cargo:rustc-cfg=m9_bench");
+    }
 }
 
 // Embed the short git SHA and a dirty flag so the firmware can log a

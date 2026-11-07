@@ -82,6 +82,10 @@
 //!                           cycle or an EN reset says record=none
 //! [WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow
 //!                           once, as core 0's loop arms its watchdog (1534)
+//! [BENCH] inject=on        at boot and with the banner, only in the bench
+//!                           image (`LEVICULUM_M9_BENCH=1`, 1533): a
+//!                           `TYPE_KEY_INJECT` frame presses a key, the
+//!                           module `bench` at the end of this file
 //! [CORES] census=done waited_ms=<n>   core 0 held still while the UI
 //!                           core's census ran (1521b), or census=late
 //! KBRAW <ms> <hex>          one per answer that is no idle one: a timer
@@ -1110,6 +1114,11 @@ fn main() -> ! {
     // flash again; the word is the state, the log has the detail.
     let mut faulted = false;
     let mut next_banner = uptime_ms() + BANNER_INTERVAL_MS;
+    // The bench's keys (1533), only in an image built for it.
+    #[cfg(m9_bench)]
+    let mut inject = loquax_m9::kbraw::Inject::new();
+    #[cfg(m9_bench)]
+    log.line("[BENCH] ", format_args!("inject=on"));
     // From here core 0's loop feeds its watchdog every turn, and between
     // the messages of a long one (1534): a frame dump's lines took 4.6 s
     // of one turn on the bench (2026-11-07f), all of it the UART's.
@@ -1131,6 +1140,8 @@ fn main() -> ! {
             next_banner = now + BANNER_INTERVAL_MS;
             if now < BANNER_WINDOW_MS {
                 log.identify(m9::LOG_PREFIX, m9::BOARD_NAME, bytes);
+                #[cfg(m9_bench)]
+                log.line("[BENCH] ", format_args!("inject=on"));
             }
             log.set_stack_free(watch.free());
             log.say_rx_counts(true);
@@ -1198,6 +1209,13 @@ fn main() -> ! {
                     log.frame(&answer);
                     continue;
                 }
+                #[cfg(m9_bench)]
+                if frame.frame_type == envelope::TYPE_KEY_INJECT {
+                    stall::stage(Core::Io, Stage::Line);
+                    let answer = bench::take(frame.payload, kb, &mut inject);
+                    log.frame(&answer);
+                    continue;
+                }
                 if frame.frame_type == envelope::TYPE_FRAME_DUMP {
                     match envelope::decode_frame_dump_payload(frame.payload) {
                         None => log.frame(&envelope::encode_refusal(
@@ -1222,6 +1240,10 @@ fn main() -> ! {
             }
             control(&data, &mut log);
         }
+
+        // A key the bench holds answers again when it is due (1533).
+        #[cfg(m9_bench)]
+        bench::held(kb, &mut inject);
 
         turn.host = uptime_ms().saturating_sub(t_host);
         stall::stage(Core::Io, Stage::Node);
@@ -1795,6 +1817,8 @@ fn control(data: &[u8], log: &mut UartLog<'_>) {
                     envelope::TYPE_CAPABILITIES,
                     envelope::TYPE_FRAME_DUMP,
                     envelope::TYPE_HOME_CODE,
+                    #[cfg(m9_bench)]
+                    envelope::TYPE_KEY_INJECT,
                 ],
                 &[envelope::FACT_SERIAL_MUX],
             ));
@@ -1805,6 +1829,56 @@ fn control(data: &[u8], log: &mut UartLog<'_>) {
                 _ => envelope::REFUSE_UNKNOWN_TYPE,
             };
             log.frame(&envelope::encode_refusal(other, reason));
+        }
+    }
+}
+
+/// The bench's key injection (1533): a test hook, compiled only into an
+/// image built with `LEVICULUM_M9_BENCH=1` (`scripts/build-m9-image.sh
+/// --bench`, `cfg(m9_bench)` from `build.rs`), whose boot says
+/// `[BENCH] inject=on`. A `TYPE_KEY_INJECT`
+/// frame puts the key's answer into [`KB_PRESSES`] where the keyboard's
+/// timer interrupt puts a polled one, so the UI core reads it as a finger's
+/// press: the `KBRAW` and `KEY` lines, the fold, the draw, the flush and
+/// the `[PAGE]` line are the real path's.
+#[cfg(m9_bench)]
+mod bench {
+    use super::{envelope, kbraw, stall, uptime_ms, Core, Lock, Protocol, KB_PRESSES};
+    use alloc::vec::Vec;
+    use loquax_m9::kbraw::Inject;
+
+    /// One answer for `code` into the keyboard's queue, at the uptime now.
+    fn queue(kb: Protocol, code: u8) {
+        let (answer, len) = kbraw::answer_of(&kb, code);
+        stall::locked(Core::Io, Lock::Keys, || {
+            critical_section::with(|cs| {
+                KB_PRESSES
+                    .borrow_ref_mut(cs)
+                    .poll(&kb, uptime_ms() as u32, &answer[..len])
+            })
+        });
+    }
+
+    /// A `TYPE_KEY_INJECT` payload taken: the press queued and the hold
+    /// kept, and the frame that answers it, an ack or a named refusal.
+    pub fn take(payload: &[u8], kb: Protocol, inject: &mut Inject) -> Vec<u8> {
+        match envelope::decode_key_inject_payload(payload) {
+            None => envelope::encode_refusal(envelope::TYPE_KEY_INJECT, envelope::REFUSE_MALFORMED),
+            Some(asked) if !asked.valid() => {
+                envelope::encode_refusal(envelope::TYPE_KEY_INJECT, envelope::REFUSE_VALUE)
+            }
+            Some(asked) => {
+                let code = inject.press(asked.code, uptime_ms() as u32, asked.hold_ms);
+                queue(kb, code);
+                envelope::encode_ack(envelope::TYPE_KEY_INJECT)
+            }
+        }
+    }
+
+    /// The held key's next answer, when it is due.
+    pub fn held(kb: Protocol, inject: &mut Inject) {
+        if let Some(code) = inject.due(uptime_ms() as u32) {
+            queue(kb, code);
         }
     }
 }
