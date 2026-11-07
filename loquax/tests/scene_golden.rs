@@ -389,7 +389,9 @@ fn the_browse_tab_is_the_golden_scene() {
 /// the reader of the ugly store with a contact code, a mailbox on a
 /// server reached over the relay and pulling, and two devices. The
 /// avatar of the list's bar raises the profile, and the profile's
-/// scene is the golden; its QR is the code's modules row by row.
+/// scene is the golden; its QR is the code's modules row by row. The QR
+/// is `home::qr`, behind the `qr` feature this target does not require.
+#[cfg(feature = "qr")]
 #[test]
 fn the_profile_is_the_golden_scene() {
     use loquax::ui::intent::Intent;

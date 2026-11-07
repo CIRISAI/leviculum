@@ -40,10 +40,10 @@ NRF_DIR="$ROOT/leviculum-nrf"
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$ROOT/scripts/cargo-target-dir.sh"
 # The firmware is built with the checkout's paths remapped, the same way in
-# every script that builds it (scripts/nrf-rustflags.sh, order 1368).
+# every script that builds it, at one fixed path (scripts/nrf-rustflags.sh,
+# orders 1368 and 1460): every build below goes through nrf_cargo.
 # shellcheck source=scripts/nrf-rustflags.sh
 source "$ROOT/scripts/nrf-rustflags.sh"
-nrf_rustflags_export || exit 1
 HOST_TARGET="$(cargo_target_dir "$ROOT")"
 NRF_TARGET_DIR="$(cargo_target_dir "$NRF_DIR")"
 NRF_TARGET="$NRF_TARGET_DIR/thumbv7em-none-eabihf/release"
@@ -221,7 +221,7 @@ for record in "${BOARDS[@]}"; do
 
     if [ "${SKIP_FIRMWARE:-0}" != 1 ]; then
         say "building the $name firmware ($features)"
-        (cd "$NRF_DIR" && cargo build --release --bin "$bin" --features "$features")
+        (cd "$NRF_DIR" && nrf_cargo build --release --bin "$bin" --features "$features")
     fi
 
     ELF="$NRF_TARGET/$bin"

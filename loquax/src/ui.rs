@@ -1598,7 +1598,7 @@ pub enum UiEvent {
     /// page's row, the palette's command toggles it.
     ReadReceipts(bool),
     /// Send a photo to `peer` (1220): `data` is the picture the shell
-    /// scaled by [`UiModel::photo_size`] already ([`crate::photo`]), in
+    /// scaled by [`UiModel::photo_size`] already (`crate::photo`), in
     /// `format` (`jpg`, `png`, `gif`). It goes as one message with the
     /// image field alone ([`photos::photo_fields`]).
     SendPhoto {
@@ -1700,7 +1700,7 @@ pub enum UiEvent {
         index: usize,
     },
     /// Send a recording to `peer` (1222): Opus in Ogg as
-    /// [`crate::voice::encode`] made it; it goes as one message with the
+    /// `crate::voice::encode` made it; it goes as one message with the
     /// audio field alone ([`voice::voice_fields`]).
     SendVoice { peer: [u8; 16], data: Vec<u8> },
     /// A tap on a voice message's play button: the shell plays it

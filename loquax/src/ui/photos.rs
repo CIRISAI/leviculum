@@ -8,7 +8,7 @@
 //! `columba/app/src/main/java/network/columba/app/ui/model/MessageMapper.kt:511-547`.
 //!
 //! The model knows the field and the reader's size choice; the pixels are
-//! the shell's ([`crate::photo`], behind the `photos` feature): it scales
+//! the shell's (`crate::photo`, behind the `photos` feature): it scales
 //! a picked picture before [`super::UiEvent::SendPhoto`] and decodes the
 //! thumbnail a bubble shows. A photo is one message with an empty text,
 //! as Columba sends one without a caption.

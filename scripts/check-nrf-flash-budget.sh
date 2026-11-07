@@ -34,10 +34,13 @@
 #   bash scripts/check-nrf-flash-budget.sh --selftest   # fake images, no build
 #
 # The images are built with scripts/nrf-rustflags.sh, which remaps the
-# checkout's, the registry's and the toolchain's paths (order 1368), so the
-# bytes do not depend on where the tree is checked out. The gate holds that
-# too: an image whose .rodata still carries `/home/` is red, a host path that
-# reached the board through a root the remap does not know.
+# checkout's, the registry's and the toolchain's paths (order 1368), and
+# builds at one fixed path in a private mount namespace (order 1460), so the
+# bytes do not depend on where the tree is checked out
+# (scripts/check-nrf-reproducible.sh compares two). The gate holds the first
+# half too: an image whose .rodata still carries `/home/` or the fixed build
+# path is red, a host path that reached the board through a root the remap
+# does not know.
 #
 # Exit 0 = every image links, keeps the floor free and carries no host path.
 # Exit 1 = one does not, or a selftest case did not behave.
@@ -103,16 +106,18 @@ verdict() {
     return 0
 }
 
-# host_path_verdict <board> <rodata blob>: red when the blob holds `/home/`.
+# host_path_verdict <board> <rodata blob>: red when the blob holds `/home/`
+# or the fixed build path `/mnt/leviculum/` (order 1460; the remap maps it to
+# /src, so finding it means the remap missed the namespace's root).
 # Panic locations are the bulk of what lands there; 1300 counted about 5.6 KB
 # of them per image before the remap, and with them the image size moved with
 # the checkout path (1326).
 host_path_verdict() {
     local board="$1" blob="$2" n
-    n="$(grep -ac '/home/' "$blob")"
+    n="$(grep -acE '/home/|/mnt/leviculum/' "$blob")"
     if [ "$n" -ne 0 ]; then
-        echo "[flash-budget] FAIL $board: .rodata carries a host path ($n line(s) with /home/), e.g.:"
-        grep -ao '/home/[[:graph:]]*' "$blob" | head -3 | sed 's/^/    /'
+        echo "[flash-budget] FAIL $board: .rodata carries a host path ($n line(s) with /home/ or /mnt/leviculum/), e.g.:"
+        grep -aoE '(/home/|/mnt/leviculum/)[[:graph:]]*' "$blob" | head -3 | sed 's/^/    /'
         echo "[flash-budget] Build through scripts/nrf-rustflags.sh, or teach it the missing root."
         return 1
     fi
@@ -163,14 +168,13 @@ run() {
     out="$(cargo_target_dir "$NRF")" || exit 1
     # shellcheck source=scripts/nrf-rustflags.sh
     source "$ROOT/scripts/nrf-rustflags.sh"
-    nrf_rustflags_export || exit 1
     logdir="$out/flash-budget"
     mkdir -p "$logdir"
     for entry in "${IMAGES[@]}"; do
         board="${entry%%|*}"
         features="${entry#*|}"
         log="$logdir/$board.log"
-        if (cd "$NRF" && cargo build --release --bin "$board" --features "$features") >"$log" 2>&1; then
+        if (cd "$NRF" && nrf_cargo build --release --bin "$board" --features "$features") >"$log" 2>&1; then
             measure_elf "$board" "$out/thumbv7em-none-eabihf/release/$board" "$origin" "$length" "$floor" || rc=1
             check_host_paths "$board" "$out/thumbv7em-none-eabihf/release/$board" "$logdir" || rc=1
         else
@@ -263,8 +267,11 @@ LOG
     # The host-path guard: a .rodata with a registry path in it is red, one
     # with only remapped paths is not.
     printf 'panicked at /home/u/.cargo/registry/src/x/lib' >"$dir/home.rodata"
-    expect 1 "[flash-budget] FAIL home: .rodata carries a host path (1 line(s) with /home/), e.g.:" \
+    expect 1 "[flash-budget] FAIL home: .rodata carries a host path (1 line(s) with /home/ or /mnt/leviculum/), e.g.:" \
         "a /home/ path in .rodata is red" host_path_verdict home "$dir/home.rodata"
+    printf 'panicked at /mnt/leviculum/leviculum-core/src/lib' >"$dir/canon.rodata"
+    expect 1 "[flash-budget] FAIL canon: .rodata carries a host path (1 line(s) with /home/ or /mnt/leviculum/), e.g.:" \
+        "the unremapped fixed build path is red" host_path_verdict canon "$dir/canon.rodata"
     printf 'panicked at /registry/x/lib\0/src/leviculum-core/src' >"$dir/clean.rodata"
     expect 0 "" "remapped paths pass" host_path_verdict clean "$dir/clean.rodata"
 

@@ -1,7 +1,7 @@
 //! What the map's autoload loads for the area on screen (1292): one
 //! scheduler, driven by the frames the frontend asks, that says which
 //! regions the view needs now and which it needs next. The frontend only
-//! downloads, in the order given ([`crate::mapload::Loader::schedule`]).
+//! downloads, in the order given (`crate::mapload::Loader::schedule`).
 //!
 //! - The view is cut into cells, the tiles of a zoom [`CELL_ABOVE`] steps
 //!   above the view's, so a pan asks for the same boxes again and a region

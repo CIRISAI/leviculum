@@ -343,7 +343,7 @@ pub enum Intent {
     /// Send the recording the microphone made to `peer` (1222): the
     /// compose bar's button, held and released. Mono 16-bit PCM at `rate`
     /// as the platform recorded it; the shell codes it
-    /// ([`crate::voice::encode`]). Empty in the scene's action, which the
+    /// (`crate::voice::encode`). Empty in the scene's action, which the
     /// platform fills.
     SendVoice {
         peer: [u8; 16],

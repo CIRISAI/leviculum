@@ -349,7 +349,8 @@ nrf-shellcheck:
         scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
-        scripts/nrf-elf.sh scripts/nrf-rustflags.sh \
+        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh \
+        scripts/nrf-flash.sh scripts/check-nrf-reproducible.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/check-nrf-stack-frames.sh \
@@ -1589,7 +1590,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2164,11 +2165,13 @@ btvirt-selftest:
 # device. Details: leviculum-nrf/README.md §Build and flash.
 # The runner refuses a board whose SoftDevice our image is not linked for,
 # because that write is a soft brick: docs/src/concepts/lnode-flashing.md.
-# The firmware crate is outside the workspace (cross-compiled), so we
-# invoke cargo from its own directory.
+# scripts/nrf-flash.sh builds at the fixed path of scripts/nrf-rustflags.sh
+# (so a clone of the commit builds the same bytes, 1460), prints the image's
+# NRF_IMAGE sha256, and runs tools/uf2-runner.sh outside the build's
+# namespace on the ELF it built.
 [doc('Flash every attached T114 with the current firmware')]
 flash:
-    cd leviculum-nrf && bash ../scripts/nrf-rustflags.sh cargo run --release --bin t114 --features bsp-t114
+    bash scripts/nrf-flash.sh t114 bsp-t114
 
 # Wiring, gdb setup and the probe's own quirks: docs/src/firmware/probe-debugging.md
 [doc('SWD firmware debugging via the RPi Debug Probe')]
@@ -2180,7 +2183,7 @@ probe *args:
 #   just flash-one /dev/leviculum-transport
 [doc('Flash a single T114 by port path or udev symlink')]
 flash-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin t114 --features bsp-t114
+    LEVICULUM_FLASH_ONLY={{PORT}} bash scripts/nrf-flash.sh t114 bsp-t114
 
 # What every RAK4631 flash recipe tells the runner about this board: the USB
 # PID our firmware enumerates on, the names it puts in its messages, and the
@@ -2196,13 +2199,13 @@ rak4631_env := 'LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF
 # flashes use the touch path automatically.
 [doc('Flash every attached RAK4631 (WisMesh Pocket V2) with our firmware')]
 flash-rak4631:
-    cd leviculum-nrf && {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631
+    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
 
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
 [doc('Flash a single RAK4631 by port path or udev symlink')]
 flash-rak4631-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631
+    LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
 
 # Flash with all RAK19026 baseboard peripherals enabled — the WisMesh
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
@@ -2210,7 +2213,7 @@ flash-rak4631-one PORT:
 # bundle ships for this board (docs/src/concepts/board-support-scope.md).
 [doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
-    cd leviculum-nrf && {{rak4631_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 
 # What every SenseCAP Solar Node flash recipe tells the runner about this
 # board. The Board-ID is the XIAO MODULE's, not this product's: a DIY XIAO
@@ -2225,11 +2228,11 @@ solarnode_env := 'LEVICULUM_USB_PID=0003 LEVICULUM_BOARD_NAME=SolarNode LEVICULU
 # touch. Once our firmware is on, this recipe works like the other two.
 [doc('Flash every attached SenseCAP Solar Node P1-Pro with our firmware')]
 flash-solarnode:
-    cd leviculum-nrf && {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin solarnode --features bsp-solarnode
+    {{solarnode_env}} bash scripts/nrf-flash.sh solarnode bsp-solarnode
 
 [doc('Flash a single SenseCAP Solar Node by port path or udev symlink')]
 flash-solarnode-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin solarnode --features bsp-solarnode
+    LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} bash scripts/nrf-flash.sh solarnode bsp-solarnode
 
 # The SenseCAP T1000-E's bootloader (2886:0057, Board-ID nRF52840-T1000-E-v1)
 # answers serial DFU only on the rig unit, with no UF2 volume, so the UF2
@@ -2253,7 +2256,7 @@ t1000e-dfu-package:
 # firmware back.
 [doc('Measurement tool: ERASES all SolarNode external flash, tests it')]
 flash-solarnode-qspi-selftest:
-    cd leviculum-nrf && {{solarnode_env}} bash ../scripts/nrf-rustflags.sh cargo run --release --bin qspi-selftest --features bsp-solarnode,qspi-selftest
+    {{solarnode_env}} bash scripts/nrf-flash.sh qspi-selftest bsp-solarnode,qspi-selftest
 
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no
@@ -2709,6 +2712,34 @@ flash-m9 port:
     espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
         --non-interactive --flash-size 16mb \
         --partition-table leviculum-esp/partitions-m9.csv "$elf"
+
+# The M9 image is the same bytes from any clone of the same commit (1458,
+# #474): builds it in this tree and in a clone of HEAD under a throwaway path
+# and compares sha256, red on a difference or on a host path in either image;
+# on a tree with tracked changes both builds are clones of HEAD. In `fast`
+# beside nrf-flash-budget; it says SKIP on a host without the Xtensa fork or
+# without unprivileged user namespaces. 75 s on a clean tree, 89 s with
+# tracked changes (two cold clones), measured 2026-11-06. The cheap half, no
+# host path in the image, runs in every build-m9.
+# not-in-guards: m9-reproducible -- 75 s, two full Xtensa builds, one cold
+[doc('Check the ThinkNode M9 image builds to the same bytes from a clone')]
+m9-reproducible:
+    bash scripts/check-m9-reproducible.sh --selftest
+    bash scripts/check-m9-reproducible.sh
+
+# The nRF images are the same bytes from any clone of the same commit (1460,
+# #474): builds the T114 image in this tree and in a clone of HEAD under a
+# throwaway path, both through scripts/nrf-rustflags.sh's fixed-path wrapper,
+# and compares the flat images by sha256, red on a difference or on a host
+# path in either; on a tree with tracked changes both builds are clones of
+# HEAD. Says SKIP on a host without unprivileged user namespaces. In `fast`
+# beside m9-reproducible: 49 s on a clean tree, 51 s with tracked changes
+# (two cold clones), measured 2026-11-06.
+# not-in-guards: nrf-reproducible -- 49 s, two full T114 release builds
+[doc('Check the T114 firmware image builds to the same bytes from a clone')]
+nrf-reproducible:
+    bash scripts/check-nrf-reproducible.sh --selftest
+    bash scripts/check-nrf-reproducible.sh
 
 # 1422, #474: the map's frame budget measured (the eye candy study of
 # 2026-11-04, section 4). `REGION` is the Frankfurt region the study cut

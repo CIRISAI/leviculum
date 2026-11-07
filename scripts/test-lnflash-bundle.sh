@@ -89,11 +89,21 @@ cp "${@: -2:1}" "${@: -1}"
 EOF
 chmod +x "$STUBS"/*
 
+# Where the firmware build sees the fixture tree: the fixed path of
+# scripts/nrf-rustflags.sh when this host has unprivileged user namespaces,
+# else the tree itself (BUILT_AT is set per case in setup).
+if unshare --user --map-root-user --mount true 2>/dev/null; then
+    CANON_BUILD=/mnt/leviculum
+else
+    CANON_BUILD=""
+fi
+
 # --- The fixture tree -------------------------------------------------------
 VERSION="0.10.0-dev"
 
 setup() { # <case>
     TREE="$WORK/$1/tree"
+    BUILT_AT="${CANON_BUILD:-$TREE}"
     FIXTURE_TARGET="$WORK/$1/cargo-target"
     mkdir -p "$TREE/scripts" "$TREE/leviculum-nrf/tools" "$TREE/lnflash/payload" \
         "$FIXTURE_TARGET/thumbv7em-none-eabihf/release"
@@ -194,10 +204,12 @@ assert_build_features() { # <extra, comma-prefixed or empty>
             "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null ||
             fail "the $name firmware was not built with --features $features$1: $(cat "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null)"
         # The shipped images carry no host path: the tree is remapped to /src
-        # (scripts/nrf-rustflags.sh, order 1368).
+        # (scripts/nrf-rustflags.sh, order 1368), and where this host allows a
+        # user namespace the tree the build saw is the fixed path, not the
+        # fixture's own (order 1460), so a clone builds the same bytes.
         grep -F -- "$bin --remap-path-prefix=" "$FIXTURE_TARGET/cargo-rustflags.log" 2>/dev/null |
-            grep -qF -- "=$TREE=/src" ||
-            fail "the $name firmware was not built with the path remap: $(cat "$FIXTURE_TARGET/cargo-rustflags.log" 2>/dev/null)"
+            grep -qF -- "=$BUILT_AT=/src" ||
+            fail "the $name firmware was not built with the path remap of $BUILT_AT: $(cat "$FIXTURE_TARGET/cargo-rustflags.log" 2>/dev/null)"
     done
 }
 
