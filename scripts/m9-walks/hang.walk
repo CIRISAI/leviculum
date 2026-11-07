@@ -1,0 +1,429 @@
+# hang.walk (order 1540): open an unread chat fifty times, each time with
+# the flash owed a write while the UI core folds the page. The window the
+# M9 hung in on 2026-11-07 (1534: core 0 writes or erases the flash while
+# core 1 is parked inside the critical section it allocates under) is
+# re-armed before every open, so the race is under load every time, not
+# only on the first open as in window 10.
+#
+# Each block is Lew's case: a message arrives in the chat at row i (the
+# board counts rows modulo the chats it has and selects that chat), the
+# owe is armed, Enter opens the chat: the read mark goes to the ring and
+# every row to the summary log while core 1 folds and allocates. Even
+# blocks close both stores' sectors first, so the writes erase (about 45
+# ms with core 0's interrupts off, after which the keyboard's 10 ms tick
+# is always pending); odd blocks only write.
+#
+# Run it on the diagnosis image (the fix 04b20b78 reverted, built with
+# --bench): expected FAIL with a [PREV_RUN] reason=wdt0|wdt1 line. Then on
+# the fix image: expected PASS, fifty [OPEN] lines, no [PREV_RUN] with a
+# record.
+#
+#   just m9-walk <rig> scripts/m9-walks/hang.walk <bench elf>
+#
+# The bars are 1533's except the key bar: Enter on a long chat took up to
+# 1.7 s in window 10 and the median key 170 ms, which is 1507's to fix and
+# the [OPEN] lines' to explain; this walk asks whether the board hangs.
+allow key_ms 2000
+
+# open 1 of 50
+bench arrive 0
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 2 of 50
+bench arrive 1
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 3 of 50
+bench arrive 2
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 4 of 50
+bench arrive 3
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 5 of 50
+bench arrive 4
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 6 of 50
+bench arrive 5
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 7 of 50
+bench arrive 6
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 8 of 50
+bench arrive 7
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 9 of 50
+bench arrive 8
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 10 of 50
+bench arrive 9
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 11 of 50
+bench arrive 10
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 12 of 50
+bench arrive 11
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 13 of 50
+bench arrive 12
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 14 of 50
+bench arrive 13
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 15 of 50
+bench arrive 14
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 16 of 50
+bench arrive 15
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 17 of 50
+bench arrive 16
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 18 of 50
+bench arrive 17
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 19 of 50
+bench arrive 18
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 20 of 50
+bench arrive 19
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 21 of 50
+bench arrive 20
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 22 of 50
+bench arrive 21
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 23 of 50
+bench arrive 22
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 24 of 50
+bench arrive 23
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 25 of 50
+bench arrive 24
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 26 of 50
+bench arrive 25
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 27 of 50
+bench arrive 26
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 28 of 50
+bench arrive 27
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 29 of 50
+bench arrive 28
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 30 of 50
+bench arrive 29
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 31 of 50
+bench arrive 30
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 32 of 50
+bench arrive 31
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 33 of 50
+bench arrive 32
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 34 of 50
+bench arrive 33
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 35 of 50
+bench arrive 34
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 36 of 50
+bench arrive 35
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 37 of 50
+bench arrive 36
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 38 of 50
+bench arrive 37
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 39 of 50
+bench arrive 38
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 40 of 50
+bench arrive 39
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 41 of 50
+bench arrive 40
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 42 of 50
+bench arrive 41
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 43 of 50
+bench arrive 42
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 44 of 50
+bench arrive 43
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 45 of 50
+bench arrive 44
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 46 of 50
+bench arrive 45
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 47 of 50
+bench arrive 46
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 48 of 50
+bench arrive 47
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 49 of 50
+bench arrive 48
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+
+# open 50 of 50
+bench arrive 49
+bench owe
+key enter
+wait page=chat
+key back
+wait page=chats
+
+measure
+idle 10

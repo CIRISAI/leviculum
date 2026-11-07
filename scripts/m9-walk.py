@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Walk the ThinkNode M9 on the bench without hands (order 1533).
+"""Walk the ThinkNode M9 on the bench without hands (orders 1533, 1540).
 
 The board runs the bench image (`scripts/build-m9-image.sh --bench`, boot
 line `[BENCH] inject=on`). The rig folder's proxy (`m9-proxy.py`, the
@@ -30,7 +30,25 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
     idle <s>                  watch the line <s> seconds: rx_lost must
                               not grow
     sleep <ms>                wait
-    measure                   the key latencies so far into walk.md
+    measure                   the key latencies and the [OPEN] lines so
+                              far into walk.md
+    bench owe [erase|erase-log|erase-ring]
+                              TYPE_BENCH_OWE (1540): the next open writes
+                              every chat's row again while the UI core
+                              folds; `erase-log` closes the summary log's
+                              sector first so the write erases one,
+                              `erase-ring` the message ring's (the open's
+                              read mark), `erase` both; waits for
+                              `[BENCH] owe=armed`
+    bench arrive <row>        TYPE_BENCH_ARRIVE (1540): a message comes
+                              into the chat at that row of the list
+                              (modulo the rows there are), unread, and its
+                              chat is selected; waits for
+                              `[BENCH] arrive=folded`
+    allow key_ms <ms>         the key bar for the rest of the walk, when
+                              the walk asks another question than the
+                              latency (hang.walk: Enter on a long chat
+                              took 1.7 s in window 10, 1507's to fix)
 
 The walk's verdict is held to the bars of order 1533: key to frame under
 100 ms (a KEY line's board time to the next `[DISP] flush` line's t=),
@@ -63,15 +81,21 @@ import zlib
 
 FLAG, ESC, XON, XOFF = 0x7E, 0x7D, 0x11, 0x13
 TYPE_FRAME_DUMP, TYPE_KEY_INJECT = 0x18, 0x1A
+TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE = 0x1B, 0x1C
+# leviculum-core/src/envelope.rs, BENCH_OWE_*.
+OWE_FLAGS = {None: 0x00, "erase-log": 0x01, "erase-ring": 0x02, "erase": 0x03}
 # The steps that do something; `expect ... changed` and `expect log` look
 # back to the last of them.
-ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep")
+ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep", "bench")
 KEY_MS_BAR = 100
 RESTORE_MS_BAR = 2000
 LOOP_MS_BAR = 250
 KEY_WAIT_S = 2.0
 READY_WAIT_S = 90.0
 DUMP_WAIT_S = 20.0
+BENCH_WAIT_S = 5.0
+# The [OPEN] line's fields (1540), in its order.
+OPEN_FIELDS = ("wait_ms", "page_read_ms", "decode_ms", "fold_ms", "scene_ms", "draw_ms", "flush_ms")
 
 # loquax-m9/src/keyboard.rs, SPECIALS and Key::of.
 NAMES = {
@@ -82,7 +106,7 @@ NAMES = {
 }
 
 
-VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure")
+VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure", "bench", "allow")
 
 
 def parse(steps):
@@ -106,6 +130,11 @@ def parse(steps):
                 float(args[0])
             if verb in ("dump", "wait", "expect") and not args:
                 raise ValueError(f"{verb} what?")
+            if verb == "bench":
+                bench_frame(args)
+            if verb == "allow":
+                if args[0] != "key_ms" or int(args[1]) <= 0:
+                    raise ValueError("allow key_ms <ms>")
         except (IndexError, ValueError) as e:
             raise ValueError(f"line {number}: `{line}`: {e}") from None
         out.append((line, verb, args))
@@ -150,6 +179,22 @@ def key_frame(code, hold_ms=None):
 
 def dump_frame():
     return wire(envelope(TYPE_FRAME_DUMP, b""))
+
+
+def bench_frame(args):
+    """A `bench` step's frame; a ValueError for one that does not read."""
+    if args[:1] == ["owe"] and len(args) <= 2:
+        flag = args[1] if len(args) == 2 else None
+        if flag not in OWE_FLAGS:
+            raise ValueError(f"bench owe takes erase, erase-log or erase-ring, not {flag!r}")
+        flags = OWE_FLAGS[flag]
+        return wire(envelope(TYPE_BENCH_OWE, bytes([flags]) if flags else b""))
+    if args[:1] == ["arrive"] and len(args) == 2:
+        row = int(args[1])
+        if not 0 <= row <= 255:
+            raise ValueError("a row is 0 to 255")
+        return wire(envelope(TYPE_BENCH_ARRIVE, bytes([row])))
+    raise ValueError("bench owe [erase|erase-log|erase-ring] or bench arrive <row>")
 
 
 def fields(line):
@@ -270,6 +315,8 @@ class Walk:
         self.boots = 0
         self.rx_lost = None
         self.loop_max = 0
+        self.key_bar = KEY_MS_BAR
+        self.opens = []
 
     # ----- the line -----
 
@@ -299,6 +346,12 @@ class Walk:
                 self.fail(f"[LOOP] turn_ms={ms} over {LOOP_MS_BAR}: {line}")
         elif line.startswith("[PREV_RUN] ") and "record=none" not in line:
             self.fail(f"the board stopped and restarted: {line}")
+        elif line.startswith("[OPEN] "):
+            f = fields(line)
+            try:
+                self.opens.append({k: float(f[k]) for k in OPEN_FIELDS})
+            except (KeyError, ValueError):
+                self.fail(f"an [OPEN] line that does not read: {line}")
         elif line.startswith("[UART] "):
             self.rx_lost = int(fields(line).get("rx_lost", 0))
         elif line.startswith("[STORE] ") and "restore_ms=" in line:
@@ -380,8 +433,8 @@ class Walk:
             return "no frame"
         ms = int(fields(flush)["t"]) - pressed
         self.keys.append((code, ms))
-        if ms >= KEY_MS_BAR:
-            self.fail(f"key {code:#04x}: {ms} ms to its frame, the bar is under {KEY_MS_BAR}")
+        if ms >= self.key_bar:
+            self.fail(f"key {code:#04x}: {ms} ms to its frame, the bar is under {self.key_bar}")
         return f"key_ms={ms}"
 
     def dump(self, name):
@@ -400,6 +453,25 @@ class Walk:
         png(os.path.join(self.out, path), *image)
         self.pump(0.2)
         return f"dump {path}"
+
+    def bench(self, args):
+        """A bench frame (1540) and the board's line that says it took."""
+        start = self.mark()
+        self.rig.send(bench_frame(args))
+        if args[0] == "owe":
+            done, refused = "[BENCH] owe=armed", "[BENCH] owe=refused"
+        else:
+            done, refused = "[BENCH] arrive=folded", "[BENCH] arrive=refused"
+        line, _ = self.until(lambda l: l.startswith(done) or l.startswith(refused), BENCH_WAIT_S, start)
+        step = " ".join(["bench"] + args)
+        if not line:
+            self.fail(f"{step}: no {done} line within {BENCH_WAIT_S:.0f} s")
+            return f"no {done} line"
+        if line.startswith(refused):
+            self.fail(f"{step}: {line}")
+            return line
+        f = fields(line)
+        return f"{done.split()[1]} " + " ".join(f"{k}={f[k]}" for k in ("flags", "peer", "unread") if k in f)
 
     def expect(self, words):
         if words[0] == "log":
@@ -469,7 +541,12 @@ class Walk:
             elif verb == "sleep":
                 self.pump(int(args[0]) / 1000)
             elif verb == "measure":
-                extra = self.latencies()
+                extra = self.latencies() + "; " + self.open_stats()
+            elif verb == "bench":
+                extra = self.bench(args)
+            elif verb == "allow":
+                self.key_bar = int(args[1])
+                extra = f"key bar {self.key_bar} ms from here"
             else:
                 raise ValueError(f"no step {verb!r}")
             self.row(line, extra)
@@ -481,16 +558,28 @@ class Walk:
             return "key_ms none"
         return f"key_ms n={len(ms)} median={ms[len(ms) // 2]} max={ms[-1]} no_frame={sum(1 for _, m in self.keys if m is None)}"
 
+    def open_stats(self):
+        """The [OPEN] lines so far (1540): each field's median and max."""
+        if not self.opens:
+            return "opens none"
+        out = [f"opens n={len(self.opens)}"]
+        for k in OPEN_FIELDS:
+            v = sorted(o[k] for o in self.opens)
+            out.append(f"{k} median={v[len(v) // 2]:.1f} max={v[-1]:.1f}")
+        return " ".join(out)
+
     def verdict(self):
         verdict = "PASS" if not self.fails else "FAIL"
         line = (f"VERDICT {verdict} steps={len(self.md)} boots={self.boots} {self.latencies()} "
-                f"loop_max_ms={self.loop_max} rx_lost={self.rx_lost} fails={len(self.fails)}")
+                f"loop_max_ms={self.loop_max} rx_lost={self.rx_lost} opens={len(self.opens)} fails={len(self.fails)}")
         with open(os.path.join(self.out, "walk.md"), "w") as f:
             f.write("# M9 bench walk\n\n")
             f.write("Each dump is for an agent's eye: judge it against the step it follows.\n\n")
             f.write("| # | step | page | cursor | top | zoom | what happened |\n")
             f.write("|---|---|---|---|---|---|---|\n")
             f.write("\n".join(self.md) + "\n\n")
+            if self.opens:
+                f.write("## Opens\n\n" + self.open_stats() + "\n\n")
             if self.fails:
                 f.write("## Failed\n\n" + "".join(f"- {why}\n" for why in self.fails) + "\n")
             f.write(line + "\n")
@@ -506,11 +595,17 @@ class Walk:
 
 class FakeBoard(threading.Thread):
     """The proxy and the bench image in one: takes tx.hex, answers into
-    raw.bin as the M9 would. `slow_ms` delays every flush."""
+    raw.bin as the M9 would. `slow_ms` delays every flush, `refuse_owe`
+    refuses the bench's owe as a board without a store does, `hang_on`
+    is the open after which the board hangs and its watchdog restarts it
+    (1540: what hang.walk exists to catch)."""
 
-    def __init__(self, rig, slow_ms=0, grow_rx=False):
+    def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None):
         super().__init__(daemon=True)
         self.rig, self.slow_ms, self.grow_rx = rig, slow_ms, grow_rx
+        self.refuse_owe, self.hang_on = refuse_owe, hang_on
+        self.page = "chats"
+        self.opens = 0
         self.t0 = time.monotonic()
         self.stop = False
         self.cursor = 0
@@ -526,7 +621,7 @@ class FakeBoard(threading.Thread):
                 f.write(line.encode() + b"\r\n")
 
     def page_line(self):
-        self.say(f"[PAGE] name=chats cursor={self.cursor} top={max(0, self.cursor - 4)} t={self.ms()}")
+        self.say(f"[PAGE] name={self.page} cursor={self.cursor} top={max(0, self.cursor - 4)} t={self.ms()}")
 
     def run(self):
         tx, rst = os.path.join(self.rig, "tx.hex"), os.path.join(self.rig, "reset")
@@ -535,6 +630,7 @@ class FakeBoard(threading.Thread):
                 os.unlink(rst)
                 self.boots += 1
                 self.cursor = 0
+                self.page = "chats"
                 self.say("[PREV_RUN] reason=power record=none t=1", "[BENCH] inject=on t=2",
                          f"[STORE] sectors=896 used=3 entries=40 restore={'whole' if self.boots == 1 else 'resumed'} restore_ms=640 t=900",
                          "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
@@ -568,9 +664,34 @@ class FakeBoard(threading.Thread):
             self.say(f"KBRAW {at} {code:02x}", f"KEY {at} code={code:#04x} name=x")
             if code == 0xB6:
                 self.cursor += 1
+            if code == 0x0D and self.page == "chats":
+                self.page = "chat"
+                self.opens += 1
+            elif code == 0x86:
+                self.page = "chats"
             time.sleep(self.slow_ms / 1000)
             self.say(f"[DISP] flush rows=0..239 ms=4.000 t={self.ms() + 20}")
             self.page_line()
+            if code == 0x0D and self.page == "chat":
+                if self.opens == self.hang_on:
+                    # Silent, then the watchdog's reset and its record.
+                    time.sleep(0.3)
+                    self.page = "chats"
+                    self.say("[PREV_RUN] reason=wdt0 core0_stage=rows core0_lock=flash core0_isr=kb "
+                             "core1_stage=draw core1_lock=none peer=0a0b0c0d turns=10/12 t=1",
+                             "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
+                    self.page_line()
+                    return
+                self.say("[OPEN] peer=0a0b0c0d entries=24 wait_ms=12.500 page_read_ms=9.000 decode_ms=30.250 "
+                         "fold_ms=40.000 scene_ms=20.000 draw_ms=35.000 flush_ms=14.000",
+                         "[DISP] flush rows=24..239 ms=14.000 t=%d" % self.ms())
+        elif kind == TYPE_BENCH_OWE:
+            flags = payload[0] if payload else 0
+            self.say(f"[BENCH] owe={'refused' if self.refuse_owe else 'armed'} flags={flags:#04x}")
+        elif kind == TYPE_BENCH_ARRIVE:
+            self.say(f"[BENCH] arrive=sent row={payload[0] % 3} of=3 peer=0a0b0c0d",
+                     "[STORE] kept=1 writes=1 erased=0 cursor=40 used=3 entries=41",
+                     "[BENCH] arrive=folded peer=0a0b0c0d unread=1")
         elif kind == TYPE_FRAME_DUMP:
             w, h = 4, 2
             px = [0xF800, 0x07E0, 0x001F, 0xFFFF, 0, 0, 0x1234, 0x1234]
@@ -595,11 +716,28 @@ idle 0.4
 measure
 """
 
+# The bench steps' selftest walk (1540): hang.walk's block, twice.
+SELFTEST_HANG_WALK = """
+allow key_ms 2000
+bench arrive 0
+bench owe erase
+key enter
+wait page=chat
+key back
+wait page=chats
+bench arrive 4
+bench owe
+key enter
+wait page=chat
+key back
+measure
+"""
+
 
 def selftest():
     rc = 0
     with tempfile.TemporaryDirectory(dir=os.environ.get("M9_WALK_TMP")) as base:
-        def walk(name, **board):
+        def walk(name, steps=SELFTEST_WALK, **board):
             rig = os.path.join(base, name)
             os.makedirs(rig)
             open(os.path.join(rig, "raw.bin"), "wb").close()
@@ -607,7 +745,7 @@ def selftest():
             fake.start()
             out = os.path.join(rig, "out")
             w = Walk(Rig(rig), out, boots=2)
-            got = w.run(SELFTEST_WALK.splitlines())
+            got = w.run(steps.splitlines())
             fake.stop = True
             return got, w, out
         got, w, out = walk("good")
@@ -629,12 +767,44 @@ def selftest():
         if got == 0 or not any("rx_lost grew" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a growing rx_lost passed the idle step")
             rc = 1
-    shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", "bench.walk")
-    try:
-        with open(shipped) as f:
-            parse(f.read().splitlines())
-    except ValueError as e:
-        print(f"[m9-walk] selftest FAIL: the shipped walk does not read: {e}")
+        # 1540: the bench steps pass on a good board and count its opens;
+        # a refused owe and a hang on an open fail by name.
+        got, w, out = walk("bench", steps=SELFTEST_HANG_WALK)
+        if got != 0 or len(w.opens) != 2:
+            print("[m9-walk] selftest FAIL: a good board's bench walk failed:", w.fails, len(w.opens))
+            rc = 1
+        with open(os.path.join(out, "walk.md")) as f:
+            if "decode_ms median=30.2" not in f.read():
+                print("[m9-walk] selftest FAIL: walk.md has no [OPEN] figures")
+                rc = 1
+        got, w, _ = walk("noowe", steps=SELFTEST_HANG_WALK, refuse_owe=True)
+        if got == 0 or not any("owe=refused" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a refused owe passed")
+            rc = 1
+        got, w, _ = walk("hang", steps=SELFTEST_HANG_WALK, hang_on=2)
+        if got == 0 or not any("reason=wdt0" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a hang on an open passed the [PREV_RUN] bar", w.fails)
+            rc = 1
+    for name in ("bench.walk", "hang.walk"):
+        shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", name)
+        try:
+            with open(shipped) as f:
+                parse(f.read().splitlines())
+        except (OSError, ValueError) as e:
+            print(f"[m9-walk] selftest FAIL: the shipped {name} does not read: {e}")
+            rc = 1
+    for bad in (["bench owe now"], ["bench arrive 256"], ["bench nap"], ["allow key_ms -1"]):
+        try:
+            parse(bad)
+            print(f"[m9-walk] selftest FAIL: `{bad[0]}` was read")
+            rc = 1
+        except ValueError:
+            pass
+    if bench_frame(["owe", "erase-log"]).hex() != "7ea4a51b0001017e":
+        print("[m9-walk] selftest FAIL: the owe frame is not the envelope's", bench_frame(["owe", "erase-log"]).hex())
+        rc = 1
+    if bench_frame(["arrive", "3"]).hex() != "7ea4a51c0001037e":
+        print("[m9-walk] selftest FAIL: the arrive frame is not the envelope's")
         rc = 1
     try:
         parse(["key nosuchkey"])
@@ -649,7 +819,8 @@ def selftest():
         print("[m9-walk] selftest FAIL: the key frame is not the envelope's", key_frame(0xB5, 500).hex())
         rc = 1
     if rc == 0:
-        print("[m9-walk] selftest ok: a good walk passes and writes its dump, a slow frame and a growing rx_lost fail")
+        print("[m9-walk] selftest ok: a good walk passes and writes its dump, a slow frame and a growing rx_lost fail; "
+              "the bench steps pass and count opens, a refused owe and a hang on an open fail")
     return rc
 
 
