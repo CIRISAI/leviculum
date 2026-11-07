@@ -21,6 +21,10 @@ What it writes, from the tree's root:
   and the legacy ic_launcher.png for every mipmap density.
 - packaging/loquax/loquax.png, 256 px, for the Linux package.
 - leviculum-ui-iced/assets/window-icon.png, 128 px, the windows' icon.
+- loquax-m9/assets/splash-logo.rgba, 112 px, the M9's power-on splash
+  (1485): the same render as raw RGBA, 8 bits a channel, not
+  premultiplied, row by row, no header (50,176 B), because the board has
+  no PNG decoder; `loquax_m9::splash` lays it on the panel's ground.
 
 The PNGs are rendered by resvg (0.45.1 measured; `sudo apt install
 resvg`), which writes the same bytes for the same SVG, so `--check`
@@ -31,8 +35,10 @@ no gradients.
 
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +57,8 @@ DENSITIES = {
 }
 PACKAGE_PNG = (ROOT / "packaging" / "loquax" / "loquax.png", 256)
 WINDOW_PNG = (ROOT / "leviculum-ui-iced" / "assets" / "window-icon.png", 128)
+# The M9's splash (1485): raw RGBA, its size `loquax_m9::splash::LOGO_PX`.
+SPLASH_RGBA = (ROOT / "loquax-m9" / "assets" / "splash-logo.rgba", 112)
 
 # The jackdaw in profile, beak open: head, the two mandibles, the body with
 # its tail, then the legs as strokes and the eye in the ground's colour.
@@ -201,6 +209,52 @@ def rasters():
     return out
 
 
+def png_rgba(path):
+    """The pixels of an 8-bit RGBA, non-interlaced PNG (what resvg writes),
+    as raw RGBA bytes row by row: the five scanline filters undone."""
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        sys.exit(f"render-icon: {path} is no PNG")
+    at, idat, head = 8, b"", None
+    while at < len(data):
+        (n,) = struct.unpack(">I", data[at : at + 4])
+        kind, body = data[at + 4 : at + 8], data[at + 8 : at + 8 + n]
+        at += 12 + n
+        if kind == b"IHDR":
+            head = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat += body
+    if head is None or head[2:] != (8, 6, 0, 0, 0):
+        sys.exit(f"render-icon: {path} is not 8-bit RGBA non-interlaced: {head}")
+    width, height = head[0], head[1]
+    raw, stride, bpp = zlib.decompress(idat), head[0] * 4, 4
+    out, prev = bytearray(), bytearray(stride)
+    for y in range(height):
+        kind = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1 : (y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 0xFF
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                line[i] = (line[i] + pred) & 0xFF
+            elif kind != 0:
+                sys.exit(f"render-icon: {path}: filter {kind} in row {y}")
+        out += line
+        prev = line
+    assert len(out) == width * height * 4
+    return bytes(out)
+
+
 def render(src, size, out):
     out.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -239,6 +293,16 @@ def main():
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(out, path)
+    path, size = SPLASH_RGBA
+    out = SCRATCH / "splash.png"
+    render(master, size, out)
+    raw = png_rgba(out)
+    if check:
+        if not path.exists() or path.read_bytes() != raw:
+            differ.append(path)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
     shutil.rmtree(SCRATCH)
     for path in differ:
         print(f"render-icon: {path.relative_to(ROOT)} differs from the script's")
