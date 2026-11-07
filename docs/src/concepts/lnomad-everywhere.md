@@ -192,7 +192,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
 
 | Control | Where it is | lnomad |
 |---|---|---|
-| List row | `ListItem` (`leviculum-ui/src/scene.rs:273`, since 1240); Loquax's `Row` (`loquax/src/ui/scene.rs:392`) is a `ListItem` with a conversation's `ListRow` beside it; iced `list_row` (`loquax/src/gui/chat.rs:1772`) | **parametrised**: the generic part moved to `leviculum-ui` as `ListItem` in slice 0 (id, `selected`, `activate`, `menu`, `A11y`); Loquax's `Row` keeps its `ListRow` beside it. Title, subtitle and trailing words join the item in slice 1, with the first list whose words are the item's own (Loquax's are its `ListRow`'s). Places, history and name results are list items |
+| List row | `ListItem` (`leviculum-ui/src/scene.rs:273`, since 1240); Loquax's `Row` (`loquax/src/ui/scene.rs:392`) is a `ListItem` with a conversation's `ListRow` beside it; iced `list_row` (`loquax/src/gui/chat.rs:1791`) | **parametrised**: the generic part moved to `leviculum-ui` as `ListItem` in slice 0 (id, `selected`, `activate`, `menu`, `A11y`); Loquax's `Row` keeps its `ListRow` beside it. Title, subtitle and trailing words join the item in slice 1, with the first list whose words are the item's own (Loquax's are its `ListRow`'s). Places, history and name results are list items |
 | Top bar | `TopBar`, `Lead` (`leviculum-ui/src/scene.rs:187`) | **reused**, moved to `leviculum-ui` in slice 0; `Lead::Back` for history; the address is a field node below or inside it per renderer |
 | Tab bar | `Tabs` (`leviculum-ui/src/scene.rs:251`), `TabId` (`loquax/src/ui/scene.rs:77`), Chats and Map | **parametrised** where the browser is hosted: `TabId::Browse` beside Chats and Map ("Calls later" in [Loquax on Android: navigation and views](loquax-android-navigation.md) already plans a third). The standalone lnomad has no tab bar |
 | Sheet | `Sheet` (`leviculum-ui/src/scene.rs:293`) | **reused** unchanged: places, history, a link's long press |
@@ -443,7 +443,7 @@ last, and is where a second pass starts.
 - **`leviculum-ui-iced`, extracted, not written beside.** Out of
   `loquax/src/gui/chat.rs` into the crate, generic over the program's
   message and coloured by a `Palette` each program fills from its own
-  tokens (Loquax's `palette`, `loquax/src/gui/chat.rs:69`): the drawn
+  tokens (Loquax's `palette`, `loquax/src/gui/chat.rs:73`): the drawn
   icons with the compose bar's and the recording bar's (`icon`), the
   waveform (`wave`, the fold handed in), the bare, link and icon-action
   buttons (`control`), the avatar and its dot (`avatar`), the top bar,
@@ -683,7 +683,7 @@ terminal and window get no tab (the second question, answered no for now).
   address field as they are. An announce is kept while the tab is off.
 - **Chat and page hand over.** A NomadNet page link in a chat
   (`<hash>:/page/...`) opens the tab at that page where the host has the
-  tab (`loquax/src/ui.rs:3356`) and is copied for lnomad where not. A
+  tab (`loquax/src/ui.rs:3357`) and is copied for lnomad where not. A
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:455`) when hosted
   (`lnomad/src/app/event.rs:1531`), and Loquax opens that chat for
@@ -817,9 +817,9 @@ as the phone, off by default until Lew flips it.
   the bookmarks and pins to their files. A write and a quit stay the
   core's (`effects_of`).
 - **The keys.** While the tab is in front the core hands keys and the
-  mouse to the browser (`loquax/src/ui.rs:1964`, `loquax/src/ui.rs:2008`),
+  mouse to the browser (`loquax/src/ui.rs:1965`, `loquax/src/ui.rs:2009`),
   so lnomad's whole key table works, its `q` leaves the tab, and the
-  terminal's screen size is the page's (`loquax/src/ui.rs:2006`). `B` and
+  terminal's screen size is the page's (`loquax/src/ui.rs:2007`). `B` and
   the palette's `browse` bring the tab to the front
   (`loquax/src/keys.rs:602`, `browse::open`, `loquax/src/ui/browse.rs:231`);
   with the tab off they say how to switch it on.
@@ -829,17 +829,17 @@ as the phone, off by default until Lew flips it.
   for no pictures (`no_images`): the map owns the terminal's picture
   protocol, and two pickers on one terminal is a later question.
 - **The window** draws it with lnomad's window view beside the rail
-  (`browse_view`, `loquax/src/gui.rs:2597`; `lnomad::gui::view`,
+  (`browse_view`, `loquax/src/gui.rs:2626`; `lnomad::gui::view`,
   `lnomad/src/gui.rs:681`). The pictures are lnomad's window code too:
   `Pictures` (`lnomad/src/gui.rs:272`), moved out of lnomad's `Window`
   so a host keeps it beside a model it hosts; the shell holds it and the
   window draws from it. What lnomad's view says is folded as lnomad's
-  window folds it (`App::browse`, `loquax/src/gui.rs:1820`, with
+  window folds it (`App::browse`, `loquax/src/gui.rs:1846`, with
   `wheel_mice` and `pointer_mouse`, `lnomad/src/gui.rs:433` and
   `lnomad/src/gui.rs:433`, and `type_address`,
   `lnomad/src/app/event.rs:428`, which lnomad's own window now calls as
   well). The window tells the browser its light or dark and the page's
-  cells (`browse_sync`, `loquax/src/gui.rs:1731`). The tab's icon
+  cells (`browse_sync`, `loquax/src/gui.rs:1757`). The tab's icon
   borrows the search glass; the shared icons have no globe yet.
 - **What the standalone has that the tab lacked (1337's list), and what
   the desktop tab has now.** Inline pictures: the window, yes; the
