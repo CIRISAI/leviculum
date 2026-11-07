@@ -175,22 +175,43 @@ pub fn scene<B>(model: &UiModel<B>) -> Scene {
     }
 }
 
+/// Where the drawn screen stands in what it shows (1533): the list's
+/// selected row and first row on screen, as places in the whole order,
+/// and the open chat's topmost bubble on screen by its key. What the
+/// board's `[PAGE]` line says ([`crate::page`]); none of it is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Window {
+    /// The list's `(selected, first on screen)`, while the list is drawn.
+    pub list: Option<(usize, usize)>,
+    /// The key of the chat's topmost bubble on screen, while a chat is.
+    pub chat_top: Option<u64>,
+}
+
 /// The screen the scene is, `cols` x `rows` cells: the top bar, the list
 /// scrolled to show its selected row, the tab bar; or, with a chat open
 /// and no list, the chat's bar over the chat ([`crate::chat`]).
 pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine> {
+    lines_at(scene, look, cols, rows).0
+}
+
+/// [`lines`], and where the screen stands ([`Window`]).
+pub fn lines_at(scene: &Scene, look: &Look, cols: usize, rows: usize) -> (Vec<RLine>, Window) {
+    let mut window = Window::default();
     if let Some(sheet) = crate::group::lines(scene, look, cols, rows) {
-        return sheet;
+        return (sheet, window);
     }
     let mut out = Vec::with_capacity(rows);
     out.push(top_bar(&scene.top, look, cols));
     let below = rows.saturating_sub(1 + usize::from(scene.tabs.is_some()));
     if let (None, Some(chat)) = (&scene.list, &scene.chat) {
-        out.extend(crate::chat::lines(chat, look, cols, below));
+        let (chat_lines, top) = crate::chat::lines_at(chat, look, cols, below);
+        out.extend(chat_lines);
+        window.chat_top = top;
     }
     if let Some(list) = &scene.list {
         match list.rows.is_empty() {
             true => {
+                window.list = Some((0, 0));
                 let words = list.empty.resolve(look.lang);
                 out.push(line(&[(&cut(&words, cols), muted(look))], cols));
             }
@@ -198,6 +219,7 @@ pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine>
                 let shown = (below / ENTRY_ROWS).max(1);
                 let at = list.rows.iter().position(|r| r.selected).unwrap_or(0);
                 let first = (at + 1).saturating_sub(shown);
+                window.list = Some((list.first + at, list.first + first));
                 for row in list.rows.iter().skip(first).take(shown) {
                     out.extend(entry(row, look, cols));
                 }
@@ -225,7 +247,7 @@ pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine>
         out.push(fill(bar, cols, painted(look.tokens.chrome)));
     }
     out.truncate(rows);
-    out
+    (out, window)
 }
 
 /// The top bar: the reader's avatar (or the chat's), the title.

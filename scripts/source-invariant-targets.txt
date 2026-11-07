@@ -274,6 +274,7 @@ skip  loquax-m9        splash                     # the M9's power-on splash dra
 skip  loquax-m9        turn                       # a list draw and a page take at 4000 entries held to their cost at 400, the full scene as control (1463); subject is the code, and it times
 skip  loquax-m9        operation_counts           # a key down the M9 list counted over the real fixture against its bar (1489); subject is the code
 skip  loquax-m9        restore_counts             # the M9 restore, a pulled page and one new message counted over a 1489-shaped store, the per-entry fold as control (1514); subject is the code
+skip  loquax-m9        page                       # the M9 [PAGE] line walked over the fixture with the board's keys and one renderer: page, cursor, top, zoom (1533); subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer

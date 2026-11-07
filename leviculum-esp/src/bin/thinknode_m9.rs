@@ -68,6 +68,10 @@
 //! [STORE] page_read entries=<n> earlier=<n> ms=<ms>   (1521, a conversation opened or scrolled to its top)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
+//! [PAGE] name=<page> cursor=<n> top=<n> [zoom=<z>] t=<ms>
+//!                           after the draw, when the page or its cursor
+//!                           moved (1533, `loquax_m9::page`): what a bench
+//!                           walk asserts without a dump
 //! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> t=<ms>
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
@@ -94,7 +98,8 @@
 //! minutes, the window `lnflash` reads it in, never after (1521b: it
 //! stood beside every `[UART]` line for good). A `FRAME_DUMP` control frame
 //! (`7e a4 a5 18 00 00 7e`, or `7e a4 a5 18 00 01 <screen> 7e`) is acked
-//! and answered with the `PBM` dump of `loquax_m9::dump`; `<screen>` is a
+//! and answered with the `PBM` dump of `loquax_m9::dump`, its lines written
+//! in one go so no HDLC frame lands between two of them (1533); `<screen>` is a
 //! byte of `fixture::SCREENS`, 0 to 10, or `pair::DUMP_BYTE`, 11, the
 //! pairing screen (1440).
 //!
@@ -160,6 +165,7 @@ use loquax_m9::home::Answer;
 use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key, POLL_MS};
 use loquax_m9::map::{self, Map};
+use loquax_m9::page;
 use loquax_m9::pair::{self, Pairing};
 use loquax_m9::render::Renderer;
 use loquax_m9::splash::{self, Panel as _};
@@ -313,8 +319,11 @@ enum FromUi {
     /// A formatted log line: prefix and body, printed by the one UART
     /// writer.
     Line(&'static str, String),
-    /// A raw line (`KBRAW`, `KEY`, the `PBM` dump).
+    /// A raw line (`KBRAW`, `KEY`).
     Raw(String),
+    /// A frame dump's `PBM` lines, whole (1533): written in one go, so no
+    /// HDLC frame of the node lands between two of its lines.
+    Dump(Vec<String>),
     /// A complete home code typed on the pairing screen.
     Code(String),
     /// The rows of the conversations the folds changed, those deleted,
@@ -662,7 +671,9 @@ struct Shown {
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
 /// the map in pixels when it is open, or the pairing over all of it, and
 /// send the rows that changed to the panel. On the UI core (1493); the
-/// lines go through the queue.
+/// lines go through the queue. A `[PAGE]` line follows the flush when the
+/// page or its cursor moved (1533).
+#[allow(clippy::too_many_arguments)]
 fn redraw(
     renderer: &mut Renderer<'_, Frame>,
     map: &mut Map<'_>,
@@ -670,6 +681,7 @@ fn redraw(
     model: &UiModel<Field>,
     row: usize,
     shown: &Shown,
+    said: &mut page::Said,
     log: &mut UiLog,
 ) {
     let look = screen::Look {
@@ -686,8 +698,13 @@ fn redraw(
         log.line("[DISP] ", alloc::string::String::from("draw=failed"));
         return;
     }
+    let at = page::of(model, row, shown.pairing.is_some(), &renderer.window());
+    let moved = said.say(at);
     let frame = renderer.panel();
     let Some((first, last)) = frame.take_dirty() else {
+        if let Some(body) = moved {
+            log.line("[PAGE] ", body);
+        }
         return;
     };
     let t0 = esp_hal::time::Instant::now();
@@ -717,6 +734,9 @@ fn redraw(
             frame.forget_flushed();
             log.line("[DISP] ", alloc::format!("flush=failed spi={e:?}"));
         }
+    }
+    if let Some(body) = moved {
+        log.line("[PAGE] ", body);
     }
 }
 
@@ -1276,6 +1296,15 @@ fn main() -> ! {
                     stall::stage(Core::Io, Stage::Line);
                     log.raw(&body);
                 }
+                // Every line before anything else is written (1533): the
+                // 4.6 s of a dump fed line by line to the watchdog.
+                FromUi::Dump(lines) => {
+                    stall::stage(Core::Io, Stage::Line);
+                    for line in lines {
+                        log.raw(&line);
+                        wdt.feed();
+                    }
+                }
                 FromUi::Code(text) => {
                     stall::stage(Core::Io, Stage::Code);
                     match node.take_code(&text, &mut rng, &mut stores, batch, &mut log) {
@@ -1463,6 +1492,8 @@ fn ui_main(
 
     // The M9's own cursor over a group's sheet or picker (slice six).
     let mut row = 0;
+    // The last `[PAGE]` line said (1533).
+    let mut said = page::Said::default();
     redraw(
         &mut renderer,
         &mut map,
@@ -1470,6 +1501,7 @@ fn ui_main(
         &model,
         row,
         &shown,
+        &mut said,
         &mut log,
     );
     // What the panel shows (1491): a page that changed nothing draws
@@ -1577,6 +1609,7 @@ fn ui_main(
                             &model,
                             row,
                             &Shown::default(),
+                            &mut said,
                             &mut log,
                         );
                         log.line("[DUMP] ", alloc::format!("screen={}", walked.name()));
@@ -1594,14 +1627,17 @@ fn ui_main(
                             &model,
                             0,
                             &fresh,
+                            &mut said,
                             &mut log,
                         );
                         log.line("[DUMP] ", alloc::format!("screen={}", pair::DUMP_NAME));
                     }
                     let dumped = renderer.panel();
+                    let mut lines = Vec::new();
                     dump::encode(WIDTH, HEIGHT, |x, y| dumped.pixel(x, y), &mut |line| {
-                        log.raw(String::from(line))
+                        lines.push(String::from(line))
                     });
+                    log.send(FromUi::Dump(lines));
                     dirty = true;
                 }
             }
@@ -1686,6 +1722,7 @@ fn ui_main(
                 &model,
                 row,
                 &shown,
+                &mut said,
                 &mut log,
             );
             drawn.drawn(&model);

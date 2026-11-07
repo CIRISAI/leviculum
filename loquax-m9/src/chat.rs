@@ -37,7 +37,14 @@ use crate::screen::{cut, fill, muted, narrow, painted, push, state_of, Look, BAR
 /// The chat's `rows` lines under the top bar, `cols` cells each: our
 /// share's chip, the bubbles, the compose line (or the line that the group
 /// ended, or a group's invitation above the compose line).
-pub(crate) fn lines(chat: &Chat, look: &Look, cols: usize, rows: usize) -> Vec<RLine> {
+/// With them the key of the topmost bubble on screen, whole or cut
+/// (1533, the `[PAGE]` line's `top`); none while no bubble is.
+pub(crate) fn lines_at(
+    chat: &Chat,
+    look: &Look,
+    cols: usize,
+    rows: usize,
+) -> (Vec<RLine>, Option<u64>) {
     let mut head = Vec::new();
     if let Some(share) = &chat.share {
         head.push(fill(
@@ -92,16 +99,17 @@ pub(crate) fn lines(chat: &Chat, look: &Look, cols: usize, rows: usize) -> Vec<R
     }
     let area = rows.saturating_sub(head.len() + foot.len());
     let mut out = head;
-    out.extend(bubbles(chat, look, cols, area));
+    let (rows_drawn, top) = bubbles(chat, look, cols, area);
+    out.extend(rows_drawn);
     out.extend(foot);
     out.truncate(rows);
-    out
+    (out, top)
 }
 
 /// The `area` rows of bubbles, the newest at the bottom, or the cursor's
 /// bubble there when it stands above the last screen; blank rows above
-/// when the chat is shorter.
-fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> Vec<RLine> {
+/// when the chat is shorter; and the key of the topmost bubble drawn.
+fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, Option<u64>) {
     let at: Vec<(usize, usize)> = chat
         .groups
         .iter()
@@ -133,10 +141,13 @@ fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> Vec<RLine> {
     }
     let mut drawn: Vec<Vec<RLine>> = Vec::new();
     let mut used = 0;
+    let mut top = None;
     for k in (0..end).rev() {
         let rows = item(k);
         used += rows.len();
         drawn.push(rows);
+        let (g, b) = at[k];
+        top = Some(chat.groups[g].bubbles[b].bubble.key);
         if used >= area {
             break;
         }
@@ -152,7 +163,7 @@ fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> Vec<RLine> {
         out.into_iter()
             .map(|row| fill(row, cols, RStyle::default())),
     );
-    rows
+    (rows, top)
 }
 
 /// Bubble `b` of group `g` and what stands above it: before a group's

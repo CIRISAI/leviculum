@@ -59,6 +59,7 @@ pub mod kbraw;
 pub mod keyboard;
 pub mod keys;
 pub mod map;
+pub mod page;
 pub mod pair;
 pub mod render;
 pub mod screen;

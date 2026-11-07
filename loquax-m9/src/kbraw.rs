@@ -202,6 +202,78 @@ impl Presses {
     }
 }
 
+/// How often a key the bench holds answers again (1533): the cadence of
+/// the quickest same-key answers in the bench logs of 2026-11-07 (180 to
+/// 240 ms, `rig-run/m9/*/board.log`). Whether the controller repeats a
+/// held key on its own is not measured yet (`thinknode-m9.md`, "The
+/// keyboard controller, measured"); a held key here is presses at this
+/// interval, which is what the board would read if it did.
+pub const HOLD_REPEAT_MS: u32 = 200;
+
+/// The answer the controller gives for `code` under `protocol`: the code
+/// in every byte it reads, as the capture saw every press (1533). Its
+/// [`Protocol::read`] is [`Read::Code`] for any code but 0.
+pub fn answer_of(protocol: &Protocol, code: u8) -> ([u8; MAX_ANSWER], usize) {
+    let len = protocol.len.clamp(1, MAX_ANSWER);
+    let mut answer = [0u8; MAX_ANSWER];
+    answer[..len].fill(code);
+    (answer, len)
+}
+
+/// The bench's keys (1533, a test hook): a press is one answer now, a
+/// hold is that answer again every [`HOLD_REPEAT_MS`] until it ends. The
+/// caller puts each answer where the keyboard interrupt puts a polled one
+/// ([`Presses::poll`]), so the rest of the path is a finger's. One key is
+/// held at a time; a new press or hold ends the one before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Inject {
+    held: Option<Hold>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Hold {
+    code: u8,
+    next: u32,
+    until: u32,
+}
+
+impl Inject {
+    pub const fn new() -> Self {
+        Self { held: None }
+    }
+
+    /// `code` pressed at `now`, held `hold_ms` when some: the code of the
+    /// answer to queue now.
+    pub fn press(&mut self, code: u8, now: u32, hold_ms: Option<u16>) -> u8 {
+        self.held = hold_ms.map(|ms| Hold {
+            code,
+            next: now.wrapping_add(HOLD_REPEAT_MS),
+            until: now.wrapping_add(u32::from(ms)),
+        });
+        code
+    }
+
+    /// The held key's code when its next answer is due at `now`, and the
+    /// hold's end once it is past.
+    pub fn due(&mut self, now: u32) -> Option<u8> {
+        let hold = self.held.as_mut()?;
+        if now.wrapping_sub(hold.next) as i32 >= 0 {
+            if hold.until.wrapping_sub(hold.next) as i32 >= 0 {
+                let code = hold.code;
+                hold.next = hold.next.wrapping_add(HOLD_REPEAT_MS);
+                return Some(code);
+            }
+            self.held = None;
+        }
+        None
+    }
+
+    /// Whether a key is held.
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+}
+
 /// The answers of a capture, `(ms, bytes)` per `KBRAW` line; every other
 /// line is skipped and a `KBRAW` line that does not read is too, by number.
 pub fn parse_raw(text: &str) -> impl Iterator<Item = Result<(u32, Vec<u8>), usize>> + '_ {
@@ -362,6 +434,40 @@ mod tests {
         let kept: Vec<u32> = core::iter::from_fn(|| queue.pop()).map(|p| p.ms).collect();
         assert_eq!(kept.len(), QUEUE);
         assert_eq!(kept.last(), Some(&99));
+    }
+
+    /// 1533: an injected press is an answer the measured protocol reads as
+    /// its code, queued as a poll's; a 500 ms hold answers at 0, 200 and
+    /// 400 ms and then ends; a new press ends a hold.
+    #[test]
+    fn an_injected_key_is_a_polled_answer_and_a_hold_repeats() {
+        let (answer, len) = answer_of(&MEASURED, 0xb7);
+        assert_eq!(len, MEASURED.len);
+        assert_eq!(MEASURED.read(&answer[..len]), Read::Code(0xb7));
+        let mut queue = Presses::new();
+        queue.poll(&MEASURED, 5, &answer[..len]);
+        let press = queue.pop().expect("kept as a poll's answer");
+        assert_eq!((press.ms, press.answer()), (5, &[0xb7; 8][..]));
+        let short = Protocol { len: 1, ..MEASURED };
+        assert_eq!(answer_of(&short, 0x61).1, 1);
+
+        let mut inject = Inject::new();
+        let mut at = alloc::vec![(1000, inject.press(0xb5, 1000, Some(500)))];
+        for now in (1000..=2000).step_by(crate::keyboard::POLL_MS as usize) {
+            if let Some(code) = inject.due(now) {
+                at.push((now, code));
+            }
+        }
+        assert_eq!(at, [(1000, 0xb5), (1200, 0xb5), (1400, 0xb5)]);
+        assert!(!inject.holding(), "the hold ended");
+
+        // A press without a hold is one answer; a press ends a hold.
+        inject.press(0xb5, 0, Some(1000));
+        inject.press(0x0d, 50, None);
+        assert_eq!((0..2000).find_map(|now| inject.due(now)), None);
+        // The positive control: the hold alone would have answered.
+        inject.press(0xb5, 0, Some(1000));
+        assert_eq!((0..2000).find_map(|now| inject.due(now)), Some(0xb5));
     }
 
     #[test]

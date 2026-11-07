@@ -41,6 +41,8 @@ where
     font: MonoFont<'static>,
     /// The last draw put the map's pixels over the cells.
     map_drawn: bool,
+    /// Where the last draw's screen stood (1533).
+    window: screen::Window,
 }
 
 impl<'d, D> Renderer<'d, D>
@@ -76,13 +78,28 @@ where
             terminal,
             font,
             map_drawn: false,
+            window: screen::Window::default(),
         })
     }
 
     /// Draw `scene` as [`screen::lines`] words it, at the grid's size.
     pub fn draw(&mut self, scene: &Scene, look: &Look) -> Result<(), DrawError> {
         self.leave_map()?;
-        self.cells(|cols, rows| screen::lines(scene, look, cols, rows))
+        let mut window = screen::Window::default();
+        self.cells(|cols, rows| {
+            let (lines, at) = screen::lines_at(scene, look, cols, rows);
+            window = at;
+            lines
+        })?;
+        self.window = window;
+        Ok(())
+    }
+
+    /// Where the last draw's screen stood in what it shows (1533): the
+    /// list's rows, the chat's topmost bubble; nothing for the map and
+    /// the board's own screens.
+    pub fn window(&self) -> screen::Window {
+        self.window
     }
 
     /// Draw what `model` shows: the map in pixels when it is open
@@ -99,6 +116,7 @@ where
         let credit = map.credit();
         // No region under the view (1476): the cells say so, no picture.
         let bare = !map::covers(map.region.header(), &view);
+        self.window = screen::Window::default();
         self.cells(|cols, rows| map::lines(model, look, &credit, bare, cols, rows))?;
         let panel = self.terminal.backend_mut().display_mut();
         if !bare {
@@ -118,6 +136,7 @@ where
         lines: impl FnOnce(usize, usize) -> alloc::vec::Vec<RLine>,
     ) -> Result<(), DrawError> {
         self.leave_map()?;
+        self.window = screen::Window::default();
         self.cells(lines)
     }
 
