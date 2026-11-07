@@ -747,39 +747,54 @@ impl Shell {
         }
     }
 
-    /// Everything that arrived since the last call, without waiting.
-    pub(crate) fn poll(&mut self) {
-        match self.fanout.pump(&mut self.attached.outbox) {
-            Ok(events) => {
-                for event in events {
-                    let named = match &event {
-                        OutboxEvent::Announced {
-                            destination,
-                            name: Some(_),
-                            ..
-                        } => Some(*destination),
-                        _ => None,
-                    };
-                    if runner::already_held(&self.store, &event) {
-                        continue;
-                    }
-                    runner::keep_signature(&mut self.store, &event);
-                    self.apply(UiEvent::Engine(event));
-                    if let Some(destination) = named {
-                        runner::keep_name(
-                            &mut self.store,
-                            &self.model.names,
-                            self.model.address,
-                            destination,
-                        );
-                    }
-                }
+    /// Fold the engine's events the fan-out took into the screen and the
+    /// store.
+    fn fold(&mut self, events: Vec<OutboxEvent>) {
+        for event in events {
+            let named = match &event {
+                OutboxEvent::Announced {
+                    destination,
+                    name: Some(_),
+                    ..
+                } => Some(*destination),
+                _ => None,
+            };
+            if runner::already_held(&self.store, &event) {
+                continue;
             }
-            Err(gone) => {
-                if !self.gone {
-                    self.gone = true;
-                    self.apply(UiEvent::Notice(gone.to_string()));
-                    self.afterwards.push(gone.to_string());
+            runner::keep_signature(&mut self.store, &event);
+            self.apply(UiEvent::Engine(event));
+            if let Some(destination) = named {
+                runner::keep_name(
+                    &mut self.store,
+                    &self.model.names,
+                    self.model.address,
+                    destination,
+                );
+            }
+        }
+    }
+
+    /// What arrived since the last call, without waiting: a slice of it
+    /// (1464, [`loquax::fanout::SLICE`]), the rest at the next pump. Each
+    /// event folded is a store commit, and a first pull of a big mailbox
+    /// queues thousands: drained in one call, as before 1464, the shell
+    /// handled none of the window's or the terminal's input and sent them
+    /// no new state until all of it was folded, 12.8 s on the host for
+    /// 4000 entries, the phone's measure (1446).
+    pub(crate) fn poll(&mut self) {
+        let mut slicing = loquax::fanout::Slicing::new(loquax::fanout::SLICE);
+        loop {
+            match slicing.next(&mut self.fanout, &mut self.attached.outbox, false) {
+                Ok(Some(events)) => self.fold(events),
+                Ok(None) => break,
+                Err(gone) => {
+                    if !self.gone {
+                        self.gone = true;
+                        self.apply(UiEvent::Notice(gone.to_string()));
+                        self.afterwards.push(gone.to_string());
+                    }
+                    break;
                 }
             }
         }

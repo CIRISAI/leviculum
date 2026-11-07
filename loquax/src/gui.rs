@@ -3388,7 +3388,7 @@ mod tests {
     use loquax::outbox::OutboxEvent;
     use loquax::ui::update;
 
-    const ANNA: [u8; 16] = [0x3a; 16];
+    pub(super) const ANNA: [u8; 16] = [0x3a; 16];
     const BERT: [u8; 16] = [0xb7; 16];
     /// The reader.
     const OWN: [u8; 16] = [0x30; 16];
@@ -4225,6 +4225,20 @@ mod tests {
     /// ours, every fourth of ours a reply quoting her last, emoji here and
     /// there, the days going by; open, `w` by `h`. Deterministic.
     pub(super) fn real_chat(w: u32, h: u32) -> App {
+        let mut model = real_chat_grown(|_| {});
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app
+    }
+
+    /// The model of [`real_chat`], `each` handed it after every message,
+    /// as a first pull brings them one after the other (1464).
+    pub(super) fn real_chat_grown(
+        mut each: impl FnMut(&mut crate::shell::Model),
+    ) -> crate::shell::Model {
         const WORDS: [&str; 24] = [
             "the relay",
             "on the hill",
@@ -4305,6 +4319,7 @@ mod tests {
                     }),
                 );
                 messages += 1;
+                each(&mut model);
             }
             for _ in 0..1 + messages % 2 {
                 minute += 3;
@@ -4327,14 +4342,10 @@ mod tests {
                 };
                 update(&mut model, event);
                 messages += 1;
+                each(&mut model);
             }
         }
-        update(&mut model, UiEvent::Open { peer: ANNA });
-        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
-        app.window = Size::new(w as f32, h as f32);
-        app.apply(Message::Seen(Box::new(seen_of(&model))));
-        app
+        model
     }
 
     /// The bench's real-shaped chat is what its doc says (1456): a few

@@ -20,7 +20,7 @@
 //! it the test returns at once. The map gestures run over the Florence
 //! fixture, or over the regions in `LOQUAX_WINDOW_BENCH_MAPS`.
 
-use super::tests::{long_chat, real_chat, window_over_florence};
+use super::tests::{long_chat, real_chat, real_chat_grown, seen_of, window_over_florence, ANNA};
 use super::*;
 use iced::advanced::Layout;
 use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
@@ -587,5 +587,139 @@ fn the_benchs_gestures_move_the_window() {
         if !matches!(case, Case::ChatDrag(_) | Case::ChatIdle(_)) {
             assert!(m.moved, "{}", m.line());
         }
+    }
+}
+
+/// How many messages a first pull brings the window per state in
+/// [`a_first_pull_never_costs_a_frame_over_the_budget`]: the shell folds
+/// [`loquax::fanout::SLICE`] at a time and sends the window what changed
+/// after each poll; on the host a 50 ms slice folded 16 to 35 events.
+const PULL_SLICE: usize = 10;
+
+/// A frame's budget while a first pull arrives (1464): one refresh of a
+/// 60 Hz screen.
+const REFRESH_BUDGET_MS: f64 = 1000.0 / 60.0;
+
+/// The window as a first pull reaches it: after each frame drawn, the
+/// next state the shell sent.
+struct Pulling {
+    window: Window,
+    states: std::cell::RefCell<std::collections::VecDeque<Seen>>,
+}
+
+impl Program for Pulling {
+    type Message = Message;
+
+    fn view(&self) -> Element<'_, Message> {
+        self.window.view()
+    }
+
+    fn update(&mut self, message: Message) {
+        self.window.update(message);
+    }
+
+    fn pump(&self, drawn: bool) -> Vec<Message> {
+        let mut out = self.window.pump(drawn);
+        if drawn {
+            if let Some(next) = self.states.borrow_mut().pop_front() {
+                out.push(Message::Seen(Box::new(next)));
+            }
+        }
+        out
+    }
+
+    fn idle(&self) -> bool {
+        self.states.borrow().is_empty() && self.window.idle()
+    }
+
+    fn marked(&self) -> bool {
+        self.window.marked()
+    }
+
+    fn style(&self) -> (Theme, Color, Color) {
+        self.window.style()
+    }
+}
+
+/// The first pull of the real-shaped chat never costs the window a frame
+/// over the refresh budget (1464). Before 1464 the shell folded a whole
+/// pull in one poll and the window saw nothing until all of it was in;
+/// now it folds a slice per poll and sends the window each state: the
+/// chat open, it grows [`PULL_SLICE`] messages a state, each drawn as it
+/// comes. Every state arrives and the last frame shows the whole chat;
+/// in an optimised build no frame of the pull takes longer than
+/// [`REFRESH_BUDGET_MS`] (6.5 to 10 ms each at 900 by 560 on the host).
+/// Unoptimised, a view of these 300 long paragraphs shaped takes longer
+/// than a frame (as [`the_benchs_gestures_move_the_window`] says), so
+/// the frame times are only printed there.
+#[test]
+fn a_first_pull_never_costs_a_frame_over_the_budget() {
+    let (w, h) = (900, 560);
+    let mut states = std::collections::VecDeque::new();
+    let mut opened = false;
+    let mut count = 0;
+    let model = real_chat_grown(|model| {
+        if !opened {
+            loquax::ui::update(model, UiEvent::Open { peer: ANNA });
+            opened = true;
+        }
+        count += 1;
+        if count % PULL_SLICE == 0 {
+            states.push_back(seen_of(model));
+        }
+    });
+    states.push_back(seen_of(&model));
+    let slices = states.len();
+    let first = states.pop_front().expect("a state");
+    let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+    app.window = Size::new(w as f32, h as f32);
+    app.apply(Message::Seen(Box::new(first)));
+    let mut pulling = Pulling {
+        window: Window::new(app),
+        states: std::cell::RefCell::new(states),
+    };
+    let mut script = |now: Duration| (now < SETTLE).then(Vec::new);
+    let run =
+        headless::drive(&mut pulling, w, h, &mut script, SETTLE).expect("the software renderer");
+    // The pull's frames: the first frame is the window opening on the
+    // chat before the pull's first state, its present a fresh surface's
+    // (14.6 ms of its 20.7 in the release run that set the budget).
+    let longest = run
+        .frames
+        .iter()
+        .skip(1)
+        .map(DrawnFrame::total_ms)
+        .fold(0.0, f64::max);
+    let views = run.frames.iter().filter(|f| f.rebuilt).count();
+    println!(
+        "FIRST_PULL states={slices} frames={} views={views} longest_ms={longest:.2}",
+        run.frames.len()
+    );
+    assert!(
+        pulling.states.borrow().is_empty(),
+        "every state reached the window"
+    );
+    let chat = pulling
+        .window
+        .app
+        .scene
+        .chat
+        .as_ref()
+        .expect("the chat open");
+    let bubbles: usize = chat.groups.iter().map(|g| g.bubbles.len()).sum();
+    assert!(
+        bubbles >= 300,
+        "the whole chat at the end: {bubbles} bubbles"
+    );
+    assert!(
+        views >= slices - 1,
+        "a view per state: {views} for {slices}"
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            longest < REFRESH_BUDGET_MS,
+            "a frame of the first pull took {longest:.2} ms (budget {REFRESH_BUDGET_MS:.1} ms)"
+        );
     }
 }

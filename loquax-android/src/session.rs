@@ -63,22 +63,20 @@ pub const IDLE_PUMP: Duration = watch::LOOK;
 /// The longest the pump sleeps while a position share runs (1273): its
 /// shortest gap, so a report and the end are at most that late.
 pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_S as u64);
-/// The longest one pump turn folds the engine's events under the
-/// session's lock (1446). Every event folded is a store commit with its
-/// fsyncs, and the first pull of a big mailbox brings thousands: before
-/// 1446 one turn folded all of them, 12.8 s on the host for 4000 entries,
-/// while `ConversationsActivity.onResume` waited on the lock from the UI
-/// thread and Android said the app was not responding.
-pub const SLICE: Duration = Duration::from_millis(50);
-/// How many events the pump takes from the engine between two looks at
-/// the clock and at the callers waiting for the lock: each costs a
-/// commit, a few milliseconds on a phone's flash. One (1464): with eight a
-/// turn ran 60 to 80 ms past its [`SLICE`] on the host, and a command that
-/// came in the middle waited for all of it.
-pub const CHUNK: usize = 1;
+/// How one pump turn folds the engine's events under the session's lock
+/// (1446, 1464): [`loquax::fanout::SLICE`], the desktop shell's too. Every
+/// event folded is a store commit with its fsyncs, and the first pull of
+/// a big mailbox brings thousands: before 1446 one turn folded all of
+/// them, 12.8 s on the host for 4000 entries, while
+/// `ConversationsActivity.onResume` waited on the lock from the UI thread
+/// and Android said the app was not responding. One event between two
+/// looks at the clock and at the callers waiting for the lock (1464): with
+/// eight a turn ran 60 to 80 ms past its budget on the host, and a command
+/// that came in the middle waited for all of it.
+pub const SLICE: loquax::fanout::Slice = loquax::fanout::SLICE;
 /// How long the pump lets go of the lock between two slices of a backlog:
 /// long enough for a screen woken from its wait on the lock to take it,
-/// short against [`SLICE`], so the history still comes at nine tenths of
+/// short against a [`SLICE`], so the history still comes at nine tenths of
 /// the speed.
 pub const BACKLOG_PUMP: Duration = Duration::from_millis(5);
 /// How long a send runner waits for its bubble to be named.
@@ -210,7 +208,7 @@ struct Inner {
     origin: std::time::Instant,
     /// Something the screen shows changed since the last `changed`.
     dirty: bool,
-    /// The last pump turn stopped at [`SLICE`], or for a caller waiting
+    /// The last pump turn stopped at its [`SLICE`], or for a caller waiting
     /// for the lock (1464), with events still waiting in the engine's
     /// queue (1446).
     backlog: bool,
@@ -2192,18 +2190,18 @@ impl Inner {
         // The engine's events a slice at a time (1446): each one folded is
         // a store commit, and a first pull of a big mailbox brings
         // thousands. The pump holds the session's lock for its whole turn,
-        // and the screens wait on that lock from the UI thread, so the turn
-        // stops after [`SLICE`] and the next one comes after
-        // [`BACKLOG_PUMP`], in which a waiting screen takes the lock.
-        // A caller waiting for the lock ends the turn after the event in
-        // hand (1464): a screen's command waits for one commit, not for a
-        // slice.
-        let began = std::time::Instant::now();
-        self.backlog = false;
+        // and the screens wait on that lock, so the turn stops after
+        // [`SLICE`] and the next one comes after [`BACKLOG_PUMP`], in which
+        // a waiting caller takes the lock. A caller waiting for the lock
+        // ends the turn after the event in hand (1464): a screen's command
+        // waits for one commit, not for a slice.
         self.stale_scene();
+        let mut slicing = loquax::fanout::Slicing::new(SLICE);
         loop {
-            let events = match self.fanout.pump_at_most(&mut self.attached.outbox, CHUNK) {
-                Ok(events) => events,
+            let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            match slicing.next(&mut self.fanout, &mut self.attached.outbox, waited) {
+                Ok(Some(events)) => self.fold(events),
+                Ok(None) => break,
                 Err(gone) => {
                     self.gone = true;
                     let _ = self.events.send(Event::Stopped {
@@ -2212,18 +2210,9 @@ impl Inner {
                     });
                     return false;
                 }
-            };
-            let full = events.len() == CHUNK;
-            self.fold(events);
-            if !full {
-                break;
-            }
-            let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
-            if waited || began.elapsed() >= SLICE {
-                self.backlog = true;
-                break;
             }
         }
+        self.backlog = slicing.backlog();
         while let Ok(finished) = self.finished_rx.try_recv() {
             match finished {
                 Finished::Send(event) => {
