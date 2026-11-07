@@ -200,6 +200,33 @@ pub fn present(
     if damage.is_empty() || is_quiet(&damage) {
         return Ok(());
     }
+
+    // Leviculum's patch (1442): what changed against the frame on the
+    // screen, the last one presented, for the display server; the damage
+    // above is against the frame this buffer held, `age` frames back.
+    let whole = Rectangle::with_size(viewport.logical_size());
+    let shown = match surface.layer_stack.front() {
+        Some(front) if surface.background_color == background_color => {
+            if buffer.age() == 1 {
+                damage.clone()
+            } else {
+                damage::diff(
+                    front,
+                    renderer.layers(),
+                    |layer| vec![layer.bounds],
+                    Layer::damage,
+                )
+            }
+        }
+        _ => vec![whole],
+    };
+    let shown = physical_damage(
+        &damage::group(shown, whole),
+        viewport.scale_factor(),
+        physical_size.width,
+        physical_size.height,
+    );
+
     {
         surface.layer_stack.push_front(renderer.layers().to_vec());
         surface.background_color = background_color;
@@ -226,9 +253,27 @@ pub fn present(
     }
 
     on_pre_present();
-    buffer
-        .present()
-        .map_err(|_| compositor::SurfaceError::Lost)?;
+    // Leviculum's patch (1442): the display server takes the rectangles
+    // that changed, not the whole buffer (softbuffer sets one
+    // `wl_surface.damage_buffer` or SHM put per rectangle). Nothing on
+    // the buffer is presented whole.
+    let presented = match shown.is_empty() {
+        true => buffer.present(),
+        false => buffer.present_with_damage(
+            &shown
+                .iter()
+                .filter_map(|&[x, y, width, height]| {
+                    Some(softbuffer::Rect {
+                        x,
+                        y,
+                        width: NonZeroU32::new(width)?,
+                        height: NonZeroU32::new(height)?,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+    };
+    presented.map_err(|_| compositor::SurfaceError::Lost)?;
     let _ = PRESENTS.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
@@ -309,6 +354,30 @@ pub fn whole_when_fragmented(
     } else {
         damage
     }
+}
+
+/// Leviculum's patch (1442): logical `damage` as the buffer's pixels at
+/// `scale`, each rectangle rounded outward to whole pixels and kept
+/// within the `width` by `height` buffer, `[x, y, width, height]`; a
+/// rectangle with no pixel inside is left out.
+pub fn physical_damage(
+    damage: &[Rectangle],
+    scale: f32,
+    width: u32,
+    height: u32,
+) -> Vec<[u32; 4]> {
+    damage
+        .iter()
+        .filter_map(|r| {
+            let r = *r * scale;
+            let clamp = |v: f32, max: u32| v.clamp(0.0, max as f32) as u32;
+            let x0 = clamp(r.x.floor(), width);
+            let y0 = clamp(r.y.floor(), height);
+            let x1 = clamp((r.x + r.width).ceil(), width);
+            let y1 = clamp((r.y + r.height).ceil(), height);
+            (x0 < x1 && y0 < y1).then_some([x0, y0, x1 - x0, y1 - y0])
+        })
+        .collect()
 }
 
 pub fn screenshot(

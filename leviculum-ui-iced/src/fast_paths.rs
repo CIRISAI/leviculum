@@ -244,3 +244,49 @@ fn premultiplying_an_opaque_pixel_keeps_it() {
         );
     }
 }
+
+/// The damage the display server is handed (1442): every changed pixel
+/// inside a rectangle, the rectangles rounded outward at the window's
+/// scale and kept on the buffer, none empty.
+#[test]
+fn the_display_server_gets_every_changed_pixel() {
+    use iced_tiny_skia::window::compositor::physical_damage;
+    let mut rng = Rng(0x5eed_f00d_cafe_babe);
+    for _ in 0..2000 {
+        let scale = [1.0, 1.25, 1.5, 2.0][rng.below(4) as usize];
+        let rects: Vec<Rectangle> = (0..1 + rng.below(4)).map(|_| rng.rect(W, H)).collect();
+        let (bw, bh) = ((W as f32 * scale) as u32, (H as f32 * scale) as u32);
+        let out = physical_damage(&rects, scale, bw, bh);
+        for &[x, y, w, h] in &out {
+            assert!(w > 0 && h > 0 && x + w <= bw && y + h <= bh, "{out:?}");
+        }
+        for r in &rects {
+            let p = *r * scale;
+            // A pixel whose centre a changed rectangle covers is handed.
+            for py in 0..bh {
+                for px in 0..bw {
+                    let (cx, cy) = (px as f32 + 0.5, py as f32 + 0.5);
+                    if cx > p.x && cx < p.x + p.width && cy > p.y && cy < p.y + p.height {
+                        assert!(
+                            out.iter().any(|&[x, y, w, h]| px >= x
+                                && px < x + w
+                                && py >= y
+                                && py < y + h),
+                            "{px},{py} of {r:?} at {scale} not in {out:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(physical_damage(
+        &[Rectangle::new(
+            iced::Point::new(-20.0, -20.0),
+            iced::Size::new(5.0, 5.0)
+        )],
+        1.0,
+        W,
+        H
+    )
+    .is_empty());
+}
