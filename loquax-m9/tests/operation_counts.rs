@@ -25,6 +25,9 @@ fn a_key_in_the_list_builds_the_rows_on_screen() {
     real_store::check_shape();
     let mut model: UiModel<Field> = real_store::model();
     model.focus = Pane::Conversations;
+    // As the board's model is built (loquax-m9/src/home.rs): the scene
+    // is built for the M9's screen, not the store.
+    update(&mut model, UiEvent::Viewing(screen::viewing()));
     let _ = screen::scene(&model);
     update(
         &mut model,

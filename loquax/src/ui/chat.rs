@@ -604,13 +604,22 @@ pub struct Bubble {
 /// ([`super::relayed::is_relayed`]) each post is drawn under its writer,
 /// without the relay's prefix.
 pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
-    let bubbles = bubbles_of(model, c);
+    let to = model.conversations.get(c).map_or(0, |c| c.messages.len());
+    bubbles_in(model, c, 0, to)
+}
+
+/// The bubbles of messages `from..to` alone (1490): what the scene's
+/// chat window builds. A reaction chip finds its target wherever the
+/// reaction lies; a group line's dedupe sees the window only, so a
+/// digest twin older than the window can show again beside it.
+pub fn bubbles_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bubble> {
+    let bubbles = bubbles_of(model, c, from, to);
     model.count(super::counters::Op::BubblesBuilt, bubbles.len());
     bubbles
 }
 
-/// [`bubbles`], uncounted.
-fn bubbles_of<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
+/// [`bubbles_in`], uncounted.
+fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bubble> {
     let Some(conversation) = model.conversations.get(c) else {
         return Vec::new();
     };
@@ -650,10 +659,12 @@ fn bubbles_of<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
             .filter(|m| !m.name.is_empty())
             .map_or_else(|| model.names.label(address), |m| m.name.clone()),
     };
-    conversation
-        .messages
+    let to = to.min(conversation.messages.len());
+    let from = from.min(to);
+    conversation.messages[from..to]
         .iter()
         .enumerate()
+        .map(|(m, message)| (m + from, message))
         .map(|(m, message)| {
             let note = group
                 .then(|| {

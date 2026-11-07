@@ -789,6 +789,7 @@ impl<B> UiModel<B> {
     fn forget_group(&mut self, group: [u8; 16]) {
         self.groups.remove(&group);
         self.groups_changed.remove(&group);
+        self.owed_groups.remove(&group);
         if self.group_sheet.is_some_and(|s| s.group == group) {
             self.group_sheet = None;
         }

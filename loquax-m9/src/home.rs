@@ -23,6 +23,9 @@ pub fn model(address: [u8; 16]) -> UiModel<Field> {
     model.lang = crate::LANG;
     model.address = Some(address);
     model.focus = Pane::Conversations;
+    // The board's screen (1490): the scene builds its window, not the
+    // store.
+    model.viewing = crate::screen::viewing();
     // The board's map, as the fixture has it (1476): without it the map
     // a home board opens is sized for a terminal, not the picture.
     crate::map::ready(&mut model);

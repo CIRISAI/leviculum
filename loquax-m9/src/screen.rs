@@ -45,6 +45,19 @@ pub const NARROW_COLS: usize = loquax::ui::layout::NARROW;
 /// count or mark.
 pub const ENTRY_ROWS: usize = 2;
 
+/// What the M9's screen shows (1490): the list's entries between the
+/// top bar and the tab bar, and in a chat at most one bubble row a cell
+/// row. The scene is built for this window and its margin, never for
+/// the whole store ([`loquax::ui::Viewing`]).
+pub fn viewing() -> loquax::ui::Viewing {
+    let below = ROWS - 2;
+    loquax::ui::Viewing {
+        list_rows: below / ENTRY_ROWS,
+        chat_rows: below,
+        apart: true,
+    }
+}
+
 /// The selection's bar in the margin, the terminal's (`layout::BAR`).
 pub const BAR: char = '▌';
 

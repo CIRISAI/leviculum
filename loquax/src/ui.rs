@@ -533,6 +533,65 @@ impl OrderCache {
     }
 }
 
+/// What the target's screen shows of the list and the open chat (1490):
+/// the scene builds this many rows and bubbles in view plus as much
+/// again as margin, half a screen either side. The default is a phone's
+/// portrait screen; each target says its own ([`UiEvent::Viewing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Viewing {
+    /// Conversation rows in view in the chats list.
+    pub list_rows: usize,
+    /// Bubble rows in view in the open chat.
+    pub chat_rows: usize,
+    /// The list is a screen of its own (the M9, the phone): the chat is
+    /// on screen only while the keys are in it, and is not built while
+    /// the list is the screen. The terminal and the window show both
+    /// panes at once and leave this off.
+    pub apart: bool,
+}
+
+impl Viewing {
+    /// A target that scrolls a scene it keeps whole (the window, until
+    /// its own step wires scrolling into the viewport): everything.
+    pub const ALL: Viewing = Viewing {
+        list_rows: usize::MAX / 4,
+        chat_rows: usize::MAX / 4,
+        apart: false,
+    };
+}
+
+impl Default for Viewing {
+    fn default() -> Self {
+        Self {
+            list_rows: 14,
+            chat_rows: 24,
+            apart: false,
+        }
+    }
+}
+
+/// The list's window as the last fold built it (1490).
+#[derive(Clone, Debug)]
+struct BuiltList {
+    /// The fingerprint of everything the rows were built from
+    /// ([`UiModel::list_stamp`]).
+    stamp: u64,
+    /// The first built row's place in the whole order, and the order's
+    /// length: the scroll geometry.
+    first: usize,
+    total: usize,
+    rows: Vec<scene::Row>,
+}
+
+/// The open chat's window as the last fold built it (1490).
+#[derive(Clone, Debug)]
+struct BuiltChat {
+    /// The fingerprint of everything the chat was built from
+    /// ([`UiModel::chat_stamp`]).
+    stamp: u64,
+    chat: scene::Chat,
+}
+
 /// A delivery state as one fingerprint word.
 fn delivery_word(state: Option<DeliveryState>) -> u64 {
     match state {
@@ -1010,10 +1069,17 @@ pub struct UiModel<B> {
     /// instead of the others.
     pub show_archived: bool,
     /// Messages a fold changed, by conversation and key, for the store
-    /// ([`UiModel::take_writes`]).
+    /// ([`UiModel::take_writes`]). Only the running fold's: each
+    /// [`UiModel::note_changes`] moves them into the owed shadows, so a
+    /// fold's own changes are knowable without a diff (1490).
     changed: BTreeSet<([u8; 16], u64)>,
     /// Conversations whose own state (pin, unread) a fold changed.
     changed_peers: BTreeSet<[u8; 16]>,
+    /// What earlier folds changed and the store has not drained
+    /// ([`UiModel::take_writes`] reads both halves).
+    owed_changed: BTreeSet<([u8; 16], u64)>,
+    owed_peers: BTreeSet<[u8; 16]>,
+    owed_groups: BTreeSet<[u8; 16]>,
     /// Deletions for the store, in the order they were made.
     forgotten: Vec<StoreWrite>,
     /// Whether this device is a client of a home node: what the reader
@@ -1165,6 +1231,19 @@ pub struct UiModel<B> {
     /// A fold is running: what it mutated is not yet noted, so caches
     /// keyed by revisions stand aside until [`UiModel::note_changes`].
     folding: bool,
+    /// What the target's screen shows (1490): how many list rows and how
+    /// many bubble rows are in view. The scene is built for this window
+    /// and a margin as big again, never for the whole model
+    /// ([`UiEvent::Viewing`] sets it; a window that scrolls itself asks
+    /// for everything with [`Viewing::ALL`]).
+    pub viewing: Viewing,
+    /// The list's window as the last fold built it ([`scene::Scene`]'s
+    /// list): checked against its stamp before every reuse.
+    built_list: Option<BuiltList>,
+    /// The open chat as the last fold built it: the window of bubbles
+    /// around the newest, or around the cursor while the keys are in the
+    /// chat.
+    built_chat: Option<BuiltChat>,
     /// The fingerprint of the model-wide look the last [`update`] saw
     /// ([`UiModel::look_fingerprint`]), and how often it changed: part of
     /// every conversation-keyed cache's key, so a name heard, a day
@@ -1239,6 +1318,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             show_archived: false,
             changed: BTreeSet::new(),
             changed_peers: BTreeSet::new(),
+            owed_changed: BTreeSet::new(),
+            owed_peers: BTreeSet::new(),
+            owed_groups: BTreeSet::new(),
             forgotten: Vec::new(),
             home_client: false,
             history: false,
@@ -1291,6 +1373,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             look_rev: 0,
             order_cache: None,
             folding: false,
+            viewing: Viewing::default(),
+            built_list: None,
+            built_chat: None,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1574,38 +1659,21 @@ impl<B> UiModel<B> {
     /// conversations too, so an in-place change the summary cannot see (a
     /// delivery tick deep in the pane) still bumps; they drain with the
     /// store's writes, and a bump too many costs one rebuild, never a
-    /// stale frame. `pending` is what the sets held before the fold: only
-    /// this fold's own entries poke (a change to a key already owed in a
-    /// previous undrained fold is the one case this misses, and every
-    /// shell drains per fold).
-    fn note_changes(
-        &mut self,
-        pending: &(
-            BTreeSet<([u8; 16], u64)>,
-            BTreeSet<[u8; 16]>,
-            BTreeSet<[u8; 16]>,
-        ),
-    ) {
+    /// stale frame. The fold's sets hold only this fold's entries: each
+    /// note moves them into the owed shadows the store drains, so the
+    /// poke costs the fold's changes, never what accumulated.
+    fn note_changes(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         let mut poked: BTreeSet<[u8; 16]> = BTreeSet::new();
-        poked.extend(
-            self.changed
-                .iter()
-                .filter(|entry| !pending.0.contains(entry))
-                .map(|(peer, _)| *peer),
-        );
-        poked.extend(
-            self.changed_peers
-                .iter()
-                .filter(|peer| !pending.1.contains(*peer))
-                .copied(),
-        );
-        poked.extend(
-            self.groups_changed
-                .iter()
-                .filter(|peer| !pending.2.contains(*peer))
-                .copied(),
-        );
+        let changed = core::mem::take(&mut self.changed);
+        poked.extend(changed.iter().map(|(peer, _)| *peer));
+        self.owed_changed.extend(changed);
+        let peers = core::mem::take(&mut self.changed_peers);
+        poked.extend(peers.iter().copied());
+        self.owed_peers.extend(peers);
+        let groups = core::mem::take(&mut self.groups_changed);
+        poked.extend(groups.iter().copied());
+        self.owed_groups.extend(groups);
         let mut bumped: Vec<usize> = Vec::new();
         for (index, conversation) in self.conversations.iter_mut().enumerate() {
             let refreshed = conversation
@@ -1627,6 +1695,7 @@ impl<B> UiModel<B> {
         // The fold is noted: the caches may stand on it again.
         self.folding = false;
         self.refresh_order(&bumped);
+        self.refresh_scene();
     }
 
     /// How often the model-wide look changed (1490): the names, the
@@ -1656,6 +1725,30 @@ impl<B> UiModel<B> {
             hash.word(playing.key);
         }
         hash.word(self.voice_tracks.len() as u64);
+        for peer in self.shares.running.keys() {
+            hash.bytes(peer);
+        }
+        for peer in self.bar.staged.keys() {
+            hash.bytes(peer);
+        }
+        // The recording bar lives in the chat's compose node: its phase
+        // and its growing track move the look while one runs.
+        hash.bytes(&self.recording.peer);
+        hash.word(match self.recording.phase {
+            recording::Phase::Idle => 0,
+            recording::Phase::Held { since } => 1 ^ (since << 3),
+            recording::Phase::Locked { since } => 2 ^ (since << 3),
+            recording::Phase::Paused => 3,
+            recording::Phase::Preview => 4,
+            recording::Phase::Cancelled => 5,
+            recording::Phase::Sent => 6,
+        });
+        hash.word(self.recording.track.len() as u64);
+        hash.word(self.recording.slide.0 as u64);
+        hash.word(self.recording.slide.1 as u64);
+        hash.word(u64::from(self.recording.previewing));
+        hash.word(u64::from(self.recording.heard));
+        hash.word(u64::from(self.recording.said.is_some()));
         self.names.fingerprint(&mut hash);
         hash.done()
     }
@@ -1759,6 +1852,125 @@ impl<B> UiModel<B> {
             self.count(counters::Op::Sorted, moved);
         }
         self.order_cache = Some(cache);
+    }
+
+    /// The slice of `order` the scene's list is built for (1490): the
+    /// rows in view and half a screen either side, the selected row
+    /// inside. `(first, how many)`.
+    fn list_window(&self, order: &[usize]) -> (usize, usize) {
+        let visible = self.viewing.list_rows.max(1);
+        let build = order.len().min(visible.saturating_mul(2));
+        let at = order.iter().position(|&i| i == self.selected).unwrap_or(0);
+        let first = at.saturating_sub(visible / 2).min(order.len() - build);
+        (first, build)
+    }
+
+    /// The fingerprint of everything the list's window is built from:
+    /// the look, the viewport, the whole order and the windowed
+    /// conversations' revisions.
+    fn list_stamp(&self, order: &[usize], first: usize, len: usize) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(self.look_rev);
+        hash.word(self.viewing.list_rows as u64);
+        hash.word(self.selected as u64);
+        hash.word(first as u64);
+        hash.word(len as u64);
+        for &i in order {
+            hash.word(i as u64);
+        }
+        for &i in &order[first..first + len] {
+            hash.word(self.conversations[i].revision());
+        }
+        hash.done()
+    }
+
+    /// Whether message `index` has a bubble row of its own: what the
+    /// chat's window counts ([`chat::bubbles`] builds notes and orphan
+    /// reactions besides, which the margin covers).
+    fn bubble_row(&self, c: usize, index: usize) -> bool {
+        let conversation = &self.conversations[c];
+        !conversation.messages[index].is_aside() && !conversation.report_folded(index)
+    }
+
+    /// The window of conversation `c`'s messages the chat is built for
+    /// (1490): the newest rows two screens deep, or the rows around the
+    /// cursor once the keys took it above them. `(from, to)`, message
+    /// indices.
+    fn chat_window(&self, c: usize) -> (usize, usize) {
+        let len = self.conversations[c].messages.len();
+        let target = self.viewing.chat_rows.max(1).saturating_mul(2);
+        let back = |end: usize, mut rows: usize| {
+            let mut from = end;
+            while from > 0 && rows > 0 {
+                from -= 1;
+                if self.bubble_row(c, from) {
+                    rows -= 1;
+                }
+            }
+            from
+        };
+        let mut from = back(len, target);
+        let mut to = len;
+        let cursor = self.message_cursor.min(len.saturating_sub(1));
+        if self.focus == Pane::Messages && cursor < from {
+            // The cursor climbed above the window: it follows, the
+            // cursor a quarter in from its top.
+            from = back(cursor + 1, (target / 4).max(1));
+            let mut rows = 0;
+            to = from;
+            while to < len && rows < target {
+                if self.bubble_row(c, to) {
+                    rows += 1;
+                }
+                to += 1;
+            }
+        }
+        (from, to)
+    }
+
+    /// The fingerprint of everything the open chat's window is built
+    /// from.
+    fn chat_stamp(&self, c: usize, from: usize, to: usize) -> u64 {
+        let conversation = &self.conversations[c];
+        let mut hash = Fnv::new();
+        hash.bytes(&conversation.peer);
+        hash.word(conversation.revision());
+        hash.word(self.look_rev);
+        hash.word(self.viewing.chat_rows as u64);
+        hash.word(from as u64);
+        hash.word(to as u64);
+        hash.done()
+    }
+
+    /// Build what the fold changed of the scene (1490): the list's
+    /// window and the open chat's, each only when its stamp moved, each
+    /// counted into the event that made it. [`UiModel::scene`] assembles
+    /// from these and builds nothing itself while they are current.
+    fn refresh_scene(&mut self) {
+        let order = self.order();
+        let (first, len) = self.list_window(&order);
+        let stamp = self.list_stamp(&order, first, len);
+        if self.built_list.as_ref().map(|b| b.stamp) != Some(stamp) {
+            let rows = scene::rows(self, order[first..first + len].to_vec());
+            self.built_list = Some(BuiltList {
+                stamp,
+                first,
+                total: order.len(),
+                rows,
+            });
+        }
+        let shown = !self.viewing.apart || self.focus != Pane::Conversations;
+        match shown && self.conversations.get(self.selected).is_some() {
+            true => {
+                let (from, to) = self.chat_window(self.selected);
+                let stamp = self.chat_stamp(self.selected, from, to);
+                if self.built_chat.as_ref().map(|b| b.stamp) != Some(stamp) {
+                    let chat = scene::chat_in(self, self.selected, from, to);
+                    self.built_chat = Some(BuiltChat { stamp, chat });
+                }
+            }
+            false => self.built_chat = None,
+        }
     }
 
     /// The conversations the list shows, in no order: [`UiModel::order`]
@@ -1921,6 +2133,11 @@ pub enum UiEvent {
     HomeWake,
     /// The screen's size in cells.
     Resize { width: u16, height: u16 },
+    /// What the target's screen shows of the list and the open chat
+    /// (1490): the scene is built for this window plus a margin. Sent at
+    /// start and whenever the window changes; a target that keeps whole
+    /// scenes sends [`Viewing::ALL`].
+    Viewing(Viewing),
     /// A click, a wheel turn, a drag or a move, at a screen cell.
     Mouse(MouseEvent),
     /// The mailbox the stored record or a run selected.
@@ -2356,13 +2573,6 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     model.ops.reset();
     // Until the fold is noted, revision-keyed caches stand aside (1490).
     model.folding = true;
-    // What the store is already owed, so this fold's own changes stand
-    // out even while nothing drains them (1490).
-    let pending = (
-        model.changed.clone(),
-        model.changed_peers.clone(),
-        model.groups_changed.clone(),
-    );
     let mut effects = fold(model, event);
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
     // Whatever hid the open conversation, a block, the `blocked` view or a
@@ -2395,7 +2605,7 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // The list's summaries up to what the event did (1463), and the
     // revisions over them (1490): every change the fold made is noted
     // here, so the caches keyed by a revision reuse everything else.
-    model.note_changes(&pending);
+    model.note_changes();
     effects
 }
 
@@ -2460,6 +2670,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::Resumed => schedule(model, SyncEvent::Resume),
         UiEvent::HomeWake => pull_for(model, Reason::Wake),
+        UiEvent::Viewing(viewing) => {
+            model.viewing = viewing;
+            Vec::new()
+        }
         UiEvent::Resize { width, height } => {
             model.screen = (width, height);
             model.selection = None;

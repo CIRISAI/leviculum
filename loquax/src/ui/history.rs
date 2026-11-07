@@ -313,7 +313,9 @@ impl<B> UiModel<B> {
     /// deletions. A message deleted after it changed is only deleted.
     pub fn take_writes(&mut self) -> Vec<StoreWrite> {
         let mut writes = Vec::new();
-        for (peer, key) in core::mem::take(&mut self.changed) {
+        let mut changed = core::mem::take(&mut self.owed_changed);
+        changed.extend(core::mem::take(&mut self.changed));
+        for (peer, key) in changed {
             let found = self
                 .conversations
                 .iter()
@@ -326,7 +328,9 @@ impl<B> UiModel<B> {
                 });
             }
         }
-        for peer in core::mem::take(&mut self.changed_peers) {
+        let mut peers = core::mem::take(&mut self.owed_peers);
+        peers.extend(core::mem::take(&mut self.changed_peers));
+        for peer in peers {
             if let Some(c) = self.conversations.iter().find(|c| c.peer == peer) {
                 writes.push(StoreWrite::Conversation {
                     peer,
@@ -365,7 +369,9 @@ impl<B> UiModel<B> {
                 .into_iter()
                 .map(|(peer, share)| StoreWrite::Share { peer, share }),
         );
-        for address in core::mem::take(&mut self.groups_changed) {
+        let mut groups = core::mem::take(&mut self.owed_groups);
+        groups.extend(core::mem::take(&mut self.groups_changed));
+        for address in groups {
             if let Some(group) = self.groups.get(&address) {
                 writes.push(StoreWrite::Group(group.clone()));
             }
@@ -740,6 +746,7 @@ impl<B> UiModel<B> {
             self.press = None;
         }
         self.changed.remove(&(peer, key));
+        self.owed_changed.remove(&(peer, key));
         Some(id)
     }
 
@@ -768,7 +775,9 @@ impl<B> UiModel<B> {
             other => other,
         };
         self.changed.retain(|(p, _)| *p != peer);
+        self.owed_changed.retain(|(p, _)| *p != peer);
         self.changed_peers.remove(&peer);
+        self.owed_peers.remove(&peer);
         self.positions.remove(&peer);
         self.tracks.remove(&peer);
         self.fixes_received.retain(|fix| fix.peer != peer);

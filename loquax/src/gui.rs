@@ -237,6 +237,10 @@ pub async fn run(options: ShellOptions) -> ExitCode {
         Ok(started) => started,
         Err(code) => return code,
     };
+    // The window scrolls scenes it keeps whole (1490): the viewport rule
+    // reaches it with its own plan step, which wires the scroll offsets
+    // into the model; until then it asks for everything.
+    shell.model.viewing = loquax::ui::Viewing::ALL;
     // The desktop's portal is the window's picker (1341): Gallery and
     // File in the plus, as on the phone.
     shell.model.bar.abilities.picker = true;

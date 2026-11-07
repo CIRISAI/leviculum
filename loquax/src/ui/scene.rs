@@ -432,11 +432,16 @@ impl core::ops::Deref for Row {
     }
 }
 
-/// The conversation list.
+/// The conversation list: the window of rows the viewport asked for
+/// (1490), inside the whole order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct List {
     pub id: NodeId,
     pub rows: Vec<Row>,
+    /// The first row's place in the whole order, and the order's length:
+    /// the scroll geometry when `rows` is a window of it.
+    pub first: usize,
+    pub total: usize,
     /// What shows when there is no row.
     pub empty: Text,
     pub a11y: A11y,
@@ -1054,7 +1059,7 @@ impl<B> UiModel<B> {
             .get(self.selected)
             .filter(|_| chat_open)
             .map(|_| self.selected);
-        let chat = open.map(|c| chat(self, c));
+        let chat = open.map(|c| self.assembled_chat(c));
         let screen = match &chat {
             Some(chat) => ScreenId::Chat { peer: chat.peer },
             None => ScreenId::Chats,
@@ -1068,7 +1073,7 @@ impl<B> UiModel<B> {
             screen,
             top: me_bar(self),
             tabs: Some(tabs(self)),
-            list: Some(list(self)),
+            list: Some(self.assembled_list()),
             chat,
             sheet,
             whereabouts,
@@ -1081,6 +1086,43 @@ impl<B> UiModel<B> {
             profile: None,
         })
         .in_class(class)
+    }
+
+    /// The list the fold built for the viewport (1490), reused while its
+    /// stamp is current; a model changed outside `update` builds whole,
+    /// as before.
+    fn assembled_list(&self) -> List {
+        if !self.folding {
+            if let Some(built) = &self.built_list {
+                let order = self.order();
+                let (first, len) = self.list_window(&order);
+                if built.stamp == self.list_stamp(&order, first, len) {
+                    return List {
+                        id: NodeId::List,
+                        rows: built.rows.clone(),
+                        first: built.first,
+                        total: built.total,
+                        empty: Text::key(StrId::NoConversations),
+                        a11y: A11y::of(NodeId::List, Role::List, Text::key(StrId::TabChats)),
+                    };
+                }
+            }
+        }
+        list(self)
+    }
+
+    /// The open chat the fold built for the viewport (1490), reused
+    /// while its stamp is current; built whole otherwise.
+    fn assembled_chat(&self, c: usize) -> Chat {
+        if !self.folding {
+            if let Some(built) = &self.built_chat {
+                let (from, to) = self.chat_window(c);
+                if built.stamp == self.chat_stamp(c, from, to) {
+                    return built.chat.clone();
+                }
+            }
+        }
+        chat(self, c)
     }
 
     /// `scene` with its nodes counted as built (1489), before a class
@@ -1395,11 +1437,17 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
     }
 }
 
-/// The list as the model orders it.
+/// The list as the model orders it, built whole: the cold path, for a
+/// model changed outside `update` ([`UiModel::note_changes`] keeps the
+/// windowed one).
 fn list<B>(model: &UiModel<B>) -> List {
+    let order = model.order();
+    let total = order.len();
     List {
         id: NodeId::List,
-        rows: rows(model, model.order()),
+        rows: rows(model, order),
+        first: 0,
+        total,
         empty: Text::key(StrId::NoConversations),
         a11y: A11y::of(NodeId::List, Role::List, Text::key(StrId::TabChats)),
     }
@@ -1565,6 +1613,13 @@ pub fn peer_title(bar: &TopBar) -> Text {
 /// The open chat of conversation `c`: its bar, its bubbles grouped, its
 /// compose. An index past the conversations gives an empty chat.
 pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
+    let to = model.conversations.get(c).map_or(0, |c| c.messages.len());
+    chat_in(model, c, 0, to)
+}
+
+/// [`chat`] over the window `from..to` of its messages alone (1490):
+/// what the fold builds for the viewport.
+pub(crate) fn chat_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Chat {
     let peer = model.conversations.get(c).map_or([0; 16], |c| c.peer);
     let name = model.names.label(&peer);
     let liveness = model.liveness(&peer);
@@ -1612,7 +1667,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         actions: bar_actions,
         a11y: A11y::of(NodeId::ChatBar, Role::Bar, title),
     };
-    let bubbles = chat::bubbles(model, c);
+    let bubbles = chat::bubbles_in(model, c, from, to);
     let places = chat::placements(&bubbles);
     let now = model.now;
     let in_group = model.groups.contains_key(&peer);
