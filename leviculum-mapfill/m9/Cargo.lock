@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-mapfill"
-version = "0.10.0-dev.6"
+version = "0.10.0-dev.7"
 dependencies = [
  "embedded-graphics",
 ]
