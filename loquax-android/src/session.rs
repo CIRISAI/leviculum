@@ -52,6 +52,12 @@ pub const BUDGET: Duration = Duration::from_secs(60);
 /// How often the session takes what the engine said and runs the clock
 /// while something is going on: the terminal's pump interval.
 pub const PUMP: Duration = Duration::from_millis(100);
+
+/// The name of the pump's OS thread (1496). Before, the pump was a task on
+/// the runtime's two workers: each turn's synchronous SQLite commits held
+/// a worker the node's and the runners' tasks needed (structure review
+/// 2026-11-07, B4).
+pub const PUMP_THREAD: &str = "loquax-pump";
 /// The longest the pump sleeps while the session is idle (1176): no screen
 /// in front, the watching link up, nothing sent, pulled or owed. Then
 /// nothing the pump does is due before the pull schedule's next pull, and
@@ -246,6 +252,8 @@ struct Inner {
     photos: std::cell::RefCell<std::collections::HashMap<[u8; 16], Option<String>>>,
     /// How often [`Inner::photo`] asked the file system, for the facade.
     photo_stats: std::cell::Cell<u64>,
+    /// The thread the pump's last turn ran on (1496), for the facade.
+    pump_thread: Option<String>,
     /// The peers added by a code while this session runs (walk finding
     /// 15): their chat does not ask to save them to the phone's contacts,
     /// the user just named them.
@@ -362,7 +370,13 @@ impl DeviceCosts {
 
 /// A running session.
 pub struct Session {
-    inner: Arc<Mutex<Inner>>,
+    /// The model and everything it folds, behind a `parking_lot` mutex
+    /// (1496): fair handoff when a screen's call waits while the pump
+    /// unlocks and locks again, no poisoning to unwrap.
+    inner: Arc<parking_lot::Mutex<Inner>>,
+    /// The pump's own OS thread, [`PUMP_THREAD`] (1496), joined by the
+    /// stop.
+    pump: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// [`Inner::waiting`].
     waiting: Arc<std::sync::atomic::AtomicUsize>,
     /// [`Inner::scene`].
@@ -643,31 +657,43 @@ impl Session {
         // The lists exist before any screen asks (1491): a screen never
         // makes them, so the first is made here, before the pump runs.
         inner.show_scene();
-        let inner = Arc::new(Mutex::new(inner));
+        let inner = Arc::new(parking_lot::Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
-        runtime.spawn(async move {
-            let mut wait = PUMP;
-            loop {
-                tokio::select! {
-                    () = tokio::time::sleep(wait) => {}
-                    () = pump_wake.notified() => {}
-                    // A re-dial for a network change began or ended: the
-                    // line follows it even while the pump sleeps idle
-                    // (1334).
-                    () = network.turned() => {}
-                }
-                let Ok(mut inner) = pumped.lock() else {
-                    return;
-                };
-                if !inner.pump() {
-                    return;
-                }
-                wait = inner.next_pump();
-            }
-        });
+        let handle = runtime.handle().clone();
+        // The pump on an OS thread of its own (1496), in the runtime's
+        // context for its timers and what it spawns: its commits block
+        // this thread, never a worker. It ends when the session is gone
+        // (`Inner::pump` says false), which the stop sets and wakes it for.
+        let pump = std::thread::Builder::new()
+            .name(PUMP_THREAD.to_string())
+            .spawn(move || {
+                handle.block_on(async move {
+                    let mut wait = PUMP;
+                    loop {
+                        tokio::select! {
+                            () = tokio::time::sleep(wait) => {}
+                            () = pump_wake.notified() => {}
+                            // A re-dial for a network change began or
+                            // ended: the line follows it even while the
+                            // pump sleeps idle (1334).
+                            () = network.turned() => {}
+                        }
+                        let mut inner = pumped.lock();
+                        if inner.pump_thread.is_none() {
+                            inner.pump_thread = std::thread::current().name().map(str::to_string);
+                        }
+                        if !inner.pump() {
+                            return;
+                        }
+                        wait = inner.next_pump();
+                    }
+                })
+            })
+            .map_err(|error| StartError::other(format!("no pump thread: {error}")))?;
         let session = Self {
             inner,
+            pump: Mutex::new(Some(pump)),
             waiting,
             scene,
             wake,
@@ -1210,19 +1236,23 @@ impl Session {
         inner.store.reset_counters();
     }
 
-    fn lock(&self) -> MutexGuard<'_, Inner> {
+    fn lock(&self) -> parking_lot::MutexGuard<'_, Inner> {
         use std::sync::atomic::Ordering;
         // Counted while it waits, so the pump lets go after the event it
-        // is folding (1464).
+        // is folding (1464). A panic under the lock is caught at the JNI
+        // edge; parking_lot does not poison, so what it left is the state
+        // the next caller sees, as it was before 1496.
         self.waiting.fetch_add(1, Ordering::SeqCst);
-        // A panic under the lock is caught at the JNI edge; what it left
-        // is still the best state there is.
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let inner = self.inner.lock();
         self.waiting.fetch_sub(1, Ordering::SeqCst);
         inner
+    }
+
+    /// The name of the thread the pump's last turn ran on (1496), for the
+    /// facade.
+    #[doc(hidden)]
+    pub fn pump_thread(&self) -> Option<String> {
+        self.lock().pump_thread.clone()
     }
 
     /// A list screen without waiting for the lock (1464) and without
@@ -1986,6 +2016,19 @@ impl Session {
                 detail: String::new(),
             });
         }
+        // The pump sees the session gone on its next turn, which this
+        // wakes, and ends before the runtime its timers run on goes.
+        self.wake.notify_one();
+        let pump = self
+            .pump
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pump) = pump {
+            if pump.thread().id() != std::thread::current().id() && pump.join().is_err() {
+                tracing::warn!("loquax: the pump's thread panicked");
+            }
+        }
         // The mailbox closes its node before the runtime goes, so its lock
         // and its store are let go of in order.
         let here = self.here().take();
@@ -2128,6 +2171,7 @@ impl Inner {
             book: links::load(home),
             photos: std::cell::RefCell::default(),
             photo_stats: std::cell::Cell::new(0),
+            pump_thread: None,
             just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
             recorder: Vec::new(),

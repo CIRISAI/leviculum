@@ -300,3 +300,25 @@ fn a_list_made_again_stats_no_thumbnail() {
     assert_eq!(again, 0, "{made} lists stat'ed {again} thumbnails");
     assert_eq!(changed, 1, "a changed link is looked for again, once");
 }
+
+/// The pump turns on an OS thread of its own (1496, structure review
+/// 2026-11-07 B4), never on a worker of the runtime the node and the
+/// runners need: each turn's commits block only it.
+#[test]
+fn the_pump_turns_on_its_own_thread() {
+    let dir = tempfile::tempdir().expect("app dir");
+    let session = fixture_session(dir.path());
+    let begin = Instant::now();
+    let mut seen = session.pump_thread();
+    while seen.is_none() && begin.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+        seen = session.pump_thread();
+    }
+    session.stop();
+    println!("COUNTS phone.pump_thread {seen:?}");
+    assert_eq!(
+        seen.as_deref(),
+        Some(loquax_android::session::PUMP_THREAD),
+        "the pump turned elsewhere"
+    );
+}

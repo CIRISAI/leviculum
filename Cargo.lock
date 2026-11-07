@@ -3517,6 +3517,7 @@ dependencies = [
  "lnpnd",
  "loquax",
  "loquax-m9",
+ "parking_lot",
  "png",
  "proptest",
  "rand_core 0.6.4",
