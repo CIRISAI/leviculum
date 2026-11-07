@@ -256,7 +256,9 @@ impl ReticulumNodeBuilder {
     }
 
     /// Set the resource receive-window adaptation policy (Codeberg #85).
-    /// Default: [`WindowPolicy::Current`]. Endpoint tools read it from the
+    /// Default: [`WindowPolicy::Current`]. [`WindowPolicy::ByMedium`] uses
+    /// goodput tiers on fast duplex paths and keeps `Current` on radio, for
+    /// a node with both (leviculum#103). Endpoint tools read it from the
     /// `LEVICULUM_RESOURCE_WINDOW_POLICY` environment variable via
     /// [`crate::resource_policy::resource_window_policy_from_env`].
     pub fn resource_window_policy(mut self, policy: WindowPolicy) -> Self {

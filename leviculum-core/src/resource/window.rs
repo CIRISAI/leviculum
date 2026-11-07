@@ -29,6 +29,7 @@ use crate::resource::{
     FAST_RATE_THRESHOLD, RESOURCE_WINDOW_FLEXIBILITY, RESOURCE_WINDOW_MAX_VERY_SLOW,
     SLOW_RATE_THRESHOLD, VERY_SLOW_RATE_THRESHOLD,
 };
+use crate::traits::InterfaceKind;
 
 /// Python Resource.RATE_FAST: (50 * 1000) / 8 B/s. Round goodput above this
 /// counts toward the fast tier.
@@ -45,6 +46,10 @@ const FAST_RATE_ROUNDS: usize = RESOURCE_WINDOW_MAX_SLOW - RESOURCE_WINDOW_INITI
 /// Python Resource.VERY_SLOW_RATE_THRESHOLD: rounds of sustained very slow
 /// rate before window_max is capped to WINDOW_MAX_VERY_SLOW.
 const VERY_SLOW_RATE_ROUNDS: usize = 2;
+
+/// Round trip at or above which [`WindowPolicy::ByMedium`] assumes a slow hop
+/// on the path, whatever the local medium.
+pub const BY_MEDIUM_RTT_LIMIT_MS: u64 = 1_000;
 
 /// Receiver-side rate measurements for one completed window round.
 ///
@@ -84,6 +89,13 @@ pub enum WindowPolicy {
     /// intact, so a transient loss does not permanently lower the ceiling
     /// the window can re-grow to.
     Adaptive,
+    /// +ciris (leviculum#103): [`Adaptive`](Self::Adaptive) where the path is
+    /// fast and duplex, [`Current`](Self::Current) everywhere else; resolved
+    /// per resource by [`for_path`](Self::for_path). `Current`'s rate tier
+    /// reads one part over the round trip, so an ordinary internet RTT caps
+    /// the window at the slow tier; `Adaptive` tiers on goodput but has
+    /// livelocked half-duplex LoRa (a85753ac).
+    ByMedium,
 }
 
 impl WindowPolicy {
@@ -94,7 +106,36 @@ impl WindowPolicy {
             "current" => Some(Self::Current),
             "pythonlike" => Some(Self::PythonLike),
             "adaptive" => Some(Self::Adaptive),
+            "bymedium" => Some(Self::ByMedium),
             _ => None,
+        }
+    }
+
+    /// The policy for one resource on a link attached to `medium` with this
+    /// round trip. Only [`ByMedium`](Self::ByMedium) depends on them.
+    ///
+    /// The local medium can't speak for the whole path: a TCP link to a relay
+    /// may cross LoRa beyond it. A radio hop anywhere shows in the round
+    /// trip, so a slow or unmeasured one keeps `Current`, as does any medium
+    /// not known to be fast and duplex.
+    #[must_use]
+    pub fn for_path(self, medium: Option<InterfaceKind>, rtt_ms: u64) -> Self {
+        if self != Self::ByMedium {
+            return self;
+        }
+        let fast_medium = matches!(
+            medium,
+            Some(
+                InterfaceKind::Tcp
+                    | InterfaceKind::Udp
+                    | InterfaceKind::Auto
+                    | InterfaceKind::Local
+            )
+        );
+        if fast_medium && rtt_ms > 0 && rtt_ms < BY_MEDIUM_RTT_LIMIT_MS {
+            Self::Adaptive
+        } else {
+            Self::Current
         }
     }
 }
@@ -186,6 +227,8 @@ impl WindowState {
             WindowPolicy::PythonLike | WindowPolicy::Adaptive => {
                 self.round_complete_pythonlike(sample.round_rate)
             }
+            // Resolved by `for_path` before a resource is built.
+            WindowPolicy::ByMedium => self.round_complete_current(sample.first_part_rate),
         }
     }
 
@@ -193,7 +236,7 @@ impl WindowState {
     pub(crate) fn on_timeout(&mut self, policy: WindowPolicy) {
         match policy {
             // The historical logic never touches the window on timeout.
-            WindowPolicy::Current => {}
+            WindowPolicy::Current | WindowPolicy::ByMedium => {}
             WindowPolicy::PythonLike => self.timeout_pythonlike(),
             WindowPolicy::Adaptive => self.timeout_adaptive(),
         }
@@ -556,5 +599,69 @@ mod tests {
         // Gap far above flexibility: window_max steps down twice.
         assert_eq!(ws.window(), w - 1);
         assert_eq!(ws.window_max(), m - 2);
+    }
+
+    /// leviculum#103: edge's numbers. At 464-byte parts and 40 ms, the first
+    /// part reads 11,600 B/s while the round carries far more. `Current` is
+    /// stuck at the slow tier; `ByMedium` on a fast path opens to the top.
+    #[test]
+    fn a_40_ms_path_opens_the_window_by_medium_and_stays_capped_on_current() {
+        let at_40_ms = RateSample {
+            first_part_rate: 464 * 1000 / 40,
+            round_rate: 116_000,
+        };
+        let run = |policy: WindowPolicy| {
+            let mut ws = WindowState::new();
+            for _ in 0..200 {
+                ws.on_round_complete(policy, at_40_ms);
+            }
+            ws.window_max()
+        };
+        assert_eq!(run(WindowPolicy::Current), RESOURCE_WINDOW_MAX_SLOW);
+        let chosen = WindowPolicy::ByMedium.for_path(Some(InterfaceKind::Udp), 40);
+        assert_eq!(chosen, WindowPolicy::Adaptive);
+        assert_eq!(run(chosen), RESOURCE_WINDOW_MAX_FAST);
+    }
+
+    #[test]
+    fn by_medium_keeps_current_on_radio_and_on_anything_it_cannot_vouch_for() {
+        let p = WindowPolicy::ByMedium;
+        for radio in [
+            InterfaceKind::Rnode,
+            InterfaceKind::Kiss,
+            InterfaceKind::Ble,
+            InterfaceKind::Serial,
+            InterfaceKind::Unknown,
+        ] {
+            assert_eq!(p.for_path(Some(radio), 40), WindowPolicy::Current);
+        }
+        assert_eq!(p.for_path(None, 40), WindowPolicy::Current);
+        // TCP to a relay with LoRa behind it: the round trip gives it away.
+        assert_eq!(
+            p.for_path(Some(InterfaceKind::Tcp), BY_MEDIUM_RTT_LIMIT_MS),
+            WindowPolicy::Current
+        );
+        // No measurement yet is not a fast path.
+        assert_eq!(
+            p.for_path(Some(InterfaceKind::Tcp), 0),
+            WindowPolicy::Current
+        );
+    }
+
+    #[test]
+    fn only_by_medium_depends_on_the_path() {
+        for p in [
+            WindowPolicy::Current,
+            WindowPolicy::PythonLike,
+            WindowPolicy::Adaptive,
+        ] {
+            assert_eq!(p.for_path(Some(InterfaceKind::Rnode), 5_000), p);
+            assert_eq!(p.for_path(Some(InterfaceKind::Tcp), 10), p);
+        }
+        assert_eq!(
+            WindowPolicy::parse("bymedium"),
+            Some(WindowPolicy::ByMedium)
+        );
+        assert_eq!(WindowPolicy::default(), WindowPolicy::Current);
     }
 }

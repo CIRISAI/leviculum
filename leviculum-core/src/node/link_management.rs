@@ -3268,6 +3268,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let data_size = adv.data_size;
         let link_mdu = link.mdu();
         let sdu = crate::resource::resource_sdu(link.negotiated_mtu());
+        let window_policy = self.resource_window_policy.for_path(
+            link.attached_interface()
+                .map(|i| self.transport.interface_kind(i)),
+            link.rtt_ms(),
+        );
         let mut accepted_response_request = None;
 
         match strategy {
@@ -3280,7 +3285,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     sdu,
                     now_ms,
                     self.max_incoming_resource_size,
-                    self.resource_window_policy,
+                    window_policy,
                 ) {
                     Ok((incoming, req_payload)) => {
                         let req_packet = link.build_data_packet_with_context(

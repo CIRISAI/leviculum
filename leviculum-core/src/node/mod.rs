@@ -2618,7 +2618,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             sdu,
             now_ms,
             self.max_incoming_resource_size,
-            self.resource_window_policy,
+            self.resource_window_policy.for_path(
+                link.attached_interface()
+                    .map(|i| self.transport.interface_kind(i)),
+                link.rtt_ms(),
+            ),
         )?;
 
         let req_packet = link
