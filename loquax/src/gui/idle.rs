@@ -15,9 +15,10 @@
 //!
 //! The five seconds start when the window has settled, by its events and
 //! not by the clock (1473): its first frames drawn, the map's worker done
-//! painting (the window idle, as `drive` asks it), and no message of the
-//! window's own for a whole tick, at the earliest after [`SETTLE`] and at
-//! the latest after [`SETTLE_MAX`]. Before 1473 it settled for a fixed
+//! painting (the window idle, as `drive` asks it), a frame drawn after
+//! the last message of the window's own and a whole tick without a
+//! frame since, at the earliest after [`SETTLE`] and at the latest after
+//! [`SETTLE_MAX`]. Before 1473 it settled for a fixed
 //! 1.5 s, and a debug-build worker still painting under a loaded host
 //! put its `Painted` into the five seconds (red once in 1468's run:
 //! `messages: [("Painted", 5)], presents: 4`).
@@ -139,8 +140,9 @@ struct Idle {
     /// start, and its kind.
     handed: Vec<(f64, String)>,
     /// When the window last was handed a message of its own (not the
-    /// shell's state), since the start.
+    /// shell's state), and when it last drew, since the start.
     own: Cell<Duration>,
+    drawn: Cell<Option<Duration>>,
     /// When the window settled, since the start, shared with the script
     /// that ends the run [`IDLE`] after it; and whether it had to be
     /// settled at [`SETTLE_MAX`].
@@ -171,9 +173,15 @@ impl Idle {
         if now < SETTLE {
             return;
         }
+        // Drawn since its last message and quiet a tick since: a message
+        // is followed by a redraw, and on a loaded host the view it
+        // builds first can take longer than a tick.
         let quiet = out.is_empty()
             && self.held.borrow().is_empty()
-            && now.saturating_sub(self.own.get()) >= QUIET
+            && self
+                .drawn
+                .get()
+                .is_some_and(|at| at >= self.own.get() && now.saturating_sub(at) >= QUIET)
             && self.window.idle();
         if self.settle == Settle::Clock || quiet {
             self.settled.set(Some(now));
@@ -213,6 +221,9 @@ impl Program for Idle {
     }
 
     fn pump(&self, drawn: bool) -> Vec<Message> {
+        if drawn {
+            self.drawn.set(Some(self.elapsed()));
+        }
         let mut out = self.window.pump(drawn);
         if let Some(late) = self.late {
             let mut held = self.held.borrow_mut();
@@ -354,6 +365,7 @@ fn idle_with(screen: Screen1455, rule: Rule, settle: Settle, late: Option<Durati
         }),
         handed: Vec::new(),
         own: Cell::new(Duration::ZERO),
+        drawn: Cell::new(None),
         settled: Rc::new(Cell::new(None)),
         timed_out: Cell::new(false),
         settle,
