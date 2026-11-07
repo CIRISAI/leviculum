@@ -80,6 +80,106 @@ pub fn raw_line(ms: u32, answer: &[u8]) -> String {
     out
 }
 
+/// The answers the queue holds before it drops the newest: a key every
+/// 10 ms poll for a third of a second of a loop that does not turn.
+pub const QUEUE: usize = 32;
+
+/// One answer a poll took that was no idle one, and when.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Press {
+    /// The board's uptime at the poll.
+    pub ms: u32,
+    answer: [u8; MAX_ANSWER],
+    len: u8,
+}
+
+impl Press {
+    const EMPTY: Self = Self {
+        ms: 0,
+        answer: [0; MAX_ANSWER],
+        len: 0,
+    };
+
+    /// The bytes the controller answered.
+    pub fn answer(&self) -> &[u8] {
+        &self.answer[..usize::from(self.len)]
+    }
+}
+
+/// The keyboard read apart from the drawing (1463): a timer interrupt
+/// polls the controller every [`crate::keyboard::POLL_MS`] and keeps every
+/// answer that is no idle one here, and the loop takes them when it turns.
+/// Before, the loop read the controller once per turn, and the controller
+/// has no FIFO: a key pressed and let go inside a three-second turn was
+/// never read (Lew's hand test, 2026-11-07 12:52). A queue that is full
+/// drops the newest and counts it.
+#[derive(Debug)]
+pub struct Presses {
+    ring: [Press; QUEUE],
+    head: usize,
+    len: usize,
+    lost: u32,
+    polls: u32,
+}
+
+impl Default for Presses {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Presses {
+    pub const fn new() -> Self {
+        Self {
+            ring: [Press::EMPTY; QUEUE],
+            head: 0,
+            len: 0,
+            lost: 0,
+            polls: 0,
+        }
+    }
+
+    /// One poll's `answer` at `ms`, read by `protocol`: kept unless idle.
+    pub fn poll(&mut self, protocol: &Protocol, ms: u32, answer: &[u8]) {
+        self.polls = self.polls.wrapping_add(1);
+        if protocol.read(answer) == Read::Idle {
+            return;
+        }
+        if self.len == QUEUE {
+            self.lost = self.lost.saturating_add(1);
+            return;
+        }
+        let mut press = Press::EMPTY;
+        let len = answer.len().min(MAX_ANSWER);
+        press.answer[..len].copy_from_slice(&answer[..len]);
+        press.len = len as u8;
+        press.ms = ms;
+        self.ring[(self.head + self.len) % QUEUE] = press;
+        self.len += 1;
+    }
+
+    /// The oldest answer kept.
+    pub fn pop(&mut self) -> Option<Press> {
+        if self.len == 0 {
+            return None;
+        }
+        let press = self.ring[self.head];
+        self.head = (self.head + 1) % QUEUE;
+        self.len -= 1;
+        Some(press)
+    }
+
+    /// Answers dropped because the queue was full.
+    pub fn lost(&self) -> u32 {
+        self.lost
+    }
+
+    /// Polls taken.
+    pub fn polls(&self) -> u32 {
+        self.polls
+    }
+}
+
 /// The answers of a capture, `(ms, bytes)` per `KBRAW` line; every other
 /// line is skipped and a `KBRAW` line that does not read is too, by number.
 pub fn parse_raw(text: &str) -> impl Iterator<Item = Result<(u32, Vec<u8>), usize>> + '_ {
@@ -193,6 +293,53 @@ mod tests {
         assert_eq!(answers.len(), 3);
         assert_eq!(answers[2], Err(5));
         assert_eq!(answers[1], Ok((20, alloc::vec![0x6b; 8])));
+    }
+
+    /// 1463, Lew's hand test: a ring key pressed for 10 ms in the middle
+    /// of a 3 s turn of the loop. The timer polls every 10 ms into the
+    /// queue and the loop drains it at the turn's end: the press is there,
+    /// once, at its time. The positive control is the loop before 1463,
+    /// which read the controller once per turn, at the turn's start and
+    /// its end, and saw nothing.
+    #[test]
+    fn a_press_inside_a_three_second_stall_is_kept() {
+        let ring_up = [0x5a; 8];
+        let answer_at = |ms: u32| match ms {
+            1500 => ring_up,
+            _ => [0; 8],
+        };
+        let mut queue = Presses::new();
+        for ms in (0..=3000).step_by(crate::keyboard::POLL_MS as usize) {
+            queue.poll(&MEASURED, ms, &answer_at(ms));
+        }
+        let press = queue.pop().expect("the press was kept");
+        assert_eq!((press.ms, press.answer()), (1500, &ring_up[..]));
+        assert_eq!(queue.pop(), None, "one press, one answer");
+        assert_eq!((queue.polls(), queue.lost()), (301, 0));
+        // The control: a read per turn of a loop that turns every 3 s.
+        let per_turn: Vec<Read> = [0, 3000]
+            .iter()
+            .map(|&ms| MEASURED.read(&answer_at(ms)))
+            .collect();
+        assert_eq!(per_turn, [Read::Idle, Read::Idle]);
+    }
+
+    /// A queue that is full keeps what it has, drops the newest and says
+    /// how many; a mixed answer is kept for its `KBRAW` line.
+    #[test]
+    fn a_full_queue_counts_what_it_drops() {
+        let mut queue = Presses::new();
+        for i in 0..QUEUE as u32 + 3 {
+            queue.poll(&MEASURED, i, &[0x61; 8]);
+        }
+        assert_eq!(queue.lost(), 3);
+        let mut mixed = [0x61; 8];
+        mixed[0] = 0x62;
+        assert_eq!(queue.pop().map(|p| p.ms), Some(0));
+        queue.poll(&MEASURED, 99, &mixed);
+        let kept: Vec<u32> = core::iter::from_fn(|| queue.pop()).map(|p| p.ms).collect();
+        assert_eq!(kept.len(), QUEUE);
+        assert_eq!(kept.last(), Some(&99));
     }
 
     #[test]
