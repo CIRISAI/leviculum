@@ -2787,7 +2787,7 @@ map-bench-baseline REGION:
 # ROUNDS rounds (at least 3), the medians compared; a frame_ms_mean more
 # than 5 % and 0.1 ms slower fails, a row whose rounds spread more than
 # 5 % on a side is "noise" with no verdict, and a 1-minute load above
-# WINDOW_BENCH_MAX_LOAD (default half the cores) at any round's start is a
+# WINDOW_BENCH_MAX_LOAD (default a fifth of the CPUs, 2.0 here) at any round's start is a
 # SKIP, exit 3 (a gesture of fewer than 30 frames is reported, not held;
 # the chat's drag rows, 0 frames, are left out). `just window-bench HEAD`
 # in a clean tree is the A/A selftest: one binary as both sides, every row

@@ -22,9 +22,11 @@
 #
 # The load: the 1-minute load average is recorded at the start of each side
 # of each round; above the bound the compare refuses a verdict (exit 3,
-# SKIP). The bound is WINDOW_BENCH_MAX_LOAD, else half the host's cores
-# (2.0 on schneckenschreck's 4): the A/A of 2026-11-07 at loads 0.4 to 4.9
-# moved rows from -25.8 % to +11.8 %.
+# SKIP). The bound is WINDOW_BENCH_MAX_LOAD, else a fifth of the host's
+# CPUs (2.0 on schneckenschreck's 10): the A/A of 2026-11-07 at loads 0.4
+# to 4.9 moved rows from -25.8 % to +11.8 %. The load average counts the
+# whole host, so the bound divides the host's CPUs, not the ones this
+# process may run on (a coder pass is pinned to 4 of the 10).
 set -euo pipefail
 
 out="$(realpath -m target/window-bench)"
@@ -86,7 +88,7 @@ round)
     done
     ;;
 compare)
-    bound="${WINDOW_BENCH_MAX_LOAD:-$(python3 -c 'import os; print(os.cpu_count() / 2)')}"
+    bound="${WINDOW_BENCH_MAX_LOAD:-$(python3 -c 'import os; print(os.cpu_count() / 5)')}"
     status=0
     python3 -I scripts/window-bench-compare.py --base "$out"/base-*.txt --this "$out"/this-*.txt \
         --load "$out/load.txt" --max-load "$bound" --mode "$(cat "$out/mode")" > "$out/table.md" || status=$?
