@@ -66,9 +66,14 @@
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
 //! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> t=<ms>
 //!                           on every loss and with every banner (1440)
-//! KBRAW <ms> <hex>          one per poll, every 10 ms
+//! KBRAW <ms> <hex>          one per answer that is no idle one: a timer
+//!                           polls every 10 ms into a queue the loop takes
+//!                           (1463); <ms> is the poll's time, not the line's
 //! KEY <ms> code=0x6b name=k after a KBRAW line that carries a press (1427)
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
+//! [KB] queue_lost=<n> read_failed=<n>   when either count moved (1463)
+//! [LOOP] turn_ms=<n> stage=<host|node|take|draw|keys> host=.. node=.. take=.. draw=.. keys=.. entries=<n>
+//!                           a turn of the loop longer than 100 ms (1463)
 //! ```
 //!
 //! and the banner pair every five seconds. A `FRAME_DUMP` control frame
@@ -87,6 +92,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use critical_section::Mutex;
 
 use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::{
@@ -100,7 +109,8 @@ use esp_hal::{
         master::{Config as SpiConfig, Spi, SpiDma},
         Mode,
     },
-    time::Rate,
+    time::{Duration, Rate},
+    timer::{timg::TimerGroup, PeriodicTimer},
     uart::Uart,
     Blocking,
 };
@@ -116,7 +126,7 @@ use loquax_m9::census::{self, Probe, Step};
 use loquax_m9::field::Field;
 use loquax_m9::fixture::{self, Screen};
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
-use loquax_m9::kbraw::{self, Protocol, Read, MAX_ANSWER};
+use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key, POLL_MS};
 use loquax_m9::map::{self, Map};
 use loquax_m9::pair::{self, Pairing};
@@ -139,6 +149,103 @@ const HEAP_MIN: usize = 1_100_000 + (1 << 20);
 /// read it: one key code per press (`thinknode-m9.md`, "The keyboard
 /// controller, measured").
 const KB: Protocol = kbraw::MEASURED;
+
+/// The keyboard's poll, the interrupt's once the boot handed it over
+/// (1463): the controller's bus and the timer that ticks every
+/// [`POLL_MS`]. The loop no longer reads the controller; it takes what the
+/// interrupt kept in [`KB_PRESSES`], so a key pressed while the loop is
+/// busy drawing or storing is read all the same.
+struct KbPoll {
+    bus: I2c<'static, Blocking>,
+    timer: PeriodicTimer<'static, Blocking>,
+}
+
+static KB_POLL: Mutex<RefCell<Option<KbPoll>>> = Mutex::new(RefCell::new(None));
+/// The answers the polls took that were no idle ones.
+static KB_PRESSES: Mutex<RefCell<Presses>> = Mutex::new(RefCell::new(Presses::new()));
+/// Polls whose I2C transfer failed.
+static KB_FAILS: AtomicU32 = AtomicU32::new(0);
+
+/// The timer's tick: one read of the controller, its answer queued. The
+/// transfer is about a millisecond at 100 kHz, inside the critical
+/// section; the UART's interrupt has 5.5 ms of slack behind it.
+#[esp_hal::handler]
+fn kb_tick() {
+    critical_section::with(|cs| {
+        let mut poll = KB_POLL.borrow_ref_mut(cs);
+        let Some(poll) = poll.as_mut() else {
+            return;
+        };
+        poll.timer.clear_interrupt();
+        let mut answer = [0u8; kbraw::MAX_ANSWER];
+        let answer = &mut answer[..KB.len];
+        let read = match KB.register {
+            Some(register) => poll.bus.write_read(KB.address, &[register], answer),
+            None => poll.bus.read(KB.address, answer),
+        };
+        match read {
+            Ok(()) => KB_PRESSES
+                .borrow_ref_mut(cs)
+                .poll(&KB, uptime_ms() as u32, answer),
+            Err(_) => {
+                KB_FAILS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// The answers kept since the last call, oldest first, and how many were
+/// dropped and failed so far.
+fn kb_drain() -> (Vec<kbraw::Press>, u32, u32) {
+    critical_section::with(|cs| {
+        let mut presses = KB_PRESSES.borrow_ref_mut(cs);
+        let drained = core::iter::from_fn(|| presses.pop()).collect();
+        (drained, presses.lost(), KB_FAILS.load(Ordering::Relaxed))
+    })
+}
+
+/// A turn of the loop longer than this says where its time went (1463):
+/// the bar a key is answered within.
+const SLOW_TURN_MS: u64 = 100;
+
+/// What one turn of the loop spent, by stage, in milliseconds.
+#[derive(Default)]
+struct Turn {
+    host: u64,
+    node: u64,
+    take: u64,
+    draw: u64,
+    keys: u64,
+}
+
+impl Turn {
+    /// Say the turn as a `[LOOP]` line when it took longer than
+    /// [`SLOW_TURN_MS`].
+    fn say(&self, log: &mut UartLog<'_>, entries: u64) {
+        let total = self.host + self.node + self.take + self.draw + self.keys;
+        if total <= SLOW_TURN_MS {
+            return;
+        }
+        let stages = [
+            ("host", self.host),
+            ("node", self.node),
+            ("take", self.take),
+            ("draw", self.draw),
+            ("keys", self.keys),
+        ];
+        let slowest = stages
+            .iter()
+            .max_by_key(|(_, ms)| *ms)
+            .map_or("none", |(name, _)| name);
+        log.line(
+            "[LOOP] ",
+            format_args!(
+                "turn_ms={total} stage={slowest} host={} node={} take={} draw={} keys={} entries={entries}",
+                self.host, self.node, self.take, self.draw, self.keys
+            ),
+        );
+    }
+}
 
 /// The ST7789 opcodes this image sends (Sitronix ST7789V datasheet, 9.1).
 const SWRESET: u8 = 0x01;
@@ -580,6 +687,26 @@ fn main() -> ! {
         );
     }
 
+    // The keyboard's poll from here on is the timer's (1463).
+    if let Some(bus) = i2c.take() {
+        let group = TimerGroup::new(p.TIMG0);
+        let mut timer = PeriodicTimer::new(group.timer0);
+        timer.set_interrupt_handler(kb_tick);
+        match timer.start(Duration::from_millis(u64::from(POLL_MS))) {
+            Ok(()) => {
+                critical_section::with(|cs| {
+                    timer.listen();
+                    KB_POLL.borrow_ref_mut(cs).replace(KbPoll { bus, timer });
+                });
+                log.line(
+                    "[KB] ",
+                    format_args!("poll=timer every_ms={POLL_MS} queue={}", kbraw::QUEUE),
+                );
+            }
+            Err(e) => log.line("[KB] ", format_args!("state=down reason=timer err={e:?}")),
+        }
+    }
+
     // The renderer over the panel's frame, made once; it clears the frame
     // in memory, the panel keeps the splash.
     let before = leviculum_esp::heap_live();
@@ -711,12 +838,12 @@ fn main() -> ! {
     );
 
     let mut deframer = Deframer::new();
-    let mut answer = [0u8; MAX_ANSWER];
-    let mut i2c_failing = false;
+    // The keyboard's losses as the last `[KB]` line said them.
+    let mut kb_said = (0, 0);
     let mut next_banner = uptime_ms() + BANNER_INTERVAL_MS;
-    let mut next_poll = uptime_ms();
     loop {
         let now = uptime_ms();
+        let mut turn = Turn::default();
         if now >= next_banner {
             next_banner = now + BANNER_INTERVAL_MS;
             log.identify(m9::LOG_PREFIX, m9::BOARD_NAME, bytes);
@@ -724,6 +851,7 @@ fn main() -> ! {
         }
 
         // The host: control frames between the lines.
+        let t_host = uptime_ms();
         let mut incoming = [0u8; 64];
         let n = log.read_ready(&mut incoming);
         let mut requests = Vec::new();
@@ -802,7 +930,11 @@ fn main() -> ! {
             );
         }
 
+        turn.host = uptime_ms().saturating_sub(t_host);
+        let t_node = uptime_ms();
         node.turn(uptime_ms(), &mut stores, &mut log);
+        turn.node = uptime_ms().saturating_sub(t_node);
+        let t_take = uptime_ms();
 
         // What the client brought: pulled entries into the model, ended
         // sends to their bubbles, and the top bar's word when it moved.
@@ -824,6 +956,7 @@ fn main() -> ! {
             dirty = true;
         }
         if dirty {
+            let t_draw = uptime_ms();
             redraw(
                 &mut renderer,
                 &mut map,
@@ -833,110 +966,101 @@ fn main() -> ! {
                 &shown,
                 &mut log,
             );
+            turn.draw = uptime_ms().saturating_sub(t_draw);
         }
+        turn.take = uptime_ms().saturating_sub(t_take).saturating_sub(turn.draw);
 
-        if now < next_poll {
-            continue;
+        // The keys the timer read since the last turn (1463), oldest
+        // first: every press, however long the turn that held it was.
+        let t_keys = uptime_ms();
+        let (presses, kb_lost, kb_fails) = kb_drain();
+        if (kb_lost, kb_fails) != kb_said {
+            kb_said = (kb_lost, kb_fails);
+            log.line(
+                "[KB] ",
+                format_args!("queue_lost={kb_lost} read_failed={kb_fails}"),
+            );
         }
-        next_poll = now + u64::from(POLL_MS);
-        let Some(bus) = i2c.as_mut() else {
-            continue;
-        };
-        let ms = now as u32;
-        let read = match KB.register {
-            Some(register) => bus.write_read(KB.address, &[register], &mut answer[..KB.len]),
-            None => bus.read(KB.address, &mut answer[..KB.len]),
-        };
-        match read {
-            Ok(()) => {
-                if i2c_failing {
-                    i2c_failing = false;
-                    log.line("[KB] ", format_args!("read=ok again"));
-                }
-                log.raw(&kbraw::raw_line(ms, &answer[..KB.len]));
-                let mut events = Vec::new();
-                let mut command = None;
-                match KB.read(&answer[..KB.len]) {
-                    Read::Idle => {}
-                    Read::Mixed => log.line("[KB] ", format_args!("answer=mixed")),
-                    Read::Code(code) => {
-                        if let Some(key) = Key::of(code) {
-                            log.raw(&keyboard::key_line(ms, code, key));
-                            events.extend(key.event());
-                            command = key.command();
-                        }
+        for press in presses {
+            let ms = press.ms;
+            log.raw(&kbraw::raw_line(ms, press.answer()));
+            let mut events = Vec::new();
+            let mut command = None;
+            match KB.read(press.answer()) {
+                Read::Idle => {}
+                Read::Mixed => log.line("[KB] ", format_args!("answer=mixed")),
+                Read::Code(code) => {
+                    if let Some(key) = Key::of(code) {
+                        log.raw(&keyboard::key_line(ms, code, key));
+                        events.extend(key.event());
+                        command = key.command();
                     }
                 }
-                // A control that runs a command (1440): the chats list, the
-                // compose line, the map. Not on the pairing screen, which
-                // only Back leaves.
-                if let (Some(command), None) = (command, shown.pairing.as_ref()) {
-                    keyboard::run(&mut model, &mut row, command);
-                    redraw(
-                        &mut renderer,
-                        &mut map,
-                        &mut panel,
-                        &model,
-                        row,
-                        &shown,
-                        &mut log,
-                    );
-                }
-                if !events.is_empty() {
-                    for event in events {
-                        if let Some(pairing) = shown.pairing.as_mut() {
-                            let taken = pairing_key(
-                                pairing,
-                                &event,
-                                &mut node,
-                                &mut rng,
-                                &mut stores,
-                                batch,
-                                &mut log,
-                            );
-                            if event.code == KeyCode::Esc && event.kind != KeyEventKind::Release {
-                                shown.pairing = None;
-                            }
-                            if let Some(taken) = taken {
-                                // The code was taken: the home's chats from
-                                // here (what the store kept of that home),
-                                // the join in the top bar.
-                                model = taken;
-                                row = 0;
-                                shown.pairing = None;
-                            }
-                            shown.word = node.word();
-                            continue;
-                        }
-                        let effects = group::press(&mut model, &mut row, &event);
-                        if node.address().is_some() {
-                            let mut ids = || {
-                                let mut id = [0u8; 16];
-                                rand_core::RngCore::fill_bytes(&mut rng, &mut id);
-                                id
-                            };
-                            node.send(home::sends(effects, &mut ids), uptime_ms());
-                        }
-                    }
-                    redraw(
-                        &mut renderer,
-                        &mut map,
-                        &mut panel,
-                        &model,
-                        row,
-                        &shown,
-                        &mut log,
-                    );
-                }
             }
-            Err(e) => {
-                // Said once per run of failures, not once per poll.
-                if !i2c_failing {
-                    i2c_failing = true;
-                    log.line("[KB] ", format_args!("read=failed err={e:?}"));
+            // A control that runs a command (1440): the chats list, the
+            // compose line, the map. Not on the pairing screen, which
+            // only Back leaves.
+            if let (Some(command), None) = (command, shown.pairing.as_ref()) {
+                keyboard::run(&mut model, &mut row, command);
+                redraw(
+                    &mut renderer,
+                    &mut map,
+                    &mut panel,
+                    &model,
+                    row,
+                    &shown,
+                    &mut log,
+                );
+            }
+            if !events.is_empty() {
+                for event in events {
+                    if let Some(pairing) = shown.pairing.as_mut() {
+                        let taken = pairing_key(
+                            pairing,
+                            &event,
+                            &mut node,
+                            &mut rng,
+                            &mut stores,
+                            batch,
+                            &mut log,
+                        );
+                        if event.code == KeyCode::Esc && event.kind != KeyEventKind::Release {
+                            shown.pairing = None;
+                        }
+                        if let Some(taken) = taken {
+                            // The code was taken: the home's chats from
+                            // here (what the store kept of that home),
+                            // the join in the top bar.
+                            model = taken;
+                            row = 0;
+                            shown.pairing = None;
+                        }
+                        shown.word = node.word();
+                        continue;
+                    }
+                    let effects = group::press(&mut model, &mut row, &event);
+                    if node.address().is_some() {
+                        let mut ids = || {
+                            let mut id = [0u8; 16];
+                            rand_core::RngCore::fill_bytes(&mut rng, &mut id);
+                            id
+                        };
+                        node.send(home::sends(effects, &mut ids), uptime_ms());
+                    }
                 }
+                redraw(
+                    &mut renderer,
+                    &mut map,
+                    &mut panel,
+                    &model,
+                    row,
+                    &shown,
+                    &mut log,
+                );
             }
         }
+        turn.keys = uptime_ms().saturating_sub(t_keys);
+        turn.say(&mut log, node.entries());
     }
 }
 

@@ -330,6 +330,15 @@ impl Handheld {
         self.client.as_ref().map(|client| client.address)
     }
 
+    /// Entries the message store holds, for the `[LOOP]` line (1463); none
+    /// on a board without a store or a home.
+    pub fn entries(&self) -> u64 {
+        self.client
+            .as_ref()
+            .and_then(|client| client.store.as_ref())
+            .map_or(0, Store::entries)
+    }
+
     /// What the screen's top bar says of the home.
     pub fn word(&self) -> Option<Word> {
         self.client.as_ref().map(|client| {
