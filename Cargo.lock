@@ -3223,6 +3223,7 @@ dependencies = [
  "leviculum-ui",
  "mundy",
  "png",
+ "rustix 1.1.3",
  "tiny-skia",
 ]
 

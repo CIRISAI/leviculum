@@ -24,6 +24,7 @@ use super::tests::{long_chat, real_chat, real_chat_grown, seen_of, window_over_f
 use super::*;
 use iced::advanced::Layout;
 use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
+use std::cell::Cell;
 use std::sync::mpsc;
 
 /// The window sizes: the one the goldens use, Lew's three (2026-11-06,
@@ -657,6 +658,108 @@ const EDGE: u8 = 64;
 /// How many pixels of a frame may lie more than one step from the twin's.
 const EDGE_PIXELS: usize = 4;
 
+/// Whether the host was quiet enough over a measurement for a time to
+/// measure the window and not the host (1473): the 1-minute load average
+/// at its start within the window bench's bound (`scripts/window-bench.sh`:
+/// `WINDOW_BENCH_MAX_LOAD`, else a fifth of the CPUs), and the tasks
+/// running or waiting for a CPU, sampled whenever the drive pumps
+/// ([`Watched`]), never more than the drive itself and that bound. The
+/// load average trails a burst by a minute (the tests beside this one in
+/// the same run start together); the runnable count does not.
+pub(super) struct HostLoad {
+    load: Option<f64>,
+    bound: f64,
+    most: Cell<u32>,
+    unread: Cell<bool>,
+}
+
+impl HostLoad {
+    pub(super) fn start() -> Self {
+        let load = std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| s.split_whitespace().next()?.parse().ok());
+        let bound = std::env::var("WINDOW_BENCH_MAX_LOAD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| loquax::picture::cores() as f64 / 5.0);
+        let host = Self {
+            load,
+            bound,
+            most: Cell::new(0),
+            unread: Cell::new(false),
+        };
+        host.sample();
+        host
+    }
+
+    /// The tasks running or waiting for a CPU now, the drive's own one
+    /// among them (`/proc/loadavg`'s fourth field).
+    pub(super) fn sample(&self) {
+        let runnable = std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| {
+            let field = s.split_whitespace().nth(3)?;
+            field.split('/').next()?.parse::<u32>().ok()
+        });
+        match runnable {
+            Some(n) => self.most.set(self.most.get().max(n)),
+            None => self.unread.set(true),
+        }
+    }
+
+    /// Whether the measurement counts; printed when it does not, so a
+    /// run says what it did not measure.
+    pub(super) fn measured(&self, what: &str) -> bool {
+        self.sample();
+        let quiet = !self.unread.get()
+            && self.load.is_some_and(|l| l <= self.bound)
+            && f64::from(self.most.get()) <= self.bound + 1.0;
+        if !quiet {
+            println!(
+                "NOT MEASURED: {what}: load {:?} against {:.1}, at most {} runnable{}",
+                self.load,
+                self.bound,
+                self.most.get(),
+                if self.unread.get() { ", unread" } else { "" }
+            );
+        }
+        quiet
+    }
+}
+
+/// A program driven with the host's load sampled at every pump.
+pub(super) struct Watched<'a, P> {
+    pub(super) inner: &'a mut P,
+    pub(super) host: &'a HostLoad,
+}
+
+impl<P: Program> Program for Watched<'_, P> {
+    type Message = P::Message;
+
+    fn view(&self) -> Element<'_, P::Message> {
+        self.inner.view()
+    }
+
+    fn update(&mut self, message: P::Message) {
+        self.inner.update(message);
+    }
+
+    fn pump(&self, drawn: bool) -> Vec<P::Message> {
+        self.host.sample();
+        self.inner.pump(drawn)
+    }
+
+    fn idle(&self) -> bool {
+        self.inner.idle()
+    }
+
+    fn style(&self) -> (Theme, Color, Color) {
+        self.inner.style()
+    }
+
+    fn marked(&self) -> bool {
+        self.inner.marked()
+    }
+}
+
 #[test]
 fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
     let optimised = !cfg!(debug_assertions);
@@ -677,7 +780,12 @@ fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
             let (app, events) = case.setup(w, h);
             let mut window = Window::new(app);
             let mut script = script(events);
-            let run = headless::drive_twinned(&mut window, w, h, &mut script, SETTLE)
+            let host = HostLoad::start();
+            let mut watched = Watched {
+                inner: &mut window,
+                host: &host,
+            };
+            let run = headless::drive_twinned(&mut watched, w, h, &mut script, SETTLE)
                 .expect("the software renderer");
             let what = format!(
                 "{} at {w}x{h}: {} frames, {} shifted, at most {} pixels a frame off, {} by more than one step, by at most {}; more at {:?}, first within {:?}",
@@ -695,7 +803,14 @@ fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
             assert!(run.past_one <= EDGE_PIXELS, "{what}");
             // A scrollbar's drag over 3000 messages moves them further
             // than the pane is high with every report: nothing to keep.
-            if !matches!(case, Case::ChatScrollbar(_)) {
+            // Whether a frame shifts depends on how many the gesture's
+            // wall-clock seconds drew: under a loaded host a wheel's
+            // notches pile into two frames that move further than the
+            // pane (1469: "2 frames, 0 shifted" at load 4.7), so this is
+            // asserted only within the bench's load bound (1473).
+            if !matches!(case, Case::ChatScrollbar(_))
+                && host.measured(&format!("frames shifted, {what}"))
+            {
                 assert!(run.shifted > 0, "{what}");
             }
         }
@@ -761,6 +876,12 @@ impl Program for Pulling {
 /// comes. Every state arrives and the last frame shows the whole chat;
 /// in an optimised build no frame of the pull takes longer than
 /// [`REFRESH_BUDGET_MS`] (6.5 to 10 ms each at 900 by 560 on the host).
+/// Counted in the drive's thread's CPU time (1473), where the wall clock
+/// counted the host's other work too (590 ms frames at load 18, 1469),
+/// and only on a quiet host ([`HostLoad`]): two tests beside it doubled
+/// even the CPU time (9.8 to 18.2 ms, cores and caches shared), so under
+/// load it prints that it did not measure. Where the thread's clock is
+/// not told, the wall clock on the quiet host.
 /// Unoptimised, a view of these 300 long paragraphs shaped takes longer
 /// than a frame (as [`the_benchs_gestures_move_the_window`] says), so
 /// the frame times are only printed there.
@@ -792,8 +913,17 @@ fn a_first_pull_never_costs_a_frame_over_the_budget() {
         states: std::cell::RefCell::new(states),
     };
     let mut script = |now: Duration| (now < SETTLE).then(Vec::new);
+    // A frame's cost is the drive's thread's time on a CPU (1473): the
+    // wall clock counted the host too, 590 ms frames at load 18 (1469).
+    headless::measure_cpu(true);
+    let host = HostLoad::start();
+    let mut watched = Watched {
+        inner: &mut pulling,
+        host: &host,
+    };
     let run =
-        headless::drive(&mut pulling, w, h, &mut script, SETTLE).expect("the software renderer");
+        headless::drive(&mut watched, w, h, &mut script, SETTLE).expect("the software renderer");
+    headless::measure_cpu(false);
     // The pull's frames: the first frame is the window opening on the
     // chat before the pull's first state, its present a fresh surface's
     // (14.6 ms of its 20.7 in the release run that set the budget).
@@ -803,9 +933,16 @@ fn a_first_pull_never_costs_a_frame_over_the_budget() {
         .skip(1)
         .map(DrawnFrame::total_ms)
         .fold(0.0, f64::max);
+    // The CPU time where the kernel tells it, else the wall clock.
+    let cpu: Option<f64> = run
+        .frames
+        .iter()
+        .skip(1)
+        .map(|f| f.cpu_ms)
+        .try_fold(0.0, |most: f64, ms| ms.map(|ms| most.max(ms)));
     let views = run.frames.iter().filter(|f| f.rebuilt).count();
     println!(
-        "FIRST_PULL states={slices} frames={} views={views} longest_ms={longest:.2}",
+        "FIRST_PULL states={slices} frames={} views={views} longest_ms={longest:.2} longest_cpu_ms={cpu:?}",
         run.frames.len()
     );
     assert!(
@@ -828,10 +965,14 @@ fn a_first_pull_never_costs_a_frame_over_the_budget() {
         views >= slices - 1,
         "a view per state: {views} for {slices}"
     );
-    if !cfg!(debug_assertions) {
+    if !cfg!(debug_assertions) && host.measured("the first pull's frames") {
+        let (ms, clock) = match cpu {
+            Some(cpu) => (cpu, "of CPU"),
+            None => (longest, "by the wall clock"),
+        };
         assert!(
-            longest < REFRESH_BUDGET_MS,
-            "a frame of the first pull took {longest:.2} ms (budget {REFRESH_BUDGET_MS:.1} ms)"
+            ms < REFRESH_BUDGET_MS,
+            "a frame of the first pull took {ms:.2} ms {clock} (budget {REFRESH_BUDGET_MS:.1} ms)"
         );
     }
 }
