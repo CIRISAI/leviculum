@@ -647,8 +647,8 @@ impl Cover {
 /// Draw `tracks` into `rgba`, `w` by `h` pixels, under the pins (1385,
 /// `loquax-tracks.md`): the places faint, labelled where they are among
 /// the largest; the lines at their age's opacity; the dwells as blobs;
-/// the outliers as dots; the wedge beside the newest fix's marker and the
-/// quiet line under it. `at(world)` is where a point lands on the frame.
+/// the outliers as dots; the wedge beside the newest fix's marker. The
+/// marker's own label carries its age, one per position (1447). `at(world)` is where a point lands on the frame.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_tracks(
     rgba: &mut [u8],
@@ -746,20 +746,6 @@ pub fn draw_tracks(
             }
         }
         cover.blend(rgba, hue);
-        if let (Some(words), Some(head)) = (&t.quiet, t.head) {
-            let (x, y) = at(head);
-            let mask = type_.mask(words, size, 0, false);
-            let top = y + f64::from(MARKER * scale / 2.0 + 3.0 * scale);
-            let centre = (x, top + f64::from(size * LINE) / 2.0);
-            let half_w = mask.w as f64 / 2.0 + f64::from(3.0 * scale);
-            let half_h = f64::from(size * LINE) / 2.0;
-            for py in (centre.1 - half_h).floor() as i64..(centre.1 + half_h).ceil() as i64 {
-                for px in (centre.0 - half_w).floor() as i64..(centre.0 + half_w).ceil() as i64 {
-                    blend(rgba, w, h, px, py, ground, 0.75);
-                }
-            }
-            mapnames::paint_faded(rgba, w, h, &mask, centre, 0.0, hue, 1.0);
-        }
     }
 }
 

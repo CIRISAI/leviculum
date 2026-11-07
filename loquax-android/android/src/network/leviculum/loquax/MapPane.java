@@ -668,7 +668,9 @@ final class MapPane implements MapView.Listener {
         // A peer that reports says whether it is alive, in the chat row's
         // words as the library says them (1209, 1217); one known from a
         // text alone how old its fix is.
+        String said = Core.str(row, "age");
         String age = !live.isEmpty() ? live
+                : !said.isEmpty() ? said
                 : Ui.nowSecs() - at < 60 ? activity.getString(R.string.just_now)
                 : activity.getString(R.string.card_ago, Ui.age(activity, at, Ui.nowSecs()));
         String distance = distance(row);

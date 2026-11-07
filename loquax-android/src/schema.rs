@@ -1198,6 +1198,11 @@ pub struct FriendRow {
     /// the ring's colour as [`ConversationRow::ring`].
     #[serde(default)]
     pub live: String,
+    /// The position's one age in the phone's language, "vor 28 Std."
+    /// (1447, `scene::ago`): what the marker says under the avatar and
+    /// the card says where `live` is empty, so the two never disagree.
+    #[serde(default)]
+    pub age: String,
     #[serde(default)]
     pub ring: String,
     /// A node the mesh announced that is no contact (1302): the map draws

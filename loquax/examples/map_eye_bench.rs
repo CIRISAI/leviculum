@@ -216,7 +216,6 @@ fn tracks(at: World) -> Vec<Track> {
         dwells: Vec::new(),
         places: Vec::new(),
         wedge: None,
-        quiet: None,
         head: Some(point(400)),
     }]
 }

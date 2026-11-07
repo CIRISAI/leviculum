@@ -196,7 +196,7 @@ pub fn radar(pins: &[MapPin], unit: f64, size: (u32, u32)) -> Option<Radar> {
 
 /// `pins` as the radar labels them: each but the one it centres on says
 /// where it is from the centre and how old its fix is, "1.3 km NE, 12 min
-/// ago".
+/// ago" (the age is the pin's own, already in the reader's words, 1447).
 pub fn label(pins: &mut [MapPin], radar: &Radar) {
     for pin in pins.iter_mut() {
         if pin.at == radar.centre && (pin.own || radar.on.is_some()) {
@@ -204,7 +204,7 @@ pub fn label(pins: &mut [MapPin], radar: &Radar) {
         }
         let way = relative(radar.centre, pin.at);
         pin.age = Some(match &pin.age {
-            Some(age) => format!("{way}, {age} ago"),
+            Some(age) => format!("{way}, {age}"),
             None => way,
         });
     }
@@ -294,7 +294,7 @@ mod tests {
             } else {
                 alloc::format!("p{peer}")
             },
-            age: Some("12 min".to_string()),
+            age: Some("12 min ago".to_string()),
             stale: false,
             nearby: false,
             own,
@@ -370,7 +370,11 @@ mod tests {
         assert!(r.rings.windows(2).all(|w| w[1] - w[0] == r.step_m));
         let mut labelled = pins.to_vec();
         label(&mut labelled, &r);
-        assert_eq!(labelled[1].age.as_deref(), Some("12 min"), "us unchanged");
+        assert_eq!(
+            labelled[1].age.as_deref(),
+            Some("12 min ago"),
+            "us unchanged"
+        );
         let anna = labelled[0].age.clone().unwrap_or_default();
         assert_eq!(anna, "830 m NE, 12 min ago");
 

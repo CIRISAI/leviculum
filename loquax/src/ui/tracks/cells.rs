@@ -2,7 +2,8 @@
 //! terminal"): the lines as braille dots, two by four a cell, whatever
 //! technique draws the picture under them; a dwell as `•`, a place as `○`,
 //! an outlier as `·`, the wedge as an arrow in the cell the newest fix
-//! moves towards, the quiet line on the row below the pin. A line whose
+//! moves towards; the pin's own age says how long it has been silent
+//! (1447: the quiet line is gone). A line whose
 //! newer fix arrived late (1386) is `┄` where no other line crosses the
 //! cell, `:` in ASCII. Four levels of
 //! age ([`super::Age::level`]), the hue per peer ([`super::hue`]).
@@ -24,7 +25,7 @@ use super::{Age, Track};
 pub struct TrackCell {
     pub col: u16,
     pub row: u16,
-    /// The glyph, or the quiet line's words starting here.
+    /// The glyph.
     pub text: String,
     /// [`super::hue`]: `None` for our own, grey.
     pub hue: Option<u8>,
@@ -140,21 +141,6 @@ pub fn cells(
                 level,
             });
         }
-        if let (Some(words), Some(head)) = (&track.quiet, track.head) {
-            let (x, y) = dot(head);
-            let (col, row) = (x.div_euclid(2), y.div_euclid(4) + 1);
-            let len = words.chars().count() as i64;
-            if (0..rows).contains(&row) && col >= 0 && col < cols {
-                let col = col.min(cols - len).max(0);
-                out.push(TrackCell {
-                    col: area.x + col as u16,
-                    row: area.y + row as u16,
-                    text: words.clone(),
-                    hue: track.hue,
-                    level: 1,
-                });
-            }
-        }
     }
     out
 }
@@ -205,7 +191,6 @@ fn arrow(bearing: i32, ascii: bool) -> (i64, i64, char) {
 mod tests {
     use super::super::{Blob, Place, Segment, Wedge};
     use super::*;
-    use alloc::string::ToString;
     use alloc::vec;
     use leviculum_map::mercator::World;
 
@@ -256,7 +241,6 @@ mod tests {
                 at: px(&v, 18, 1),
                 bearing: 90,
             }),
-            quiet: Some("no fix for 3 h".to_string()),
             head: Some(px(&v, 0, 1)),
         };
         let got = cells(&[track], &v, area, (2, 4), false);
@@ -274,7 +258,7 @@ mod tests {
         // The top row's line in the dots' second row; the wedge at the
         // right end overwrites nothing, it is past the edge.
         assert_eq!(text[0], "⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒");
-        assert_eq!(text[1], "no fix for", "the quiet line, cut at the edge");
+        assert_eq!(text[1], "          ", "no quiet line under the pin (1447)");
         assert_eq!(text[2], "  •       ");
         assert_eq!(&text[3][..], "    ○     ");
         let dwell = got.iter().find(|c| c.text == "•").expect("dwell");

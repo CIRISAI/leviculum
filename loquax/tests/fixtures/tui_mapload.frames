@@ -34,7 +34,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││    ·       ·       ·          ·       ·       ·    │
 │                        ││    ·      ·       ·            ·       ·      ·    │
 │                        ││    ·      ·      ·              ·      ·      ·    │
-│                        ││    ·      ·      ·       ◉ them ·61dd · 4 min ·    │
+│                        ││    ·      ·      ·       ◉ them ·61dd · 4 min ago  │
 │                        ││    ·      ·       ·            ·       ·      ·    │
 │                        ││    ·       ·       ··        ··       ·       ·    │
 │                        ││     ·       ·         · ·· ·         ·       ·     │
@@ -59,7 +59,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                         ⠈⣆             ⠈⢿⣾⠟⠁       │
 │                        ││                          ⠈⢆             ⠈⣿⡀        │
 │                        ││                           ⠈⠳⡀            ⢹⣇        │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them ·61dd · 4 min ago  │
 │                        ││                              ⢸           ⣼⠏        │
 │                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
 │                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
@@ -84,7 +84,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                         ⠈⣆             ⠈⢿⣾⠟⠁       │
 │                        ││                          ⠈⢆             ⠈⣿⡀        │
 │                        ││                           ⠈⠳⡀            ⢹⣇        │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them ·61dd · 4 min ago  │
 │                        ││                              ⢸           ⣼⠏        │
 │                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
 │                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
@@ -109,7 +109,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them ·61dd · 4 min ago  │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -134,7 +134,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them ·61dd · 4 min ago  │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │

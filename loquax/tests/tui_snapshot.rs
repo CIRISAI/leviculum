@@ -2319,7 +2319,10 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         assert!(map.contains("● you · 1 min"), "{map}");
         // Tab: the selection moves from the first pin by name to the next.
         let next = frame(&frames, "next pin");
-        assert!(map.contains("· 3 h ◉") && next.contains("◉ them"), "{next}");
+        assert!(
+            map.contains("· 3 h ago ◉") && next.contains("◉ them"),
+            "{next}"
+        );
         assert!(map.contains("· 3 h"), "the stale one with its age\n{map}");
         // The drag: every pin ten cells left and three up, the map open.
         let dragged = frame(&frames, "dragged");

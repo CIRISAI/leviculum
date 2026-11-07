@@ -1139,7 +1139,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
         (i64s(), i32s(), i32s(), prop::option::of(u32s())),
         (any::<(bool, bool)>(), text()),
         live(),
-        (text(), text()),
+        (text(), text(), text()),
         (any::<bool>(), text()),
     )
         .prop_map(
@@ -1148,7 +1148,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
                 (at, lat_e6, lon_e6, distance_m),
                 ((recent, stale), geo),
                 (liveness, cadence_s, last_fix_at),
-                (live, ring),
+                (live, age, ring),
                 (nearby, announced),
             )| FriendRow {
                 peer,
@@ -1168,6 +1168,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
                 cadence_s,
                 last_fix_at,
                 live,
+                age,
                 ring,
                 nearby,
                 announced,

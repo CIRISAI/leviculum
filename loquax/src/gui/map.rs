@@ -423,6 +423,7 @@ pub(super) mod tests {
                 &scene.now,
                 unit,
                 1.0,
+                loquax::ui::strings::Lang::En,
             );
             let pins = scenes::pins(&scene);
             for (theme, suffix) in themes {
@@ -496,6 +497,7 @@ pub(super) mod tests {
                 &scene.now,
                 unit,
                 1.0,
+                loquax::ui::strings::Lang::En,
             );
             let mut pins = scenes::pins(&scene);
             let shown = match radar::shows(&fitted, &setup.regions) {

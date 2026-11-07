@@ -2192,6 +2192,7 @@ impl App {
             &now,
             unit,
             self.scale,
+            self.lang,
         );
         *cache = Some((key, tracks.clone()));
         tracks

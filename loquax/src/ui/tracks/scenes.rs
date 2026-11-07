@@ -112,7 +112,7 @@ fn ending(mut fixes: Vec<TrackFix>, end: i64) -> Vec<TrackFix> {
 
 /// A hiking group of four from the Duomo up to Fiesole, three hours,
 /// a fix every two minutes; one turned back an hour ago and went quiet
-/// (the quiet line), one leads at a brisk pace (the wedge).
+/// (its pin's age says so), one leads at a brisk pace (the wedge).
 pub fn hiking() -> Scene {
     let now = noon();
     let n = now.unix_secs;
@@ -341,7 +341,9 @@ pub fn pins(scene: &Scene) -> Vec<crate::ui::map::MapPin> {
                 peer: *peer,
                 at: last.at(),
                 label: alloc::string::String::from(*name),
-                age: Some(crate::telemetry::span(now - last.t)),
+                age: Some(
+                    crate::ui::scene::ago(now - last.t).resolve(crate::ui::strings::Lang::En),
+                ),
                 stale: now - last.t > crate::telemetry::STALE_AFTER_SECS,
                 nearby: false,
                 own: scene.own == Some(*peer),
@@ -572,6 +574,7 @@ mod tests {
     use leviculum_ui::Rect;
 
     use crate::ui::map::{place, MapSetup};
+    use crate::ui::strings::Lang;
     use crate::ui::tracks::{cells::cells, tracks, TrackWindow};
 
     /// The terminal's picture of a scene: braille cells of 72 by 22, the
@@ -602,7 +605,14 @@ mod tests {
             _ => view_of(scene, u32::from(cols) * 2, u32::from(rows) * 4, 6),
         };
         let unit = libm::exp2(24.0 - f64::from(view.zoom()));
-        let drawn = tracks(&input(scene), TrackWindow::Episode, &scene.now, unit, 0.5);
+        let drawn = tracks(
+            &input(scene),
+            TrackWindow::Episode,
+            &scene.now,
+            unit,
+            0.5,
+            Lang::En,
+        );
         let mut pinned = pins(scene);
         let radar = match scene.name == "radar" {
             true => crate::ui::radar::radar(&pinned, unit, view.size()),
@@ -700,7 +710,14 @@ mod tests {
         let scene = late();
         let view = view_of(&scene, 480, 320, 20);
         let unit = libm::exp2(24.0 - f64::from(view.zoom()));
-        let t = &tracks(&input(&scene), TrackWindow::Episode, &scene.now, unit, 1.0)[0];
+        let t = &tracks(
+            &input(&scene),
+            TrackWindow::Episode,
+            &scene.now,
+            unit,
+            1.0,
+            Lang::En,
+        )[0];
         let late = t.segments.iter().filter(|s| s.late).count();
         assert!(
             late > 0 && late < t.segments.len(),
@@ -717,7 +734,14 @@ mod tests {
         assert!(scene.peers[0].2.len() > 35_000);
         let view = view_of(&scene, 480, 320, 20);
         let unit = libm::exp2(24.0 - f64::from(view.zoom()));
-        let t = &tracks(&input(&scene), TrackWindow::Episode, &scene.now, unit, 1.0)[0];
+        let t = &tracks(
+            &input(&scene),
+            TrackWindow::Episode,
+            &scene.now,
+            unit,
+            1.0,
+            Lang::En,
+        )[0];
         assert!(t.places.len() <= 8, "{:?}", t.places.len());
         assert!(t.places.len() >= 3);
         assert!(t.segments.len() < 200, "{}", t.segments.len());

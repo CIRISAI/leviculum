@@ -126,6 +126,11 @@ terminal's braille cells, 72 x 22, the tracks and the pins as the text
 frame draws them, drawn by
 `ui::tracks::scenes::tests::the_track_scenes_in_cells_are_the_goldens`;
 `LOQUAX_WRITE_GOLDEN=1` writes them anew.
+Redrawn in 1447 (walk 1 finding 7): a pin's age is the catalogue's, "13 min
+ago", "now", where it was "13 min", "<1 min"; the quiet line ("no fix for
+3 h") under dino's pin is gone, the pin's own age says it; every
+`gui-tracks-*.png` moved by those words alone (hiking 3265 pixels, park
+1485, radar 513, the others alike).
 
 `gui-tracks-radar.png`, `gui-tracks-way-back.png`, `gui-tracks-late.png`,
 `gui-tracks-battery.png`, `gui-tracks-fit-all.png`, and

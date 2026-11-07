@@ -15,8 +15,11 @@
 //! speed outlier, the accuracy drop), [`dwells`] (rule 2), the episode
 //! ([`episode_start`], rule 3), [`places`] (rule 4), the age steps
 //! ([`Age`], rule 5), the hue ([`hue`], rule 6), the wedge ([`wedge`],
-//! rule 7) and the quiet line ([`quiet`], rule 8). [`track`] puts them
-//! together under a fixed drawing budget per peer.
+//! rule 7). Rule 8's quiet line is gone from the screen (1447, walk 1
+//! finding 7): the pin's own age says how long a peer has been silent, in
+//! the catalogue's words, and a second age beside it ("no fix for 1 d"
+//! over "vor 28 Std.") was one position with three ages. [`track`] puts
+//! the rules together under a fixed drawing budget per peer.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -25,7 +28,7 @@ use alloc::vec::Vec;
 
 use leviculum_map::mercator::{project, LatLon, World};
 
-use crate::telemetry::{span, Fix};
+use crate::telemetry::Fix;
 use crate::ui::strings::{Lang, StrId};
 use crate::when::WallTime;
 
@@ -73,11 +76,6 @@ pub const DECIMATE_PX: f64 = 1.0;
 /// The newest fix carries a wedge above this speed, metres per second
 /// times 100 (rule 7).
 pub const MOVING_E2: i64 = 150;
-/// A peer silent longer than this many median intervals gets the quiet
-/// line (rule 8) ...
-pub const QUIET_INTERVALS: i64 = 3;
-/// ... and never before this.
-pub const QUIET_FLOOR_SECS: i64 = 3600;
 /// A dwell blob's radius in logical pixels, at most (rule 2).
 pub const DWELL_RADIUS_MAX_PX: u8 = 14;
 /// A place blob's radius in logical pixels, at most (rule 4).
@@ -585,8 +583,6 @@ pub struct Track {
     pub dwells: Vec<Blob>,
     pub places: Vec<Place>,
     pub wedge: Option<Wedge>,
-    /// The quiet line beside the pin (rule 8).
-    pub quiet: Option<String>,
     /// The newest fix, where the pin is.
     pub head: Option<World>,
 }
@@ -691,7 +687,13 @@ fn thin<T>(items: Vec<T>, budget: usize) -> Vec<T> {
 /// cell with less than [`DWELL_SECS`] is passage and drawn as nothing; of
 /// the others the largest [`PLACE_BUDGET`] are places, the largest
 /// [`PLACE_LABELS`] labelled with their total.
-pub fn places(fixes: &[TrackFix], skip: &[bool], (from, to): (i64, i64), cell: f64) -> Vec<Place> {
+pub fn places(
+    fixes: &[TrackFix],
+    skip: &[bool],
+    (from, to): (i64, i64),
+    cell: f64,
+    lang: Lang,
+) -> Vec<Place> {
     let cell = cell.max(1.0);
     let key = |w: World| {
         (
@@ -756,7 +758,7 @@ pub fn places(fixes: &[TrackFix], skip: &[bool], (from, to): (i64, i64), cell: f
     out.sort_by_key(|p| (core::cmp::Reverse(p.dwell_secs), p.at));
     out.truncate(PLACE_BUDGET);
     for p in out.iter_mut().take(PLACE_LABELS) {
-        p.label = Some(span(p.dwell_secs));
+        p.label = Some(dwell_words(p.dwell_secs, lang));
     }
     out
 }
@@ -804,28 +806,18 @@ pub fn bearing_of(a: &TrackFix, b: &TrackFix) -> i32 {
     (libm::round(deg) as i32).rem_euclid(360)
 }
 
-/// The quiet line (rule 8): when the newest fix is older than
-/// [`QUIET_INTERVALS`] times the median interval between the fixes inside
-/// the window, and older than [`QUIET_FLOOR_SECS`] in any case, "no fix
-/// for 3 h". It stays until the next fix. Fewer than two fixes in the
-/// window have no interval: a position shared once is no stream that went
-/// quiet, and its pin's age says how old it is.
-pub fn quiet(fixes: &[TrackFix], (from, to): (i64, i64), now: i64) -> Option<String> {
-    let newest = fixes.last()?;
-    let inside: Vec<i64> = fixes
-        .iter()
-        .filter(|f| f.t >= from && f.t < to)
-        .map(|f| f.t)
-        .collect();
-    if inside.len() < 2 {
-        return None;
-    }
-    let mut gaps: Vec<i64> = inside.windows(2).map(|w| w[1] - w[0]).collect();
-    gaps.sort_unstable();
-    let median = gaps.get(gaps.len() / 2).copied().unwrap_or(0);
-    let silent = now - newest.t;
-    let limit = (QUIET_INTERVALS * median).max(QUIET_FLOOR_SECS);
-    (silent > limit).then(|| format!("no fix for {}", span(silent)))
+/// How long a place was stayed at, in the catalogue's words (1447):
+/// `45 min`, `3 h`, `12 d`; never the English of [`crate::telemetry::span`]
+/// on a German screen.
+pub fn dwell_words(secs: i64, lang: Lang) -> String {
+    use crate::ui::strings::{Arg, Text};
+    let secs = secs.max(0);
+    let (id, n) = match secs {
+        ..3600 => (StrId::MinutesAgo, (secs / 60).max(1)),
+        3600..86_400 => (StrId::HoursAgo, secs / 3600),
+        _ => (StrId::DaysAgo, secs / 86_400),
+    };
+    Text::Key(id, Vec::from([Arg::Int(n)])).resolve(lang)
 }
 
 /// The world units a place's cell spans at a view whose screen pixel is
@@ -836,7 +828,8 @@ pub fn place_cell(unit: f64, scale: f32) -> f64 {
 
 /// `peer`'s track as the map draws it in `window` at `now`, on a view
 /// whose screen pixel spans `unit` world units, drawn at `scale`; `fixes`
-/// in time order ([`insert`]).
+/// in time order ([`insert`]), the places' words in `lang`.
+#[allow(clippy::too_many_arguments)]
 pub fn track(
     peer: [u8; 16],
     own: bool,
@@ -845,6 +838,7 @@ pub fn track(
     now: &WallTime,
     unit: f64,
     scale: f32,
+    lang: Lang,
 ) -> Track {
     let outlier = outliers(fixes);
     let stays = dwells(fixes, &outlier);
@@ -876,7 +870,19 @@ pub fn track(
             *s = true;
         }
     }
-    let places = places(fixes, &skip, bounds, place_cell(unit, scale));
+    let cell = place_cell(unit, scale);
+    let mut places = places(fixes, &skip, bounds, cell, lang);
+    // A place under the pin carries no words (1447): the pin's age is the
+    // one label there, never a stay's length laid over it.
+    let head = fixes.last().map(TrackFix::at);
+    if let Some(head) = head {
+        for p in places
+            .iter_mut()
+            .filter(|p| world_distance(p.at, head) < cell * PLACE_JOIN_CELLS)
+        {
+            p.label = None;
+        }
+    }
     Track {
         peer,
         hue: hue(&peer, own),
@@ -885,8 +891,7 @@ pub fn track(
         dwells,
         places,
         wedge: wedge(fixes, &outlier),
-        quiet: quiet(fixes, bounds, t),
-        head: fixes.last().map(TrackFix::at),
+        head,
     }
 }
 
@@ -894,17 +899,19 @@ pub fn track(
 /// us, the fixes in time order.
 pub type TrackInput = Vec<([u8; 16], bool, alloc::sync::Arc<Vec<TrackFix>>)>;
 
-/// The tracks of `input` ([`track`] for each).
+/// The tracks of `input` ([`track`] for each), the places' words in
+/// `lang`.
 pub fn tracks(
     input: &TrackInput,
     window: TrackWindow,
     now: &WallTime,
     unit: f64,
     scale: f32,
+    lang: Lang,
 ) -> Vec<Track> {
     input
         .iter()
-        .map(|(peer, own, fixes)| track(*peer, *own, fixes, window, now, unit, scale))
+        .map(|(peer, own, fixes)| track(*peer, *own, fixes, window, now, unit, scale, lang))
         .collect()
 }
 
@@ -1035,7 +1042,16 @@ mod tests {
             at(120, 30_000.0, 100.0),
         ];
         assert_eq!(outliers(&end), vec![false; 3]);
-        let t = track([1; 16], false, &fixes, TrackWindow::All, &noon(), 0.0, 1.0);
+        let t = track(
+            [1; 16],
+            false,
+            &fixes,
+            TrackWindow::All,
+            &noon(),
+            0.0,
+            1.0,
+            Lang::En,
+        );
         assert_eq!(t.dots, vec![Dot { at: fixes[2].at() }]);
     }
 
@@ -1142,11 +1158,21 @@ mod tests {
             &now,
             64.0,
             1.0,
+            Lang::En,
         );
         assert_eq!(t.segments.len(), 29, "the walk on, not the walk before");
         assert_eq!(t.dwells.len(), 1, "the night ends at the episode's start");
         assert!(t.places.is_empty(), "{:?}", t.places);
-        let t = track([1; 16], false, &fixes, TrackWindow::All, &now, 64.0, 1.0);
+        let t = track(
+            [1; 16],
+            false,
+            &fixes,
+            TrackWindow::All,
+            &now,
+            64.0,
+            1.0,
+            Lang::En,
+        );
         assert_eq!(t.segments.len(), 29 + 29, "the hotel is a blob, not a line");
         assert_eq!(t.dwells.len(), 1);
     }
@@ -1164,7 +1190,16 @@ mod tests {
         for m in 0..=20 {
             fixes.push(at(n - 5 * 3600 + m * 15 * 60, 0.0, 2_400.0));
         }
-        let t = track([1; 16], false, &fixes, TrackWindow::Episode, &now, 1.0, 1.0);
+        let t = track(
+            [1; 16],
+            false,
+            &fixes,
+            TrackWindow::Episode,
+            &now,
+            1.0,
+            1.0,
+            Lang::En,
+        );
         assert!(t.segments.len() >= 59, "{}", t.segments.len());
         assert_eq!(t.dwells.len(), 1);
     }
@@ -1218,7 +1253,13 @@ mod tests {
         let fixes = handbag_year(noon().unix_secs);
         let o = outliers(&fixes);
         // z14 at one logical pixel: 2^10 world units a pixel.
-        let got = places(&fixes, &o, (i64::MAX, i64::MAX), place_cell(1024.0, 1.0));
+        let got = places(
+            &fixes,
+            &o,
+            (i64::MAX, i64::MAX),
+            place_cell(1024.0, 1.0),
+            Lang::En,
+        );
         assert!(got.len() <= 6, "{}", got.len());
         assert_eq!(got[0].radius, PLACE_RADIUS_MAX_PX);
         assert!(got[0].dwell_secs > got[1].dwell_secs);
@@ -1274,7 +1315,7 @@ mod tests {
         assert_eq!(fixes.len(), 100_000);
         for window in [TrackWindow::Episode, TrackWindow::Month, TrackWindow::All] {
             for unit in [0.0, 64.0, 4096.0] {
-                let t = track([7; 16], false, &fixes, window, &now, unit, 1.0);
+                let t = track([7; 16], false, &fixes, window, &now, unit, 1.0, Lang::En);
                 let (segments, blobs) = cost(&t);
                 assert!(segments <= SEGMENT_BUDGET, "{window:?} {unit}: {segments}");
                 assert!(blobs <= BLOB_BUDGET, "{window:?} {unit}: {blobs}");
@@ -1343,32 +1384,38 @@ mod tests {
         assert_eq!(wedge(&alone, &outliers(&alone)), None);
     }
 
-    /// Rule 8: silent longer than three median intervals and an hour.
+    /// 1447: a place's stay is said in the reader's language, and a
+    /// place under the pin carries no words beside the pin's age.
     #[test]
-    fn a_quiet_peer_says_how_long() {
-        let fixes: Vec<TrackFix> = (0..10).map(|i| at(i * 600, 0.0, 0.0)).collect();
-        let last = 9 * 600;
-        assert_eq!(
-            quiet(&fixes, all(), last + 3600),
-            None,
-            "an hour is not enough"
+    fn a_place_speaks_the_readers_language_and_none_under_the_pin() {
+        assert_eq!(dwell_words(45 * 60, Lang::En), "45 min");
+        assert_eq!(dwell_words(45 * 60, Lang::De), "45 Min.");
+        assert_eq!(dwell_words(3 * 3600, Lang::De), "3 Std.");
+        assert_eq!(dwell_words(2 * 86_400, Lang::De), "2 T.");
+        let now = noon();
+        let fixes = handbag_year(now.unix_secs);
+        let unit = 1024.0;
+        let t = track(
+            [7; 16],
+            false,
+            &fixes,
+            TrackWindow::Episode,
+            &now,
+            unit,
+            1.0,
+            Lang::De,
         );
-        assert_eq!(
-            quiet(&fixes, all(), last + 3 * 3600).as_deref(),
-            Some("no fix for 3 h")
-        );
-        let hourly: Vec<TrackFix> = (0..10).map(|i| at(i * 3600, 0.0, 0.0)).collect();
-        assert_eq!(
-            quiet(&hourly, all(), 9 * 3600 + 2 * 3600),
-            None,
-            "3 m = 3 h"
-        );
-        assert!(quiet(&hourly, all(), 9 * 3600 + 4 * 3600).is_some());
-        assert_eq!(
-            quiet(&fixes[..1], all(), 10 * 3600),
-            None,
-            "one fix is no stream"
-        );
+        let head = t.head.expect("a head");
+        let cell = place_cell(unit, 1.0);
+        assert!(t.places.iter().any(|p| p.label.is_some()), "{:?}", t.places);
+        for p in &t.places {
+            if world_distance(p.at, head) < cell * PLACE_JOIN_CELLS {
+                assert_eq!(p.label, None, "a place under the pin is quiet");
+            }
+            if let Some(words) = &p.label {
+                assert!(!words.contains(" d") && !words.contains("fix"), "{words}");
+            }
+        }
     }
 
     #[test]

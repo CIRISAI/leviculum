@@ -159,6 +159,8 @@ pub fn friends<B>(
             cadence_s: crate::session::cadence(&list.liveness),
             last_fix_at: list.liveness.last_fix_at.unwrap_or(0),
             live: scene::row_live(&list.liveness, Some(now)).resolve(lang),
+            age: scene::ago(now.saturating_sub(list.liveness.last_fix_at.unwrap_or(at)))
+                .resolve(lang),
             ring: crate::session::ring(scene::Ring::of(list.liveness.state)),
             nearby: model.is_nearby(peer),
             announced: model.names.announced(peer).unwrap_or_default().to_string(),
@@ -186,6 +188,49 @@ pub fn friends<B>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1447 (walk 1 finding 7): a position 28 hours old has one age, in
+    /// the phone's language, the same on the marker (`age`) and in the
+    /// card (`live`), and never the word "fix".
+    #[test]
+    fn an_old_position_has_one_age_in_the_readers_words() {
+        use loquax::ui::UiEvent;
+        const NOW: i64 = 1_793_500_000;
+        let mut model = UiModel::<crate::session::Line>::new(&[]);
+        model.lang = Lang::De;
+        update_clock(&mut model, NOW);
+        let fix = leviculum_lxmf::telemetry::Location {
+            latitude_e6: 43_773_100,
+            longitude_e6: 11_256_000,
+            altitude_e2: 0,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 0,
+            last_update: NOW - 28 * 3600,
+        };
+        loquax::ui::update(
+            &mut model,
+            UiEvent::MeshPosition {
+                identity: [1u8; 16],
+                fix,
+                name: Some("Walker".to_string()),
+                age: 0,
+            },
+        );
+        let sheet = friends(&model, NOW, None, Lang::De, |_| None);
+        let row = sheet.friends.first().expect("a row");
+        assert_eq!(row.age, "vor 28 Std.", "{row:?}");
+        assert!(
+            row.live.ends_with(&row.age),
+            "the card says the same: {row:?}"
+        );
+        let pins = model.map_pins();
+        assert!(
+            pins.iter().all(|p| p.words().ends_with("vor 28 Std.")),
+            "{pins:?}"
+        );
+        assert!(!row.live.contains("fix") && !row.age.contains("fix"));
+    }
 
     /// 1302: a node the mesh announced is a row of the sheet, marked
     /// nearby with the name it announced and no avatar letters asked of

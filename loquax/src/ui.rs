@@ -4581,6 +4581,7 @@ impl<B> UiModel<B> {
             |peer| self.is_nearby(peer),
             self.address,
             self.now.map(|now| now.unix_secs),
+            self.lang,
         )
     }
 
@@ -4736,7 +4737,14 @@ impl<B> UiModel<B> {
         let Some(now) = self.now else {
             return Vec::new();
         };
-        tracks::tracks(&self.track_input(), self.track_window, &now, unit, scale)
+        tracks::tracks(
+            &self.track_input(),
+            self.track_window,
+            &now,
+            unit,
+            scale,
+            self.lang,
+        )
     }
 
     /// The fixes the map draws tracks of: every peer's but a blocked
@@ -11947,8 +11955,8 @@ pub(crate) mod tests {
         // She is at the picture's right edge: her name is set left of her
         // marker, which stays on her cell.
         assert!(alice.stale, "{alice:?}");
-        assert_eq!(alice.text, "Alice ·cdcd · 3 h ◉");
-        assert!(alice.col + 19 <= map.area.x + map.area.width, "{alice:?}");
+        assert_eq!(alice.text, "Alice ·cdcd · 3 h ago ◉");
+        assert!(alice.col + 23 <= map.area.x + map.area.width, "{alice:?}");
         let last = map.pins.last().expect("pins");
         assert!(
             last.selected && last.text.contains('◉'),

@@ -1,9 +1,9 @@
 convoy z10
 
 
-                                                          car 2 · <1 min
-                                           car 1 · <1 min ●⡠⠔●
-                                                      ⣀⡠⠔⠊car 3 · <1 min
+                                                          car 2 · now
+                                              car 1 · now ●⡠⠔●
+                                                      ⣀⡠⠔⠊car 3 · now
                                                  ⢀⡠⠔⠊⠉
                                              ⢀⡠⠔⠊⠁
                                          ⣀⠤⠒⠊⠁

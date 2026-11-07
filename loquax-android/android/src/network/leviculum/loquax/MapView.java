@@ -823,7 +823,12 @@ final class MapView extends View {
                 canvas.drawRect(bx + bw, by + bh / 3f, bx + bw + 1.5f * density, by + bh * 2f / 3f, battery);
             }
             if (row.containsKey("at")) {
-                String age = Ui.age(getContext(), Core.num(row, "at"), now);
+                // The position's one age, the library's (1447): the card
+                // says the same words, never a second age beside it.
+                String age = Core.str(row, "age");
+                if (age.isEmpty()) {
+                    age = Ui.age(getContext(), Core.num(row, "at"), now);
+                }
                 // Under the radar (1386): how far and which way, then the age.
                 String way = Core.str(mark, "way");
                 if (!way.isEmpty()) {

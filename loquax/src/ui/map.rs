@@ -469,13 +469,16 @@ pub const MARKER: char = '●';
 /// screen show it, and a text frame does too.
 pub const SELECTED: char = '◉';
 
-/// The pins of `positions` (peer to fix) in `Tab` order, `own` named `you`.
+/// The pins of `positions` (peer to fix) in `Tab` order, `own` named `you`,
+/// each fix's age in the catalogue's words in `lang` ("vor 28 Std.", 1447):
+/// the one age a position has, the card's.
 pub fn pins_of(
     positions: &alloc::collections::BTreeMap<[u8; 16], telemetry::Fix>,
     label: impl Fn(&[u8; 16]) -> String,
     nearby: impl Fn(&[u8; 16]) -> bool,
     own: Option<[u8; 16]>,
     now: Option<i64>,
+    lang: super::strings::Lang,
 ) -> Vec<MapPin> {
     let all: Vec<MapPin> = positions
         .iter()
@@ -486,7 +489,7 @@ pub fn pins_of(
             ));
             let age = now
                 .filter(|_| !fix.ahead())
-                .map(|now| telemetry::span(now - fix.fix_time()));
+                .map(|now| super::scene::ago(now - fix.fix_time()).resolve(lang));
             MapPin {
                 peer: *peer,
                 at,
