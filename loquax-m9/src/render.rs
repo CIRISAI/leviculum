@@ -91,11 +91,15 @@ where
             return self.draw(&screen::scene(model), look);
         };
         let credit = map.credit();
-        self.cells(|cols, rows| map::lines(model, look, &credit, cols, rows))?;
+        // No region under the view (1476): the cells say so, no picture.
+        let bare = !map::covers(map.region.header(), &view);
+        self.cells(|cols, rows| map::lines(model, look, &credit, bare, cols, rows))?;
         let panel = self.terminal.backend_mut().display_mut();
-        map.painter
-            .picture(&map.region, &view, panel)
-            .map_err(|_| DrawError)?;
+        if !bare {
+            map.painter
+                .picture(&map.region, &view, panel)
+                .map_err(|_| DrawError)?;
+        }
         map::pins(&pins, look, &self.font, panel).map_err(|_| DrawError)?;
         self.map_drawn = true;
         Ok(())

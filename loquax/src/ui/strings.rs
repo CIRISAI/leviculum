@@ -107,6 +107,10 @@ leviculum_ui::catalogue! {
     // The radar's line where no map is loaded (1447, walk 1 finding 19).
     RadarNote = "radar_note", "No map loaded for this area · Rings %1$s", "Keine Karte für diese Gegend geladen · Ringe %1$s";
     RadarNoteOn = "radar_note_on", "No map loaded for this area · Rings %1$s around %2$s", "Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s";
+    // The M9's map where no region lies under the view (1476): the words of
+    // 1447 §5 instead of plain grey, and how a region gets onto the board.
+    MapNoRegion = "map_no_region", "No map for this area", "Keine Karte für diese Gegend";
+    MapRegionHow = "map_region_how", "lnflash loads maps over USB", "Karten lädt lnflash per USB";
     // An empty conversation in the terminal (1447, walk 1 finding 22).
     NoMessagesYet = "no_messages_yet", "No messages yet", "Noch keine Nachrichten";
     // The terminal's title without a name of our own (1447).

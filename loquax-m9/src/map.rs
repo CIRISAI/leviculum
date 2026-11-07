@@ -89,6 +89,19 @@ pub fn setup(header: &Header) -> MapSetup {
     }
 }
 
+/// Tell `model` the board's map: the region the image carries
+/// ([`FIXTURE`]) and the picture's cells. The fixture's model and a home's
+/// (1476) both, so a home's map is the same picture under the same keys.
+pub fn ready<B>(model: &mut UiModel<B>)
+where
+    B: InputBuffer + Default,
+{
+    if let Ok(region) = Region::from_bytes(FIXTURE) {
+        loquax::ui::update(model, loquax::ui::UiEvent::MapSetup(setup(region.header())));
+    }
+    model.map_picture = Some(PICTURE);
+}
+
 /// Whether `model` shows the map.
 pub fn shown<B>(model: &UiModel<B>) -> bool {
     model.focus == Pane::Map && model.map.is_some()
@@ -144,15 +157,29 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> Option<(Viewport, Vec<PinCell
     Some((viewport, pins))
 }
 
+/// Whether the board's region lies under `view` (1476): the fixture is
+/// drawn only where the view is in it. Elsewhere the picture is no plain
+/// grey but says there is no map there ([`lines`] with `bare`).
+pub fn covers(region: &Header, view: &Viewport) -> bool {
+    loquax::ui::radar::any_region(core::slice::from_ref(region), view)
+}
+
 /// The map screen's cells, `cols` x `rows`: the top bar (the title and
 /// the zoom, the data's credit at its right end, which the ODbL asks for
 /// on the view), the picture's rows blank in the map's background, the
 /// legend and the keys. The chosen pin is told apart on the picture, not
 /// in the bar: its name would leave the credit no room.
+///
+/// `bare`: no region lies under the view (1476). The picture's rows then
+/// say so in the words of 1447 §5, "Keine Karte für diese Gegend", in
+/// their second row, above the own pin the view is centred on, and their
+/// last row how a region gets onto the board; no
+/// credit, as no data of anybody's is shown.
 pub fn lines<B: InputBuffer>(
     model: &UiModel<B>,
     look: &Look,
     attribution: &str,
+    bare: bool,
     cols: usize,
     rows: usize,
 ) -> Vec<RLine> {
@@ -166,13 +193,16 @@ pub fn lines<B: InputBuffer>(
         ),
         _ => format!(" {} ", Words::key(StrId::Map).resolve(look.lang)),
     };
-    let credit = format!(
-        "{} ",
-        cut(
-            short_credit(attribution),
-            cols.saturating_sub(fit_width(&title) + 1)
-        )
-    );
+    let credit = match bare {
+        true => String::new(),
+        false => format!(
+            "{} ",
+            cut(
+                short_credit(attribution),
+                cols.saturating_sub(fit_width(&title) + 1)
+            )
+        ),
+    };
     let gap = cols.saturating_sub(fit_width(&title) + fit_width(&credit));
     let mut bar = RLine::default();
     push(
@@ -190,8 +220,24 @@ pub fn lines<B: InputBuffer>(
         bg: Some(ui_ink(style().theme.palette().background)),
         ..RStyle::default()
     };
-    for _ in 0..PICTURE.height {
-        out.push(fill(RLine::default(), cols, ground));
+    let height = usize::from(PICTURE.height);
+    for at in 0..height {
+        let words = match (bare, at) {
+            // Above the middle, where the own pin sits (the view is
+            // centred on it).
+            (true, 1) => Some((StrId::MapNoRegion, chrome.fg)),
+            (true, at) if at + 1 == height => Some((StrId::MapRegionHow, muted(look).fg)),
+            _ => None,
+        };
+        let mut line = RLine::default();
+        if let Some((id, fg)) = words {
+            let text = Words::key(id).resolve(look.lang);
+            let text = cut(&text, cols);
+            let left = cols.saturating_sub(fit_width(&text)) / 2;
+            push(&mut line, &" ".repeat(left), ground);
+            push(&mut line, &text, RStyle { fg, ..ground });
+        }
+        out.push(fill(line, cols, ground));
     }
     // The keys in two pages that each fit (1447): the board turns the
     // page every KEYS_PAGE_TICKS ticks.

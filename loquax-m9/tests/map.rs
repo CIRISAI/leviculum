@@ -19,6 +19,8 @@ use loquax_m9::map::{self, Map, CELL_PX, FIXTURE, PICTURE, ROWS};
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::Look;
 
+mod support;
+
 fn drawn(model: &UiModel<Field>) -> Frame {
     let mut frame = Frame::new();
     let mut map = Map::new(FIXTURE).expect("region");
@@ -202,4 +204,102 @@ fn an_unchanged_redraw_flushes_nothing() {
         .show(&model, &Look::of(&model), &mut map)
         .expect("draw");
     assert!(renderer.panel().take_dirty().is_some(), "the zoom");
+}
+
+/// 1476, the grey map of Lew's photo: a home's board opens the map where
+/// its own fix is, far from the region the image carries. The picture is
+/// not plain grey: it says "Keine Karte für diese Gegend" above the own
+/// pin and how a region gets onto the board in its last row, the bar has no
+/// credit for data it does not show, and nothing of the map is drawn.
+/// Pinned as a golden. The control: the fixture's own view over Florence
+/// draws the region and says none of it.
+#[test]
+fn the_map_says_so_where_no_region_lies_under_the_view() {
+    use leviculum_lxmf::telemetry::Location;
+    use loquax::ui::strings::{StrId, Text};
+    use loquax_m9::frame::HEIGHT;
+    use loquax_m9::home;
+    use loquax_m9::screen::{COLS, ROWS as GRID};
+
+    let mut model = home::model([0x24; 16]);
+    // Frankfurt, a minute ago: the M9 on Lew's desk.
+    let fix = Location::saturating(50_110_900, 8_682_100, 5_000, 0, 0, 500, 1_762_000_000);
+    update(&mut model, UiEvent::OwnFix(Some(fix)));
+    let mut row = 0;
+    group::press(&mut model, &mut row, &event(M9Key::Char('M')));
+    assert!(map::shown(&model), "M opens the home's map");
+    let (view, _) = map::view(&model).expect("map");
+    let region = Map::new(FIXTURE).expect("region");
+    assert!(!map::covers(region.region.header(), &view));
+
+    let look = Look::of(&model);
+    let lines = map::lines(
+        &model,
+        &look,
+        "© OpenStreetMap contributors",
+        true,
+        COLS,
+        GRID,
+    );
+    let text: Vec<String> = lines
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.ch).collect())
+        .collect();
+    let lang = model.lang;
+    let none = Text::key(StrId::MapNoRegion).resolve(lang);
+    let how = Text::key(StrId::MapRegionHow).resolve(lang);
+    assert_eq!(none, "Keine Karte für diese Gegend", "the 1447 §5 words");
+    let picture = usize::from(PICTURE.y)..usize::from(PICTURE.bottom());
+    let second = usize::from(PICTURE.y) + 1;
+    assert_eq!(text[second].trim(), none, "{text:#?}");
+    assert_eq!(text[picture.end - 1].trim(), how, "{text:#?}");
+    assert!(how.contains("lnflash"));
+    assert!(
+        !text[0].contains("OSM"),
+        "no credit over no data: {:?}",
+        text[0]
+    );
+    for line in &text {
+        assert_eq!(line.chars().count(), COLS, "{line:?}");
+    }
+
+    let frame = drawn(&model);
+    support::check("m9-map-no-region.png", &frame);
+    // The picture's rows hold the ground and the words' two inks only: no
+    // map was drawn.
+    let top = (PICTURE.y * CELL_PX.1) as u32;
+    let bottom = (PICTURE.bottom() * CELL_PX.1) as u32;
+    let mut inks = std::collections::BTreeSet::new();
+    for y in top..bottom.min(HEIGHT) {
+        for x in 0..WIDTH {
+            inks.insert(frame.pixel(x, y));
+        }
+    }
+    assert!(inks.len() <= 8, "{} inks in a picture of words", inks.len());
+
+    // The control: the fixture's view over Florence draws the region.
+    let florence = Screen::Map.model();
+    let (view, _) = map::view(&florence).expect("map");
+    assert!(map::covers(region.region.header(), &view));
+    let text: Vec<String> = map::lines(
+        &florence,
+        &Look::of(&florence),
+        "© OpenStreetMap contributors",
+        false,
+        COLS,
+        GRID,
+    )
+    .iter()
+    .map(|l| l.cells.iter().map(|c| c.ch).collect())
+    .collect();
+    assert!(text.iter().all(|l| !l.contains(&none)));
+    assert!(text[0].contains("© OSM"));
+    let mut inks = std::collections::BTreeSet::new();
+    let frame = drawn(&florence);
+    for y in top..bottom.min(HEIGHT) {
+        for x in 0..WIDTH {
+            inks.insert(frame.pixel(x, y));
+        }
+    }
+    assert!(inks.len() > 8, "the region's picture: {} inks", inks.len());
 }

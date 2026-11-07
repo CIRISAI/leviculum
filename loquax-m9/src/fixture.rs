@@ -16,7 +16,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use leviculum_lxmf::telemetry::Location;
-use leviculum_map::region::Region;
 use leviculum_ui::delivery::DeliveryState;
 use loquax::telemetry::{Fix, Source};
 use loquax::ui::groups::{GroupInfo, GroupMember, Standing};
@@ -324,10 +323,7 @@ fn location(at: &Place, secs_before_now: i64) -> Location {
 /// a pin is made of on every target: the shares the store kept, a node's
 /// `lev.position` announce, the board's own GNSS fix.
 fn map(model: &mut UiModel<Field>) {
-    if let Ok(region) = Region::from_bytes(crate::map::FIXTURE) {
-        update(model, UiEvent::MapSetup(crate::map::setup(region.header())));
-    }
-    model.map_picture = Some(crate::map::PICTURE);
+    crate::map::ready(model);
     let shares = SHARES
         .iter()
         .map(|(seed, at, ago)| Fix {
