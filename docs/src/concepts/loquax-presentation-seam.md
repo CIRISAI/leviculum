@@ -70,10 +70,10 @@ gesture never waits on the rasteriser.
   (`loquax/examples/map_eye_bench.baseline:1`).
 
 No GPU upload is measured yet; the benches give the stand-ins to beat.
-Handing a *fresh* map frame into the window costs 1.95 ms over holding
-it at 1276 x 2099 (present 14.57 fresh against 12.62 held,
-`loquax/tests/window_bench.baseline:25`) — about 0.18 ms/MB, about
-0.05 ms per 256 KiB tile. The CPU compose the transform replaces is
+Handing a *fresh* map frame into the window costs 2.52 ms over holding
+it at 1276 x 2099 (present 4.01 fresh against 1.49 held, since 1442,
+`loquax/tests/window_bench.baseline:25`) — about 0.24 ms/MB, about
+0.06 ms per 256 KiB tile. The CPU compose the transform replaces is
 3.96–4.35 ms per phone frame
 (`loquax/examples/map_eye_bench.baseline:4`).
 
@@ -143,10 +143,10 @@ Each slice is measured by `just window-bench` and `just map-bench`
 against their committed baselines, and by the M9's flush measurement.
 
 - **S1 — the window on wgpu (1442, runs next and follows this note).**
-  A moving frame at Lew's 1276 x 2099 window averages 9.3–13.0 ms, of
-  which 8.9–12.9 ms is the software present
-  (`loquax/tests/window_bench.baseline:25`): the frame *is* the
-  present — enough for 60 Hz (16.7 ms), not for 120 Hz. Target:
+  A moving frame at Lew's 1276 x 2099 window averaged 9.3–13.0 ms and
+  averages 2.0–10.7 ms since 1442's CPU fast paths, most of it the
+  software present (map drag 1.94, `loquax/tests/window_bench.baseline:25`):
+  the frame *is* the present — enough for 60 Hz, not for 120 Hz. Target:
   update + draw + present inside the detected rate's budget at
   1276 x 2099, 8.3 ms on a 120 Hz display.
 - **S2 — phone compositing.** The host proxy for a phone frame: pan
