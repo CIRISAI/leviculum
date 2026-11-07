@@ -754,6 +754,10 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     // The duplicate list's departed ids, beside the message store: a
     // message collected before a restart stays a duplicate after it.
     let engine = engine.with_departures_path(data_dir.join("departures"));
+    // The role's own heap census (`PN_CENSUS`, order 1515): SIGUSR1 asks
+    // for a line at the next tick, the printer marks what it took.
+    let census = engine.census_handle();
+    let printed = census.clone();
 
     // `node_builder` owns the driver configuration, including the reason
     // this daemon has no application event channel (Codeberg #419).
@@ -796,6 +800,7 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     let on_inbound = effective.on_inbound.clone();
     let printer = std::thread::spawn(move || {
         while let Ok(event) = events.recv() {
+            printed.event_taken();
             report(event, &messages_dir, on_inbound.as_deref());
         }
     });
@@ -810,7 +815,9 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     // SIGUSR1 prints the memory census, lnsd's signal for lnsd's dump and in
     // lnsd's shape (`leviculum_std::reticulum::compose_diagnostic_dump`), so
     // periculum's soak census reads either daemon with one parser (550). On
-    // stderr, which is where every other line of this daemon goes.
+    // stderr, which is where every other line of this daemon goes. It also
+    // asks the role for its `PN_CENSUS` line, which the engine writes at its
+    // next tick, into the event log (order 1515).
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(sigterm) => sigterm,
         Err(error) => return failure(format!("signal handling: {error}")),
@@ -826,7 +833,10 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
                 Err(error) => return failure(format!("signal handling: {error}")),
             },
             _ = sigterm.recv() => break "SIGTERM",
-            _ = sigusr1.recv() => eprint!("{}", census_dump(&node)),
+            _ = sigusr1.recv() => {
+                census.request();
+                eprint!("{}", census_dump(&node));
+            }
         }
     };
     eprintln!("lnpnd: shutting down ({received})");

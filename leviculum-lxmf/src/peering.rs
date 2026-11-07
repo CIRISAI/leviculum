@@ -1549,6 +1549,12 @@ pub struct InboundGate {
 }
 
 impl InboundGate {
+    /// Estimated heap bytes of the throttle map (a host census, lnpnd's
+    /// `PN_CENSUS peers=`).
+    pub fn heap_bytes(&self) -> usize {
+        leviculum_core::heap_census::btree_map_bytes(&self.throttled)
+    }
+
     /// Every gate the reference applies before looking at the offer
     /// itself (`offer_request`, `LXMRouter.py:2266-2295`), in its order:
     /// sequential stamp validation, concurrent inbound syncs, the

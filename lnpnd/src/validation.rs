@@ -193,6 +193,8 @@ pub(crate) struct ValidationWorker {
     jobs: Sender<ValidationJob>,
     results: Receiver<ValidationDone>,
     in_flight: usize,
+    /// Payload bytes of the jobs in flight, for `PN_CENSUS sync_in=`.
+    in_flight_bytes: usize,
 }
 
 impl ValidationWorker {
@@ -217,6 +219,7 @@ impl ValidationWorker {
             jobs: jobs_tx,
             results: results_rx,
             in_flight: 0,
+            in_flight_bytes: 0,
         }
     }
 
@@ -228,9 +231,11 @@ impl ValidationWorker {
     }
 
     pub(crate) fn enqueue(&mut self, job: ValidationJob) -> bool {
+        let bytes = job.data.capacity();
         match self.jobs.send(job) {
             Ok(()) => {
                 self.in_flight += 1;
+                self.in_flight_bytes += bytes;
                 true
             }
             Err(_) => false,
@@ -241,10 +246,21 @@ impl ValidationWorker {
         match self.results.try_recv() {
             Ok(done) => {
                 self.in_flight = self.in_flight.saturating_sub(1);
+                if self.in_flight == 0 {
+                    self.in_flight_bytes = 0;
+                } else {
+                    self.in_flight_bytes =
+                        self.in_flight_bytes.saturating_sub(done.data.capacity());
+                }
                 Some(done)
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
         }
+    }
+
+    /// Payload bytes the worker holds or has queued.
+    pub(crate) fn bytes_in_flight(&self) -> usize {
+        self.in_flight_bytes
     }
 
     pub(crate) fn busy(&self) -> bool {

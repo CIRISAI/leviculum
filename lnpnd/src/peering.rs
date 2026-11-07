@@ -143,6 +143,12 @@ pub(crate) struct InboundSync {
 }
 
 impl InboundSync {
+    /// Heap bytes of the batch still held, for `PN_CENSUS sync_in=`.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.messages.capacity() * std::mem::size_of::<Vec<u8>>()
+            + self.messages.iter().map(Vec::capacity).sum::<usize>()
+    }
+
     pub(crate) fn is_finished(&self) -> bool {
         self.next >= self.messages.len()
     }
@@ -249,16 +255,64 @@ pub(crate) struct PeeringRuntime {
     /// Construction has no core to send through; the first tick is the
     /// same pass that builds this runtime.
     static_paths_pending: Vec<[u8; 16]>,
-    events: std::sync::mpsc::Sender<EngineEvent>,
+    events: crate::census::EventSender,
+}
+
+/// The peering runtime's share of `PN_CENSUS`, in heap bytes
+/// ([`PeeringRuntime::heap_census`]).
+pub(crate) struct PeeringHeap {
+    /// The table, its traffic counters and names, the inbound throttle.
+    pub peers: usize,
+    /// The outbound round's offer plan.
+    pub sync_out: usize,
+    /// Per-link state: validated links, transfers, link facts.
+    pub links: usize,
+    /// The static peers whose path is still to be asked for.
+    pub config: usize,
 }
 
 impl PeeringRuntime {
+    /// What the runtime's tables hold (order 1515, [`crate::census`]).
+    pub(crate) fn heap_census(&self) -> PeeringHeap {
+        use crate::census::hash_table_bytes;
+        use std::mem::size_of;
+        let peers = self.table.heap_bytes()
+            + self.gate.heap_bytes()
+            + hash_table_bytes(
+                self.traffic.capacity(),
+                size_of::<[u8; 16]>() + size_of::<PeerTraffic>(),
+            )
+            + hash_table_bytes(
+                self.names.capacity(),
+                size_of::<[u8; 16]>() + size_of::<String>(),
+            )
+            + self.names.values().map(String::capacity).sum::<usize>();
+        let sync_out = self.outbound.as_ref().map_or(0, |round| {
+            round.plan.ids.capacity() * size_of::<leviculum_lxmf::TransientId>()
+        });
+        let links = hash_table_bytes(
+            self.validated_links.capacity(),
+            size_of::<LinkId>() + size_of::<[u8; 16]>(),
+        ) + hash_table_bytes(self.inbound_transfers.capacity(), size_of::<LinkId>())
+            + hash_table_bytes(
+                self.inbound_link_facts.capacity(),
+                size_of::<LinkId>() + size_of::<(Option<Identity>, Option<u8>)>(),
+            );
+        PeeringHeap {
+            peers,
+            sync_out,
+            links,
+            config: self.static_paths_pending.capacity() * size_of::<[u8; 16]>(),
+        }
+    }
+
     pub(crate) fn new(
         config: PeeringConfig,
         peer_store: Box<dyn PeerStore + Send>,
         our_identity: Identity,
-        events: std::sync::mpsc::Sender<EngineEvent>,
+        events: impl Into<crate::census::EventSender>,
     ) -> Self {
+        let events = events.into();
         let our_identity_hash = *our_identity.hash();
         let mut table = PeerTable::new(config);
         let mut traffic = HashMap::new();

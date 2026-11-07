@@ -955,6 +955,27 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PN_REJECT",
         required_keys: &["reason", "via"],
     },
+    // lnpnd: the role's heap census, one byte estimate per table, every
+    // ten minutes and on SIGUSR1 (order 1515, LV-1000).
+    EventSchema {
+        name: "PN_CENSUS",
+        required_keys: &[
+            "occasion",
+            "peers",
+            "store_index",
+            "store_writer",
+            "sync_out",
+            "sync_in",
+            "dup",
+            "links",
+            "mailbox",
+            "config",
+            "eventbuf",
+            "tables",
+            "rss_kb",
+            "stored",
+        ],
+    },
     // lnpnd: an inbound sync batch had messages the store could not hold
     // even after eviction; `offered` is the batch, `dropped` what was lost.
     // The node declines offers until its next maintenance sweep (1294).

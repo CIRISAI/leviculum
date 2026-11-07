@@ -54,6 +54,7 @@ use leviculum_lxmf::{
 
 use leviculum_std::file_propagation_store::SettledWrites;
 
+use crate::census::{CensusHandle, EventSender, PnCensus, CENSUS_PERIOD_MS};
 use crate::hook_profile::{HookProfile, HookTimes, Section};
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
 use crate::peering::{InboundSync, InboundSyncStart, PeeringRuntime, SyncSender};
@@ -165,6 +166,12 @@ pub trait WriteBehind {
     fn writes_outstanding(&self) -> bool {
         false
     }
+
+    /// What the store holds in RAM, for `PN_CENSUS` ([`crate::census`]).
+    /// A store that cannot say reports nothing.
+    fn heap_census(&self) -> leviculum_std::StoreHeapCensus {
+        leviculum_std::StoreHeapCensus::default()
+    }
 }
 
 impl WriteBehind for leviculum_std::FilePropagationStore {
@@ -178,6 +185,10 @@ impl WriteBehind for leviculum_std::FilePropagationStore {
 
     fn writes_outstanding(&self) -> bool {
         leviculum_std::FilePropagationStore::writes_outstanding(self)
+    }
+
+    fn heap_census(&self) -> leviculum_std::StoreHeapCensus {
+        leviculum_std::FilePropagationStore::heap_census(self)
     }
 }
 
@@ -324,7 +335,7 @@ pub enum EngineEvent {
 
 pub struct Engine<S> {
     state: State<S>,
-    events: std::sync::mpsc::Sender<EngineEvent>,
+    events: crate::census::EventSender,
     /// Proof hashes awaiting their data event, per link, in emission order.
     pending_proofs: HashMap<LinkId, VecDeque<[u8; 32]>>,
     /// Links peers and clients opened to the propagation destination,
@@ -382,6 +393,12 @@ pub struct Engine<S> {
     /// When each open link last asked `/lev/status`
     /// ([`LEV_STATUS_MIN_SPACING_MS`]); dropped with the link.
     status_asked_at: HashMap<LinkId, u64>,
+    /// The SIGUSR1 request and the event printer's count
+    /// ([`crate::census`]).
+    census: CensusHandle,
+    /// When the next periodic `PN_CENSUS` line is due; 0 until the first
+    /// tick books it [`CENSUS_PERIOD_MS`] on.
+    next_census_at: u64,
 }
 
 /// An accepted upload whose proof waits until its append is durable.
@@ -448,6 +465,26 @@ impl Verdicts {
 }
 
 impl Pending {
+    /// Heap bytes the queued payload pins, for `PN_CENSUS sync_in=`.
+    fn heap_bytes(&self) -> usize {
+        let verdicts = |verdicts: &Verdicts| match verdicts {
+            Verdicts::Ground(map) => crate::census::hash_table_bytes(
+                map.capacity(),
+                std::mem::size_of::<(TransientId, Option<u16>)>(),
+            ),
+            Verdicts::Inline { .. } => 0,
+        };
+        match self {
+            Pending::Packet {
+                data, verdicts: v, ..
+            }
+            | Pending::Resource {
+                data, verdicts: v, ..
+            } => data.capacity() + verdicts(v),
+            Pending::Sync { job, verdicts: v } => job.heap_bytes() + verdicts(v),
+        }
+    }
+
     /// A finished validation, ready for the store.
     fn from_validated(done: ValidationDone) -> Self {
         let ValidationDone {
@@ -515,7 +552,7 @@ pub(crate) fn log_reject_sized(reason: &'static str, via: &'static str, bytes: u
 /// operator sees at the default log level. Client uploads, maintenance and
 /// peer sync all come through here, so a cull is never logged in two
 /// shapes.
-pub(crate) fn log_evictions(evicted: &[Eviction], events: &std::sync::mpsc::Sender<EngineEvent>) {
+pub(crate) fn log_evictions(evicted: &[Eviction], events: &crate::census::EventSender) {
     for eviction in evicted {
         tracing::debug!(
             event = "PN_EVICT",
@@ -546,6 +583,8 @@ fn full_hex(bytes: &[u8]) -> String {
 impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
     pub fn new(config: EngineConfig<S>) -> (Self, std::sync::mpsc::Receiver<EngineEvent>) {
         let (events, receiver) = std::sync::mpsc::channel();
+        let events = EventSender::from(events);
+        let census = CensusHandle::new(&events);
         let announce_interval_secs = config.announce_interval_secs;
         let announce_delay_secs = config.announce_delay_secs;
         let start_announce_owed = config.announce_at_start;
@@ -572,9 +611,17 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 departures_path: None,
                 departures_dirty: false,
                 status_asked_at: HashMap::new(),
+                census,
+                next_census_at: 0,
             },
             receiver,
         )
+    }
+
+    /// The handle the daemon's main loop asks for a census through, and
+    /// marks the events it took (`PN_CENSUS`, [`crate::census`]).
+    pub fn census_handle(&self) -> CensusHandle {
+        self.census.clone()
     }
 
     /// Space outbound sync rounds by `interval` instead of the reference's
@@ -605,6 +652,67 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         match crate::departures::save(path, ready.node.departures()) {
             Ok(()) => self.departures_dirty = false,
             Err(error) => tracing::warn!("lnpnd: departures {}: {error}", path.display()),
+        }
+    }
+
+    /// The heap census of the role (order 1515, [`crate::census`]): one
+    /// byte estimate per table the engine holds. Walks the store's index
+    /// once for its paths, so it runs on the census cadence, not per hook.
+    fn census(&self, ready: &Ready<S>) -> PnCensus {
+        use crate::census::hash_table_bytes;
+        use leviculum_core::heap_census::vec_deque_bytes;
+        use std::mem::size_of;
+        let store = ready.node.store().heap_census();
+        let peering = ready.peering.heap_census();
+        let pending: usize = vec_deque_bytes(&self.pending)
+            + self.pending.iter().map(Pending::heap_bytes).sum::<usize>();
+        let links = hash_table_bytes(
+            self.pending_proofs.capacity(),
+            size_of::<LinkId>() + size_of::<VecDeque<[u8; 32]>>(),
+        ) + self
+            .pending_proofs
+            .values()
+            .map(|proofs| proofs.capacity() * 32)
+            .sum::<usize>()
+            + hash_table_bytes(self.inbound_links.capacity(), size_of::<LinkId>())
+            + vec_deque_bytes(&self.unproven)
+            + hash_table_bytes(
+                self.status_asked_at.capacity(),
+                size_of::<LinkId>() + size_of::<u64>(),
+            )
+            + peering.links;
+        let config = (ready.control_allowed.capacity()
+            + ready.auth_allowed.as_ref().map_or(0, Vec::capacity))
+            * 16
+            + peering.config
+            + ready
+                .mailbox
+                .as_ref()
+                .map_or(0, MailboxRuntime::config_bytes);
+        let events_queued = self.events.queued();
+        PnCensus {
+            peers: peering.peers,
+            store_index: store.index_bytes,
+            store_writer: store.writer_bytes,
+            sync_out: peering.sync_out,
+            sync_in: pending + self.validation.bytes_in_flight(),
+            dup: ready.node.heap_bytes(),
+            links,
+            mailbox: ready.mailbox.as_ref().map_or(0, MailboxRuntime::heap_bytes),
+            config,
+            eventbuf: events_queued * size_of::<EngineEvent>(),
+            rss_kb: crate::census::rss_kb(),
+            stored: store.messages,
+            peered: ready.peering.peer_count(),
+            events_queued,
+        }
+    }
+
+    /// The census of a registered engine, `None` before it registered.
+    pub fn census_now(&self) -> Option<PnCensus> {
+        match &self.state {
+            State::Ready(ready) => Some(self.census(ready)),
+            _ => None,
         }
     }
 
@@ -2186,6 +2294,19 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
             // the engine does not see, is on disk within one period.
             self.save_departures(&ready, true);
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
+        }
+        // The heap census (order 1515): booked a period after the first
+        // tick, and at once when SIGUSR1 asked for it.
+        if self.next_census_at == 0 {
+            self.next_census_at = now_ms + CENSUS_PERIOD_MS;
+        }
+        let requested = self.census.take_request();
+        if requested || now_ms >= self.next_census_at {
+            self.census(&ready)
+                .log(if requested { "signal" } else { "periodic" });
+            if !requested {
+                self.next_census_at = now_ms + CENSUS_PERIOD_MS;
+            }
         }
         self.profile.lap(Section::Tick);
 

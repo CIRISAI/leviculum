@@ -90,7 +90,7 @@ pub(crate) struct MailboxRuntime {
     pub(crate) delivery_hash: [u8; 16],
     config: MailboxConfig,
     announce_schedule: AnnounceSchedule,
-    events: std::sync::mpsc::Sender<EngineEvent>,
+    events: crate::census::EventSender,
 }
 
 impl MailboxRuntime {
@@ -103,7 +103,7 @@ impl MailboxRuntime {
         core: &mut Core,
         identity: &Identity,
         config: MailboxConfig,
-        events: std::sync::mpsc::Sender<EngineEvent>,
+        events: crate::census::EventSender,
     ) -> Result<Self, String> {
         let identity_hash = *identity.hash();
         let bytes = identity
@@ -129,6 +129,16 @@ impl MailboxRuntime {
             announce_schedule: AnnounceSchedule::Unscheduled,
             events,
         })
+    }
+
+    /// The router's tables, for `PN_CENSUS mailbox=`.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.router.heap_bytes()
+    }
+
+    /// The mailbox's lists from the config, for `PN_CENSUS config=`.
+    pub(crate) fn config_bytes(&self) -> usize {
+        self.config.display_name.capacity() + self.config.ignored.capacity() * 16
     }
 
     fn emit(&self, event: EngineEvent) {
@@ -327,7 +337,7 @@ mod tests {
             &mut core,
             &identity,
             config(announce_at_start, announce_interval_secs),
-            events,
+            events.into(),
         )
         .expect("the delivery destination registers");
 

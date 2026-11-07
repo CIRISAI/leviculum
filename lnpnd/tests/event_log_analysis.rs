@@ -152,6 +152,18 @@ fn the_analysis_reads_what_the_writer_writes() {
         bytes = 500u64,
     );
 
+    // The heap census through its own emitter (order 1515), twice: the
+    // analysis reports the first and the last line per table.
+    for (store_index, rss_kb) in [(1000usize, 50_000u64), (3000, 70_000)] {
+        lnpnd::census::PnCensus {
+            store_index,
+            rss_kb,
+            stored: 2,
+            ..lnpnd::census::PnCensus::default()
+        }
+        .log("periodic");
+    }
+
     let report = analyse(&log);
 
     // Phase 2: accepted and rejected, rejections split by reason.
@@ -195,6 +207,15 @@ fn the_analysis_reads_what_the_writer_writes() {
 
     // Phase 6/7: the heartbeat is recognised, and nothing is unaccounted for.
     assert!(field(&report, "heartbeats").contains('1'), "{report}");
+    let census = field(&report, "heap census");
+    assert!(
+        census.contains("2 PN_CENSUS line(s)") && census.contains("rss 50000 -> 70000 kB"),
+        "{report}"
+    );
+    assert!(
+        field(&report, "store_index ").contains("1.0 ->        3.0 kB"),
+        "{report}"
+    );
     assert!(
         report.contains("every PN_* event in this log is one the analysis accounts for"),
         "{report}"

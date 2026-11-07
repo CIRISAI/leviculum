@@ -166,6 +166,18 @@ pub struct FilePropagationStore {
     opened: OpenProfile,
 }
 
+/// [`FilePropagationStore::heap_census`]: what the store holds in RAM.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StoreHeapCensus {
+    /// Messages indexed.
+    pub messages: usize,
+    /// The four indexes (module docs, "The sequence index"), each entry's
+    /// path included.
+    pub index_bytes: usize,
+    /// Appends and purges the writer has not confirmed, bodies included.
+    pub writer_bytes: usize,
+}
+
 /// What [`FilePropagationStore::open`] found and spent its time on (module
 /// docs, "The index file").
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -485,6 +497,35 @@ impl FilePropagationStore {
         opened.total_us = micros(started);
         store.opened = opened;
         Ok(store)
+    }
+
+    /// Heap bytes the store pins in RAM, for lnpnd's `PN_CENSUS` line
+    /// (order 1515): the four indexes over the stored messages, and what the
+    /// writer still holds. Walks the index once for the paths' own heap, so
+    /// it is a census call, not a per-hook one.
+    pub fn heap_census(&self) -> StoreHeapCensus {
+        use leviculum_core::heap_census::{btree_map_bytes, btree_set_bytes};
+        let paths: usize = self.index.values().map(|entry| entry.path.capacity()).sum();
+        let index_bytes = btree_map_bytes(&self.index)
+            + paths
+            + btree_set_bytes(&self.by_sequence)
+            + btree_set_bytes(&self.by_received)
+            + self.counts.heap_bytes();
+        let writer_bytes = self.writer.as_ref().map_or(0, |writer| {
+            btree_map_bytes(&writer.tickets)
+                + btree_map_bytes(&writer.queued)
+                + writer
+                    .queued
+                    .values()
+                    .map(|queued| queued.body.len() + queued.entry.path.capacity())
+                    .sum::<usize>()
+                + writer.failed.capacity() * std::mem::size_of::<TransientId>()
+        });
+        StoreHeapCensus {
+            messages: self.index.len(),
+            index_bytes,
+            writer_bytes,
+        }
     }
 
     /// What the open found and what it cost (module docs, "The index
