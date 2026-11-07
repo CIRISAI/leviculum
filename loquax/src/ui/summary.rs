@@ -100,8 +100,10 @@ impl Eq for Summary {}
 
 impl Summary {
     /// Bring the summary up to `messages`: their new tail, or all of them
-    /// when they are not the ones seen with more after.
-    pub fn refresh(&mut self, peer: [u8; 16], messages: &[Message]) {
+    /// when they are not the ones seen with more after. Whether anything
+    /// was read: the conversation's messages changed since the last
+    /// refresh (1490, the revision counter's detector).
+    pub fn refresh(&mut self, peer: [u8; 16], messages: &[Message]) -> bool {
         let from = match &self.seen {
             Some(seen) if seen.is_prefix_of(messages) => seen.len,
             _ => {
@@ -110,7 +112,7 @@ impl Summary {
             }
         };
         if from == messages.len() && self.seen.is_some() {
-            return;
+            return false;
         }
         for (index, message) in messages.iter().enumerate().skip(from) {
             if message.is_report() && super::message_fix(peer, message).is_some() {
@@ -138,6 +140,7 @@ impl Summary {
             }
         }
         self.seen = Some(Seen::of(messages));
+        true
     }
 
     /// Start over at the next refresh: a message's id changed in place.
@@ -305,6 +308,46 @@ mod tests {
         for conversation in &model.conversations {
             agrees(conversation);
         }
+    }
+
+    /// 1490: an arrival bumps the revision of the conversation it fell
+    /// into and of no other; an event that changes nothing visible bumps
+    /// none; the minute moves the model's look, not the conversations.
+    #[test]
+    fn a_change_bumps_its_conversations_revision_and_only_that() {
+        let mut model = UiModel::<Field>::new(&[]);
+        for n in 0..6 {
+            received(&mut model, n);
+        }
+        let before: Vec<u64> = model.conversations.iter().map(|c| c.revision()).collect();
+        let look = model.look_rev();
+        // The next arrival goes to PEERS[0] (n % 3).
+        received(&mut model, 6);
+        assert_eq!(model.conversations[0].revision(), before[0] + 1);
+        assert_eq!(model.conversations[1].revision(), before[1]);
+        assert_eq!(model.conversations[2].revision(), before[2]);
+        // A tick changes nothing visible of any conversation.
+        let before: Vec<u64> = model.conversations.iter().map(|c| c.revision()).collect();
+        update(&mut model, UiEvent::Tick);
+        let after: Vec<u64> = model.conversations.iter().map(|c| c.revision()).collect();
+        assert_eq!(before, after);
+        // The clock a minute on moves the look and no conversation.
+        update(
+            &mut model,
+            UiEvent::Clock(WallTime {
+                unix_secs: 1_762_000_000 + 3_600,
+                offset_secs: 0,
+            }),
+        );
+        assert_eq!(
+            model
+                .conversations
+                .iter()
+                .map(|c| c.revision())
+                .collect::<Vec<u64>>(),
+            after
+        );
+        assert!(model.look_rev() > look, "the minute moved the look");
     }
 
     /// The positive control: a summary left behind its messages (an

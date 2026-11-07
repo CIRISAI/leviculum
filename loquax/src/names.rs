@@ -573,6 +573,27 @@ impl Names {
         self.announced.len()
     }
 
+    /// Everything a screen names a peer by, folded into `hash` (1490):
+    /// part of the model's look fingerprint, so a name heard rebuilds the
+    /// rows that show it.
+    pub(crate) fn fingerprint(&self, hash: &mut crate::ui::Fnv) {
+        for (peer, name) in &self.announced {
+            hash.bytes(peer);
+            hash.bytes(name.as_bytes());
+        }
+        for (peer, linked) in &self.book {
+            hash.bytes(peer);
+            hash.bytes(linked.name.as_bytes());
+        }
+        for (peer, petname) in &self.contacts.petnames {
+            hash.bytes(peer);
+            hash.bytes(petname.as_bytes());
+        }
+        for peer in &self.contacts.blocked {
+            hash.bytes(peer);
+        }
+    }
+
     /// The name the peer last announced, sanitised.
     pub fn announced(&self, peer: &[u8; 16]) -> Option<&str> {
         self.announced.get(peer).map(String::as_str)

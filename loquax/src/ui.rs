@@ -425,6 +425,75 @@ pub struct NewRule {
     pub count: usize,
 }
 
+/// A revision mark beside the data it counts (1490): bumped when the data
+/// changed, compared by caches. Equal to every other, as
+/// [`summary::Summary`] is: it is a cache's key, and two models with the
+/// same content are the same model whatever their caches saw.
+#[derive(Clone, Copy, Debug, Default, Eq)]
+pub struct Rev(u64);
+
+impl Rev {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    fn at(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl PartialEq for Rev {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// FNV-1a, the change detectors' fingerprint (1490): cheap, `no_std`, and
+/// not security — a collision costs one stale frame, found by the next
+/// change.
+pub(crate) struct Fnv(u64);
+
+impl Fnv {
+    pub(crate) fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn byte(&mut self, byte: u8) {
+        self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.byte(byte);
+        }
+    }
+
+    pub(crate) fn word(&mut self, word: u64) {
+        self.bytes(&word.to_le_bytes());
+    }
+
+    pub(crate) fn done(self) -> u64 {
+        self.0
+    }
+}
+
+/// A delivery state as one fingerprint word.
+fn delivery_word(state: Option<DeliveryState>) -> u64 {
+    match state {
+        None => 0,
+        Some(DeliveryState::Queued) => 1,
+        Some(DeliveryState::Stamping) => 2,
+        Some(DeliveryState::InFlight) => 3,
+        Some(DeliveryState::Sent) => 4,
+        Some(DeliveryState::InMailbox) => 5,
+        Some(DeliveryState::Arrived) => 6,
+        Some(DeliveryState::Delivered) => 7,
+        Some(DeliveryState::Read { at }) => 8 | (u64::from(at) << 8),
+        Some(DeliveryState::Rejected) => 9,
+        Some(DeliveryState::Failed) => 10,
+    }
+}
+
 /// One correspondent and the messages with them the screen loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
@@ -461,6 +530,13 @@ pub struct Conversation {
     /// What the chats list asks of it, kept up to its messages by
     /// [`update`] (1463): a cache the readers check before they trust it.
     pub summary: summary::Summary,
+    /// Bumped by [`update`] when anything a screen draws of this
+    /// conversation changed (1490): what every cache keyed by this
+    /// conversation asks before it reuses.
+    revision: Rev,
+    /// The fingerprint of the row state the last [`update`] saw
+    /// ([`Conversation::row_fingerprint`]).
+    stamp: Rev,
 }
 
 /// A line the conversation says between its messages, centred.
@@ -506,7 +582,48 @@ impl Conversation {
             earlier: 0,
             draft: history::Draft::default(),
             summary: summary::Summary::default(),
+            revision: Rev::default(),
+            stamp: Rev::default(),
         }
+    }
+
+    /// How often [`update`] saw this conversation change (1490): a cache
+    /// keyed by it reuses while it stands still. A model changed outside
+    /// `update` has not bumped it; the next `update` does.
+    pub fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
+    /// The fingerprint of what a list row or a bubble pane draws of this
+    /// conversation besides the messages the summary watches: the cheap
+    /// fields, and the newest message's mutable face (its delivery, its
+    /// id). Deeper in-place changes are caught by the fold's own change
+    /// sets ([`UiModel::note_changes`]).
+    fn row_fingerprint(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(self.unread as u64);
+        hash.word(u64::from(self.pinned));
+        hash.word(self.flags.muted_until.map_or(0, |at| at as u64));
+        hash.word(u64::from(self.flags.archived));
+        hash.word(u64::from(self.flags.verified));
+        hash.word(u64::from(self.flags.receipts));
+        hash.word(self.earlier as u64);
+        hash.word(self.touched.map_or(0, |at| at as u64));
+        hash.word(self.notes.len() as u64);
+        if let Some(rule) = self.new_rule {
+            hash.word(rule.at as u64);
+            hash.word(rule.count as u64);
+        }
+        hash.bytes(self.draft.text.as_bytes());
+        if let Some(reply) = self.draft.reply {
+            hash.bytes(&reply);
+        }
+        hash.word(self.messages.len() as u64);
+        if let Some(last) = self.messages.last() {
+            hash.word(delivery_word(last.delivery));
+            hash.word(u64::from(last.id.is_some()));
+        }
+        hash.done()
     }
 
     /// The messages that carry `id`, oldest first: the summary's index
@@ -981,6 +1098,15 @@ pub struct UiModel<B> {
     /// What the presentation built since the last event (1489,
     /// [`counters`]).
     ops: counters::Ops,
+    /// Bumped by every [`update`] (1490): a cache that outlives one fold
+    /// keys on it, so two reads in the same turn share one build.
+    pub revision: u64,
+    /// The fingerprint of the model-wide look the last [`update`] saw
+    /// ([`UiModel::look_fingerprint`]), and how often it changed: part of
+    /// every conversation-keyed cache's key, so a name heard, a day
+    /// turned or a language set rebuilds what shows them.
+    look_stamp: u64,
+    look_rev: u64,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -1096,6 +1222,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             lang: strings::Lang::En,
             debug_overlay: false,
             ops: counters::Ops::new(),
+            revision: 0,
+            look_stamp: 0,
+            look_rev: 0,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1370,6 +1499,94 @@ impl<B> UiModel<B> {
     #[inline]
     pub(crate) fn count(&self, op: counters::Op, n: usize) {
         self.ops.add(op, n);
+    }
+
+    /// Note what the fold changed (1490), at the end of every [`update`]:
+    /// the summaries' new tails (1463), each changed conversation's
+    /// revision, the model-wide look. The fold's own change sets
+    /// (`changed`, `changed_peers`, `groups_changed`) poke their
+    /// conversations too, so an in-place change the summary cannot see (a
+    /// delivery tick deep in the pane) still bumps; they drain with the
+    /// store's writes, and a bump too many costs one rebuild, never a
+    /// stale frame. `pending` is what the sets held before the fold: only
+    /// this fold's own entries poke (a change to a key already owed in a
+    /// previous undrained fold is the one case this misses, and every
+    /// shell drains per fold).
+    fn note_changes(
+        &mut self,
+        pending: &(
+            BTreeSet<([u8; 16], u64)>,
+            BTreeSet<[u8; 16]>,
+            BTreeSet<[u8; 16]>,
+        ),
+    ) {
+        self.revision = self.revision.wrapping_add(1);
+        let mut poked: BTreeSet<[u8; 16]> = BTreeSet::new();
+        poked.extend(
+            self.changed
+                .iter()
+                .filter(|entry| !pending.0.contains(entry))
+                .map(|(peer, _)| *peer),
+        );
+        poked.extend(
+            self.changed_peers
+                .iter()
+                .filter(|peer| !pending.1.contains(*peer))
+                .copied(),
+        );
+        poked.extend(
+            self.groups_changed
+                .iter()
+                .filter(|peer| !pending.2.contains(*peer))
+                .copied(),
+        );
+        for conversation in &mut self.conversations {
+            let refreshed = conversation
+                .summary
+                .refresh(conversation.peer, &conversation.messages);
+            let stamp = conversation.row_fingerprint();
+            if refreshed || stamp != conversation.stamp.get() || poked.contains(&conversation.peer)
+            {
+                conversation.stamp = Rev::at(stamp);
+                conversation.revision = Rev::at(conversation.revision.get().wrapping_add(1));
+            }
+        }
+        let look = self.look_fingerprint();
+        if look != self.look_stamp {
+            self.look_stamp = look;
+            self.look_rev = self.look_rev.wrapping_add(1);
+        }
+    }
+
+    /// How often the model-wide look changed (1490): the names, the
+    /// language, the minute, what plays. Part of every
+    /// conversation-keyed cache's key.
+    pub fn look_rev(&self) -> u64 {
+        self.look_rev
+    }
+
+    /// The fingerprint behind [`UiModel::look_rev`]: everything a list
+    /// row or a bubble draws that belongs to no one conversation.
+    fn look_fingerprint(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(self.lang as u64);
+        if let Some(now) = self.now {
+            // To the minute: the rows' ago-words move by it.
+            hash.word((now.unix_secs.div_euclid(60)) as u64);
+            hash.word(now.offset_secs as u64);
+        }
+        hash.word(u64::from(self.home_client));
+        hash.word(u64::from(self.reading.on));
+        hash.word(u64::from(self.ascii));
+        hash.word(u64::from(self.show_blocked));
+        hash.word(u64::from(self.show_archived));
+        if let Some(playing) = &self.playing {
+            hash.bytes(&playing.peer);
+            hash.word(playing.key);
+        }
+        hash.word(self.voice_tracks.len() as u64);
+        self.names.fingerprint(&mut hash);
+        hash.done()
     }
 
     /// The marks a fold made, for the shell to hand the home node.
@@ -1993,14 +2210,14 @@ pub enum UiEffect {
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     // Each event's work is counted on its own (1489).
     model.ops.reset();
+    // What the store is already owed, so this fold's own changes stand
+    // out even while nothing drains them (1490).
+    let pending = (
+        model.changed.clone(),
+        model.changed_peers.clone(),
+        model.groups_changed.clone(),
+    );
     let mut effects = fold(model, event);
-    // The list's summaries up to what the event did (1463): the new tail of
-    // each conversation, read once here instead of whole on every draw.
-    for conversation in &mut model.conversations {
-        conversation
-            .summary
-            .refresh(conversation.peer, &conversation.messages);
-    }
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
@@ -2029,6 +2246,10 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     receipts::mark_sends(&mut effects, groups::client_caps(model.reading.on));
     // And names this device as the map's writer (1482).
     receipts::name_writer(&mut effects, model.address);
+    // The list's summaries up to what the event did (1463), and the
+    // revisions over them (1490): every change the fold made is noted
+    // here, so the caches keyed by a revision reuse everything else.
+    model.note_changes(&pending);
     effects
 }
 
