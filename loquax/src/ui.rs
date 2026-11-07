@@ -1272,8 +1272,12 @@ pub struct UiModel<B> {
     /// What the presentation built since the last event (1489,
     /// [`counters`]).
     ops: counters::Ops,
-    /// Bumped by every [`update`] (1490): a cache that outlives one fold
-    /// keys on it, so two reads in the same turn share one build.
+    /// Moves when a fold changed something a screen shows (1490, 1491):
+    /// every event but the clock's three ([`UiEvent::is_clock`]), and
+    /// those only when they moved what is shown ([`UiModel::clock_marks`]).
+    /// A cache that outlives one fold keys on it, and a target's loop
+    /// builds its view only when it moved ([`Presented`]), so a screen
+    /// left alone builds nothing while the clock runs.
     pub revision: u64,
     /// The list's order as the last [`update`] left it (1490):
     /// [`UiModel::order`] reads it, [`UiModel::note_changes`] moves only
@@ -1311,6 +1315,13 @@ pub struct UiModel<B> {
     /// turned or a language set rebuilds what shows them.
     look_stamp: u64,
     look_rev: u64,
+    /// Moves when a list row may have changed (1491): a conversation's
+    /// revision, the look, a conversation come or gone. The phone makes
+    /// its two lists by it, not by [`UiModel::revision`], which a node
+    /// the Browse tab heard of moves too.
+    lists_rev: u64,
+    /// How many conversations the last fold left, for `lists_rev`.
+    lists_len: usize,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -1435,6 +1446,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             revision: 0,
             look_stamp: 0,
             look_rev: 0,
+            lists_rev: 0,
+            lists_len: 0,
             order_cache: None,
             folding: false,
             viewing: Viewing::default(),
@@ -1728,8 +1741,7 @@ impl<B> UiModel<B> {
     /// stale frame. The fold's sets hold only this fold's entries: each
     /// note moves them into the owed shadows the store drains, so the
     /// poke costs the fold's changes, never what accumulated.
-    fn note_changes(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
+    fn note_changes(&mut self) -> bool {
         let mut poked: BTreeSet<[u8; 16]> = BTreeSet::new();
         let changed = core::mem::take(&mut self.changed);
         poked.extend(changed.iter().map(|(peer, _)| *peer));
@@ -1755,7 +1767,8 @@ impl<B> UiModel<B> {
             }
         }
         let look = self.look_fingerprint();
-        if look != self.look_stamp {
+        let looked = look != self.look_stamp;
+        if looked {
             self.look_stamp = look;
             self.look_rev = self.look_rev.wrapping_add(1);
         }
@@ -1763,6 +1776,69 @@ impl<B> UiModel<B> {
         self.folding = false;
         self.refresh_order(&bumped);
         self.refresh_scene();
+        let rows = looked || !bumped.is_empty() || self.lists_len != self.conversations.len();
+        if rows {
+            self.lists_len = self.conversations.len();
+            self.lists_rev = self.lists_rev.wrapping_add(1);
+        }
+        rows
+    }
+
+    /// How often a list row may have changed (1491): what a target that
+    /// makes only the lists, the phone's two, makes them again by.
+    pub fn lists_revision(&self) -> u64 {
+        self.lists_rev
+    }
+
+    /// What a clock event can move on a screen besides the
+    /// conversations and the look (1491): a toast that aged out, a
+    /// question, the fetch and the sends, the map's drawing named a
+    /// moment, the header's fetch word and next sync. Two equal marks around a clock event mean it moved nothing
+    /// shown. The tick itself is not here: only the terminal draws by it
+    /// ([`UiModel::animating`]), and its loop stamps it while it does.
+    fn clock_marks(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(self.toasts.len() as u64);
+        hash.word(u64::from(self.current_toast().is_some()));
+        hash.word(u64::from(self.confirm.is_some()));
+        hash.word(u64::from(self.fetching));
+        hash.word(self.sending.len() as u64);
+        hash.word(u64::from(self.history));
+        hash.word(u64::from(
+            self.map_named_until.is_some_and(|until| self.tick < until),
+        ));
+        // The header's two readings of the monotonic clock: a quiet pull
+        // said once it took a second, and the next sync's minute.
+        hash.word(u64::from(fetch_shown(self)));
+        hash.word(next_sync(self).map_or(u64::MAX, |at| at.unix_secs as u64));
+        hash.done()
+    }
+
+    /// Whether the terminal draws something by the tick now (1491): the
+    /// delivery spinner while a send or a fetch runs, a waveform playing,
+    /// a recording's bar. Its loop builds a frame per tick then, and none
+    /// otherwise.
+    pub fn animating(&self) -> bool {
+        !self.sending.is_empty()
+            || self.fetching
+            || self.playing.is_some()
+            || self.recording.phase != recording::Phase::Idle
+    }
+
+    /// A change made outside [`update`] (1491): a shell that sets the
+    /// model's fields itself (the window's abilities and viewport at its
+    /// start), hands the hosted browser an event of its own, or reads
+    /// history into the model, says so. The loops build once more, and
+    /// the fold's built list and chat are dropped, as their stamps see
+    /// only what a fold changes: the scene builds whole until the next
+    /// fold builds them again. Before, the window's plus stayed away
+    /// until the open chat changed (1490's cache kept the chat built
+    /// before `run` gave the window its chooser).
+    pub fn changed_outside(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.built_list = None;
+        self.built_chat = None;
+        *self.view_cache.borrow_mut() = None;
     }
 
     /// How often the model-wide look changed (1490): the names, the
@@ -2305,6 +2381,60 @@ impl<B> UiModel<B> {
     }
 }
 
+/// What a target's loop presented last (1491): it builds its view, scene
+/// or lists only when the stamp it asks with moved, the model's
+/// [`UiModel::revision`] and whatever of its own moves outside the model
+/// (a size, a map picture's epoch). Before 1491 the terminal and the
+/// window built their whole presentation fifty times a second with
+/// nothing changed, and only the present was skipped (1455).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Presented {
+    at: Option<u64>,
+    builds: u64,
+}
+
+impl Presented {
+    /// Whether the loop builds now: `stamp` moved since the last build,
+    /// or nothing was built yet. Counts the builds it allows.
+    pub fn due(&mut self, stamp: u64) -> bool {
+        if self.at == Some(stamp) {
+            return false;
+        }
+        self.at = Some(stamp);
+        self.builds += 1;
+        true
+    }
+
+    /// The next [`Presented::due`] says yes, whatever the stamp: an input
+    /// the loop handles outside the model (a map picture that landed, a
+    /// screen to clear) needs a frame.
+    pub fn owe(&mut self) {
+        self.at = None;
+    }
+
+    /// The frame just built shows the model at `stamp`: a fold the build
+    /// made itself (the terminal's viewport) is in it, and does not owe
+    /// another.
+    pub fn drawn(&mut self, stamp: u64) {
+        self.at = Some(stamp);
+    }
+
+    /// How many builds [`Presented::due`] allowed.
+    pub fn builds(&self) -> u64 {
+        self.builds
+    }
+
+    /// The stamp of `revision` and the loop's own `extra` words.
+    pub fn stamp(revision: u64, extra: &[u64]) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(revision);
+        for &word in extra {
+            hash.word(word);
+        }
+        hash.done()
+    }
+}
+
 /// What the model is told.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiEvent {
@@ -2620,6 +2750,15 @@ pub enum UiEvent {
     Rooms(rooms::RoomsEvent),
 }
 
+impl UiEvent {
+    /// The clock's own events, which every loop folds several times a
+    /// second (1491): they move [`UiModel::revision`] only when they
+    /// moved what a screen shows.
+    pub fn is_clock(&self) -> bool {
+        matches!(self, Self::Clock(_) | Self::Tick | Self::Elapsed(_))
+    }
+}
+
 /// How a region load goes, as the shell reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MapLoad {
@@ -2777,6 +2916,11 @@ pub enum UiEffect {
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     // Each event's work is counted on its own (1489).
     model.ops.reset();
+    // The clock's events move the revision only when they moved what is
+    // shown (1491): fifty a second while nothing changes, before, and
+    // every loop built its whole view for each.
+    let clock = event.is_clock();
+    let marks = clock.then(|| model.clock_marks());
     // Until the fold is noted, revision-keyed caches stand aside (1490).
     model.folding = true;
     let mut effects = fold(model, event);
@@ -2811,7 +2955,10 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // The list's summaries up to what the event did (1463), and the
     // revisions over them (1490): every change the fold made is noted
     // here, so the caches keyed by a revision reuse everything else.
-    model.note_changes();
+    let noted = model.note_changes();
+    if !clock || noted || !effects.is_empty() || marks != Some(model.clock_marks()) {
+        model.revision = model.revision.wrapping_add(1);
+    }
     // A selected conversation whose messages a restart deferred (1490):
     // its newest page, asked once, whatever event selected it.
     if let Some(conversation) = model.conversations.get(model.selected) {

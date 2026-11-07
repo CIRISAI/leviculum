@@ -95,7 +95,6 @@ pub const VOICE: &[u8] = include_bytes!("../fixtures/real-voice.ogg");
 pub const KNOWN_REDS: &[&str] = &[
     "phone.a_key_in_compose_builds_no_list",
     // C: nothing is built when nothing changed.
-    "core.a_frame_without_a_change_builds_nothing",
     "window.a_pump_without_a_change_builds_nothing",
 ];
 
@@ -123,6 +122,48 @@ pub fn bar(name: &str, ok: bool, what: &str) {
             "BAR {name} is green now: take it out of KNOWN_REDS in \
              loquax/tests/support/real_store.rs ({what})"
         ),
+    }
+}
+
+/// How long a loop is left alone in the idle bars (1491).
+pub const IDLE_MS: u64 = 5_000;
+/// The shells' engine pump and clock tick (`loquax/src/shell.rs`
+/// `PUMP_MS`, `TICK_MS`).
+pub const PUMP_MS: u64 = 20;
+pub const TICK_MS: u64 = 250;
+
+/// [`IDLE_MS`] of a loop left alone, folded as the shells fold it
+/// (`loquax/src/shell.rs` `poll` and `tick`): the engine's pump every
+/// [`PUMP_MS`] (`Elapsed`), the clock every [`TICK_MS`] (`Clock`, then
+/// `Tick`), on seconds of [`now`]'s minute, which the five seconds do not
+/// turn. After each fold `pass` is the loop's turn: it asks its gate and
+/// builds when told to. `elapsed` is where the model's monotonic clock
+/// stands at the start.
+pub fn idle<B: leviculum_ui::input::InputBuffer + Default>(
+    model: &mut loquax::ui::UiModel<B>,
+    elapsed: u64,
+    mut pass: impl FnMut(&mut loquax::ui::UiModel<B>),
+) {
+    use loquax::ui::{update, UiEvent};
+    let start = now();
+    assert!(
+        start.unix_secs.rem_euclid(60) + (IDLE_MS / 1000) as i64 + 1 < 60,
+        "the idle seconds turn a minute"
+    );
+    for at in (PUMP_MS..=IDLE_MS).step_by(PUMP_MS as usize) {
+        update(model, UiEvent::Elapsed(elapsed + at));
+        if at % TICK_MS == 0 {
+            let secs = (at / 1000) as i64;
+            update(
+                model,
+                UiEvent::Clock(WallTime {
+                    unix_secs: start.unix_secs + secs,
+                    ..start
+                }),
+            );
+            update(model, UiEvent::Tick);
+        }
+        pass(model);
     }
 }
 

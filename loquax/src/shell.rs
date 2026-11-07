@@ -298,6 +298,8 @@ impl Shell {
     /// picture's, which no event of Loquax's carries.
     fn apply_app(&mut self, event: lnomad::AppEvent) {
         let effects = loquax::ui::browse::app(&mut self.model, event);
+        // Not through `update`: the loops are told the tab moved (1491).
+        self.model.changed_outside();
         self.run(effects);
     }
 
@@ -361,6 +363,7 @@ impl Shell {
                         effect,
                         &mut self.outputs,
                     ));
+                    self.model.changed_outside();
                 }
                 // The Rooms (1379): the hub link does it; what the hub says
                 // comes back on the pump.
@@ -636,7 +639,10 @@ impl Shell {
             out.push(UiEvent::Notice(lines.join("; ")));
         }
         match loquax::names::load_contacts(&self.context.home) {
-            Ok(contacts) => self.model.names.contacts = contacts,
+            Ok(contacts) => {
+                self.model.names.contacts = contacts;
+                self.model.changed_outside();
+            }
             Err(error) => tracing::warn!("IMPORT contacts not shown: {error}"),
         }
         self.show_imported(imported);
@@ -1085,6 +1091,7 @@ impl Shell {
         // Once a pull settled, what arrives is live mail (1429).
         if end.cursor.is_some() {
             self.model.history = false;
+            self.model.changed_outside();
         }
         if end.imported > 0 {
             self.show_imported(end.imported);
@@ -1112,7 +1119,9 @@ impl Shell {
     /// it reads back is whole.
     fn show_imported(&mut self, imported: usize) {
         self.persist();
-        match runner::show_imported(&mut self.model, &self.store) {
+        let shown = runner::show_imported(&mut self.model, &self.store);
+        self.model.changed_outside();
+        match shown {
             Ok(()) => tracing::info!("SYNC imported rows={imported} shown"),
             Err(error) => tracing::warn!("SYNC imported rows={imported} not shown: {error}"),
         }

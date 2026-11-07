@@ -315,6 +315,12 @@ async fn run_terminal(
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
     let mut notices = crate::desktop::Notices::default();
     let mut counts: Vec<([u8; 16], usize)> = Vec::new();
+    // What was drawn last (1491): a turn with nothing changed builds no
+    // viewport, view or frame; before, every 20 ms pump did.
+    let mut presented = ui::Presented::default();
+    // A frame that panicked is drawn again on the next input, not on
+    // every pump.
+    let mut panicked = false;
 
     let result = loop {
         for output in std::mem::take(&mut shell.outputs) {
@@ -340,11 +346,12 @@ async fn run_terminal(
             remember(shell, &mut memory);
         }
         map_open = open;
-        if shell.redraw {
+        if shell.redraw && !panicked {
             shell.redraw = false;
             if let Err(error) = terminal.clear() {
                 break Err(error.to_string());
             }
+            presented.owe();
         }
         // The terminal's size as the frame will have it: a shrink whose
         // resize event has not been read yet (mosh delivers them late) is
@@ -357,7 +364,35 @@ async fn run_terminal(
                 });
             }
         }
+        if shell.model.debug_overlay {
+            // The frame meter counts frames: it has one every turn.
+            presented.owe();
+        }
+        if !presented.due(frame_stamp(&shell.model)) {
+            if shell.model.quit {
+                break Ok(());
+            }
+            if let Some(ended) = wait(
+                shell,
+                &mut events,
+                log_input,
+                &mut painter,
+                &mut pump,
+                &mut tick,
+                &mut clocks,
+                &mut presented,
+                &mut panicked,
+            )
+            .await
+            {
+                break ended;
+            }
+            continue;
+        }
         say_viewport(shell);
+        // The frame shows what the viewport's fold left: the next turn
+        // compares with that, not with the turn's start.
+        presented.drawn(frame_stamp(&shell.model));
         notify(shell, &mut notices, &mut counts);
         let view = ui::view(&shell.model);
         // A frame that panics is skipped, not the messenger: the panic hook
@@ -383,25 +418,26 @@ async fn run_terminal(
                 // Not drawn again until something happens: a frame that
                 // panics every time is one line a key, not a spin.
                 shell.redraw = true;
+                panicked = true;
             }
         }
         if shell.model.quit {
             break Ok(());
         }
-        tokio::select! {
-            item = events.next() => {
-                // A held key's repeats and a drag's motions that queued
-                // while the last frame was drawn are one frame at the
-                // newest view, not a frame each (1075).
-                let ended =
-                    apply_waiting(item, &mut events, log_input, |event| shell.apply(event));
-                if let Some(result) = ended {
-                    break result;
-                }
-            }
-            _ = painter.ready() => {}
-            _ = pump.tick() => shell.poll(),
-            _ = tick.tick() => shell.tick(&mut clocks),
+        if let Some(ended) = wait(
+            shell,
+            &mut events,
+            log_input,
+            &mut painter,
+            &mut pump,
+            &mut tick,
+            &mut clocks,
+            &mut presented,
+            &mut panicked,
+        )
+        .await
+        {
+            break ended;
         }
     };
     // How many map pictures went up, beside the GRAPHICS line: a held key
@@ -410,6 +446,63 @@ async fn run_terminal(
     remember(shell, &mut memory);
     guard.restore_now().map_err(|e| e.to_string())?;
     result
+}
+
+/// What the terminal's frame is drawn from (1491): the model's revision,
+/// the screen's size, and the tick while something on screen moves by it
+/// ([`ui::UiModel::animating`]). A turn whose stamp did not move builds
+/// nothing.
+fn frame_stamp<B>(model: &loquax::ui::UiModel<B>) -> u64 {
+    let tick = match model.animating() {
+        true => model.tick,
+        false => u64::MAX,
+    };
+    ui::Presented::stamp(
+        model.revision,
+        &[u64::from(model.screen.0), u64::from(model.screen.1), tick],
+    )
+}
+
+/// The loop's wait for what comes next: input, a map picture painted, the
+/// engine's pump or the clock. Input and a picture owe a frame whatever
+/// the revision says; the pump and the clock fold, and the revision says
+/// whether that changed anything shown. `Some` when the input ended the
+/// run.
+#[allow(clippy::too_many_arguments)]
+async fn wait(
+    shell: &mut Shell,
+    events: &mut EventStream,
+    log_input: bool,
+    painter: &mut map::MapPainter,
+    pump: &mut tokio::time::Interval,
+    tick: &mut tokio::time::Interval,
+    clocks: &mut (i64, u64),
+    presented: &mut ui::Presented,
+    panicked: &mut bool,
+) -> Option<Result<(), String>> {
+    tokio::select! {
+        item = events.next() => {
+            // A held key's repeats and a drag's motions that queued
+            // while the last frame was drawn are one frame at the
+            // newest view, not a frame each (1075).
+            let ended = apply_waiting(item, events, log_input, |event| shell.apply(event));
+            *panicked = false;
+            presented.owe();
+            ended
+        }
+        _ = painter.ready() => {
+            presented.owe();
+            None
+        }
+        _ = pump.tick() => {
+            shell.poll();
+            None
+        }
+        _ = tick.tick() => {
+            shell.tick(clocks);
+            None
+        }
+    }
 }
 
 /// New mail in a conversation other than the open one (1341): the

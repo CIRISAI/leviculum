@@ -19,7 +19,7 @@ use loquax::store::Store;
 use loquax::ui::counters::Counters;
 use loquax::ui::history::{Restored, LOAD_WINDOW};
 use loquax::ui::scene::LayoutClass;
-use loquax::ui::{update, Pane, UiEvent, UiModel};
+use loquax::ui::{update, Pane, Presented, UiEvent, UiModel};
 
 use real_store::{bar, ANNA, CONVERSATIONS};
 
@@ -117,7 +117,11 @@ fn a_message_in_a_closed_chat_builds_nothing_of_the_open_one() {
     );
 }
 
-/// A frame no event asked for builds nothing: the scene asked twice.
+/// Five seconds of the window's loop left alone build nothing (1491):
+/// the clock's events fold, the gate asks the model's revision, and the
+/// scene is built only when it moved. The control is the rule before
+/// 1491, a scene built on every pass: 250 of them in the five seconds,
+/// each with its list and its chat.
 #[test]
 fn a_frame_without_a_change_builds_nothing() {
     if !real_store::counting() {
@@ -130,19 +134,44 @@ fn a_frame_without_a_change_builds_nothing() {
             peer: real_store::peer(ANNA),
         },
     );
-    let _ = model.scene(LayoutClass::Wide);
-    model.reset_counters();
-    let _ = model.scene(LayoutClass::Wide);
-    let counts = counted(&model);
-    println!("COUNTS core.idle_frame {counts}");
+    let (gated, counts) = idle_builds(&mut model, true);
+    println!("COUNTS core.idle_frame builds={gated} {counts}");
+    let (every, control) = idle_builds(&mut model, false);
+    println!("COUNTS core.idle_frame_control builds={every} {control}");
+    assert!(
+        every >= 200 && control.scene_nodes > 0,
+        "the control built nothing: {every} builds, {control}"
+    );
     bar(
         "core.a_frame_without_a_change_builds_nothing",
-        counts.scene_nodes == 0 && counts.rows_built == 0 && counts.bubbles_built == 0,
+        gated == 0 && counts.scene_nodes == 0 && counts.rows_built == 0,
         &format!(
-            "scene_nodes {} rows_built {} bubbles_built {} (bar 0)",
-            counts.scene_nodes, counts.rows_built, counts.bubbles_built
+            "builds {gated} scene_nodes {} rows_built {} bubbles_built {} over {} ms (bar 0)",
+            counts.scene_nodes,
+            counts.rows_built,
+            counts.bubbles_built,
+            real_store::IDLE_MS
         ),
     );
+}
+
+/// The scenes the window's loop builds over [`real_store::idle`], gated
+/// on the revision (`gated`) or on every pass, and what they built: the
+/// gate's first build (the frame the loop drew before it was left alone)
+/// is made before the five seconds.
+fn idle_builds(model: &mut UiModel<Line>, gated: bool) -> (u64, Counters) {
+    let mut presented = Presented::default();
+    let _ = presented.due(Presented::stamp(model.revision, &[]));
+    let mut builds = 0;
+    let mut total = Counters::default();
+    real_store::idle(model, 0, |model| {
+        if !gated || presented.due(Presented::stamp(model.revision, &[])) {
+            builds += 1;
+            let _ = model.scene(LayoutClass::Wide);
+        }
+        total = total + counted(model);
+    });
+    (builds, total)
 }
 
 /// The work units of a count, for a comparison of two sizes.
@@ -320,25 +349,55 @@ fn a_key_in_the_terminals_messages_lays_the_rows_on_screen() {
     );
 }
 
-/// A turn of the terminal's loop with nothing changed lays nothing.
+/// Five seconds of the terminal's loop left alone lay and build nothing
+/// (1491): the loop (`loquax/src/tui.rs`) asks its gate with the model's
+/// revision and the screen's size before `say_viewport`, the view and
+/// the draw. The control asks no gate: the view's own cache (1490) is
+/// keyed on the revision, which before 1491 every pump moved.
 #[test]
 fn a_terminal_pass_without_a_change_lays_nothing() {
     if !real_store::counting() {
         return;
     }
-    let model = terminal_model();
-    model.reset_counters();
-    terminal_pass(&model);
-    let counts = counted(&model);
-    println!("COUNTS terminal.idle_pass {counts}");
+    let mut model = terminal_model();
+    let (gated, counts) = terminal_idle(&mut model, true);
+    println!("COUNTS terminal.idle_pass builds={gated} {counts}");
+    let (every, _) = terminal_idle(&mut model, false);
+    println!("COUNTS terminal.idle_pass_control passes={every}");
+    assert!(every >= 200, "the control passed {every} times");
     bar(
         "terminal.a_pass_without_a_change_lays_nothing",
-        counts.rows_laid == 0 && counts.rows_built == 0,
+        gated == 0 && counts.rows_laid == 0 && counts.rows_built == 0,
         &format!(
-            "rows_laid {} rows_built {} (bar 0)",
-            counts.rows_laid, counts.rows_built
+            "passes {gated} rows_laid {} rows_built {} over {} ms (bar 0)",
+            counts.rows_laid,
+            counts.rows_built,
+            real_store::IDLE_MS
         ),
     );
+}
+
+/// The terminal's passes over [`real_store::idle`], gated as the loop
+/// gates them or on every turn, and what they built.
+fn terminal_idle(model: &mut UiModel<Line>, gated: bool) -> (u64, Counters) {
+    let stamp = |model: &UiModel<Line>| {
+        Presented::stamp(
+            model.revision,
+            &[u64::from(model.screen.0), u64::from(model.screen.1)],
+        )
+    };
+    let mut presented = Presented::default();
+    let _ = presented.due(stamp(model));
+    let mut passes = 0;
+    let mut total = Counters::default();
+    real_store::idle(model, 0, |model| {
+        if !gated || presented.due(stamp(model)) {
+            passes += 1;
+            terminal_pass(model);
+        }
+        total = total + counted(model);
+    });
+    (passes, total)
 }
 
 /// The register's own arms, as the guardrail rule asks: a green bar
