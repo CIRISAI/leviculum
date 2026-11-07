@@ -350,7 +350,14 @@ echo "verify-deb-packaging: arch=${ARCH}"
 echo
 
 check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath
-contains "$CONFFILES" "/etc/reticulum/config" "registers /etc/reticulum/config as a conffile"
+# No stock config (#471, 1510): lnsd writes its first-start file itself, and
+# a shipped one would be "a configuration present", which keeps the
+# automatic layer's servers, BLE and serial off on every package install.
+if grep -q 'etc/reticulum/config' <<<"$CONTENTS$CONFFILES"; then
+    fail "leviculum ships /etc/reticulum/config, which the first-start design says it must not"
+else
+    pass "ships no /etc/reticulum/config (lnsd writes its first-start file)"
+fi
 contains "$CONTENTS" "lnsd.service" "ships the lnsd systemd unit"
 # lnsd ships on mimalloc (#437, 766). Read off the packaged bytes rather than
 # run, so an arm64 package is checked from an amd64 host too; the startup

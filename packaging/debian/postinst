@@ -27,6 +27,12 @@ case "$1" in
             adduser --quiet leviculum dialout || true
         fi
 
+        # The package ships no config file (#471, 1510): lnsd writes its
+        # first-start file here on its first start, the bytes `lnsd
+        # --writeconfig` writes, and a config an earlier package shipped
+        # stays as it is. This script only provisions the directory, which
+        # the unit's ReadWritePaths needs to exist.
+        #
         # /etc/reticulum is the single config + state directory shared
         # between lnsd and any Reticulum tooling the user runs against
         # it (lnstest, rnstatus, rncp, Sideband, Nomadnet, …). Mode 2775
@@ -39,7 +45,8 @@ case "$1" in
         chmod 2775 /etc/reticulum/storage
 
         # Is another Reticulum daemon already serving the instance name
-        # this package's config asks for?
+        # the config here asks for (`default` without one, which is what a
+        # fresh install's lnsd will write)?
         #
         # The instance name IS the identity of a shared instance, so two
         # daemons under one name is a contradiction, not a topology —
