@@ -165,14 +165,10 @@ impl Cache {
             // conversion of a map frame was 17.5 % of its present. Two
             // passes without a branch per pixel, which vectorise.
             let raw = image.as_raw();
-            let opaque = raw
-                .chunks_exact(4)
-                .fold(true, |opaque, pixel| opaque & (pixel[3] == 255));
+            let opaque = crate::fast::all_opaque(raw);
 
             let buffer: Vec<u32> = if opaque {
-                raw.chunks_exact(4)
-                    .map(|p| u32::from_ne_bytes([p[2], p[1], p[0], 255]))
-                    .collect()
+                crate::fast::swap_red_blue(raw)
             } else {
                 raw.chunks_exact(4)
                     .map(|p| {

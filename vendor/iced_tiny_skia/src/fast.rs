@@ -80,6 +80,45 @@ pub fn whole_rect(
     covered(bounds, width, height)?.intersect(covered(clip, width, height)?)
 }
 
+/// Whether every pixel of the RGBA8 `raw` is opaque; read as words where
+/// it can be, as [`swap_red_blue`] reads it (1468).
+pub fn all_opaque(raw: &[u8]) -> bool {
+    match bytemuck::try_cast_slice::<u8, u32>(raw) {
+        Ok(words) => {
+            let alpha = u32::from_ne_bytes([0, 0, 0, 0xff]);
+            words.iter().fold(alpha, |all, &w| all & w) & alpha == alpha
+        }
+        Err(_) => raw
+            .chunks_exact(4)
+            .fold(true, |opaque, pixel| opaque & (pixel[3] == 255)),
+    }
+}
+
+/// The opaque RGBA8 pixels `raw` as tiny-skia's premultiplied BGRA8
+/// words, `u32::from_ne_bytes([b, g, r, 255])` each (1442's conversion
+/// of an opaque picture). On a little-endian target a word's red and
+/// blue bytes swapped in place (1468): the byte-wise form compiled to
+/// about 18 instructions a pixel, 29 % of a map-wheel frame's present
+/// in callgrind, since every frame of the zoom is a new picture.
+pub fn swap_red_blue(raw: &[u8]) -> Vec<u32> {
+    let swap = |v: u32| {
+        (v & 0x0000_ff00)
+            | ((v >> 16) & 0xff)
+            | ((v & 0xff) << 16)
+            | 0xff00_0000
+    };
+    match bytemuck::try_cast_slice::<u8, u32>(raw) {
+        // Words read as words: the map over them vectorises.
+        Ok(words) if cfg!(target_endian = "little") => {
+            words.iter().map(|&v| swap(v)).collect()
+        }
+        _ => raw
+            .chunks_exact(4)
+            .map(|p| u32::from_ne_bytes([p[2], p[1], p[0], 255]))
+            .collect(),
+    }
+}
+
 /// The four bytes tiny-skia stores for `color` filled with the `Source`
 /// blend and no anti-aliasing: the same pipeline run on one pixel.
 pub fn solid_pixel(color: tiny_skia::Color) -> [u8; 4] {

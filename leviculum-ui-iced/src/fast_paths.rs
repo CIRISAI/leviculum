@@ -469,3 +469,56 @@ fn an_opaque_square_quad_is_the_fill_tiny_skia_draws() {
         );
     }
 }
+
+/// An opaque picture's pixels (1468) are the words 1442's byte-wise
+/// conversion made: red and blue swapped, alpha 255.
+#[test]
+fn an_opaque_pictures_pixels_swap_red_and_blue() {
+    let mut rng = Rng(0x0bad_cafe_dead_beef);
+    let raw: Vec<u8> = (0..4096)
+        .flat_map(|_| {
+            [
+                rng.below(256) as u8,
+                rng.below(256) as u8,
+                rng.below(256) as u8,
+                255,
+            ]
+        })
+        .collect();
+    let reference: Vec<u32> = raw
+        .chunks_exact(4)
+        .map(|p| u32::from_ne_bytes([p[2], p[1], p[0], 255]))
+        .collect();
+    assert_eq!(fast::swap_red_blue(&raw), reference);
+}
+
+/// A picture is opaque when every alpha byte is 255 (1468), read as words
+/// or as bytes: one translucent pixel anywhere makes it not.
+#[test]
+fn a_picture_is_opaque_when_every_alpha_is_full() {
+    let mut rng = Rng(0x5eed_5eed_5eed_5eed);
+    for n in [1usize, 2, 3, 7, 64, 1000] {
+        let mut raw: Vec<u8> = (0..n)
+            .flat_map(|_| {
+                [
+                    rng.below(256) as u8,
+                    rng.below(256) as u8,
+                    rng.below(256) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        assert!(fast::all_opaque(&raw), "{n}");
+        assert!(fast::all_opaque(&raw[..raw.len()]), "{n}");
+        let at = rng.below(n as u64) as usize * 4 + 3;
+        raw[at] = 254;
+        assert!(!fast::all_opaque(&raw), "{n} at {at}");
+        // Misaligned: the bytes after the first.
+        let mut shifted = vec![0u8];
+        shifted.extend_from_slice(&raw);
+        assert!(!fast::all_opaque(&shifted[1..]), "{n} misaligned");
+        raw[at] = 255;
+        shifted[at + 1] = 255;
+        assert!(fast::all_opaque(&shifted[1..]), "{n} misaligned, opaque");
+    }
+}
