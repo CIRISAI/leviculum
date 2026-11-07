@@ -14,6 +14,17 @@
 //! | `0x05` | `[uint epoch, [[bin16 address, str name, uint flags], ...], uint standing]` | a group's membership; a member leaving sends itself alone, flagged [`MEMBER_LEFT`]; the third element is there only when the group [`GROUP_ENDED`] |
 //! | `0x06` | `[[bin16 sender, uint64 sent_ms, str text, uint left_out?], ...]` | a digest: the lines a group's home held for a slow member, one message for all of them; `left_out` only on a line that stands for what was not sent ([`LEFT_OUT_PHOTO`] and its siblings) |
 //! | `0x07` | `[uint32 received_at, [bin32 message id, ...]]` | a device receipt: these messages of yours are on my device (named a propagation receipt when it was built for collected post) |
+//! | `0x08` | `bin16 writer` | the address that wrote this map (1482); a reader takes the map as the word of the message's source only when this is the source |
+//!
+//! Key `0x08` (1482) is against relays. A bot such as LXMF-Tools'
+//! distribution group passes a member's fields through unchanged into the
+//! copy it signs itself, so a capability mark on the copy is the writer's,
+//! not the bot's: a reader that took it as the bot's would send the bot
+//! device and read receipts, which the bot hands every member back as
+//! empty posts. Every map a Loquax client sends names its writer; a reader
+//! takes a map whose writer is another address as no `lev` at all
+//! ([`Lev::from_fields_of`]). A map without the key (a writer before 1482)
+//! is taken as the source's, as before.
 //!
 //! Capability bit 2 says "I say when your post is on my device, and want
 //! mine said": a recipient's device answers such a sender's message with
@@ -96,6 +107,9 @@ pub const KEY_GROUP_DIGEST: i64 = 0x06;
 
 /// The map key of a propagation receipt (1393).
 pub const KEY_PROPAGATION_RECEIPT: i64 = 0x07;
+
+/// The map key of the map's writer (1482).
+pub const KEY_WRITER: i64 = 0x08;
 
 /// What a digest line stands for when the home left its message out
 /// (1348): a photo, a voice message or a file too large for a slow member,
@@ -397,6 +411,8 @@ pub struct Lev {
     pub digest: Option<Vec<DigestLine>>,
     /// Key `0x07`.
     pub propagation_receipt: Option<PropagationReceipt>,
+    /// Key `0x08`: the address that wrote the map (1482).
+    pub writer: Option<[u8; 16]>,
 }
 
 impl Lev {
@@ -448,7 +464,8 @@ impl Lev {
             + usize::from(self.invite.is_some())
             + usize::from(self.members.is_some())
             + usize::from(self.digest.is_some())
-            + usize::from(self.propagation_receipt.is_some());
+            + usize::from(self.propagation_receipt.is_some())
+            + usize::from(self.writer.is_some());
         let mut data = Vec::new();
         msgpack::map(&mut data, entries);
         if let Some(caps) = self.capabilities {
@@ -537,6 +554,10 @@ impl Lev {
                 msgpack::bin(&mut data, id);
             }
         }
+        if let Some(writer) = &self.writer {
+            msgpack::int(&mut data, KEY_WRITER);
+            msgpack::bin(&mut data, writer);
+        }
         [(FIELD_CUSTOM_TYPE, kind), (FIELD_CUSTOM_DATA, data)]
     }
 
@@ -596,10 +617,27 @@ impl Lev {
                         ids: r.ids,
                     });
                 }
+                Ok(KEY_WRITER) => {
+                    lev.writer = bytes(value).and_then(|b| <[u8; 16]>::try_from(b).ok());
+                }
                 _ => {}
             }
         }
         Some(lev)
+    }
+
+    /// The namespace of a message `source` sent, as `source`'s own word
+    /// (1482): [`Self::from_fields`], and none when the map names another
+    /// writer, as a relay's copy of a member's message does. A map that
+    /// names no writer is the source's, as every map before 1482 was.
+    pub fn from_fields_of(fields: &[Field], source: &[u8; 16]) -> Option<Self> {
+        Self::from_fields(fields).filter(|lev| lev.said_by(source))
+    }
+
+    /// Whether this map is `source`'s own word: it names no writer, or
+    /// names `source`.
+    pub fn said_by(&self, source: &[u8; 16]) -> bool {
+        self.writer.is_none_or(|writer| writer == *source)
     }
 }
 
@@ -802,6 +840,36 @@ mod tests {
         let read = Lev::from_fields(&Lev::mark().fields()).expect("lev");
         assert_eq!(read, Lev::mark());
         assert!(read.supports_receipts());
+    }
+
+    /// 1482: the writer is `08 c4 10` and its sixteen bytes, after every
+    /// other key; a map naming another writer is no word of the source's,
+    /// one naming none (before 1482) is.
+    #[test]
+    fn the_writer_key_names_who_wrote_the_map() {
+        let anna = [0xa1; 16];
+        let relay = [0xb0; 16];
+        let lev = Lev {
+            writer: Some(anna),
+            ..Lev::mark()
+        };
+        let [_, (_, data)] = lev.fields();
+        assert_eq!(hex(&data), alloc::format!("82000108c410{}", hex(&anna)));
+        let fields = lev.fields();
+        assert_eq!(Lev::from_fields(&fields), Some(lev.clone()));
+        assert_eq!(Lev::from_fields_of(&fields, &anna), Some(lev));
+        assert_eq!(Lev::from_fields_of(&fields, &relay), None, "passed through");
+        let before = Lev::mark().fields();
+        assert_eq!(Lev::from_fields_of(&before, &relay), Some(Lev::mark()));
+        // Of another length it names nobody, and the map stays the source's.
+        let mut odd = Vec::new();
+        msgpack::map(&mut odd, 2);
+        msgpack::int(&mut odd, KEY_CAPABILITIES);
+        msgpack::uint(&mut odd, 1);
+        msgpack::int(&mut odd, KEY_WRITER);
+        msgpack::bin(&mut odd, &[0xa1; 8]);
+        let odd = alloc::vec![Lev::mark().fields()[0].clone(), (FIELD_CUSTOM_DATA, odd)];
+        assert_eq!(Lev::from_fields_of(&odd, &relay), Some(Lev::mark()));
     }
 
     #[test]

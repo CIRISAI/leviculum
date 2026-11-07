@@ -1737,6 +1737,12 @@ impl LxmfRouter {
         let Some((_, raw)) = message.fields.iter().find(|(key, _)| *key == FIELD_TICKET) else {
             return;
         };
+        // A relay's copy of another writer's message (1482) carries the
+        // writer's ticket for the relay, passed through: the relay never
+        // issued it, so it is no ticket of the relay's to send with.
+        if crate::relay::passed_through(&message.content, &message.fields, &message.source_hash) {
+            return;
+        }
         let Ok(ticket) = Ticket::from_field_value(raw) else {
             return;
         };
@@ -4570,6 +4576,50 @@ mod persistence_tests {
             event,
             RouterEvent::StampPending(_) | RouterEvent::InvalidStamp(_)
         )));
+    }
+
+    /// 1482: a relay's copy of another writer's message carries that
+    /// writer's ticket for the relay, passed through; it is not remembered
+    /// as the relay's. The same ticket on the relay's own message is.
+    #[test]
+    fn a_ticket_a_relay_passes_through_is_not_the_relays() {
+        let (mut router, _node) = router_and_node(RouterConfig::default());
+        let relay_hash = [0x63; 16];
+        let relay = identity_from(92);
+        let ticket = Ticket {
+            expires_unix: TEST_WALL_UNIX as f64 + 100_000.0,
+            secret: [0x74; 16],
+        };
+        let incoming = |body: &[u8]| {
+            let mut message = Message::create(
+                router.node.delivery_destination_hash().into_bytes(),
+                relay_hash,
+                &relay,
+                wall(1.0),
+                Vec::new(),
+                body.to_vec(),
+                alloc::vec![(FIELD_TICKET, ticket.field_value())],
+                DeliveryMethod::Direct,
+            )
+            .expect("signed incoming message");
+            message.verification = Verification::Valid;
+            message
+        };
+        let copy = incoming(b"Anna\n<a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1>\nHallo");
+        let own = incoming(b"Welcome to the group");
+        let mut events = Vec::new();
+
+        router.handle_inbound_message(copy, wall(1.0), &mut events);
+        assert!(
+            !router.tickets.outbound_entries().contains_key(&relay_hash),
+            "the writer's ticket, passed through"
+        );
+        router.handle_inbound_message(own, wall(2.0), &mut events);
+        assert_eq!(
+            router.tickets.outbound_entries().get(&relay_hash),
+            Some(&ticket),
+            "the relay's own message: its own ticket"
+        );
     }
 
     #[test]
