@@ -2513,6 +2513,50 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok(self.process_events_and_actions())
     }
 
+    /// Cancel the resource `resource_hash` this node is receiving on
+    /// `link_id`: a receiver cancel (RCL) naming it, the receiver's state
+    /// for it gone, and a `ResourceFailed` with
+    /// [`Cancelled`](crate::resource::ResourceError::Cancelled). The sender
+    /// ends its transfer on the RCL as it does on a refused advertisement
+    /// (`reference/Reticulum/RNS/Link.py`, the `RESOURCE_RCL` branch calling
+    /// `Resource._rejected()`). When the resource was the response to a
+    /// request, the request fails with it as a `RequestTimedOut`, at once,
+    /// and the requester may ask again on the same link (1461: an answer
+    /// whose every part the line lost, the watchdog's retries running past
+    /// the requester's bound).
+    pub fn cancel_incoming_resource(
+        &mut self,
+        link_id: &LinkId,
+        resource_hash: &[u8; 32],
+    ) -> Result<crate::transport::TickOutput, crate::resource::ResourceError> {
+        use crate::packet::PacketContext;
+        use crate::resource::ResourceError;
+
+        let link_id = self.resolve_link_id(link_id);
+        let now_ms = self.transport.clock().now_ms();
+        let link = self
+            .links
+            .get_mut(&link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.take_incoming_resource(resource_hash)
+            .ok_or(ResourceError::NoPendingResource)?;
+        if let Ok(pkt) = link.build_data_packet_with_context(
+            resource_hash,
+            PacketContext::ResourceRcl,
+            &mut self.rng,
+        ) {
+            link.record_outbound(now_ms);
+            self.route_link_packet(&link_id, &pkt);
+        }
+        self.events.push(NodeEvent::ResourceFailed {
+            link_id,
+            resource_hash: *resource_hash,
+            error: ResourceError::Cancelled,
+            is_sender: false,
+        });
+        Ok(self.process_events_and_actions())
+    }
+
     /// Cancel the resource this node is sending on `link_id`: an initiator
     /// cancel (ICL) naming it, so the receiver fails it at once, the
     /// sender's state for it gone, and a `ResourceFailed` with

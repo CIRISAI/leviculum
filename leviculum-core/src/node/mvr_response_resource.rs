@@ -433,3 +433,105 @@ fn cancelling_with_nothing_under_way_is_refused() {
         Err(crate::resource::ResourceError::NoPendingResource)
     ));
 }
+
+/// 1461: the requester cancels the response resource it is receiving (an
+/// RCL naming it), as a requester does whose answer the line lost whole.
+/// Its download fails as `Cancelled`, its request fails with it at once
+/// as a `RequestTimedOut`, and the responder ends its send on the RCL.
+#[test]
+fn a_requester_cancels_its_response_resource_and_the_request_fails_at_once() {
+    use crate::packet::{Packet, PacketContext};
+    let (mut initiator, mut responder, i_iface, r_iface, link) = establish();
+    let (request_id, out) = initiator
+        .send_request(&link, "/page/large.mu", None, None)
+        .expect("request");
+    let mut to_initiator = Vec::new();
+    let mut responder_events = Vec::new();
+    for pkt in action_data(&out) {
+        let o = responder.handle_packet(InterfaceId(r_iface), &pkt);
+        to_initiator.extend(action_data(&o));
+        responder_events.extend(o.events);
+    }
+    let (resp_link, rid) = request_received(&responder_events).expect("request dispatched");
+    let (resource_hash, adv) = responder
+        .send_response_resource_with(&resp_link, &rid, &large_response_value(), false)
+        .expect("advertised");
+    to_initiator.extend(action_data(&adv));
+    // The advertisement reaches the requester, which accepts it and asks
+    // for parts; the parts never come back.
+    let mut started = false;
+    for pkt in to_initiator {
+        let o = initiator.handle_packet(InterfaceId(i_iface), &pkt);
+        started |= o.events.iter().any(|e| {
+            matches!(e, NodeEvent::ResourceTransferStarted { resource_hash: h, is_sender: false, .. } if *h == resource_hash)
+        });
+    }
+    assert!(started, "the requester accepted the response resource");
+    assert!(initiator
+        .link(&link)
+        .and_then(|l| l.incoming_resource_progress_of(&resource_hash))
+        .is_some());
+
+    let cancelled = initiator
+        .cancel_incoming_resource(&link, &resource_hash)
+        .expect("a resource under way");
+    assert!(cancelled.events.iter().any(|e| matches!(
+        e,
+        NodeEvent::ResourceFailed {
+            resource_hash: h,
+            error: crate::resource::ResourceError::Cancelled,
+            is_sender: false,
+            ..
+        } if *h == resource_hash
+    )));
+    assert!(
+        cancelled.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::RequestTimedOut { request_id: r, .. } if *r == request_id
+        )),
+        "the request fails with its answer: {:?}",
+        cancelled.events
+    );
+    assert!(initiator
+        .link(&link)
+        .and_then(|l| l.incoming_resource_progress_of(&resource_hash))
+        .is_none());
+    let rcl: Vec<_> = action_data(&cancelled)
+        .into_iter()
+        .filter(|p| Packet::unpack(p).map(|p| p.context).ok() == Some(PacketContext::ResourceRcl))
+        .collect();
+    assert_eq!(rcl.len(), 1, "one RCL on the wire");
+    let mut sender_failed = None;
+    for pkt in rcl {
+        let o = responder.handle_packet(InterfaceId(r_iface), &pkt);
+        sender_failed = sender_failed.or(o.events.iter().find_map(|e| match e {
+            NodeEvent::ResourceFailed {
+                resource_hash: h,
+                error,
+                is_sender: true,
+                ..
+            } if *h == resource_hash => Some(*error),
+            _ => None,
+        }));
+    }
+    assert_eq!(
+        sender_failed,
+        Some(crate::resource::ResourceError::RejectedByRemote),
+        "the responder ends its send on the RCL"
+    );
+}
+
+/// 1461, the control: a link receiving nothing has nothing to cancel, and
+/// a hash it does not receive is refused too.
+#[test]
+fn cancelling_an_incoming_resource_that_is_not_under_way_is_refused() {
+    let (mut initiator, _responder, _, _, link) = establish();
+    assert!(matches!(
+        initiator.cancel_incoming_resource(&link, &[7; 32]),
+        Err(crate::resource::ResourceError::NoPendingResource)
+    ));
+    assert!(matches!(
+        initiator.cancel_incoming_resource(&LinkId::new([9; 16]), &[7; 32]),
+        Err(crate::resource::ResourceError::InvalidRequest)
+    ));
+}
