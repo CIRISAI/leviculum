@@ -115,8 +115,6 @@ struct Client {
     pulled: usize,
     /// How far the latest pull came, for the screen's word.
     progress: Option<Progress>,
-    /// The cursor as flash has it; the record's moves with every page.
-    saved_cursor: u64,
     /// The message store, when the board's table has one (1476).
     store: Option<Store>,
     /// Sends the model asked for, oldest first.
@@ -231,8 +229,10 @@ impl Handheld {
     /// (`board::agree`): a cursor past zero over an empty store means the
     /// store was lost, and the board pulls again from the start rather
     /// than showing an empty list under a cursor that says everything was
-    /// fetched. The record in flash keeps its old cursor until the next
-    /// pull ends and writes the new one.
+    /// fetched. The record in flash is written when the board joins and
+    /// when a code makes a new one, never for its cursor (1463): the store
+    /// holds the cursor, and this agreement is the only reader of the
+    /// record's.
     pub fn client(
         &mut self,
         mut record: ClientRecord,
@@ -280,7 +280,6 @@ impl Handheld {
             },
         };
         let stored = store.as_ref().map_or(0, Store::cursor);
-        let saved_cursor = record.cursor;
         let agreement = board::agree(&mut record, stored);
         if agreement != board::Agreement::Agrees {
             log.line(
@@ -301,7 +300,6 @@ impl Handheld {
                     ),
                 );
                 self.client = Some(Client {
-                    saved_cursor,
                     record,
                     device,
                     address,
@@ -591,12 +589,13 @@ impl Client {
                 pages,
                 ..
             }) => {
+                // The cursor lives in the message store, which kept every
+                // page as it came; the record is not written (1463).
                 self.record.cursor = self.record.cursor.max(*cursor);
-                let saved = self.save_cursor(stores);
                 log.line(
                     "[HOME] ",
                     format_args!(
-                        "pulled entries={entries} pages={pages} cursor={cursor} saved={saved} reach={reach} next_in_ms={next_in}"
+                        "pulled entries={entries} pages={pages} cursor={cursor} saved=store reach={reach} next_in_ms={next_in}"
                     ),
                 );
             }
@@ -635,32 +634,16 @@ impl Client {
                 );
             }
             Err(error) => {
-                let saved = self.save_cursor(stores);
                 log.line(
                     "[HOME] ",
                     format_args!(
-                        "failed error=\"{error}\" pulled={} cursor={} saved={saved} reach={reach} failures={} next_in_ms={next_in}",
+                        "failed error=\"{error}\" pulled={} cursor={} saved=store reach={reach} failures={} next_in_ms={next_in}",
                         self.pulled,
                         self.record.cursor,
                         self.session.failures()
                     ),
                 );
             }
-        }
-    }
-
-    /// Write the record when its cursor moved since the last write: once
-    /// per pull, not once per page, for the flash's sake.
-    fn save_cursor(&mut self, stores: &mut Stores<'_>) -> &'static str {
-        if self.record.cursor == self.saved_cursor {
-            return "unchanged";
-        }
-        match stores.save_client(&self.record) {
-            Ok(()) => {
-                self.saved_cursor = self.record.cursor;
-                "yes"
-            }
-            Err(_) => "no",
         }
     }
 }

@@ -59,7 +59,7 @@
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
 //! [STORE] sectors=1024 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> restore_ms=<ms>  (1476)
 //! [HOME] store=empty cursor=reset was=<n> cursor=0   (1476, a record whose store is gone; or store=behind/ahead)
-//! [HOME] page ... taken=<n> of=<m> / pulled ... / joined=yes ... / failed ...   (as the client asks)
+//! [HOME] page ... taken=<n> of=<m> / pulled ... saved=store / joined=yes ... / failed ...   (as the client asks; the record is not written for a pull, 1463)
 //! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
 //! [STORE] kept=<n> writes=<n> erased=<n> cursor=<seq> used=<n> entries=<n>   (1476, every page pulled)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
